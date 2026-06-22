@@ -30,6 +30,31 @@ import type {
 
 declare const __APP_VERSION__: string;
 
+function adapterDisplayName(adapter: NetworkAdapterInfo): string {
+  return adapter.friendly_name || adapter.description || adapter.guid;
+}
+
+function isManualAdapterCandidate(adapter: NetworkAdapterInfo): boolean {
+  return adapter.is_up && adapter.kind !== "loopback" && adapter.kind !== "tunnel";
+}
+
+function pickRecommendedManualAdapter(
+  adapters: NetworkAdapterInfo[],
+): NetworkAdapterInfo | null {
+  return (
+    adapters.find(
+      (adapter) => adapter.is_default_route && isManualAdapterCandidate(adapter),
+    ) ||
+    adapters.find(
+      (adapter) =>
+        isManualAdapterCandidate(adapter) &&
+        ["ethernet", "wifi", "ppp"].includes(adapter.kind),
+    ) ||
+    adapters.find(isManualAdapterCandidate) ||
+    null
+  );
+}
+
 export function SettingsTab() {
   const email = useAuthStore((s) => s.email);
   const isTester = useAuthStore((s) => s.isTester);
@@ -174,6 +199,34 @@ export function SettingsTab() {
     const bn = (b.friendly_name || b.description || b.guid).toLowerCase();
     return an.localeCompare(bn);
   });
+  const recommendedManualAdapter = pickRecommendedManualAdapter(sortedAdapters);
+  const selectedManualAdapter = sortedAdapters.find(
+    (adapter) => adapter.guid === settings.preferred_physical_adapter_guid,
+  );
+  const manualAdapterSelectValue =
+    settings.preferred_physical_adapter_guid ||
+    recommendedManualAdapter?.guid ||
+    "";
+
+  useEffect(() => {
+    if (
+      !manualAdapterBinding ||
+      settings.preferred_physical_adapter_guid ||
+      networkAdaptersLoading ||
+      !recommendedManualAdapter
+    ) {
+      return;
+    }
+
+    setQuietDebounced({
+      preferred_physical_adapter_guid: recommendedManualAdapter.guid,
+    });
+  }, [
+    manualAdapterBinding,
+    settings.preferred_physical_adapter_guid,
+    networkAdaptersLoading,
+    recommendedManualAdapter?.guid,
+  ]);
 
   const adapterMissing =
     !networkAdaptersError &&
@@ -320,7 +373,9 @@ export function SettingsTab() {
           label="Adapter selection"
           desc={
             manualAdapterBinding
-              ? "Manual — locked to a specific adapter"
+              ? selectedManualAdapter
+                ? `Manual — ${adapterDisplayName(selectedManualAdapter)}`
+                : "Manual — choose a specific adapter"
               : "Smart Auto — follows active route, rebinds on network change"
           }
           tooltip={
@@ -337,18 +392,25 @@ export function SettingsTab() {
               { value: "manual" as const, label: "Manual" },
             ]}
             value={adapterBindingMode}
-            onChange={(mode) =>
+            onChange={(mode) => {
+              const nextMode = mode as "smart_auto" | "manual";
               set({
-                adapter_binding_mode: mode as "smart_auto" | "manual",
-              })
-            }
+                adapter_binding_mode: nextMode,
+                preferred_physical_adapter_guid:
+                  nextMode === "manual" &&
+                  !settings.preferred_physical_adapter_guid &&
+                  recommendedManualAdapter
+                    ? recommendedManualAdapter.guid
+                    : settings.preferred_physical_adapter_guid,
+              });
+            }}
           />
         </Row>
 
         {manualAdapterBinding && (
           <SubRow>
             <select
-              value={settings.preferred_physical_adapter_guid || ""}
+              value={manualAdapterSelectValue}
               onChange={(e) =>
                 set({
                   preferred_physical_adapter_guid: e.target.value || null,
@@ -362,10 +424,15 @@ export function SettingsTab() {
                 color: "var(--color-text-primary)",
               }}
             >
-              <option value="">Auto fallback (recommended)</option>
+              {manualAdapterSelectValue === "" && (
+                <option value="" disabled>
+                  {networkAdaptersLoading
+                    ? "Loading adapters..."
+                    : "No usable adapter found"}
+                </option>
+              )}
               {sortedAdapters.map((adapter) => {
-                const label =
-                  adapter.friendly_name || adapter.description || adapter.guid;
+                const label = adapterDisplayName(adapter);
                 const tags = [
                   adapter.kind && adapter.kind !== "other" ? adapter.kind : null,
                   adapter.is_up ? "up" : "down",

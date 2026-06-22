@@ -411,7 +411,7 @@ export function BoostTab() {
         <SettingRow
           title="Bypass Partial Ban"
           desc="Only specific games are blocked (e.g. TSB/JJS in Vietnam)"
-          tooltip="Relays only Roblox's search/login/join traffic so banned games appear and join - gameplay and assets stay on your direct connection for real ping and fast loading. Turns off Country Ban."
+          tooltip="Relays Roblox web, join, avatar, and asset traffic while gameplay stays direct for normal ping. Turns off Country Ban."
           enabled={draftPartialBan}
           onChange={choosePartialBan}
         />

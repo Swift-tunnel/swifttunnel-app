@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { useAuthStore } from "../../stores/authStore";
 import { Button, Spinner } from "../ui";
-import swiftLogo from "../../assets/swift.png";
+import swiftLogo from "../../assets/swift.png?inline";
 
 export function formatBannedAt(bannedAt: string | null) {
   if (!bannedAt) {

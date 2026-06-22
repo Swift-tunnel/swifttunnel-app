@@ -192,11 +192,10 @@ pub struct AppSettings {
     /// Bypass a PARTIAL country block (only specific games banned, e.g.
     /// Vietnam's TSB/JJS bans).
     ///
-    /// Relays only the Roblox control-plane TCP so banned games appear in
-    /// search/discovery and joins succeed; gameplay UDP stays DIRECT for the
-    /// player's real ping, and assets/settings stay direct too (no slow
-    /// textures, reliable startup). No GoodbyeDPI. Off by default. Mutually
-    /// exclusive with `enable_country_ban`.
+    /// Relays Roblox TCP for web/search/join/avatar/CDN assets so banned games
+    /// appear and content loads; gameplay UDP stays DIRECT for the player's
+    /// real ping. No GoodbyeDPI. Off by default. Mutually exclusive with
+    /// `enable_country_ban`.
     #[serde(default)]
     pub enable_partial_country_ban: bool,
 }

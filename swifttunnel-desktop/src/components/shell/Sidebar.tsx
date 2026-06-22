@@ -7,7 +7,7 @@ import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { countryFlag } from "../../lib/utils";
 import { NAV_SECTIONS, type NavItem } from "./nav";
 import type { VpnState } from "../../lib/types";
-import swiftLogo from "../../assets/swift.png";
+import swiftLogo from "../../assets/swift.png?inline";
 
 declare const __APP_VERSION__: string;
 

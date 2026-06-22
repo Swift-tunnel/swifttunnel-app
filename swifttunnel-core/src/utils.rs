@@ -78,6 +78,8 @@ fn is_system32_program(program: &str) -> bool {
         program.to_ascii_lowercase().as_str(),
         "pnputil"
             | "pnputil.exe"
+            | "ipconfig"
+            | "ipconfig.exe"
             | "msiexec"
             | "msiexec.exe"
             | "netsh"

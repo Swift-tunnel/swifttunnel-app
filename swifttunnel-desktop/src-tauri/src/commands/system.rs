@@ -676,44 +676,57 @@ fn build_elevated_msiexec_script(
 
 #[cfg(windows)]
 const STARTUP_REPAIR_RELAUNCHED_ENV: &str = "SWIFTTUNNEL_STARTUP_REPAIR_RELAUNCHED";
+#[cfg(windows)]
+const WAIT_RELAUNCH_ARG: &str = "--wait-relaunch";
+#[cfg(windows)]
+const STARTUP_REPAIR_RELAUNCHED_ARG: &str = "--startup-repair-relaunched";
 
 #[cfg(windows)]
-fn build_restart_as_admin_script_with_env(
-    exe_path: &str,
-    current_pid: u32,
-    child_env: Option<(&str, &str)>,
-) -> String {
-    // Build a non-elevated script that asks UAC for an elevated PowerShell helper.
-    // The elevated helper waits for the current process to exit, then relaunches the app.
-    let escaped_exe_for_inner = exe_path.replace('\'', "''");
-    let env_assignment = child_env
-        .map(|(key, value)| {
-            format!(
-                "$env:{}='{}'; ",
-                key.replace('\'', "''"),
-                value.replace('\'', "''")
-            )
-        })
-        .unwrap_or_default();
-    let inner_script = format!(
-        "$ErrorActionPreference='Stop'; \
-         $pidToWait={current_pid}; \
-         while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 200 }}; \
-         {env_assignment}\
-         Start-Process -FilePath '{escaped_exe_for_inner}'"
-    );
-    let escaped_inner = inner_script.replace('\'', "''");
-
-    format!(
-        "$ErrorActionPreference='Stop'; \
-         $inner='{escaped_inner}'; \
-         Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList @('-NoProfile','-Command',$inner) | Out-Null"
-    )
+fn restart_as_admin_args(current_pid: u32, mark_startup_repair_relaunch: bool) -> String {
+    let mut args = vec![WAIT_RELAUNCH_ARG.to_string(), current_pid.to_string()];
+    if mark_startup_repair_relaunch {
+        args.push(STARTUP_REPAIR_RELAUNCHED_ARG.to_string());
+    }
+    args.iter()
+        .map(|arg| swifttunnel_core::utils::quote_windows_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(windows)]
-fn build_restart_as_admin_script(exe_path: &str, current_pid: u32) -> String {
-    build_restart_as_admin_script_with_env(exe_path, current_pid, None)
+fn launch_elevated_swifttunnel(exe_path: &str, args: &str) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+
+    let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = OsStr::new(exe_path).encode_wide().chain(Some(0)).collect();
+    let params: Vec<u16> = OsStr::new(args).encode_wide().chain(Some(0)).collect();
+
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            PCWSTR(params.as_ptr()),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    let code = result.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else if code == 5 {
+        Err("Administrator restart was canceled at the UAC prompt.".to_string())
+    } else {
+        Err(format!(
+            "Failed to relaunch SwiftTunnel as Administrator (ShellExecute code {}).",
+            code
+        ))
+    }
 }
 
 #[cfg(windows)]
@@ -825,14 +838,16 @@ fn install_winpkfilter_driver_from_msi(
         }
     };
 
-    let (mut exit_code, mut output_error) = run_install(true, &first_log_string)?;
+    let (mut exit_code, mut output_error) = run_install(false, &first_log_string)?;
     let mut retry_attempted = false;
 
-    // Some systems return 1639 with /passive. Retry once with /qn.
+    // Prefer fully quiet install so repair does not flash a scary x64 installer
+    // window over SwiftTunnel. If a machine rejects the quiet command line,
+    // retry once with passive UI as a compatibility fallback.
     if exit_code == 1639 {
         retry_attempted = true;
-        log::warn!("WinpkFilter install returned 1639 with /passive; retrying with /qn");
-        let (retry_code, retry_error) = run_install(false, &retry_log_string)?;
+        log::warn!("WinpkFilter install returned 1639 with /qn; retrying with /passive");
+        let (retry_code, retry_error) = run_install(true, &retry_log_string)?;
         exit_code = retry_code;
         output_error = retry_error;
     }
@@ -1027,11 +1042,19 @@ fn startup_driver_repair_decision(
                 Ok(StartupDriverRepairDecision::Skip)
             }
             Err(err) => {
-                log::warn!(
-                    "Startup driver recovery: binding preflight failed while driver is ready: {}",
-                    err
-                );
-                Ok(StartupDriverRepairDecision::Skip)
+                if is_winpkfilter_repairable_preflight_error(&err) {
+                    log::warn!(
+                        "Startup driver recovery: binding preflight failed with a repairable WinpkFilter error; running repair: {}",
+                        err
+                    );
+                    Ok(StartupDriverRepairDecision::Repair)
+                } else {
+                    log::warn!(
+                        "Startup driver recovery: binding preflight failed while driver is ready: {}",
+                        err
+                    );
+                    Ok(StartupDriverRepairDecision::Skip)
+                }
             }
         };
     }
@@ -1086,7 +1109,7 @@ fn repair_binding_preference_from_settings(
 }
 
 pub(crate) async fn system_startup_repair_driver_if_needed(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<DriverCheckResponse>, String> {
     #[cfg(windows)]
@@ -1105,13 +1128,26 @@ pub(crate) async fn system_startup_repair_driver_if_needed(
         match decision {
             StartupDriverRepairDecision::Skip => Ok(None),
             StartupDriverRepairDecision::Report(response) => Ok(Some(response)),
-            StartupDriverRepairDecision::Repair => system_repair_driver(app, state).await.map(Some),
+            StartupDriverRepairDecision::Repair => {
+                log::warn!(
+                    "Startup driver recovery found a repairable driver issue, but skipped automatic kernel driver repair"
+                );
+                Ok(Some(DriverCheckResponse {
+                    installed: true,
+                    version: None,
+                    ready: false,
+                    status: "reboot_required".to_string(),
+                    message: "SwiftTunnel found a split-tunnel driver issue during startup. Restart Windows once, then open SwiftTunnel again. If it returns, use Repair -> Split tunnel driver and send support the log file.".to_string(),
+                    reboot_required: true,
+                    recommended_action: "reboot".to_string(),
+                }))
+            }
         }
     }
 
     #[cfg(not(windows))]
     {
-        let _ = (app, state);
+        let _ = (_app, state);
         Ok(None)
     }
 }
@@ -1671,7 +1707,7 @@ impl DriverCheckResponse {
             ready: false,
             status: "binding_missing".to_string(),
             message: format!(
-                "Almost there — restart Windows to finish setting up SwiftTunnel's network filter, then connect again. This is a normal one-time step Windows requires after the driver is installed; SwiftTunnel will work right after the restart.\n\nIf it still won't connect after restarting, reinstall SwiftTunnel.\n\nDetails: {}",
+                "Almost there - restart Windows to finish setting up SwiftTunnel's network filter, then connect again. This is a normal one-time step Windows requires after the driver is installed; SwiftTunnel will work right after the restart.\n\nIf it still won't connect after restarting, contact support and include this result.\n\nDetails: {}",
                 reason
             ),
             reboot_required: true,
@@ -1755,9 +1791,43 @@ fn driver_repair_response_after_binding_preflight(
         }
         Err(e) => {
             log::warn!("Post-repair split tunnel binding preflight failed: {}", e);
-            health_response
+            if is_winpkfilter_repairable_preflight_error(&e) {
+                DriverCheckResponse::binding_repair_failure(health, e.to_string())
+            } else {
+                health_response
+            }
         }
     }
+}
+
+#[cfg(windows)]
+fn is_winpkfilter_repairable_preflight_error(error: &swifttunnel_core::vpn::VpnError) -> bool {
+    let haystack = error.to_string().to_ascii_lowercase();
+    if haystack.contains("administrator privileges required")
+        || haystack.contains("access denied")
+        || haystack.contains("access is denied")
+        || haystack.contains("process is not elevated")
+    {
+        return false;
+    }
+
+    haystack.contains("winpkfilter_binding_missing")
+        || haystack.contains("split tunnel driver binding is missing")
+        || haystack.contains("failed to ensure winpkfilter binding")
+        || haystack.contains("winpkfilter binding validation failed")
+        || (haystack.contains("nt_ndisrd")
+            && (haystack.contains("not bound")
+                || haystack.contains("not installed on adapter")
+                || haystack.contains("binding is missing")))
+        || (haystack.contains("split tunnel driver not available")
+            && haystack.contains("windows packet filter driver"))
+        || (haystack.contains("failed to open") && haystack.contains("ndisrd"))
+        || haystack.contains("no tcp/ip-bound network adapters")
+        || haystack.contains("version query failed")
+        || haystack.contains("installed but ioctl failed")
+        || haystack.contains("get_tcpip_bound_adapters_info")
+        || haystack.contains("windows packet filter driver did not become available")
+        || (haystack.contains("driver service") && haystack.contains("reset"))
 }
 
 #[tauri::command]
@@ -1890,14 +1960,15 @@ pub async fn system_repair_driver(
                 {
                     Ok(()) => {
                         current = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
-                        if !initial.ready {
+                        if initial.ready || current.ready {
                             let preflight = post_repair_preflight();
                             return Ok(driver_repair_response_after_binding_preflight(
                                 current, preflight,
                             ));
                         }
-                        log::info!(
-                            "Driver service reset passed; continuing repair to refresh WinpkFilter adapter bindings"
+                        log::warn!(
+                            "Driver service reset passed but driver is still not ready; continuing to installer repair: {}",
+                            current.message
                         );
                     }
                     Err(e) => {
@@ -1910,6 +1981,20 @@ pub async fn system_repair_driver(
                 log::info!(
                     "Skipping in-process driver service reset because SwiftTunnel is not elevated; falling through to elevated MSI repair"
                 );
+            }
+
+            if initial.ready {
+                let mut response = driver_repair_response_after_binding_preflight(
+                    current,
+                    post_repair_preflight(),
+                );
+                if let Some(error) = last_error {
+                    response.message = format!("{}\n\n{}", response.message, error);
+                    response.reboot_required = true;
+                    response.recommended_action = "reboot".to_string();
+                    response.status = "reboot_required".to_string();
+                }
+                return Ok(response);
             }
 
             if !initial.ready && current.ready && last_error.is_none() {
@@ -1939,7 +2024,6 @@ pub async fn system_repair_driver(
                 initial.recommended_action,
                 DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
             ) || reset_failed
-                || initial.ready
             {
                 let force_reinstall = matches!(
                     current.recommended_action,
@@ -2219,6 +2303,38 @@ mod tests {
     }
 
     #[test]
+    fn driver_repair_response_reports_repairable_preflight_errors() {
+        let response = driver_repair_response_after_binding_preflight(
+            ready_health(),
+            Err(swifttunnel_core::vpn::VpnError::SplitTunnel(
+                "Failed to ensure WinpkFilter binding on adapter 'Ethernet': PowerShell failed."
+                    .to_string(),
+            )),
+        );
+
+        assert!(!response.ready);
+        assert_eq!(response.status, "binding_missing");
+        assert_eq!(response.recommended_action, "reboot");
+        assert!(response.reboot_required);
+        assert!(response.message.contains("restart Windows to finish"));
+        assert!(
+            response
+                .message
+                .contains("Failed to ensure WinpkFilter binding")
+        );
+        assert!(!response.message.contains("reinstall SwiftTunnel"));
+    }
+
+    #[test]
+    fn repairable_preflight_error_classifier_rejects_access_denied() {
+        let error = swifttunnel_core::vpn::VpnError::SplitTunnel(
+            "nt_ndisrd adapter validation error: access denied".to_string(),
+        );
+
+        assert!(!is_winpkfilter_repairable_preflight_error(&error));
+    }
+
+    #[test]
     fn driver_install_success_exit_code_accepts_expected_codes() {
         for code in [0, 1638, 1641, 3010] {
             assert!(driver_install_success_exit_code(code));
@@ -2479,32 +2595,19 @@ mod tests {
     }
 
     #[test]
-    fn build_restart_as_admin_script_waits_for_pid_and_escapes_path() {
-        let script =
-            build_restart_as_admin_script("C:\\Program Files\\Swift'Tunnel\\SwiftTunnel.exe", 4242);
-        assert!(script.contains("$pidToWait=4242"));
-        assert!(script.contains("Get-Process -Id $pidToWait"));
-        assert!(script.contains("$inner='"));
-        assert!(script.contains("Start-Process -FilePath 'powershell.exe'"));
-        assert!(script.contains("-Verb RunAs"));
-        assert!(script.contains("-WindowStyle Hidden"));
-        assert!(script.contains("-Command"));
+    fn restart_as_admin_args_waits_for_current_pid_without_powershell() {
+        let args = restart_as_admin_args(4242, false);
+        assert!(args.contains("--wait-relaunch"));
+        assert!(args.contains("4242"));
+        assert!(!args.to_ascii_lowercase().contains("powershell"));
     }
 
     #[test]
-    fn build_restart_as_admin_script_can_mark_startup_repair_relaunch() {
-        let script = build_restart_as_admin_script_with_env(
-            "C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe",
-            4242,
-            Some((STARTUP_REPAIR_RELAUNCHED_ENV, "1")),
-        );
-
-        assert!(script.contains("$pidToWait=4242"));
-        assert!(script.contains("Get-Process -Id $pidToWait"));
-        assert!(script.contains("$env:SWIFTTUNNEL_STARTUP_REPAIR_RELAUNCHED=''1'';"));
-        assert!(script.contains(
-            "Start-Process -FilePath ''C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe''"
-        ));
+    fn restart_as_admin_args_can_mark_startup_repair_relaunch() {
+        let args = restart_as_admin_args(4242, true);
+        assert!(args.contains("--wait-relaunch"));
+        assert!(args.contains("4242"));
+        assert!(args.contains("--startup-repair-relaunched"));
     }
 
     #[test]
@@ -3229,6 +3332,7 @@ pub fn system_open_url(url: String) -> Result<(), String> {
 #[cfg(windows)]
 fn startup_repair_relaunch_already_attempted() -> bool {
     std::env::var_os(STARTUP_REPAIR_RELAUNCHED_ENV).is_some()
+        || std::env::args().any(|arg| arg == STARTUP_REPAIR_RELAUNCHED_ARG)
 }
 
 #[cfg(windows)]
@@ -3239,39 +3343,11 @@ async fn launch_restart_helper(
     let exe_path =
         std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {}", e))?;
     let exe = exe_path.to_string_lossy().to_string();
-    let script = if child_env.is_some() {
-        build_restart_as_admin_script_with_env(&exe, std::process::id(), child_env)
-    } else {
-        build_restart_as_admin_script(&exe, std::process::id())
-    };
+    let args = restart_as_admin_args(std::process::id(), child_env.is_some());
 
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        swifttunnel_core::hidden_command("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .output()
-            .map_err(|e| format!("Failed to launch elevated restart helper: {}", e))
-    })
-    .await
-    .map_err(|e| format!("Restart helper task failed: {}", e))??;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() { stderr } else { stdout };
-
-        if is_probable_uac_cancel_message(&detail) {
-            return Err("Administrator restart was canceled at the UAC prompt.".to_string());
-        }
-
-        if detail.is_empty() {
-            return Err("Failed to relaunch SwiftTunnel as Administrator.".to_string());
-        }
-
-        return Err(format!(
-            "Failed to relaunch SwiftTunnel as Administrator: {}",
-            detail
-        ));
-    }
+    tauri::async_runtime::spawn_blocking(move || launch_elevated_swifttunnel(&exe, &args))
+        .await
+        .map_err(|e| format!("Restart helper task failed: {}", e))??;
 
     app.exit(0);
     Ok(())

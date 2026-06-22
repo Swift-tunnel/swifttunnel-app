@@ -25,6 +25,8 @@ fn append_driver_install_log(message: &str) {
 fn install_driver_for_installer() -> Result<(), String> {
     append_driver_install_log("SwiftTunnel driver install helper starting.");
 
+    cleanup_stale_network_state_for_installer();
+
     let initial = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
     append_driver_install_log(&format!(
         "Initial health: status={}, ready={}, message={}",
@@ -59,6 +61,69 @@ fn install_driver_for_installer() -> Result<(), String> {
     }
 
     result
+}
+
+#[cfg(windows)]
+fn cleanup_stale_network_state_for_installer() {
+    append_driver_install_log("Running pre-install stale network cleanup.");
+
+    swifttunnel_core::vpn::SplitTunnelDriver::cleanup_stale_state();
+
+    match swifttunnel_core::vpn::SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+        Ok(disabled) if disabled.is_empty() => {
+            append_driver_install_log("No stale WinpkFilter bindings found before install.");
+        }
+        Ok(disabled) => {
+            append_driver_install_log(&format!(
+                "Disabled stale WinpkFilter bindings before install: {}",
+                disabled.join(", ")
+            ));
+        }
+        Err(e) => {
+            append_driver_install_log(&format!(
+                "Pre-install WinpkFilter binding cleanup failed: {}",
+                e
+            ));
+        }
+    }
+
+    swifttunnel_core::vpn::recover_tso_on_startup();
+    swifttunnel_core::vpn::recover_ipv6_on_startup();
+    swifttunnel_core::vpn::wfp_block::cleanup_stale();
+    swifttunnel_core::roblox_proxy::hosts::recover_stale();
+}
+
+#[cfg(windows)]
+fn wait_for_relaunch_parent_if_requested() {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    const WAIT_RELAUNCH_ARG: &str = "--wait-relaunch";
+    const RELAUNCH_WAIT_MS: u32 = 10_000;
+
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg != WAIT_RELAUNCH_ARG {
+            continue;
+        }
+
+        let Some(pid_arg) = args.next() else {
+            return;
+        };
+        let Ok(pid) = pid_arg.parse::<u32>() else {
+            return;
+        };
+
+        unsafe {
+            if let Ok(handle) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+                let _ = WaitForSingleObject(handle, RELAUNCH_WAIT_MS);
+                let _ = CloseHandle(handle);
+            }
+        }
+        return;
+    }
 }
 
 fn main() {
@@ -96,6 +161,9 @@ fn main() {
     if is_install_driver {
         std::process::exit(0);
     }
+
+    #[cfg(windows)]
+    wait_for_relaunch_parent_if_requested();
 
     swifttunnel_desktop::run();
 }

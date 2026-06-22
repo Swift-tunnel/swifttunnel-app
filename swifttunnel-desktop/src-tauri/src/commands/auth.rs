@@ -216,6 +216,27 @@ pub async fn auth_start_oauth(
     result
 }
 
+#[tauri::command]
+pub async fn auth_login(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    let auth = state.auth_manager.lock().await;
+    let login_result = auth.sign_in(email.trim(), &password).await;
+    let should_run_ban_cleanup = matches!(login_result, Ok(()) | Err(AuthError::UserBanned(_)));
+    let result = login_result.map_err(|e| e.to_string());
+    drop(auth);
+
+    let emitted = should_run_ban_cleanup && apply_ban_cleanup(&app, &state).await;
+    if !emitted {
+        emit_auth_state(&app, &state).await;
+    }
+
+    result
+}
+
 #[derive(Serialize)]
 pub struct OAuthPollResult {
     pub completed: bool,

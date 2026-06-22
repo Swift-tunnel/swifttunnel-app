@@ -26,6 +26,8 @@
     <CustomAction Id="RunCleanupOnUninstall"
                   Property="CLEANUP_EXE"
                   ExeCommand="--cleanup"
+                  Execute="deferred"
+                  Impersonate="no"
                   Return="ignore" />
 
     <!-- Install/repair the bundled split-tunnel driver package after files land. -->
@@ -36,6 +38,8 @@
     <CustomAction Id="RunInstallDriverAfterInstall"
                   Property="INSTALL_DRIVER_EXE"
                   ExeCommand="--install-driver"
+                  Execute="deferred"
+                  Impersonate="no"
                   Return="ignore" />
 
     <!-- Write a marker and remove the NSIS uninstall registry entry. -->

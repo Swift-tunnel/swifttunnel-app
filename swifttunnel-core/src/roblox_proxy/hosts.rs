@@ -76,7 +76,7 @@ fn last_applied_overrides() -> &'static RwLock<Vec<HostOverride>> {
 static COUNTRY_BAN_BYPASS_ROUTING: AtomicBool = AtomicBool::new(false);
 
 // Launch-critical + sign-in-critical hosts that must stay DIRECT under Route
-// Assist / Partial bypass and are important enough to PIN back into the Windows
+// Assist and are important enough to PIN back into the Windows
 // hosts file (see `allocate_route_assist_pins`), so the OS resolves them to our
 // de-conflicted, reachability-verified direct edge instead of whatever the
 // user's resolver hands out.
@@ -106,18 +106,28 @@ const DIRECT_ONLY_BOOTSTRAP_DOMAINS: &[&str] = &[
 ];
 
 // Heavy Roblox CDN/asset hosts that ride the user's DIRECT path (not the relay)
-// under Route Assist and PARTIAL country-ban bypass: textures, avatar clothing,
-// thumbnails, cutscene/model payloads. These named roblox.com endpoints are the
-// asset entry points that aren't under rbxcdn; every `*.rbxcdn.com` host also
-// qualifies via `is_asset_direct_domain`, so we don't have to chase each CDN
-// shard name (c#, t#, tr, fts, images, css, ...) forever. FULL country-ban
-// bypass relays these too — in a fully-blocked country the CDN is blocked as
-// well, and "direct" means assets simply never load.
+// under Route Assist: textures, avatar clothing, thumbnails, cutscene/model
+// payloads. Partial country-ban bypass now relays these TCP flows so Vietnam-
+// style users can load missing maps/avatars while gameplay UDP stays direct.
+// FULL country-ban bypass relays these too — in a fully-blocked country the CDN
+// is blocked as well, and "direct" means assets simply never load.
 const ASSET_DIRECT_ROBLOX_DOMAINS: &[&str] = &[
     "assetgame.roblox.com",
     "assetdelivery.roblox.com",
     "thumbnails.roblox.com",
     "setup.roblox.com",
+];
+
+// Asset entrypoints worth pinning direct under Route Assist
+// when DNS repair finds a de-conflicted IP. These are small in number and sit
+// in front of most `rbxassetid://` textures, sounds, animations, and thumbnails.
+// Keeping them on user DNS alone lets Windows pick a Roblox edge that is also
+// pinned for the relayed join/control plane; that pushes bulk asset requests
+// through the shared relay NAT and can trigger Roblox HTTP 429 throttling.
+const PINNED_ASSET_DIRECT_ROBLOX_DOMAINS: &[&str] = &[
+    "assetdelivery.roblox.com",
+    "assetgame.roblox.com",
+    "thumbnails.roblox.com",
 ];
 
 // Route Assist only needs the region/join control plane on the relay. Roblox
@@ -262,16 +272,18 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
     }
 
     let resolved = resolve_bootstrap_overrides().await?;
-    // Route Assist (and PARTIAL bypass, which shares this classification)
-    // keeps heavy asset/CDN hosts, launch-critical settings hosts, and Roblox
-    // UI/social/chat/avatar APIs DIRECT for fast textures and reliable in-game
-    // menus; only the region/join control plane relays. FULL bypass relays
-    // everything.
+    // Route Assist keeps heavy asset/CDN hosts, launch-critical settings hosts,
+    // and Roblox UI/social/chat/avatar APIs DIRECT for fast textures and
+    // reliable in-game menus; only the region/join control plane relays. The
+    // packet router treats Partial Bypass differently by relaying Roblox TCP
+    // while keeping gameplay UDP direct. FULL bypass relays everything.
     //
-    // In the Route Assist/Partial case, only relayed control-plane hosts are
+    // In the Route Assist allocator path, only relayed control-plane hosts are
     // written to hosts. Direct hosts still contribute to the direct-only IP set,
     // but they use the user's normal DNS path so stale SwiftTunnel pins cannot
-    // break Roblox app startup/home loading on Vietnam-style partial blocks.
+    // break Roblox app startup/home loading. Partial Bypass uses this DNS repair
+    // path too, but the packet router relays Roblox TCP/assets and only keeps
+    // gameplay UDP direct.
     let (overrides, active_ips, direct_only_ips) = if country_ban_bypass {
         let (active, direct_only) = country_ban_split_ips_from_overrides(&resolved);
         (resolved, active, direct_only)
@@ -880,15 +892,16 @@ fn allocate_route_assist_pins(
         .filter(|ip| !active.contains(ip))
         .collect();
 
-    // Write the relayed control-plane pins, plus the launch-critical settings +
-    // auth pins at a de-conflicted direct IP (one that survived into
-    // `direct_only`, so never a relayed edge). The broad UI/asset direct set is
-    // left to the user's DNS.
+    // Write the relayed control-plane pins, plus launch-critical/auth pins and
+    // the main asset entrypoints at a de-conflicted direct IP (one that survived
+    // into `direct_only`, so never a relayed edge). Broad UI/social hosts and
+    // wildcard CDN shards stay on the user's DNS; pinning only these asset
+    // entrypoints avoids shared-relay 429s without chasing every CDN hostname.
     let writable_overrides = kept
         .iter()
         .filter(|entry| {
             !is_route_assist_direct_domain(&entry.domain)
-                || (is_direct_only_bootstrap_domain(&entry.domain)
+                || (is_pinned_route_assist_direct_domain(&entry.domain)
                     && direct_only.contains(&entry.ip))
         })
         .cloned()
@@ -901,9 +914,9 @@ fn allocate_route_assist_pins(
 /// settings, and asset/CDN alike. This mode exists for countries where the
 /// whole platform is blocked (e.g. Egypt), and there the asset CDN is blocked
 /// too: keeping assets "direct" meant they simply never loaded, so games died
-/// seconds after join ("plays for 20s", "assets don't load"). Bandwidth-
-/// conscious asset splitting belongs to Route Assist and PARTIAL bypass, whose
-/// users can actually reach the CDN directly.
+/// seconds after join ("plays for 20s", "assets don't load"). Route Assist is
+/// still the bandwidth-conscious split. Partial Bypass relays Roblox TCP/assets
+/// but keeps gameplay UDP direct for normal in-game ping.
 fn country_ban_split_ips_from_overrides(
     overrides: &[HostOverride],
 ) -> (HashSet<Ipv4Addr>, HashSet<Ipv4Addr>) {
@@ -917,9 +930,20 @@ fn is_direct_only_bootstrap_domain(domain: &str) -> bool {
         .any(|direct_only| domain.eq_ignore_ascii_case(direct_only))
 }
 
-/// Heavy asset/CDN host kept direct in both modes: any `*.rbxcdn.com` shard, or
-/// one of the named roblox.com asset entry points. The `*.rbxcdn.com` suffix
-/// match means new CDN shard names are covered without editing this list.
+fn is_pinned_asset_direct_domain(domain: &str) -> bool {
+    let d = domain.trim_end_matches('.');
+    PINNED_ASSET_DIRECT_ROBLOX_DOMAINS
+        .iter()
+        .any(|asset| d.eq_ignore_ascii_case(asset))
+}
+
+fn is_pinned_route_assist_direct_domain(domain: &str) -> bool {
+    is_direct_only_bootstrap_domain(domain) || is_pinned_asset_direct_domain(domain)
+}
+
+/// Heavy asset/CDN host kept direct under Route Assist: any `*.rbxcdn.com`
+/// shard, or one of the named roblox.com asset entry points. The `*.rbxcdn.com`
+/// suffix match means new CDN shard names are covered without editing this list.
 fn is_asset_direct_domain(domain: &str) -> bool {
     let d = domain.trim_end_matches('.');
     ASSET_DIRECT_ROBLOX_DOMAINS
@@ -1269,6 +1293,10 @@ mod tests {
                 domain: "setup.rbxcdn.com".to_string(),
             },
             HostOverride {
+                ip: Ipv4Addr::new(23, 61, 202, 143),
+                domain: "assetdelivery.roblox.com".to_string(),
+            },
+            HostOverride {
                 ip: Ipv4Addr::new(65, 9, 168, 81),
                 domain: "apis.roblox.com".to_string(),
             },
@@ -1285,11 +1313,12 @@ mod tests {
         let (kept, active_ips, direct_ips) = allocate_route_assist_pins(overrides);
 
         // No shared edges here: the relayed control-plane hosts AND the
-        // launch-critical settings hosts are written to the hosts file (the
-        // latter at their de-conflicted direct IP). The broad UI host
-        // (www.roblox.com) and the asset/CDN host (setup.rbxcdn.com) are left
-        // to the user's DNS, but still published in the direct-only set.
-        assert_eq!(kept.len(), 4);
+        // launch-critical settings hosts and the main assetdelivery entrypoint
+        // are written to the hosts file at de-conflicted direct IPs. The broad
+        // UI host (www.roblox.com) and wildcard CDN shard (setup.rbxcdn.com)
+        // are left to the user's DNS, but still published in the direct-only
+        // set.
+        assert_eq!(kept.len(), 5);
         assert!(
             kept.iter()
                 .any(|entry| entry.domain == "gamejoin.roblox.com")
@@ -1307,9 +1336,17 @@ mod tests {
                 .any(|entry| entry.domain == "clientsettings.roblox.com"
                     && entry.ip == Ipv4Addr::new(128, 116, 46, 3))
         );
-        // Broad UI/auth/API + asset hosts stay unwritten (user DNS picks the local edge).
+        // Broad UI/auth/API hosts stay unwritten (user DNS picks the local edge).
         assert!(!kept.iter().any(|entry| entry.domain == "www.roblox.com"));
         assert!(!kept.iter().any(|entry| entry.domain == "apis.roblox.com"));
+        // assetdelivery is pinned direct so first-hop rbxassetid fetches do not
+        // ride the shared relay NAT and get HTTP 429 throttled.
+        assert!(
+            kept.iter()
+                .any(|entry| entry.domain == "assetdelivery.roblox.com"
+                    && entry.ip == Ipv4Addr::new(23, 61, 202, 143))
+        );
+        // Wildcard CDN shards are still not written to hosts.
         assert!(!kept.iter().any(|entry| entry.domain == "setup.rbxcdn.com"));
         // Launch-critical settings hosts stay direct.
         assert!(direct_ips.contains(&Ipv4Addr::new(65, 9, 168, 80)));
@@ -1333,6 +1370,8 @@ mod tests {
         // (the textures/clothing slow-load fix).
         assert!(direct_ips.contains(&Ipv4Addr::new(23, 61, 202, 142)));
         assert!(!active_ips.contains(&Ipv4Addr::new(23, 61, 202, 142)));
+        assert!(direct_ips.contains(&Ipv4Addr::new(23, 61, 202, 143)));
+        assert!(!active_ips.contains(&Ipv4Addr::new(23, 61, 202, 143)));
     }
 
     #[test]

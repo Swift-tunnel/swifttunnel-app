@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { AuthState, AuthStateEvent } from "../lib/types";
 import {
   authGetState,
+  authLogin,
   authStartOAuth,
   authPollOAuth,
   authCancelOAuth,
@@ -24,6 +25,7 @@ interface AuthStore {
 
   // Actions
   fetchState: () => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
   startOAuth: () => Promise<void>;
   pollOAuth: () => Promise<boolean>;
   cancelOAuth: (reason?: string) => Promise<void>;
@@ -59,6 +61,21 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       });
     } catch (e) {
       set({ isLoading: false, error: String(e) });
+    }
+  },
+
+  login: async (email, password) => {
+    try {
+      set({ state: "logging_in", isLoading: true, error: null });
+      await authLogin(email, password);
+      await get().fetchState();
+    } catch (e) {
+      const message = String(e);
+      await get().fetchState();
+      set({
+        isLoading: false,
+        error: message,
+      });
     }
   },
 

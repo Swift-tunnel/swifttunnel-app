@@ -33,6 +33,9 @@ import type {
 export const authGetState = () =>
   invoke<AuthStateResponse>("auth_get_state");
 
+export const authLogin = (email: string, password: string) =>
+  invoke<void>("auth_login", { email, password });
+
 export const authStartOAuth = () =>
   invoke<string>("auth_start_oauth");
 

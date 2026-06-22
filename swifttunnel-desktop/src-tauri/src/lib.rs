@@ -208,7 +208,6 @@ fn recover_stale_network_state() {
     // the expensive steps only touch machines that are actually broken.
     #[cfg(windows)]
     {
-        use std::time::Duration;
         use swifttunnel_core::vpn::{
             SplitTunnelDriver, ipv6_recovery, tso_recovery, tunnel_mode_recovery,
         };
@@ -243,25 +242,15 @@ fn recover_stale_network_state() {
             );
 
             // If the driver is installed but STILL can't be opened after the unbind,
-            // the NDIS state is wedged — the case a simple sweep can't fix and that
-            // historically forced users to reboot or open a ticket. Restart the
-            // kernel service (bounded to 15s) to rebuild its adapter attachments.
-            // Gated on a genuinely-broken driver, so a healthy PC never runs it.
+            // the NDIS state is wedged. Do not restart or reinstall the kernel driver
+            // automatically here; BSOD reports mean this path must fail closed and
+            // let the UI ask for a clean Windows restart instead.
             let still_broken =
                 SplitTunnelDriver::driver_install_evidence() && !SplitTunnelDriver::is_available();
-            if still_broken && swifttunnel_core::is_administrator() {
-                info!(
-                    "Startup recovery: driver still wedged after unbind — restarting NDISRD service"
+            if still_broken {
+                warn!(
+                    "Startup recovery: driver still wedged after unbind; automatic NDISRD service restart skipped"
                 );
-                if let Err(e) = SplitTunnelDriver::restart_driver_service() {
-                    warn!("Startup recovery: NDISRD service restart failed: {e}");
-                } else if let Err(e) =
-                    SplitTunnelDriver::repair_and_wait_until_available(Duration::from_secs(15))
-                {
-                    warn!("Startup recovery: driver did not come back after restart: {e}");
-                } else {
-                    info!("Startup recovery: NDISRD service restarted and verified available");
-                }
             }
         }
     }
@@ -545,6 +534,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Auth
             commands::auth::auth_get_state,
+            commands::auth::auth_login,
             commands::auth::auth_start_oauth,
             commands::auth::auth_poll_oauth,
             commands::auth::auth_cancel_oauth,
@@ -729,26 +719,26 @@ pub fn run() {
                         info!("Startup driver recovery repaired the split tunnel driver");
                         swifttunnel_core::notification::show_notification(
                             "SwiftTunnel repaired itself",
-                            "SwiftTunnel fixed a startup network issue and will restart once to finish applying it.",
+                            "SwiftTunnel fixed a startup network issue. You can connect now.",
                         );
-                        if let Err(e) =
-                            commands::system::system_relaunch_after_startup_repair(
-                                app_handle.clone(),
-                            )
-                            .await
-                        {
-                            warn!("Startup driver recovery could not relaunch SwiftTunnel: {e}");
-                        }
                     }
                     Ok(Some(driver)) => {
                         warn!(
                             "Startup driver recovery could not fully repair the split tunnel driver: {}",
                             driver.message
                         );
+                        swifttunnel_core::notification::show_notification(
+                            "SwiftTunnel repair could not finish",
+                            "Restart Windows once, then open SwiftTunnel again. If this returns, contact support with your log file.",
+                        );
                     }
                     Ok(None) => {}
                     Err(e) => {
                         warn!("Startup driver recovery skipped after error: {}", e);
+                        swifttunnel_core::notification::show_notification(
+                            "SwiftTunnel repair could not run",
+                            "Restart Windows once, then open SwiftTunnel again. If this returns, contact support with your log file.",
+                        );
                     }
                 }
 

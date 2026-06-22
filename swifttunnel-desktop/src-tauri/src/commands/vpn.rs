@@ -145,14 +145,18 @@ pub(crate) fn current_binding_preference(
 ) -> Result<Option<AdapterBindingPreference>, String> {
     match settings.adapter_binding_mode {
         AdapterBindingMode::Manual => {
-            Ok(settings
-                .preferred_physical_adapter_guid
-                .clone()
-                .map(|guid| AdapterBindingPreference {
-                    guid,
-                    source: BindingPreferenceSource::Manual,
-                    network_signature: None,
-                }))
+            let Some(guid) = settings.preferred_physical_adapter_guid.clone() else {
+                log::warn!(
+                    "Adapter binding mode is Manual but no adapter GUID is selected; using Smart Auto selection."
+                );
+                return Ok(None);
+            };
+
+            Ok(Some(AdapterBindingPreference {
+                guid,
+                source: BindingPreferenceSource::Manual,
+                network_signature: None,
+            }))
         }
         AdapterBindingMode::SmartAuto => {
             let base = preflight_binding(None).map_err(|e| e.to_string())?;
@@ -365,7 +369,7 @@ pub async fn vpn_preflight_binding(
     tauri::async_runtime::spawn_blocking(move || {
         let mut settings = settings_arc.lock();
         let previous_overrides = settings.network_binding_overrides.clone();
-        let preflight = build_binding_preflight(&mut settings)?;
+        let preflight = build_connect_binding_preflight(&mut settings)?;
         let settings_snapshot = settings.clone();
         let overrides_changed = previous_overrides != settings.network_binding_overrides;
         drop(settings);

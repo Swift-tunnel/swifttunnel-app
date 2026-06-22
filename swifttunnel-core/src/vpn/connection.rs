@@ -61,6 +61,10 @@ const ADAPTER_RESET_ROLLBACK_REASON: &str = "adapter_reset_rollback";
 const ADAPTER_RESET_ROLLBACK_MESSAGE: &str = "SwiftTunnel rolled back the connection because your network adapter went offline during setup. This usually clears up on its own — please try connecting again.";
 const ETW_CONNECTION_READY_TIMEOUT_MS: u64 = 150;
 const ETW_CONNECTION_READY_POLL_MS: u64 = 5;
+/// Once the UDP relay health reaches `Dead`, keep the session alive briefly
+/// before teardown. Real dead relays still fail, but short NAT/ISP return-path
+/// stalls get a chance to recover instead of kicking users mid-game.
+const RELAY_DEAD_GRACE_SECS: u64 = 20;
 /// Number of ICMP samples to collect per relay candidate when probing.
 const AUTO_ROUTING_PING_SAMPLES: usize = 5;
 const CONNECT_FAIL_HANDSHAKE_TIMEOUT: &str = "ST_CONNECT_HANDSHAKE_TIMEOUT";
@@ -101,11 +105,11 @@ struct TunnelRoutingFlags {
 ///   wholesale, so nothing can be trusted to the direct path. GoodbyeDPI runs
 ///   on top; the relay is the fallback when DPI evasion alone isn't enough.
 /// - Partial country-ban bypass (only specific games blocked, e.g. Vietnam):
-///   relay only the control-plane TCP so the banned game appears in
-///   search/discovery and joins succeed, while gameplay UDP stays DIRECT for
-///   the player's real ping. Assets/settings stay direct too. If Route Assist
-///   is also enabled from an older/bad settings state, Partial wins: stacking
-///   both has caused temporary joins followed by Roblox server/menu failures.
+///   relay Roblox TCP for web/search/join/avatar/CDN assets so banned games and
+///   content load, while gameplay UDP stays DIRECT for the player's real ping.
+///   If Route Assist is also enabled from an older/bad settings state, Partial
+///   wins: stacking both has caused temporary joins followed by Roblox
+///   server/menu failures.
 fn resolve_tunnel_routing_flags(
     route_assist_requested: bool,
     full_ban_bypass_requested: bool,
@@ -156,6 +160,7 @@ fn classify_relay_health(
     health: super::udp_relay::RelayHealthState,
     sender_panicked: bool,
     local_connectivity: LocalConnectivity,
+    relay_dead_grace_elapsed: bool,
 ) -> RelayHealthAction {
     use super::udp_relay::RelayHealthState;
 
@@ -185,6 +190,11 @@ fn classify_relay_health(
                 error_message: "Internet connection lost - SwiftTunnel stopped the session because your device went offline. Reconnect to your network and try again."
                     .to_string(),
                 cleanup_reason: "internet_lost_recovery",
+            };
+        }
+        if !relay_dead_grace_elapsed {
+            return RelayHealthAction::Continue {
+                relay_status: Some("dead".to_string()),
             };
         }
         return RelayHealthAction::Fatal {
@@ -1106,11 +1116,10 @@ impl VpnConnection {
         enable_country_ban: bool,
         enable_partial_country_ban: bool,
     ) -> VpnResult<()> {
-        // Both bypass modes need the relay for Roblox's web/API control-plane
-        // traffic, so they imply API tunneling (Route Assist). They differ on
-        // gameplay UDP: full bypass (whole platform blocked) relays it; partial
-        // bypass (specific games blocked, e.g. Vietnam) keeps it direct so the
-        // player keeps their real ping.
+        // Both bypass modes need the relay for Roblox TCP traffic. They differ
+        // on gameplay UDP: full bypass (whole platform blocked) relays it;
+        // partial bypass (specific games blocked, e.g. Vietnam) keeps UDP
+        // direct so the player keeps their real ping.
         let routing_flags = resolve_tunnel_routing_flags(
             enable_api_tunneling,
             enable_country_ban,
@@ -2274,6 +2283,7 @@ impl VpnConnection {
             let connect_started_at = Instant::now();
             let mut watchdog_offline_ticks: u32 = 0;
             let mut watchdog_armed: bool = true;
+            let mut relay_dead_since: Option<Instant> = None;
 
             loop {
                 if stop_flag.load(Ordering::SeqCst) {
@@ -2618,6 +2628,17 @@ impl VpnConnection {
                             }
 
                             let sender_panicked = relay_health_monitor.sender_panicked();
+                            let relay_dead_grace_elapsed =
+                                if health == super::udp_relay::RelayHealthState::Dead
+                                    && !sender_panicked
+                                {
+                                    let dead_since = relay_dead_since.get_or_insert_with(Instant::now);
+                                    dead_since.elapsed()
+                                        >= Duration::from_secs(RELAY_DEAD_GRACE_SECS)
+                                } else {
+                                    relay_dead_since = None;
+                                    false
+                                };
                             let local_connectivity = if health
                                 == super::udp_relay::RelayHealthState::Dead
                             {
@@ -2625,8 +2646,12 @@ impl VpnConnection {
                             } else {
                                 LocalConnectivity::Unknown
                             };
-                            match classify_relay_health(health, sender_panicked, local_connectivity)
-                            {
+                            match classify_relay_health(
+                                health,
+                                sender_panicked,
+                                local_connectivity,
+                                relay_dead_grace_elapsed,
+                            ) {
                                 RelayHealthAction::Fatal {
                                     error_message,
                                     cleanup_reason,
@@ -3120,8 +3145,8 @@ mod tests {
 
     #[test]
     fn partial_ban_bypass_keeps_gameplay_udp_direct_for_real_ping() {
-        // Vietnam-style game ban: relay only the control plane so the banned
-        // game appears and joins; gameplay UDP stays direct = real ping.
+        // Vietnam-style game ban: relay Roblox TCP so banned games and assets
+        // load; gameplay UDP stays direct = real ping.
         let flags = resolve_tunnel_routing_flags(false, false, true);
 
         assert!(flags.api_tunneling);
@@ -3130,8 +3155,8 @@ mod tests {
 
     #[test]
     fn partial_ban_plus_route_assist_keeps_gameplay_udp_direct() {
-        // Partial Bypass wins over Route Assist: Vietnam-style users need the
-        // control plane relayed, but stacking gameplay relay causes temporary
+        // Partial Bypass wins over Route Assist: Vietnam-style users need
+        // Roblox TCP relayed, but stacking gameplay relay causes temporary
         // joins followed by Roblox server/menu failures.
         let flags = resolve_tunnel_routing_flags(true, false, true);
 
@@ -3148,11 +3173,29 @@ mod tests {
     }
 
     #[test]
-    fn test_dead_relay_health_is_fatal() {
+    fn test_dead_relay_during_grace_stays_connected_status() {
         let action = classify_relay_health(
             super::super::udp_relay::RelayHealthState::Dead,
             false,
             LocalConnectivity::Unknown,
+            false,
+        );
+
+        assert_eq!(
+            action,
+            RelayHealthAction::Continue {
+                relay_status: Some("dead".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_dead_relay_after_grace_is_fatal() {
+        let action = classify_relay_health(
+            super::super::udp_relay::RelayHealthState::Dead,
+            false,
+            LocalConnectivity::Unknown,
+            true,
         );
 
         match action {
@@ -3173,6 +3216,7 @@ mod tests {
             super::super::udp_relay::RelayHealthState::Dead,
             false,
             LocalConnectivity::Offline,
+            false,
         );
 
         match action {
@@ -3207,6 +3251,7 @@ mod tests {
             super::super::udp_relay::RelayHealthState::Dead,
             false,
             LocalConnectivity::Reachable,
+            true,
         );
 
         match action {
@@ -3228,6 +3273,7 @@ mod tests {
             super::super::udp_relay::RelayHealthState::Stale,
             false,
             LocalConnectivity::Unknown,
+            false,
         );
 
         assert_eq!(
@@ -3248,6 +3294,7 @@ mod tests {
             super::super::udp_relay::RelayHealthState::Stale,
             false,
             LocalConnectivity::Offline,
+            false,
         );
 
         assert_eq!(
@@ -3264,6 +3311,7 @@ mod tests {
             super::super::udp_relay::RelayHealthState::NoTrafficYet,
             false,
             LocalConnectivity::Unknown,
+            false,
         );
 
         assert_eq!(action, RelayHealthAction::Continue { relay_status: None });
@@ -3280,7 +3328,7 @@ mod tests {
             super::super::udp_relay::RelayHealthState::NoTrafficYet,
             super::super::udp_relay::RelayHealthState::Stale,
         ] {
-            let action = classify_relay_health(health, true, LocalConnectivity::Unknown);
+            let action = classify_relay_health(health, true, LocalConnectivity::Unknown, false);
             match action {
                 RelayHealthAction::Fatal {
                     error_message,
@@ -3309,6 +3357,7 @@ mod tests {
             super::super::udp_relay::RelayHealthState::Dead,
             true,
             LocalConnectivity::Reachable,
+            false,
         );
 
         match action {
@@ -3334,6 +3383,7 @@ mod tests {
             super::super::udp_relay::RelayHealthState::Healthy,
             false,
             LocalConnectivity::Unknown,
+            false,
         );
         assert_eq!(action, RelayHealthAction::Continue { relay_status: None });
     }

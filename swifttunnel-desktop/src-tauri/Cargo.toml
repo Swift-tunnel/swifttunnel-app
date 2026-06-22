@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "2.5.13"
+version = "2.5.14"
 default-run = "swifttunnel-desktop"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
@@ -31,7 +31,7 @@ simplelog = "0.12"
 dirs = "5"
 # See swifttunnel-core/Cargo.toml: native roots trust the Windows cert store so
 # antivirus/proxy TLS inspection doesn't break the app's HTTPS (login exchange).
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots", "system-proxy"] }
 semver = "1.0"
 sha2 = "0.10"
 base64 = "0.22"
@@ -42,6 +42,12 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

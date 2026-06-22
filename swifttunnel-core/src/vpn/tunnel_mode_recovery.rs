@@ -236,7 +236,7 @@ pub fn recover_tunnel_mode_on_startup() {
         TunnelModeRecoveryPlan::RepairWithRetries => {
             log::error!(
                 "Tunnel-mode recovery FAILED after {} attempt(s); marker kept so the next launch retries. \
-                 Use Repair Center → Internet recovery, or reboot to clear the kernel filter state.",
+                 Restart Windows once to clear the kernel filter state; if it returns, contact support with the log file.",
                 outcome.attempts
             );
         }

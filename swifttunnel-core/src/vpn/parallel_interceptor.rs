@@ -2220,6 +2220,19 @@ impl ParallelInterceptor {
         }
     }
 
+    fn should_try_route_owner_fallback_after_binding_check(
+        default_route_binding_error: Option<&VpnError>,
+    ) -> bool {
+        match default_route_binding_error {
+            None => true,
+            Some(err) => {
+                let details = err.to_string();
+                Self::is_winpkfilter_binding_missing_failure(&details)
+                    || Self::is_winpkfilter_binding_disabled_failure(&details)
+            }
+        }
+    }
+
     fn normalize_binding_match_value(value: &str) -> Option<String> {
         let normalized = value.trim().to_ascii_lowercase();
         if normalized.is_empty() {
@@ -2868,6 +2881,13 @@ impl ParallelInterceptor {
             }
         }
 
+        let default_route_binding_missing =
+            default_route_binding_error.as_ref().is_some_and(|err| {
+                let details = err.to_string();
+                Self::is_winpkfilter_binding_missing_failure(&details)
+                    || Self::is_winpkfilter_binding_disabled_failure(&details)
+            });
+
         let used_bridge_sibling = if selected.is_none()
             && strict_default_route
             && Self::should_try_bridge_sibling_after_binding_check(
@@ -2881,8 +2901,9 @@ impl ParallelInterceptor {
         };
         let used_route_owner_fallback = if selected.is_none()
             && strict_default_route
-            && default_route_binding_error.is_none()
-        {
+            && Self::should_try_route_owner_fallback_after_binding_check(
+                default_route_binding_error.as_ref(),
+            ) {
             selected = Self::select_route_owner_named_candidate(
                 &physical_candidates,
                 default_route_owner.as_ref(),
@@ -2891,7 +2912,13 @@ impl ParallelInterceptor {
         } else {
             false
         };
-        let used_single_candidate_fallback = false;
+        let used_single_candidate_fallback = if selected.is_none() && default_route_binding_missing
+        {
+            selected = Self::select_single_viable_candidate(&physical_candidates);
+            selected.is_some()
+        } else {
+            false
+        };
 
         self.manual_binding_active = used_preferred_physical_adapter
             && binding_preference
@@ -2920,13 +2947,6 @@ impl ParallelInterceptor {
             BindingStage::Unrecoverable
         };
 
-        let default_route_binding_missing =
-            default_route_binding_error.as_ref().is_some_and(|err| {
-                let details = err.to_string();
-                Self::is_winpkfilter_binding_missing_failure(&details)
-                    || Self::is_winpkfilter_binding_disabled_failure(&details)
-            });
-
         if selected.is_none() && physical_candidates.is_empty() {
             self.binding_stage = if default_route_binding_missing {
                 BindingStage::WinpkFilterBindingMissing.as_str().to_string()
@@ -2939,10 +2959,10 @@ impl ParallelInterceptor {
                 }) {
                     "SwiftTunnel found the active network adapter, but the WinpkFilter binding is disabled while disconnected. Connect will enable it automatically.".to_string()
                 } else {
-                    "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. Repair the split tunnel driver, then try again.".to_string()
+                    "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. SwiftTunnel will repair it automatically, then try again.".to_string()
                 }
             } else {
-                "SwiftTunnel could not see any WinpkFilter-bound network adapters. Repair the split tunnel driver, then try again.".to_string()
+                "SwiftTunnel could not see any WinpkFilter-bound network adapters. SwiftTunnel will repair the binding automatically, then try again.".to_string()
             };
             self.last_validation_result = if default_route_binding_missing {
                 if default_route_binding_error.as_ref().is_some_and(|err| {
@@ -2998,7 +3018,7 @@ impl ParallelInterceptor {
             self.binding_reason = if binding_disabled {
                 "SwiftTunnel found the active network adapter, but the WinpkFilter binding is disabled while disconnected. Connect will enable it automatically.".to_string()
             } else {
-                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. Repair the split tunnel driver, then try again.".to_string()
+                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. SwiftTunnel will repair it automatically, then try again.".to_string()
             };
             self.last_validation_result = if binding_disabled {
                 "winpkfilter_binding_disabled".to_string()
@@ -3543,7 +3563,7 @@ impl ParallelInterceptor {
                 }}
 
                 if (-not $bindingCandidate) {{
-                    throw ('winpkfilter_binding_missing: nt_ndisrd is not bound to adapter ''' + $adapterLabel + ''' (ifIndex=' + $adapterIfIndex + '). Repair the split tunnel driver, then try again.')
+                    throw ('winpkfilter_binding_missing: nt_ndisrd is not bound to adapter ''' + $adapterLabel + ''' (ifIndex=' + $adapterIfIndex + '). SwiftTunnel will repair the binding automatically, then try again.')
                 }}
 
                 $adapterName = if ($binding.Name) {{ [string]$binding.Name }} elseif ($bindingCandidate.DisplayName) {{ [string]$bindingCandidate.DisplayName }} else {{ $adapterLabel }}
@@ -3554,7 +3574,7 @@ impl ParallelInterceptor {
 
                 if (-not $binding.Enabled) {{
                     if (-not $repairBinding) {{
-                        throw ('winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter ''' + $adapterName + ''' (ifIndex=' + $adapterIfIndex + '). SwiftTunnel will enable it when connecting or when Repair driver is run.')
+                        throw ('winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter ''' + $adapterName + ''' (ifIndex=' + $adapterIfIndex + '). SwiftTunnel will enable it automatically, then try again.')
                     }}
                     Write-Output ('Enabling WinpkFilter binding on adapter: ' + $adapterName)
                     Enable-WinpkFilterBinding $bindingCandidate
@@ -3637,7 +3657,7 @@ impl ParallelInterceptor {
 
     fn winpkfilter_binding_missing_message(adapter_label: &str) -> String {
         format!(
-            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter '{}'. Repair the split tunnel driver, then try again.",
+            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter '{}'. SwiftTunnel will repair the binding automatically, then try again.",
             adapter_label
         )
     }
@@ -5787,6 +5807,33 @@ fn run_packet_reader(
                     }
 
                     if !should_tunnel || auto_routing_bypass {
+                        if !should_tunnel {
+                            if let Some(dst_ip) = partial_bypass_gameplay_udp_destination(
+                                data,
+                                &snapshot,
+                                api_tunneling,
+                                udp_tunneling,
+                            ) {
+                                if let Some(mut servers) = detected_game_servers.try_write() {
+                                    if servers.len() < MAX_DETECTED_GAME_SERVERS
+                                        || servers.contains(&dst_ip)
+                                    {
+                                        if servers.insert(dst_ip) {
+                                            log::info!(
+                                                "Game server detected: {} (direct via Partial Bypass)",
+                                                dst_ip
+                                            );
+                                        }
+                                    }
+                                }
+
+                                log::info!(
+                                    "Partial Bypass detected gameplay on {}; keeping gameplay direct while Roblox TCP relay stays armed for assets and teleports",
+                                    dst_ip
+                                );
+                            }
+                        }
+
                         // Batch passthrough (much cheaper than per-packet bypass reinjection).
                         let _ = passthrough_to_adapter.push(&packets[i]);
 
@@ -7418,6 +7465,62 @@ fn packet_is_tunnel_process_flow(
     ports.contains(&local_port)
 }
 
+fn partial_bypass_gameplay_udp_destination(
+    data: &[u8],
+    snapshot: &ProcessSnapshot,
+    api_tunneling: bool,
+    udp_tunneling: bool,
+) -> Option<Ipv4Addr> {
+    // Partial Bypass is the only mode that keeps TCP/API relay enabled while
+    // gameplay UDP stays direct. Detecting gameplay lets us publish the game
+    // server for diagnostics/accounting, but the join/control relay must stay
+    // armed because Roblox games can teleport users into another server without
+    // closing the Roblox process.
+    if !api_tunneling || udp_tunneling {
+        return None;
+    }
+
+    let ip_start = parse_ipv4_header_offset(data)?;
+    if data.len() < ip_start + 20 || data[ip_start + 9] != 17 {
+        return None;
+    }
+
+    let ihl = ((data[ip_start] & 0xF) as usize) * 4;
+    if ihl < 20 {
+        return None;
+    }
+
+    let fragment_bits = u16::from_be_bytes([data[ip_start + 6], data[ip_start + 7]]);
+    if (fragment_bits & 0x1FFF) != 0 {
+        return None;
+    }
+
+    let transport_start = ip_start + ihl;
+    if data.len() < transport_start + 4 {
+        return None;
+    }
+
+    let dst_ip = Ipv4Addr::new(
+        data[ip_start + 16],
+        data[ip_start + 17],
+        data[ip_start + 18],
+        data[ip_start + 19],
+    );
+    let dst_port = u16::from_be_bytes([data[transport_start + 2], data[transport_start + 3]]);
+
+    if !super::process_cache::is_likely_gameplay_udp(dst_ip, dst_port, Protocol::Udp) {
+        return None;
+    }
+
+    if packet_is_tunnel_process_flow(data, snapshot, FlowAccountingDirection::Outbound)
+        || !snapshot.tunnel_pids.is_empty()
+    {
+        Some(dst_ip)
+    } else {
+        None
+    }
+}
+
 fn should_route_to_vpn_with_inline_cache(
     data: &[u8],
     snapshot: &ProcessSnapshot,
@@ -7642,24 +7745,33 @@ where
 
     let is_full_country_ban_routing =
         crate::roblox_proxy::hosts::is_country_ban_bypass_routing_active();
+    let is_partial_country_ban_routing =
+        api_tunneling && !udp_tunneling && !is_full_country_ban_routing;
 
     // A launch-critical settings host or asset/CDN host (e.g. *.rbxcdn.com) that
-    // must stay DIRECT under Route Assist / Partial Bypass. For a known tunnel
-    // app, is_likely_game_traffic would otherwise relay all TCP, so honor the
-    // direct set here too; otherwise Route Assist relays textures/avatar-
-    // clothing fetches and they load slowly. FULL Country Ban is deliberately
-    // excluded: in fully blocked countries the direct path is broken, so every
-    // Roblox app TCP flow must be allowed to use the relay.
+    // must stay DIRECT under Route Assist. For a known tunnel app,
+    // is_likely_game_traffic would otherwise relay all TCP, so honor the direct
+    // set here too; otherwise Route Assist relays textures/avatar-clothing
+    // fetches and they load slowly. FULL Country Ban and PARTIAL Country Ban are
+    // deliberately excluded: in those modes Roblox web/asset TCP is the bypass
+    // path, while Partial still keeps gameplay UDP direct for normal ping.
     // These are deliberately NOT cached as Active below, so the flow is direct
     // from its SYN and is never half-moved onto the relay mid-connection.
     let dst_is_direct_tcp = protocol == Protocol::Tcp
         && !is_full_country_ban_routing
+        && !is_partial_country_ban_routing
         && crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(dst_ip);
     let is_route_assist_control_tcp_dst = protocol == Protocol::Tcp
         && api_tunneling
         && matches!(dst_port, 80 | 443)
         && !dst_is_direct_tcp
         && crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip);
+    let is_partial_country_ban_http_dst = protocol == Protocol::Tcp
+        && is_partial_country_ban_routing
+        && matches!(dst_port, 80 | 443)
+        && (crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip)
+            || crate::roblox_proxy::hosts::is_direct_only_bootstrap_ip(dst_ip)
+            || super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling));
 
     // Phase 1: Check snapshot cache (fast path, O(1))
     //
@@ -7725,7 +7837,9 @@ where
             };
             let result = if protocol == Protocol::Tcp && api_tunneling {
                 !dst_is_direct_tcp
-                    && (is_full_country_ban_routing || is_route_assist_control_tcp_dst)
+                    && (is_full_country_ban_routing
+                        || is_partial_country_ban_routing
+                        || is_route_assist_control_tcp_dst)
             } else if protocol == Protocol::Udp {
                 should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
             } else {
@@ -7823,37 +7937,48 @@ where
             tcp_api_bootstrap_owned_by_browser && is_route_assist_http_dst;
         let tcp_api_bootstrap_owned_by_browser_full_country_ban =
             tcp_api_bootstrap_owned_by_browser && is_full_country_ban_http_dst;
+        let tcp_api_bootstrap_owned_by_browser_partial_country_ban =
+            tcp_api_bootstrap_owned_by_browser && is_partial_country_ban_http_dst;
         let tcp_api_bootstrap_known_unrelated = tcp_api_bootstrap_owner
             .map(|_| {
                 !tcp_api_bootstrap_owned_by_tunnel
                     && !tcp_api_bootstrap_owned_by_browser_route_assist
+                    && !tcp_api_bootstrap_owned_by_browser_partial_country_ban
                     && !tcp_api_bootstrap_owned_by_browser_full_country_ban
             })
             .unwrap_or(false);
         let tcp_api_bootstrap_owner_missing =
             is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && tcp_api_bootstrap_owner.is_none();
         let tcp_api_bootstrap_destination_allowed = if tcp_api_bootstrap_owned_by_tunnel {
-            is_full_country_ban_routing || is_route_assist_http_dst
+            is_full_country_ban_routing
+                || is_partial_country_ban_routing
+                || is_route_assist_http_dst
         } else {
-            is_full_country_ban_http_dst || is_route_assist_http_dst
+            is_full_country_ban_http_dst
+                || is_partial_country_ban_http_dst
+                || is_route_assist_http_dst
         };
-        // Partial/Route Assist must not relay every Roblox-owned HTTPS flow:
-        // chat, avatar, menus, and settings can open new unpinned TCP flows later
-        // and break when dragged through the shared relay. Relay only active
-        // join/control-plane destinations there. Full country-ban bypass keeps
-        // the broad Roblox-process fallback because the whole platform path is
-        // blocked and direct traffic is unusable.
+        // Route Assist must not relay every Roblox-owned HTTPS flow: chat,
+        // avatar, menus, and settings can open new unpinned TCP flows later and
+        // break when dragged through the shared relay. Partial Bypass is broader
+        // for TCP (web/join/avatar/assets relay) but still keeps gameplay UDP
+        // direct. Full country-ban bypass keeps the broad Roblox-process
+        // fallback because the whole platform path is blocked and direct traffic
+        // is unusable.
         let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
             && !dst_is_direct_tcp
             && !tcp_api_bootstrap_known_unrelated
             && tcp_api_bootstrap_destination_allowed
             && (!tcp_api_bootstrap_owner_missing
                 || is_full_country_ban_http_dst
+                || is_partial_country_ban_http_dst
                 || is_route_assist_http_dst);
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
         } else {
-            (is_full_country_ban_http_dst || is_route_assist_http_dst)
+            (is_full_country_ban_http_dst
+                || is_partial_country_ban_http_dst
+                || is_route_assist_http_dst)
                 && is_tcp_initial_syn
                 && !tcp_api_bootstrap_known_unrelated
         };
@@ -7922,16 +8047,17 @@ where
             false
         }
     } else {
-        // Process IS a tunnel app - tunnel its game traffic, but keep
-        // launch-critical settings + asset/CDN TCP flows direct. Under Route
-        // Assist/Partial Bypass, TCP relay is limited to the pinned
-        // join/control-plane IPs; otherwise first-time avatar/chat/asset flows
-        // can ride the relay before SNI learning catches up and Roblox loads
-        // naked avatars, missing menus, or black screens. Full Country Ban is
-        // the exception: the direct path is blocked, so all Roblox app TCP is
-        // allowed to fall back to the relay.
+        // Process IS a tunnel app. Route Assist keeps launch-critical settings
+        // + asset/CDN TCP flows direct, and only relays pinned join/control
+        // destinations. Partial Country Ban does the opposite for TCP: relay
+        // Roblox web/assets/avatar/CDN so banned content loads, but keep
+        // gameplay UDP direct for the player's real ping. Full Country Ban
+        // relays both TCP and UDP because the whole platform path is blocked.
         if protocol == Protocol::Tcp && api_tunneling {
-            !dst_is_direct_tcp && (is_full_country_ban_routing || is_route_assist_control_tcp_dst)
+            !dst_is_direct_tcp
+                && (is_full_country_ban_routing
+                    || is_partial_country_ban_routing
+                    || is_route_assist_control_tcp_dst)
         } else if protocol == Protocol::Udp {
             should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
         } else {
@@ -9976,6 +10102,48 @@ mod tests {
             selected.is_none(),
             "ambiguous owner-name matches must not auto-select"
         );
+    }
+
+    #[test]
+    fn test_route_owner_fallback_allows_missing_binding_precheck() {
+        let missing = VpnError::SplitTunnel(
+            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'".to_string(),
+        );
+
+        assert!(
+            ParallelInterceptor::should_try_route_owner_fallback_after_binding_check(Some(
+                &missing
+            ))
+        );
+    }
+
+    #[test]
+    fn test_route_owner_fallback_allows_disabled_binding_precheck() {
+        let disabled = VpnError::SplitTunnel(
+            "winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter 'Wi-Fi'".to_string(),
+        );
+
+        assert!(
+            ParallelInterceptor::should_try_route_owner_fallback_after_binding_check(Some(
+                &disabled
+            ))
+        );
+    }
+
+    #[test]
+    fn test_route_owner_fallback_rejects_unrelated_binding_error() {
+        let unrelated = VpnError::SplitTunnel("Failed to enumerate adapters".to_string());
+
+        assert!(
+            !ParallelInterceptor::should_try_route_owner_fallback_after_binding_check(Some(
+                &unrelated
+            ))
+        );
+    }
+
+    #[test]
+    fn test_route_owner_fallback_allows_clean_precheck() {
+        assert!(ParallelInterceptor::should_try_route_owner_fallback_after_binding_check(None));
     }
 
     #[test]
@@ -12098,7 +12266,7 @@ mod tests {
         ));
         assert_eq!(
             ParallelInterceptor::winpkfilter_binding_missing_message("Ethernet"),
-            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'. Repair the split tunnel driver, then try again."
+            "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Ethernet'. SwiftTunnel will repair the binding automatically, then try again."
         );
     }
 
@@ -12652,7 +12820,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tcp_api_tunneling_keeps_unpinned_asset_syn_direct_when_not_full_ban() {
+    fn test_route_assist_keeps_unpinned_asset_syn_direct() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
         let src_port = 40002;
@@ -12689,6 +12857,63 @@ mod tests {
             },
         ));
         assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_partial_bypass_relays_asset_tcp_while_gameplay_udp_stays_direct() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
+        let asset_src_port = 40002;
+        let gameplay_src_port = 50000;
+        let tunnel_pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [tunnel_pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: [gameplay_src_port].into_iter().collect(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let asset_syn = build_ipv4_tcp_frame_with_flags(src_ip, cdn_ip, asset_src_port, 443, 0x02);
+        let mut asset_cache: InlineCache = HashMap::new();
+
+        assert!(should_route_to_vpn_with_routing_flags_and_tcp_owner_lookup(
+            &asset_syn,
+            &snapshot,
+            &mut asset_cache,
+            true,
+            false,
+            |ip, port| {
+                if ip == src_ip && port == asset_src_port {
+                    Some(tunnel_pid)
+                } else {
+                    None
+                }
+            },
+        ));
+        assert!(!asset_cache.is_empty());
+
+        let gameplay_frame = build_ipv4_frame(
+            17,
+            src_ip,
+            Ipv4Addr::new(128, 116, 50, 100),
+            gameplay_src_port,
+            49152,
+        );
+        let mut gameplay_cache: InlineCache = HashMap::new();
+        assert!(!should_route_to_vpn_with_routing_flags(
+            &gameplay_frame,
+            &snapshot,
+            &mut gameplay_cache,
+            true,
+            false,
+        ));
     }
 
     #[test]
@@ -12891,6 +13116,64 @@ mod tests {
             "Route Assist should not restore broad browser Roblox-range tunneling"
         );
         assert!(inline_cache.is_empty());
+
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_partial_bypass_relays_browser_owned_roblox_http() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(false);
+
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let roblox_web_ip = Ipv4Addr::new(128, 116, 50, 6);
+        let src_port = 40113;
+        let dst_port = 443;
+        let browser_pid = 9004;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["robloxplayerbeta.exe".to_string()].into_iter().collect(),
+            tunnel_pids: HashSet::new(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame =
+            build_ipv4_tcp_frame_with_flags(src_ip, roblox_web_ip, src_port, dst_port, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+
+        assert!(
+            should_route_to_vpn_with_routing_flags_and_tcp_owner_process_lookup(
+                &frame,
+                &snapshot,
+                &mut inline_cache,
+                true,
+                false,
+                |ip, port| {
+                    if ip == src_ip && port == src_port {
+                        Some(browser_pid)
+                    } else {
+                        None
+                    }
+                },
+                |pid| {
+                    if pid == browser_pid {
+                        Some("chrome.exe".to_string())
+                    } else {
+                        None
+                    }
+                },
+            ),
+            "Partial Bypass should relay browser Roblox web/join traffic while gameplay UDP stays direct"
+        );
+        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14528,6 +14811,102 @@ mod tests {
             false,
         ));
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn test_partial_bypass_detects_gameplay_udp_without_relaying_it() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 50000;
+        let dst_port = 49152;
+        let pid = 1234;
+
+        let mut connections = HashMap::new();
+        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
+
+        let snapshot = ProcessSnapshot {
+            connections,
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: [src_port].into_iter().collect(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+
+        assert_eq!(
+            partial_bypass_gameplay_udp_destination(&frame, &snapshot, true, false),
+            Some(dst_ip)
+        );
+    }
+
+    #[test]
+    fn test_route_assist_and_full_ban_do_not_use_partial_gameplay_detection() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
+        let src_port = 50000;
+        let dst_port = 49152;
+        let pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: [src_port].into_iter().collect(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+
+        assert_eq!(
+            partial_bypass_gameplay_udp_destination(&frame, &snapshot, true, true),
+            None,
+            "Route Assist / Full Country Ban keep UDP relay enabled and do not use Partial Bypass gameplay detection"
+        );
+        assert_eq!(
+            partial_bypass_gameplay_udp_destination(&frame, &snapshot, false, false),
+            None,
+            "normal Connect does not have API relay to disable"
+        );
+    }
+
+    #[test]
+    fn test_partial_bypass_does_not_disable_api_for_non_gameplay_udp() {
+        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
+        let dst_ip = Ipv4Addr::new(1, 1, 1, 1);
+        let src_port = 50000;
+        let dst_port = 443;
+        let pid = 1234;
+
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: HashSet::new(),
+            tunnel_pids: [pid].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: [src_port].into_iter().collect(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+
+        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
+
+        assert_eq!(
+            partial_bypass_gameplay_udp_destination(&frame, &snapshot, true, false),
+            None
+        );
     }
 
     // ------------------------------------------------------------------

@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useAuthStore } from "../../stores/authStore";
+import { systemOpenUrl } from "../../lib/commands";
 import { Button, Spinner } from "../ui";
-import swiftLogo from "../../assets/swift.png";
+import swiftLogo from "../../assets/swift.png?inline";
 
 declare const __APP_VERSION__: string;
 
 const OAUTH_TIMEOUT_MS = 120_000;
+const SIGNUP_URL = "https://swifttunnel.net/signup";
 
 const FEATURES = [
   {
@@ -27,15 +29,28 @@ const FEATURES = [
 ];
 
 export function LoginScreen() {
-  const { state, error, startOAuth, pollOAuth, cancelOAuth } = useAuthStore();
+  const { state, error, login, startOAuth, pollOAuth, cancelOAuth } =
+    useAuthStore();
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const startedAtRef = useRef<number | null>(null);
   const [elapsedSecs, setElapsedSecs] = useState(0);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const isAwaiting = state === "awaiting_oauth";
+  const isLoggingIn = state === "logging_in";
   const remaining = Math.max(
     0,
     Math.ceil(OAUTH_TIMEOUT_MS / 1000 - elapsedSecs),
   );
+
+  const handleLogin = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    void login(email, password);
+  };
+
+  const openSignup = () => {
+    void systemOpenUrl(SIGNUP_URL);
+  };
 
   useEffect(() => {
     let polling = false;
@@ -154,30 +169,97 @@ export function LoginScreen() {
               </Button>
             </div>
           ) : (
-            <Button
-              variant="primary"
-              size="lg"
-              fullWidth
-              onClick={startOAuth}
-              leadingIcon={
-                <svg
-                  width="15"
-                  height="15"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+            <div className="flex flex-col gap-3">
+              <form className="flex flex-col gap-2.5" onSubmit={handleLogin}>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="Email"
+                  autoComplete="email"
+                  disabled={isLoggingIn}
+                  className="h-[38px] rounded-[var(--radius-button)] px-3 text-[12px] outline-none transition-colors disabled:opacity-60"
+                  style={{
+                    backgroundColor: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-border-default)",
+                    color: "var(--color-text-primary)",
+                  }}
+                />
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Password"
+                  autoComplete="current-password"
+                  disabled={isLoggingIn}
+                  className="h-[38px] rounded-[var(--radius-button)] px-3 text-[12px] outline-none transition-colors disabled:opacity-60"
+                  style={{
+                    backgroundColor: "var(--color-bg-elevated)",
+                    border: "1px solid var(--color-border-default)",
+                    color: "var(--color-text-primary)",
+                  }}
+                />
+                <Button
+                  type="submit"
+                  variant="primary"
+                  size="lg"
+                  fullWidth
+                  loading={isLoggingIn}
+                  disabled={!email.trim() || !password}
                 >
-                  <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-                  <polyline points="10 17 15 12 10 7" />
-                  <line x1="15" y1="12" x2="3" y2="12" />
-                </svg>
-              }
-            >
-              Sign in with SwiftTunnel
-            </Button>
+                  Sign in
+                </Button>
+              </form>
+
+              <div className="flex items-center gap-2">
+                <div
+                  className="h-px flex-1"
+                  style={{ backgroundColor: "var(--color-border-subtle)" }}
+                />
+                <span className="text-[10px] uppercase tracking-[0.16em] text-text-dimmed">
+                  or
+                </span>
+                <div
+                  className="h-px flex-1"
+                  style={{ backgroundColor: "var(--color-border-subtle)" }}
+                />
+              </div>
+
+              <Button
+                variant="secondary"
+                size="md"
+                fullWidth
+                onClick={startOAuth}
+                disabled={isLoggingIn}
+                leadingIcon={
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                    <polyline points="10 17 15 12 10 7" />
+                    <line x1="15" y1="12" x2="3" y2="12" />
+                  </svg>
+                }
+              >
+                Sign in in browser
+              </Button>
+
+              <button
+                type="button"
+                onClick={openSignup}
+                disabled={isLoggingIn}
+                className="self-center text-[11px] text-text-muted transition-colors hover:text-text-primary disabled:opacity-60"
+              >
+                Create account
+              </button>
+            </div>
           )}
 
           {error && (
