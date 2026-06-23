@@ -181,6 +181,30 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().error).toBeNull();
   });
 
+  it("repairs resettable driver exposure failures before connecting", async () => {
+    systemCheckDriver.mockResolvedValueOnce(
+      driverStatus({
+        ready: false,
+        status: "no_adapters",
+        message:
+          "Split tunnel driver not available (Windows Packet Filter driver): no TCP/IP-bound network adapters were enumerated. Reset the driver service, then try again.",
+        recommended_action: "reset_service",
+      }),
+    );
+    systemRepairDriver.mockResolvedValueOnce(driverStatus());
+    vpnConnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnConnect).toHaveBeenCalledWith("singapore", ["roblox"]);
+    expect(useVpnStore.getState().state).toBe("connected");
+    expect(useVpnStore.getState().driverSetupError).toBeNull();
+    expect(useVpnStore.getState().error).toBeNull();
+  });
+
   it("closes already-running Roblox after Full Country Ban connects", async () => {
     systemCheckDriver.mockResolvedValueOnce(driverStatus());
     vpnConnect.mockResolvedValue(undefined);
@@ -280,7 +304,7 @@ describe("stores/vpnStore", () => {
   });
 
   it("stops safely when preflight cannot see WinpkFilter adapters", async () => {
-    systemCheckDriver.mockResolvedValueOnce(driverStatus());
+    systemCheckDriver.mockResolvedValue(driverStatus());
     vpnPreflightBinding
       .mockResolvedValueOnce({
         status: "unrecoverable",
@@ -315,21 +339,16 @@ describe("stores/vpnStore", () => {
     const useVpnStore = await loadStore();
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-    expect(systemRepairDriver).not.toHaveBeenCalled();
-    expect(vpnPreflightBinding).toHaveBeenCalledTimes(1);
-    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnPreflightBinding).toHaveBeenCalledTimes(2);
+    expect(vpnConnect).toHaveBeenCalledTimes(1);
     expect(useVpnStore.getState().bindingPreflight).toBeNull();
-    expect(useVpnStore.getState().state).toBe("error");
-    expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
-      "reboot",
-    );
-    expect(useVpnStore.getState().driverSetupError).toContain(
-      "restart Windows to finish setting up SwiftTunnel's network filter",
-    );
+    expect(useVpnStore.getState().state).toBe("connected");
+    expect(useVpnStore.getState().driverSetupError).toBeNull();
   });
 
   it("stops safely on missing WinpkFilter binding marker during preflight", async () => {
-    systemCheckDriver.mockResolvedValueOnce(driverStatus());
+    systemCheckDriver.mockResolvedValue(driverStatus());
     vpnPreflightBinding
       .mockResolvedValueOnce({
         status: "unrecoverable",
@@ -364,13 +383,11 @@ describe("stores/vpnStore", () => {
     const useVpnStore = await loadStore();
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-    expect(systemRepairDriver).not.toHaveBeenCalled();
-    expect(vpnPreflightBinding).toHaveBeenCalledTimes(1);
-    expect(vpnConnect).not.toHaveBeenCalled();
-    expect(useVpnStore.getState().state).toBe("error");
-    expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
-      "reboot",
-    );
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnPreflightBinding).toHaveBeenCalledTimes(2);
+    expect(vpnConnect).toHaveBeenCalledTimes(1);
+    expect(useVpnStore.getState().state).toBe("connected");
+    expect(useVpnStore.getState().driverSetupError).toBeNull();
   });
 
   it("does not auto-repair unrelated nt_ndisrd validation errors", async () => {
@@ -412,14 +429,12 @@ describe("stores/vpnStore", () => {
     const useVpnStore = await loadStore();
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
     expect(vpnDisconnect).toHaveBeenCalledTimes(1);
-    expect(vpnConnect).toHaveBeenCalledTimes(1);
-    expect(vpnPreflightBinding).toHaveBeenCalledTimes(1);
-    expect(useVpnStore.getState().state).toBe("error");
-    expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
-      "reboot",
-    );
+    expect(vpnConnect).toHaveBeenCalledTimes(2);
+    expect(vpnPreflightBinding).toHaveBeenCalledTimes(2);
+    expect(useVpnStore.getState().state).toBe("connected");
+    expect(useVpnStore.getState().driverSetupError).toBeNull();
   });
 
   it("stops safely when connect cannot ensure the WinpkFilter binding", async () => {
@@ -437,13 +452,11 @@ describe("stores/vpnStore", () => {
     const useVpnStore = await loadStore();
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
     expect(vpnDisconnect).toHaveBeenCalledTimes(1);
-    expect(vpnConnect).toHaveBeenCalledTimes(1);
-    expect(useVpnStore.getState().state).toBe("error");
-    expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
-      "reboot",
-    );
+    expect(vpnConnect).toHaveBeenCalledTimes(2);
+    expect(useVpnStore.getState().state).toBe("connected");
+    expect(useVpnStore.getState().driverSetupError).toBeNull();
   });
 
   it("shows restart-required status when WinpkFilter binding cannot be ensured", async () => {
@@ -457,15 +470,15 @@ describe("stores/vpnStore", () => {
     const useVpnStore = await loadStore();
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-    expect(systemRepairDriver).not.toHaveBeenCalled();
-    expect(vpnDisconnect).toHaveBeenCalledTimes(1);
-    expect(vpnConnect).toHaveBeenCalledTimes(1);
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(vpnDisconnect).toHaveBeenCalledTimes(2);
+    expect(vpnConnect).toHaveBeenCalledTimes(2);
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
       "reboot",
     );
     expect(useVpnStore.getState().driverSetupError).toContain(
-      "restart Windows to finish setting up SwiftTunnel's network filter",
+      "Windows still has not attached the network filter",
     );
     expect(useVpnStore.getState().driverSetupError).toContain(
       "Failed to ensure WinpkFilter binding",
@@ -507,14 +520,12 @@ describe("stores/vpnStore", () => {
       const useVpnStore = await loadStore();
       await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-      expect(systemRepairDriver).not.toHaveBeenCalled();
+      expect(systemRepairDriver).toHaveBeenCalledTimes(1);
       expect(systemRepairWindowsFirewall).not.toHaveBeenCalled();
       expect(vpnDisconnect).toHaveBeenCalledTimes(1);
-      expect(vpnConnect).toHaveBeenCalledTimes(1);
-      expect(useVpnStore.getState().state).toBe("error");
-      expect(useVpnStore.getState().driverStatus?.recommended_action).toBe(
-        "reboot",
-      );
+      expect(vpnConnect).toHaveBeenCalledTimes(2);
+      expect(useVpnStore.getState().state).toBe("connected");
+      expect(useVpnStore.getState().driverSetupError).toBeNull();
     });
   }
 
@@ -536,7 +547,7 @@ describe("stores/vpnStore", () => {
       "reboot",
     );
     expect(useVpnStore.getState().driverSetupError).toContain(
-      "restart Windows to finish setting up SwiftTunnel's network filter",
+      "Restart Windows once to finish setting up",
     );
   });
 
@@ -580,6 +591,28 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().error).toContain(
       "Administrator privileges required",
     );
+  });
+
+  it("repairs elevated Windows driver-access blocks once before failing", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    systemRepairDriver.mockResolvedValueOnce(driverStatus());
+    vpnConnect
+      .mockRejectedValueOnce(
+        new Error(
+          "Windows blocked SwiftTunnel's split-tunnel driver access even though SwiftTunnel is elevated. Restart Windows once so the driver service can reload cleanly.",
+        ),
+      )
+      .mockResolvedValueOnce(undefined);
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(systemRepairWindowsFirewall).not.toHaveBeenCalled();
+    expect(vpnDisconnect).toHaveBeenCalledTimes(1);
+    expect(vpnConnect).toHaveBeenCalledTimes(2);
+    expect(useVpnStore.getState().state).toBe("connected");
   });
 
   it("treats an exact backend already-connected marker as connect success", async () => {
@@ -695,7 +728,7 @@ describe("stores/vpnStore", () => {
     await useVpnStore.getState().connect("singapore", ["roblox"]);
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
     expect(vpnConnect).not.toHaveBeenCalled();
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().driverSetupState).toBe("error");
@@ -703,7 +736,7 @@ describe("stores/vpnStore", () => {
       "reboot",
     );
     expect(useVpnStore.getState().driverSetupError).toContain(
-      "restart Windows to finish setting up SwiftTunnel's network filter",
+      "Windows still has not attached the network filter",
     );
   });
 
@@ -722,6 +755,12 @@ describe("stores/vpnStore", () => {
       binding_stage: "unrecoverable",
       candidates: [],
     });
+    let finishRepair: ((value: ReturnType<typeof driverStatus>) => void) | undefined;
+    systemRepairDriver.mockReturnValue(
+      new Promise((resolve) => {
+        finishRepair = resolve;
+      }),
+    );
     vpnDisconnect.mockResolvedValue(undefined);
     vpnGetState.mockResolvedValue({
       state: "disconnected",
@@ -735,11 +774,20 @@ describe("stores/vpnStore", () => {
     });
 
     const useVpnStore = await loadStore();
-    await useVpnStore.getState().connect("singapore", ["roblox"]);
+    const connectPromise = useVpnStore
+      .getState()
+      .connect("singapore", ["roblox"]);
+    for (let i = 0; i < 5 && systemRepairDriver.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(systemRepairDriver).toHaveBeenCalledTimes(1);
 
     await useVpnStore.getState().disconnect();
+    if (finishRepair) {
+      finishRepair(driverStatus());
+    }
+    await connectPromise;
 
-    expect(systemRepairDriver).not.toHaveBeenCalled();
     expect(vpnConnect).not.toHaveBeenCalled();
     expect(useVpnStore.getState().state).toBe("disconnected");
     expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);

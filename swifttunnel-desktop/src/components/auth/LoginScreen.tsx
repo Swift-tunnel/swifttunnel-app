@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { useAuthStore } from "../../stores/authStore";
 import { systemOpenUrl } from "../../lib/commands";
 import { Button, Spinner } from "../ui";
-import swiftLogo from "../../assets/swift.png?inline";
+import { SwiftLogo } from "../common/SwiftLogo";
 
 declare const __APP_VERSION__: string;
 
@@ -111,13 +111,7 @@ export function LoginScreen() {
           transition={{ duration: 0.3 }}
           className="flex flex-col items-center gap-3"
         >
-          <img
-            src={swiftLogo}
-            alt="SwiftTunnel"
-            width={120}
-            height={120}
-            style={{ objectFit: "contain" }}
-          />
+          <SwiftLogo size={120} />
           <div className="text-center">
             <div className="mb-2 flex items-center justify-center gap-2">
               <span

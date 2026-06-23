@@ -21,6 +21,7 @@ import {
   SAMPLE_INTERVAL_MS,
   type DataSample,
 } from "./LiveGraph";
+import { AdapterSelectionPanel } from "./AdapterSelectionPanel";
 import { StatusRing } from "./StatusRing";
 import { Button, EmptyState, Tooltip, InfoIcon, Toggle } from "../ui";
 import type { ServerRegion } from "../../lib/types";
@@ -438,6 +439,8 @@ export function ConnectTab() {
           />
         </div>
       </section>
+
+      <AdapterSelectionPanel disabled={isConnected || isTransitioning} />
 
       <RouteAssistPanel
         enabled={

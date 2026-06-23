@@ -12,6 +12,21 @@ import {
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
 
+function formatAuthError(error: unknown): string {
+  const message = String(error);
+  const lower = message.toLowerCase();
+
+  if (
+    lower.includes("network error") &&
+    (lower.includes("auth.swifttunnel.net") ||
+      lower.includes("swifttunnel.net"))
+  ) {
+    return "SwiftTunnel could not reach the login service from this PC. Try browser sign-in, then check antivirus, proxy, VPN, or DNS settings if it still fails.";
+  }
+
+  return message;
+}
+
 interface AuthStore {
   state: AuthState;
   email: string | null;
@@ -60,7 +75,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         error: null,
       });
     } catch (e) {
-      set({ isLoading: false, error: String(e) });
+      set({ isLoading: false, error: formatAuthError(e) });
     }
   },
 
@@ -70,7 +85,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       await authLogin(email, password);
       await get().fetchState();
     } catch (e) {
-      const message = String(e);
+      const message = formatAuthError(e);
       await get().fetchState();
       set({
         isLoading: false,
@@ -85,7 +100,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // Native auth command already opens the browser and tracks pending state.
       await authStartOAuth();
     } catch (e) {
-      set({ state: "logged_out", error: String(e) });
+      set({ state: "logged_out", error: formatAuthError(e) });
     }
   },
 
@@ -99,7 +114,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       }
       return false;
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatAuthError(e) });
       return false;
     }
   },
@@ -133,7 +148,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         error: null,
       });
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatAuthError(e) });
     }
   },
 
@@ -142,7 +157,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({ error: null });
       await authRefreshProfile();
     } catch (e) {
-      set({ error: String(e) });
+      set({ error: formatAuthError(e) });
     }
   },
 

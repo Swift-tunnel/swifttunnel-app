@@ -4,7 +4,7 @@ use super::device_identity::desktop_hwid;
 use super::types::{
     AuthError, ExchangeTokenResponse, RelayTicketResponse, SupabaseAuthResponse, VpnConfig,
 };
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
@@ -44,34 +44,44 @@ const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOi
 /// HTTP client for authentication API calls
 pub struct AuthClient {
     client: Client,
+    direct_client: Client,
     device_hwid: Option<String>,
+}
+
+fn build_http_client(use_system_proxy: bool) -> Client {
+    let mut builder = Client::builder()
+        .user_agent("SwiftTunnel-Desktop/0.1.0")
+        .timeout(std::time::Duration::from_secs(30))
+        .use_native_tls();
+
+    if !use_system_proxy {
+        builder = builder.no_proxy();
+    }
+
+    builder.build().expect("Failed to create HTTP client")
 }
 
 impl AuthClient {
     /// Create a new AuthClient
     pub fn new() -> Self {
-        let client = Client::builder()
-            .user_agent("SwiftTunnel-Desktop/0.1.0")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to create HTTP client");
+        let client = build_http_client(true);
+        let direct_client = build_http_client(false);
 
         Self {
             client,
+            direct_client,
             device_hwid: desktop_hwid(),
         }
     }
 
     #[cfg(test)]
     fn with_device_hwid(device_hwid: Option<String>) -> Self {
-        let client = Client::builder()
-            .user_agent("SwiftTunnel-Desktop/0.1.0")
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to create HTTP client");
+        let client = build_http_client(true);
+        let direct_client = build_http_client(false);
 
         Self {
             client,
+            direct_client,
             device_hwid,
         }
     }
@@ -80,6 +90,35 @@ impl AuthClient {
         match &self.device_hwid {
             Some(hwid) => request.header("X-SwiftTunnel-HWID", hwid),
             None => request,
+        }
+    }
+
+    async fn send_with_network_fallback<F>(
+        &self,
+        label: &str,
+        build_request: F,
+    ) -> Result<reqwest::Response, AuthError>
+    where
+        F: Fn(&Client) -> reqwest::RequestBuilder,
+    {
+        match build_request(&self.client).send().await {
+            Ok(response) => Ok(response),
+            Err(primary_error) => {
+                warn!(
+                    "{} request failed through the system network path: {}. Retrying direct.",
+                    label, primary_error
+                );
+
+                build_request(&self.direct_client)
+                    .send()
+                    .await
+                    .map_err(|direct_error| {
+                        AuthError::NetworkError(format!(
+                            "{}. Direct retry also failed: {}",
+                            primary_error, direct_error
+                        ))
+                    })
+            }
         }
     }
 
@@ -94,6 +133,56 @@ impl AuthClient {
         payload
     }
 
+    async fn parse_password_sign_in_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<SupabaseAuthResponse, AuthError> {
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Sign in failed: {} - {}", status, body);
+
+            if let Some(error) = user_banned_error_from_body(&body) {
+                return Err(error);
+            }
+            if body.contains("Invalid login credentials") {
+                return Err(AuthError::ApiError("Invalid email or password".to_string()));
+            }
+            return Err(AuthError::ApiError(format!(
+                "Sign in failed: {} - {}",
+                status, body
+            )));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))
+    }
+
+    async fn sign_in_with_password_via_desktop_api(
+        &self,
+        email: &str,
+        password: &str,
+    ) -> Result<SupabaseAuthResponse, AuthError> {
+        let url = format!("{}/api/auth/desktop/password", API_BASE_URL);
+        let response = self
+            .send_with_network_fallback("desktop password sign in", |client| {
+                self.add_hwid_header(
+                    client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .json(&json!({
+                            "email": email,
+                            "password": password,
+                        })),
+                )
+            })
+            .await?;
+
+        self.parse_password_sign_in_response(response).await
+    }
+
     /// Sign in with email and password via Supabase
     pub async fn sign_in_with_password(
         &self,
@@ -104,38 +193,32 @@ impl AuthClient {
 
         debug!("Signing in user: {}", email);
 
-        let response = self
-            .client
-            .post(&url)
-            .header("apikey", SUPABASE_ANON_KEY)
-            .header("Content-Type", "application/json")
-            .json(&json!({
-                "email": email,
-                "password": password,
-            }))
-            .send()
+        let response = match self
+            .send_with_network_fallback("sign in", |client| {
+                client
+                    .post(&url)
+                    .header("apikey", SUPABASE_ANON_KEY)
+                    .header("Content-Type", "application/json")
+                    .json(&json!({
+                        "email": email,
+                        "password": password,
+                    }))
+            })
             .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            error!("Sign in failed: {} - {}", status, body);
-
-            // Parse error message from Supabase
-            if body.contains("Invalid login credentials") {
-                return Err(AuthError::ApiError("Invalid email or password".to_string()));
+        {
+            Ok(response) => response,
+            Err(primary_error) => {
+                warn!(
+                    "Direct Supabase sign in failed; trying desktop API fallback: {}",
+                    primary_error
+                );
+                return self
+                    .sign_in_with_password_via_desktop_api(email, password)
+                    .await;
             }
-            return Err(AuthError::ApiError(format!(
-                "Sign in failed: {} - {}",
-                status, body
-            )));
-        }
+        };
 
-        let data: SupabaseAuthResponse = response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))?;
+        let data = self.parse_password_sign_in_response(response).await?;
 
         info!("Sign in successful for user {}", data.user.id);
         Ok(data)
@@ -151,16 +234,16 @@ impl AuthClient {
         debug!("Refreshing token via Supabase");
 
         let response = self
-            .client
-            .post(&url)
-            .header("apikey", SUPABASE_ANON_KEY)
-            .header("Content-Type", "application/json")
-            .json(&json!({
-                "refresh_token": refresh_token,
-            }))
-            .send()
-            .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+            .send_with_network_fallback("refresh token", |client| {
+                client
+                    .post(&url)
+                    .header("apikey", SUPABASE_ANON_KEY)
+                    .header("Content-Type", "application/json")
+                    .json(&json!({
+                        "refresh_token": refresh_token,
+                    }))
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -198,14 +281,14 @@ impl AuthClient {
         debug!("Fetching VPN config for region {}", region);
 
         let response = self
-            .add_hwid_header(self.client.post(&url))
-            .header("Authorization", format!("Bearer {}", access_token))
-            .json(&json!({
-                "region": region,
-            }))
-            .send()
-            .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+            .send_with_network_fallback("VPN config", |client| {
+                self.add_hwid_header(client.post(&url))
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .json(&json!({
+                        "region": region,
+                    }))
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -244,16 +327,16 @@ impl AuthClient {
         );
 
         let response = self
-            .add_hwid_header(self.client.post(&url))
-            .header("Authorization", format!("Bearer {}", access_token))
-            .header("Content-Type", "application/json")
-            .json(&json!({
-                "server_region": server_region,
-                "session_id": session_id,
-            }))
-            .send()
-            .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+            .send_with_network_fallback("relay ticket", |client| {
+                self.add_hwid_header(client.post(&url))
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .header("Content-Type", "application/json")
+                    .json(&json!({
+                        "server_region": server_region,
+                        "session_id": session_id,
+                    }))
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -295,12 +378,12 @@ impl AuthClient {
         debug!("Exchanging OAuth token for session");
 
         let response = self
-            .add_hwid_header(self.client.put(&url))
-            .header("Content-Type", "application/json")
-            .json(&self.exchange_oauth_payload(exchange_token, state))
-            .send()
-            .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+            .send_with_network_fallback("desktop auth exchange", |client| {
+                self.add_hwid_header(client.put(&url))
+                    .header("Content-Type", "application/json")
+                    .json(&self.exchange_oauth_payload(exchange_token, state))
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -350,11 +433,11 @@ impl AuthClient {
         debug!("Fetching user profile");
 
         let response = self
-            .add_hwid_header(self.client.get(&url))
-            .header("Authorization", format!("Bearer {}", access_token))
-            .send()
-            .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+            .send_with_network_fallback("user profile", |client| {
+                self.add_hwid_header(client.get(&url))
+                    .header("Authorization", format!("Bearer {}", access_token))
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -393,17 +476,17 @@ impl AuthClient {
         );
 
         let response = self
-            .client
-            .post(&url)
-            .header("apikey", SUPABASE_ANON_KEY)
-            .header("Content-Type", "application/json")
-            .json(&json!({
-                "type": "magiclink",
-                "token_hash": token_hash,
-            }))
-            .send()
-            .await
-            .map_err(|e| AuthError::NetworkError(e.to_string()))?;
+            .send_with_network_fallback("magic link verification", |client| {
+                client
+                    .post(&url)
+                    .header("apikey", SUPABASE_ANON_KEY)
+                    .header("Content-Type", "application/json")
+                    .json(&json!({
+                        "type": "magiclink",
+                        "token_hash": token_hash,
+                    }))
+            })
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();

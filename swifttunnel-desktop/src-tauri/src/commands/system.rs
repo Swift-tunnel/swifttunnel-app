@@ -1109,7 +1109,7 @@ fn repair_binding_preference_from_settings(
 }
 
 pub(crate) async fn system_startup_repair_driver_if_needed(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<DriverCheckResponse>, String> {
     #[cfg(windows)]
@@ -1130,24 +1130,16 @@ pub(crate) async fn system_startup_repair_driver_if_needed(
             StartupDriverRepairDecision::Report(response) => Ok(Some(response)),
             StartupDriverRepairDecision::Repair => {
                 log::warn!(
-                    "Startup driver recovery found a repairable driver issue, but skipped automatic kernel driver repair"
+                    "Startup driver recovery found a repairable driver issue; running automatic repair"
                 );
-                Ok(Some(DriverCheckResponse {
-                    installed: true,
-                    version: None,
-                    ready: false,
-                    status: "reboot_required".to_string(),
-                    message: "SwiftTunnel found a split-tunnel driver issue during startup. Restart Windows once, then open SwiftTunnel again. If it returns, use Repair -> Split tunnel driver and send support the log file.".to_string(),
-                    reboot_required: true,
-                    recommended_action: "reboot".to_string(),
-                }))
+                system_repair_driver(app, state).await.map(Some)
             }
         }
     }
 
     #[cfg(not(windows))]
     {
-        let _ = (_app, state);
+        let _ = (app, state);
         Ok(None)
     }
 }
@@ -1707,7 +1699,7 @@ impl DriverCheckResponse {
             ready: false,
             status: "binding_missing".to_string(),
             message: format!(
-                "Almost there - restart Windows to finish setting up SwiftTunnel's network filter, then connect again. This is a normal one-time step Windows requires after the driver is installed; SwiftTunnel will work right after the restart.\n\nIf it still won't connect after restarting, contact support and include this result.\n\nDetails: {}",
+                "SwiftTunnel repaired the split-tunnel driver, but Windows still has not attached the network filter to the active adapter. Restart Windows once, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: {}",
                 reason
             ),
             reboot_required: true,
@@ -1918,6 +1910,7 @@ pub async fn system_repair_driver(
             let is_admin = swifttunnel_core::is_administrator();
             let mut current = initial.clone();
             let mut last_error: Option<String> = None;
+            let mut binding_reinstall_needed = false;
 
             if initial.ready {
                 match post_repair_preflight() {
@@ -1962,9 +1955,22 @@ pub async fn system_repair_driver(
                         current = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
                         if initial.ready || current.ready {
                             let preflight = post_repair_preflight();
-                            return Ok(driver_repair_response_after_binding_preflight(
-                                current, preflight,
-                            ));
+                            let response = driver_repair_response_after_binding_preflight(
+                                current.clone(),
+                                preflight,
+                            );
+                            if response.ready {
+                                return Ok(response);
+                            }
+                            if response.status == "binding_missing" {
+                                log::warn!(
+                                    "Driver service reset passed but adapter binding is still missing; escalating to installer repair"
+                                );
+                                binding_reinstall_needed = true;
+                                last_error = Some(response.message.clone());
+                            } else {
+                                return Ok(response);
+                            }
                         }
                         log::warn!(
                             "Driver service reset passed but driver is still not ready; continuing to installer repair: {}",
@@ -1983,7 +1989,7 @@ pub async fn system_repair_driver(
                 );
             }
 
-            if initial.ready {
+            if initial.ready && !binding_reinstall_needed {
                 let mut response = driver_repair_response_after_binding_preflight(
                     current,
                     post_repair_preflight(),
@@ -2017,7 +2023,7 @@ pub async fn system_repair_driver(
 
             let reset_failed =
                 last_error.is_some() && current.recommended_action == DriverRecommendedAction::ResetService;
-            if matches!(
+            if binding_reinstall_needed || matches!(
                 current.recommended_action,
                 DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
             ) || matches!(
@@ -2025,7 +2031,7 @@ pub async fn system_repair_driver(
                 DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
             ) || reset_failed
             {
-                let force_reinstall = matches!(
+                let force_reinstall = binding_reinstall_needed || matches!(
                     current.recommended_action,
                     DriverRecommendedAction::Reinstall | DriverRecommendedAction::ResetService
                 ) || matches!(
@@ -2256,7 +2262,11 @@ mod tests {
         assert_eq!(response.status, "binding_missing");
         assert_eq!(response.recommended_action, "reboot");
         assert!(response.reboot_required);
-        assert!(response.message.contains("restart Windows to finish"));
+        assert!(
+            response
+                .message
+                .contains("Windows still has not attached the network filter")
+        );
         assert!(response.message.contains("Ethernet"));
     }
 
@@ -2316,7 +2326,11 @@ mod tests {
         assert_eq!(response.status, "binding_missing");
         assert_eq!(response.recommended_action, "reboot");
         assert!(response.reboot_required);
-        assert!(response.message.contains("restart Windows to finish"));
+        assert!(
+            response
+                .message
+                .contains("Windows still has not attached the network filter")
+        );
         assert!(
             response
                 .message

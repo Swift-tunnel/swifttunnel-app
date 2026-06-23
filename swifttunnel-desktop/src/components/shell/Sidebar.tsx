@@ -7,7 +7,7 @@ import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { countryFlag } from "../../lib/utils";
 import { NAV_SECTIONS, type NavItem } from "./nav";
 import type { VpnState } from "../../lib/types";
-import swiftLogo from "../../assets/swift.png?inline";
+import { SwiftLogo } from "../common/SwiftLogo";
 
 declare const __APP_VERSION__: string;
 
@@ -294,14 +294,7 @@ export function Sidebar() {
           collapsed ? "flex-col gap-2 px-0" : "gap-2.5 px-4"
         }`}
       >
-        <img
-          src={swiftLogo}
-          alt="SwiftTunnel"
-          width={26}
-          height={26}
-          className="shrink-0"
-          style={{ objectFit: "contain" }}
-        />
+        <SwiftLogo size={26} />
         {!collapsed && (
           <div
             className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-none text-text-primary"

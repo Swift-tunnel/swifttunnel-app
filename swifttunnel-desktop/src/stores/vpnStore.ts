@@ -53,29 +53,16 @@ function driverStatusMessage(status: DriverCheckResponse): string {
   return status.message || "Split tunnel driver is not ready.";
 }
 
-function unsafeAutomaticDriverRepairStatus(
-  status: DriverCheckResponse,
-): DriverCheckResponse {
-  return {
-    installed: status.installed,
-    version: status.version,
-    ready: false,
-    status: "reboot_required",
-    message:
-      "SwiftTunnel found the split-tunnel driver installed, but Windows is not exposing it cleanly. Restart Windows once, then connect again. SwiftTunnel skipped automatic driver repair to avoid touching the network driver while Windows is unstable.\n\nIf it still fails after restarting, use Repair -> Split tunnel driver and send support the log file.\n\nDetails: " +
-      driverStatusMessage(status),
-    reboot_required: true,
-    recommended_action: "reboot",
-  };
-}
+function isPendingDriverInstallReboot(status: DriverCheckResponse): boolean {
+  if (!status.reboot_required && status.recommended_action !== "reboot") {
+    return false;
+  }
 
-function shouldSkipAutomaticDriverRepair(status: DriverCheckResponse): boolean {
-  if (status.ready || !status.installed) return false;
-  const action = status.recommended_action.toLowerCase();
+  const message = driverStatusMessage(status).toLowerCase();
   return (
-    action === "reset_service" ||
-    action === "reinstall" ||
-    status.status.toLowerCase() !== "missing"
+    message.includes("reboot required to finish driver installation") ||
+    message.includes("reboot required to finish winpkfilter") ||
+    message.includes("marked for deletion")
   );
 }
 
@@ -129,6 +116,9 @@ function isDriverRebootMessage(message: string): boolean {
 
 function isRepairableDriverConnectMessage(message: string): boolean {
   const haystack = message.toLowerCase();
+  if (haystack.includes("windows blocked swifttunnel's split-tunnel driver access")) {
+    return true;
+  }
   if (isPermissionMessage(message)) {
     return false;
   }
@@ -143,6 +133,8 @@ function isRepairableDriverConnectMessage(message: string): boolean {
     haystack.includes("installed but ioctl failed") ||
     haystack.includes("get_tcpip_bound_adapters_info") ||
     haystack.includes("windows packet filter driver did not become available") ||
+    haystack.includes("could not attach its network filter") ||
+    haystack.includes("windows packet filter driver for your active network adapter") ||
     (haystack.includes("driver service") && haystack.includes("reset"))
   );
 }
@@ -238,7 +230,21 @@ function bindingRepairFailedStatus(reason: string): DriverCheckResponse {
     ready: false,
     status: "reboot_required",
     message:
-      "Almost there - restart Windows to finish setting up SwiftTunnel's network filter, then connect again. This is a normal one-time step Windows requires after the driver is installed; SwiftTunnel will work right after the restart.\n\nIf it still won't connect after restarting, contact support and include this result.\n\nDetails: " +
+      "SwiftTunnel repaired the split-tunnel driver, but Windows still has not attached the network filter to the active adapter. Restart Windows once, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: " +
+      reason,
+    reboot_required: true,
+    recommended_action: "reboot",
+  };
+}
+
+function driverRebootRequiredStatus(reason: string): DriverCheckResponse {
+  return {
+    installed: true,
+    version: null,
+    ready: false,
+    status: "reboot_required",
+    message:
+      "Restart Windows once to finish setting up SwiftTunnel's network driver, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: " +
       reason,
     reboot_required: true,
     recommended_action: "reboot",
@@ -363,7 +369,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         set({ driverSetupState: "idle", driverSetupError: null });
         return;
       }
-      if (check.reboot_required || check.recommended_action === "reboot") {
+      if (isPendingDriverInstallReboot(check)) {
         const message = driverStatusMessage(check);
         set({
           driverSetupState: "error",
@@ -371,16 +377,6 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           driverResetAttempted: true,
         });
         throw new Error(message);
-      }
-      if (shouldSkipAutomaticDriverRepair(check)) {
-        const safeStatus = unsafeAutomaticDriverRepairStatus(check);
-        set({
-          driverStatus: safeStatus,
-          driverSetupState: "error",
-          driverSetupError: safeStatus.message,
-          driverResetAttempted: true,
-        });
-        throw new Error(safeStatus.message);
       }
 
       const repairState: DriverSetupState =
@@ -529,6 +525,33 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         !autoRepairedBindingSignatures.has(preflight.network_signature)
       ) {
         autoRepairedBindingSignatures.add(preflight.network_signature);
+        set({
+          state: "configuring_split_tunnel",
+          error: null,
+          driverSetupState: "repairing",
+          driverSetupError: null,
+          bindingPreflight: null,
+          pendingConnectIntent: null,
+        });
+        const repaired = await systemRepairDriver();
+        set({ driverStatus: repaired });
+        if (!repaired.ready) {
+          const message = driverStatusMessage(repaired);
+          set({
+            state: "error",
+            error: message,
+            driverSetupState: "error",
+            driverSetupError: message,
+            driverResetAttempted: repaired.reboot_required,
+            connectAttemptInFlight: false,
+          });
+          return;
+        }
+        if (!isCurrentConnectAttempt(attempt)) return;
+        await get().connect(region, gamePresets);
+        return;
+      }
+      if (isRepairableBindingPreflight(preflight)) {
         const status = bindingRepairFailedStatus(preflight.reason);
         set({
           state: "error",
@@ -585,7 +608,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       } catch (e) {
         const message = getErrorMessage(e);
         if (isDriverRebootMessage(message)) {
-          const status = bindingRepairFailedStatus(message);
+          const status = driverRebootRequiredStatus(message);
           set({
             state: "error",
             error: status.message,
@@ -599,6 +622,9 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           return;
         }
         if (isRepairableDriverConnectMessage(message)) {
+          const repairAlreadyTried = autoRepairedBindingSignatures.has(
+            preflight.network_signature,
+          );
           const cleanupError = await cleanupFailedConnectAttempt();
           if (!isCurrentConnectAttempt(attempt)) return;
           if (cleanupError) {
@@ -606,7 +632,23 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
               `${message}\n\nCleanup after failed connect also failed: ${cleanupError}`,
             );
           }
-          autoRepairedBindingSignatures.add(preflight.network_signature);
+          if (!repairAlreadyTried) {
+            autoRepairedBindingSignatures.add(preflight.network_signature);
+            set({
+              state: "configuring_split_tunnel",
+              error: null,
+              driverSetupState: "repairing",
+              driverSetupError: null,
+            });
+            const repaired = await systemRepairDriver();
+            set({ driverStatus: repaired });
+            if (!repaired.ready) {
+              throw new Error(driverStatusMessage(repaired));
+            }
+            if (!isCurrentConnectAttempt(attempt)) return;
+            await get().connect(region, gamePresets);
+            return;
+          }
           const status = bindingRepairFailedStatus(message);
           set({
             state: "error",

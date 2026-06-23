@@ -70,7 +70,7 @@ dirs = "5.0"
 # bundled webpki roots) so HTTPS still validates when antivirus/proxy TLS
 # inspection presents a locally-trusted CA — the browser works via the system
 # store, so the app must too, or login fails with "error sending request".
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream", "system-proxy"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "rustls-tls-native-roots", "stream", "system-proxy"] }
 
 # Windows Packet Filter (ndisapi) for packet-level split tunneling
 ndisapi = "0.6"

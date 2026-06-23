@@ -19,41 +19,11 @@ import {
 import {
   systemOpenUrl,
   systemUninstall,
-  vpnListNetworkAdapters,
 } from "../../lib/commands";
 import { SupportToolsSection } from "../support/SupportToolsSection";
-import type {
-  AppSettings,
-  NetworkAdapterInfo,
-  UpdateChannel,
-} from "../../lib/types";
+import type { AppSettings, UpdateChannel } from "../../lib/types";
 
 declare const __APP_VERSION__: string;
-
-function adapterDisplayName(adapter: NetworkAdapterInfo): string {
-  return adapter.friendly_name || adapter.description || adapter.guid;
-}
-
-function isManualAdapterCandidate(adapter: NetworkAdapterInfo): boolean {
-  return adapter.is_up && adapter.kind !== "loopback" && adapter.kind !== "tunnel";
-}
-
-function pickRecommendedManualAdapter(
-  adapters: NetworkAdapterInfo[],
-): NetworkAdapterInfo | null {
-  return (
-    adapters.find(
-      (adapter) => adapter.is_default_route && isManualAdapterCandidate(adapter),
-    ) ||
-    adapters.find(
-      (adapter) =>
-        isManualAdapterCandidate(adapter) &&
-        ["ethernet", "wifi", "ppp"].includes(adapter.kind),
-    ) ||
-    adapters.find(isManualAdapterCandidate) ||
-    null
-  );
-}
 
 export function SettingsTab() {
   const email = useAuthStore((s) => s.email);
@@ -78,21 +48,10 @@ export function SettingsTab() {
 
   const addToast = useToastStore((s) => s.addToast);
 
-  const [networkAdapters, setNetworkAdapters] = useState<
-    NetworkAdapterInfo[] | null
-  >(null);
-  const [networkAdaptersLoading, setNetworkAdaptersLoading] = useState(false);
-  const [networkAdaptersError, setNetworkAdaptersError] = useState<string | null>(
-    null,
-  );
-
   const [isUninstalling, setIsUninstalling] = useState(false);
   const [uninstallError, setUninstallError] = useState<string | null>(null);
   const [confirmUninstallOpen, setConfirmUninstallOpen] = useState(false);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const adapterBindingMode = settings.adapter_binding_mode;
-  const manualAdapterBinding = adapterBindingMode === "manual";
 
   const routeSourceLabel = (() => {
     switch (vpnDiagnostics?.route_resolution_source) {
@@ -139,31 +98,6 @@ export function SettingsTab() {
   }, [save]);
 
   useEffect(() => {
-    let cancelled = false;
-    setNetworkAdaptersLoading(true);
-    setNetworkAdaptersError(null);
-
-    vpnListNetworkAdapters()
-      .then((adapters) => {
-        if (cancelled) return;
-        setNetworkAdapters(adapters);
-      })
-      .catch((e) => {
-        if (cancelled) return;
-        setNetworkAdapters(null);
-        setNetworkAdaptersError(String(e));
-      })
-      .finally(() => {
-        if (cancelled) return;
-        setNetworkAdaptersLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
     void fetchVpnDiagnostics();
     if (vpnState !== "connected") return;
     const id = setInterval(() => {
@@ -171,71 +105,6 @@ export function SettingsTab() {
     }, 3000);
     return () => clearInterval(id);
   }, [fetchVpnDiagnostics, vpnState]);
-
-  const sortedAdapters = (networkAdapters || []).slice().sort((a, b) => {
-    if (a.is_default_route !== b.is_default_route)
-      return a.is_default_route ? -1 : 1;
-    if (a.is_up !== b.is_up) return a.is_up ? -1 : 1;
-    const kindPriority = (k: string) => {
-      switch (k) {
-        case "ethernet":
-          return 0;
-        case "wifi":
-          return 1;
-        case "ppp":
-          return 2;
-        case "tunnel":
-          return 3;
-        case "loopback":
-          return 4;
-        default:
-          return 5;
-      }
-    };
-    const ap = kindPriority(a.kind);
-    const bp = kindPriority(b.kind);
-    if (ap !== bp) return ap - bp;
-    const an = (a.friendly_name || a.description || a.guid).toLowerCase();
-    const bn = (b.friendly_name || b.description || b.guid).toLowerCase();
-    return an.localeCompare(bn);
-  });
-  const recommendedManualAdapter = pickRecommendedManualAdapter(sortedAdapters);
-  const selectedManualAdapter = sortedAdapters.find(
-    (adapter) => adapter.guid === settings.preferred_physical_adapter_guid,
-  );
-  const manualAdapterSelectValue =
-    settings.preferred_physical_adapter_guid ||
-    recommendedManualAdapter?.guid ||
-    "";
-
-  useEffect(() => {
-    if (
-      !manualAdapterBinding ||
-      settings.preferred_physical_adapter_guid ||
-      networkAdaptersLoading ||
-      !recommendedManualAdapter
-    ) {
-      return;
-    }
-
-    setQuietDebounced({
-      preferred_physical_adapter_guid: recommendedManualAdapter.guid,
-    });
-  }, [
-    manualAdapterBinding,
-    settings.preferred_physical_adapter_guid,
-    networkAdaptersLoading,
-    recommendedManualAdapter?.guid,
-  ]);
-
-  const adapterMissing =
-    !networkAdaptersError &&
-    manualAdapterBinding &&
-    settings.preferred_physical_adapter_guid &&
-    networkAdapters &&
-    !networkAdapters.some(
-      (a) => a.guid === settings.preferred_physical_adapter_guid,
-    );
 
   const updateLabel = (() => {
     switch (updaterStatus) {
@@ -368,122 +237,6 @@ export function SettingsTab() {
 
       {/* Tunnel */}
       <Section title="Tunnel">
-        <div>
-        <Row
-          label="Adapter selection"
-          desc={
-            manualAdapterBinding
-              ? selectedManualAdapter
-                ? `Manual — ${adapterDisplayName(selectedManualAdapter)}`
-                : "Manual — choose a specific adapter"
-              : "Smart Auto — follows active route, rebinds on network change"
-          }
-          tooltip={
-            <Tooltip content="Smart Auto detects your active adapter from the OS routing table and rebinds automatically on network changes. Manual pins a specific adapter.">
-              <span className="inline-flex">
-                <InfoIcon />
-              </span>
-            </Tooltip>
-          }
-        >
-          <Segmented
-            options={[
-              { value: "smart_auto" as const, label: "Smart Auto" },
-              { value: "manual" as const, label: "Manual" },
-            ]}
-            value={adapterBindingMode}
-            onChange={(mode) => {
-              const nextMode = mode as "smart_auto" | "manual";
-              set({
-                adapter_binding_mode: nextMode,
-                preferred_physical_adapter_guid:
-                  nextMode === "manual" &&
-                  !settings.preferred_physical_adapter_guid &&
-                  recommendedManualAdapter
-                    ? recommendedManualAdapter.guid
-                    : settings.preferred_physical_adapter_guid,
-              });
-            }}
-          />
-        </Row>
-
-        {manualAdapterBinding && (
-          <SubRow>
-            <select
-              value={manualAdapterSelectValue}
-              onChange={(e) =>
-                set({
-                  preferred_physical_adapter_guid: e.target.value || null,
-                })
-              }
-              disabled={networkAdaptersLoading}
-              className="w-full rounded-[var(--radius-input)] px-3 py-2 text-[12.5px] outline-none transition-colors disabled:opacity-50"
-              style={{
-                backgroundColor: "var(--color-bg-elevated)",
-                border: "1px solid var(--color-border-default)",
-                color: "var(--color-text-primary)",
-              }}
-            >
-              {manualAdapterSelectValue === "" && (
-                <option value="" disabled>
-                  {networkAdaptersLoading
-                    ? "Loading adapters..."
-                    : "No usable adapter found"}
-                </option>
-              )}
-              {sortedAdapters.map((adapter) => {
-                const label = adapterDisplayName(adapter);
-                const tags = [
-                  adapter.kind && adapter.kind !== "other" ? adapter.kind : null,
-                  adapter.is_up ? "up" : "down",
-                  adapter.is_default_route ? "default" : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ");
-                return (
-                  <option key={adapter.guid} value={adapter.guid}>
-                    {tags ? `${label} (${tags})` : label}
-                  </option>
-                );
-              })}
-            </select>
-            {adapterMissing && (
-              <p className="mt-2 text-[11px] text-status-error">
-                Selected adapter not found. Choose Auto or another adapter.
-              </p>
-            )}
-          </SubRow>
-        )}
-
-        {!manualAdapterBinding && (
-          <SubRow>
-            <div className="flex items-center gap-2 text-[11px] text-text-muted">
-              <span
-                className="h-1.5 w-1.5 shrink-0 rounded-full"
-                style={{
-                  backgroundColor: vpnDiagnostics?.adapter_name
-                    ? "var(--color-status-connected)"
-                    : "var(--color-status-inactive)",
-                }}
-              />
-              <span className="font-mono text-text-primary">
-                {vpnDiagnostics?.adapter_name || "Not resolved"}
-              </span>
-              <span className="text-text-dimmed">·</span>
-              <span>{routeSourceLabel}</span>
-            </div>
-          </SubRow>
-        )}
-
-        {networkAdaptersError && (
-          <SubRow>
-            <div className="text-[11px] text-status-error">
-              Failed to load adapters: {networkAdaptersError}
-            </div>
-          </SubRow>
-        )}
-        </div>
-
         <Row
           label="Roblox Route Assist"
           desc={

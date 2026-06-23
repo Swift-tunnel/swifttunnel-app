@@ -2,7 +2,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import { useAuthStore } from "../../stores/authStore";
 import { Button, Spinner } from "../ui";
-import swiftLogo from "../../assets/swift.png?inline";
+import { SwiftLogo } from "../common/SwiftLogo";
 
 export function formatBannedAt(bannedAt: string | null) {
   if (!bannedAt) {
@@ -49,13 +49,7 @@ export function BannedScreen() {
           transition={{ duration: 0.3 }}
           className="flex flex-col items-center gap-3 text-center"
         >
-          <img
-            src={swiftLogo}
-            alt="SwiftTunnel"
-            width={110}
-            height={110}
-            style={{ objectFit: "contain", filter: "grayscale(0.35)" }}
-          />
+          <SwiftLogo size={110} muted />
           <div
             className="flex h-11 w-11 items-center justify-center rounded-[6px]"
             style={{
