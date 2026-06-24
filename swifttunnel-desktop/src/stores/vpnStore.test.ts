@@ -205,7 +205,7 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().error).toBeNull();
   });
 
-  it("closes already-running Roblox after Full Country Ban connects", async () => {
+  it("blocks Full Country Ban connect while Roblox is already running", async () => {
     systemCheckDriver.mockResolvedValueOnce(driverStatus());
     vpnConnect.mockResolvedValue(undefined);
     vpnGetState.mockResolvedValue(connectedState("singapore"));
@@ -226,11 +226,15 @@ describe("stores/vpnStore", () => {
 
     await useVpnStore.getState().connect("singapore", ["roblox"]);
 
-    expect(vpnConnect).toHaveBeenCalledWith("singapore", ["roblox"]);
-    expect(boostCloseRoblox).toHaveBeenCalledTimes(1);
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(boostCloseRoblox).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain(
+      "Close Roblox before connecting with Full Country Ban",
+    );
     expect(notify).toHaveBeenCalledWith(
       "SwiftTunnel",
-      "Connected. Reopen Roblox so Full Country Ban uses the tunnel.",
+      "Close Roblox first, then connect Full Country Ban.",
     );
   });
 

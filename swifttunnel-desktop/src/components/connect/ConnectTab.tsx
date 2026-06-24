@@ -978,25 +978,17 @@ function RegionRow({
   onForceServer: (regionId: string, server: string | null) => void;
   isLast: boolean;
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
   const [hover, setHover] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    function handle(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node))
-        setMenuOpen(false);
-    }
-    document.addEventListener("mousedown", handle);
-    return () => document.removeEventListener("mousedown", handle);
-  }, [menuOpen]);
+  const relayCountLabel = `${region.servers.length} ${
+    region.servers.length === 1 ? "relay" : "relays"
+  }`;
+  const expanded = selected && region.servers.length > 0;
 
   return (
     <div
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      className={`group relative flex h-[46px] items-center gap-3 px-3.5 text-left transition-colors duration-100 ${
+      className={`group relative text-left transition-colors duration-100 ${
         disabled ? "cursor-not-allowed opacity-50" : ""
       }`}
       style={{
@@ -1012,10 +1004,11 @@ function RegionRow({
     >
       {selected && (
         <span
-          className="absolute left-0 top-1/2 h-6 w-[2px] -translate-y-1/2 rounded-r"
+          className="absolute left-0 top-[11px] h-6 w-[2px] rounded-r"
           style={{ backgroundColor: "var(--color-accent-primary)" }}
         />
       )}
+      <div className="flex h-[46px] items-center gap-3 px-3.5">
       <button
         type="button"
         onClick={onSelect}
@@ -1048,7 +1041,7 @@ function RegionRow({
           >
             {forcedServer
               ? `Pinned · ${forcedServer}`
-              : `${region.servers.length} ${region.servers.length === 1 ? "relay" : "relays"}`}
+              : relayCountLabel}
           </span>
         </span>
 
@@ -1068,154 +1061,107 @@ function RegionRow({
         ) : null}
       </div>
 
-      {/* Fixed-width menu slot — invisible placeholder when no menu */}
-      <div className="flex w-6 shrink-0 items-center justify-center">
-        {region.servers.length > 1 && (
-          <ServerMenu
-            menuRef={menuRef}
-            open={menuOpen}
-            disabled={disabled}
-            onToggle={() => setMenuOpen((v) => !v)}
-            servers={region.servers}
-            forcedServer={forcedServer}
-            onForceServer={(srv) => {
-              onForceServer(region.id, srv);
-              setMenuOpen(false);
-            }}
-          />
-        )}
       </div>
-    </div>
-  );
-}
 
-function ServerMenu({
-  menuRef,
-  open,
-  disabled,
-  onToggle,
-  servers,
-  forcedServer,
-  onForceServer,
-}: {
-  menuRef: React.RefObject<HTMLDivElement | null>;
-  open: boolean;
-  disabled: boolean;
-  onToggle: () => void;
-  servers: string[];
-  forcedServer: string | undefined;
-  onForceServer: (server: string | null) => void;
-}) {
-  return (
-    <div className="relative" ref={menuRef}>
-      <button
-        type="button"
-        aria-label="Choose server"
-        aria-expanded={open}
-        disabled={disabled}
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggle();
-        }}
-        className={`flex h-6 w-6 items-center justify-center rounded-[5px] transition-all focus:opacity-100 group-hover:opacity-100 disabled:cursor-not-allowed ${
-          open || forcedServer ? "opacity-100" : "opacity-0"
-        }`}
-        style={{
-          color: forcedServer
-            ? "var(--color-text-primary)"
-            : "var(--color-text-muted)",
-          backgroundColor: open ? "var(--color-bg-hover)" : "transparent",
-        }}
-      >
-        <svg
-          width="11"
-          height="11"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <circle cx="12" cy="12" r="1" />
-          <circle cx="19" cy="12" r="1" />
-          <circle cx="5" cy="12" r="1" />
-        </svg>
-      </button>
-
-      {open && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="absolute right-0 top-7 z-50 min-w-[140px] overflow-hidden rounded-[7px] surface-elevated"
-        >
-          <ServerMenuItem
-            label="Auto"
-            active={!forcedServer}
-            onClick={(e) => {
-              e.stopPropagation();
-              onForceServer(null);
-            }}
-          />
+      {expanded && (
+        <div className="pb-3 pl-[58px] pr-3.5">
           <div
-            className="h-px"
-            style={{ backgroundColor: "var(--color-border-subtle)" }}
-          />
-          {servers.map((srv) => (
-            <ServerMenuItem
-              key={srv}
-              label={srv}
-              active={forcedServer === srv}
-              mono
-              onClick={(e) => {
-                e.stopPropagation();
-                onForceServer(srv);
-              }}
+            className="w-full max-w-[460px] overflow-hidden rounded-[8px]"
+            style={{
+              backgroundColor: "var(--color-bg-elevated)",
+              border: "1px solid var(--color-border-subtle)",
+            }}
+          >
+            <InlineServerOption
+              label="Auto"
+              description={`Best ${region.name} relay`}
+              active={!forcedServer}
+              disabled={disabled}
+              onClick={() => onForceServer(region.id, null)}
             />
-          ))}
+            {region.servers.map((srv) => (
+              <InlineServerOption
+                key={srv}
+                label={srv}
+                active={forcedServer === srv}
+                disabled={disabled}
+                mono
+                onClick={() => onForceServer(region.id, srv)}
+              />
+            ))}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-function ServerMenuItem({
+function InlineServerOption({
   label,
+  description,
   active,
+  disabled,
   mono,
   onClick,
 }: {
   label: string;
+  description?: string;
   active: boolean;
+  disabled: boolean;
   mono?: boolean;
-  onClick: (e: React.MouseEvent) => void;
+  onClick: () => void;
 }) {
   return (
     <button
+      type="button"
+      disabled={disabled}
+      aria-pressed={active}
       onClick={onClick}
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[11px] transition-colors hover:bg-bg-hover ${mono ? "font-mono" : ""}`}
+      className="flex h-8 w-full items-center gap-2 px-2.5 text-left transition-colors hover:bg-bg-hover disabled:cursor-not-allowed"
       style={{
+        backgroundColor: active
+          ? "var(--color-bg-hover)"
+          : "transparent",
         color: active
           ? "var(--color-text-primary)"
           : "var(--color-text-secondary)",
       }}
     >
-      {active ? (
-        <svg
-          width="10"
-          height="10"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
+      <span
+        className="flex h-4 w-4 shrink-0 items-center justify-center"
+        style={{
+          color: active
+            ? "var(--color-accent-primary)"
+            : "var(--color-text-dimmed)",
+        }}
+      >
+        {active ? (
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <polyline points="20 6 9 17 4 12" />
+          </svg>
+        ) : null}
+      </span>
+      <span className="flex min-w-0 items-baseline gap-2">
+        <span
+          className={`truncate text-[11.5px] font-medium ${mono ? "font-mono" : ""}`}
         >
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      ) : (
-        <span className="w-[10px]" />
-      )}
-      {label}
+          {label}
+        </span>
+        {description && (
+          <span className="truncate text-[10px] text-text-dimmed">
+            {description}
+          </span>
+        )}
+      </span>
     </button>
   );
 }

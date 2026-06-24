@@ -20,7 +20,6 @@ import {
   systemRepairWindowsFirewall,
   systemResetDriver,
   boostGetMetrics,
-  boostCloseRoblox,
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
@@ -40,6 +39,9 @@ function getErrorMessage(error: unknown): string {
   }
   return String(error);
 }
+
+const FULL_COUNTRY_BAN_ROBLOX_RUNNING_MESSAGE =
+  "Close Roblox before connecting with Full Country Ban. Then connect SwiftTunnel and reopen Roblox so login and game traffic use the bypass.";
 
 function isRebootRequiredMessage(
   vpnError: string | null,
@@ -487,11 +489,27 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
 
   connect: async (region, gamePresets) => {
     const attempt = nextConnectAttempt();
-    let closeRobloxAfterFullBypassConnect = false;
+    const fullCountryBanEnabled =
+      useSettingsStore.getState().settings.enable_country_ban;
     try {
-      if (useSettingsStore.getState().settings.enable_country_ban) {
+      if (fullCountryBanEnabled) {
         try {
-          closeRobloxAfterFullBypassConnect = (await boostGetMetrics()).roblox_running;
+          const robloxRunning = (await boostGetMetrics()).roblox_running;
+          if (robloxRunning) {
+            set({
+              state: "error",
+              error: FULL_COUNTRY_BAN_ROBLOX_RUNNING_MESSAGE,
+              driverSetupError: null,
+              bindingPreflight: null,
+              pendingConnectIntent: null,
+              connectAttemptInFlight: false,
+            });
+            await notify(
+              "SwiftTunnel",
+              "Close Roblox first, then connect Full Country Ban.",
+            );
+            return;
+          }
         } catch (e) {
           reportError("Failed to check Roblox before Full Country Ban connect", e, {
             dedupeKey: "full-country-ban-roblox-running-check",
@@ -712,25 +730,12 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       if (!isCurrentConnectAttempt(attempt)) return;
       if (get().state === "connected") {
         set({ connectedAt: Date.now() });
-        if (closeRobloxAfterFullBypassConnect) {
-          try {
-            await boostCloseRoblox();
-            await notify(
-              "SwiftTunnel",
-              "Connected. Reopen Roblox so Full Country Ban uses the tunnel.",
-            );
-          } catch (e) {
-            reportError("Failed to close Roblox after Full Country Ban connect", e, {
-              dedupeKey: "full-country-ban-close-roblox",
-            });
-            await notify(
-              "SwiftTunnel",
-              "Connected. Close and reopen Roblox so Full Country Ban uses the tunnel.",
-            );
-          }
-        } else {
-          await notify("SwiftTunnel", `Connected to ${get().region ?? region}`);
-        }
+        await notify(
+          "SwiftTunnel",
+          fullCountryBanEnabled
+            ? "Connected. Open Roblox now so Full Country Ban uses the tunnel."
+            : `Connected to ${get().region ?? region}`,
+        );
       }
       // Successful connect clears the reset-attempted one-shot so a future
       // unrelated incident gets a fresh "Reset driver service" offer.

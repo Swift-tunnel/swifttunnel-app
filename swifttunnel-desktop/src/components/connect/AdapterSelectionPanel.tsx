@@ -37,6 +37,15 @@ function adapterStatusLabel(adapter: NetworkAdapterInfo): string {
   return "[OK] usable";
 }
 
+function adapterNotUsableReason(adapter: NetworkAdapterInfo): string | null {
+  if (!adapter.is_up) return "This adapter is down.";
+  if (adapter.kind === "loopback") return "Loopback adapters cannot carry game traffic.";
+  if (adapter.kind === "tunnel") {
+    return "VPN/tunnel adapters cannot be used as the physical adapter.";
+  }
+  return null;
+}
+
 function adapterTags(adapter: NetworkAdapterInfo): string {
   return [
     adapter.kind && adapter.kind !== "other" ? adapter.kind : null,
@@ -184,6 +193,9 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
       ? `Manual - ${adapterDisplayName(selectedManualAdapter)}`
       : "Manual - choose a specific adapter"
     : "Smart Auto - follows active route, rebinds on network change";
+  const selectedAdapterNotUsableReason = selectedManualAdapter
+    ? adapterNotUsableReason(selectedManualAdapter)
+    : null;
 
   return (
     <section
@@ -278,6 +290,11 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
           {adapterMissing && (
             <p className="mt-2 text-[11px] text-status-error">
               Selected adapter not found. Choose Smart Auto or another adapter.
+            </p>
+          )}
+          {selectedAdapterNotUsableReason && (
+            <p className="mt-2 text-[11px] text-status-error">
+              Adapter not usable. {selectedAdapterNotUsableReason}
             </p>
           )}
         </div>

@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
+import { boostCloseRoblox, boostGetMetrics } from "../../lib/commands";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
 import {
   Toggle,
@@ -13,6 +14,7 @@ import {
   Row,
   Slider,
   ErrorBanner,
+  Dialog,
 } from "../ui";
 import {
   PROFILES,
@@ -61,6 +63,9 @@ export function BoostTab() {
   const savedPartialBan = settings.enable_partial_country_ban;
   const [draftPartialBan, setDraftPartialBan] = useState(savedPartialBan);
   const savedRouteAssist = settings.enable_api_tunneling;
+  const [fullBanDialogOpen, setFullBanDialogOpen] = useState(false);
+  const [fullBanChecking, setFullBanChecking] = useState(false);
+  const [fullBanClosing, setFullBanClosing] = useState(false);
 
   useEffect(() => {
     setDraftGPP(savedGPP);
@@ -79,6 +84,73 @@ export function BoostTab() {
     setDraftCountryBan(v);
     if (v) setDraftPartialBan(false);
   };
+  const enableFullBanDraft = useCallback(() => {
+    setDraftCountryBan(true);
+    setDraftPartialBan(false);
+  }, []);
+  const requestFullBan = useCallback(
+    async (v: boolean) => {
+      if (!v) {
+        chooseFullBan(false);
+        return;
+      }
+
+      setFullBanChecking(true);
+      try {
+        const metrics = await boostGetMetrics();
+        if (metrics.roblox_running) {
+          setFullBanDialogOpen(true);
+          return;
+        }
+        enableFullBanDraft();
+      } catch {
+        addToast({
+          type: "warning",
+          message: "Close Roblox before enabling Full Country Ban",
+        });
+        setFullBanDialogOpen(true);
+      } finally {
+        setFullBanChecking(false);
+      }
+    },
+    [addToast, enableFullBanDraft],
+  );
+  const confirmRobloxClosedForFullBan = useCallback(async () => {
+    setFullBanChecking(true);
+    try {
+      const metrics = await boostGetMetrics();
+      if (metrics.roblox_running) {
+        addToast({ type: "warning", message: "Roblox is still running" });
+        return;
+      }
+      enableFullBanDraft();
+      setFullBanDialogOpen(false);
+    } catch {
+      addToast({
+        type: "warning",
+        message: "Could not verify Roblox is closed",
+      });
+    } finally {
+      setFullBanChecking(false);
+    }
+  }, [addToast, enableFullBanDraft]);
+  const closeRobloxAndEnableFullBan = useCallback(async () => {
+    setFullBanClosing(true);
+    try {
+      await boostCloseRoblox();
+      await boost.fetchMetrics();
+      enableFullBanDraft();
+      setFullBanDialogOpen(false);
+      addToast({
+        type: "success",
+        message: "Roblox closed. Apply Full Country Ban to save it.",
+      });
+    } catch {
+      addToast({ type: "error", message: "Could not close Roblox" });
+    } finally {
+      setFullBanClosing(false);
+    }
+  }, [addToast, boost, enableFullBanDraft]);
   const choosePartialBan = (v: boolean) => {
     setDraftPartialBan(v);
     if (v) setDraftCountryBan(false);
@@ -406,12 +478,13 @@ export function BoostTab() {
           desc="ALL of Roblox is blocked in your country (e.g. Egypt)"
           tooltip="Full bypass: DPI evasion (GoodbyeDPI) plus relaying all Roblox traffic - login, settings, and gameplay. Use when the whole platform is banned. Turns off Partial Ban."
           enabled={draftCountryBan}
-          onChange={chooseFullBan}
+          onChange={(v) => void requestFullBan(v)}
+          disabled={fullBanChecking || fullBanClosing}
         />
         <SettingRow
           title="Bypass Partial Ban"
           desc="Only specific games are blocked (e.g. TSB/JJS in Vietnam)"
-          tooltip="Relays Roblox web, join, avatar, and asset traffic while gameplay stays direct for normal ping. Turns off Country Ban."
+          tooltip="Relays Roblox discovery/join traffic while gameplay and assets stay direct for normal ping. Turns off Country Ban."
           enabled={draftPartialBan}
           onChange={choosePartialBan}
         />
@@ -584,6 +657,54 @@ export function BoostTab() {
           </motion.div>
         )}
       </AnimatePresence>
+      <Dialog
+        open={fullBanDialogOpen}
+        onClose={() => {
+          if (!fullBanChecking && !fullBanClosing) setFullBanDialogOpen(false);
+        }}
+        title="Close Roblox first"
+        description="Full Country Ban must start before Roblox opens."
+      >
+        <div className="flex flex-col gap-4">
+          <p className="text-[12px] leading-relaxed text-text-secondary">
+            Close Roblox completely, then enable Full Country Ban and click
+            Apply. This keeps login, verification, and game traffic on the
+            selected SwiftTunnel relay from the first connection.
+          </p>
+          <p className="text-[11px] leading-relaxed text-text-muted">
+            If Roblox is stuck in the background, SwiftTunnel can close it for
+            you.
+          </p>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setFullBanDialogOpen(false)}
+              disabled={fullBanChecking || fullBanClosing}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void confirmRobloxClosedForFullBan()}
+              disabled={fullBanChecking || fullBanClosing}
+              loading={fullBanChecking}
+            >
+              I closed Roblox
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => void closeRobloxAndEnableFullBan()}
+              disabled={fullBanChecking || fullBanClosing}
+              loading={fullBanClosing}
+            >
+              Close Roblox & Enable
+            </Button>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 }

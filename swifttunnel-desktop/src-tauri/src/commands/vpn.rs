@@ -152,6 +152,8 @@ pub(crate) fn current_binding_preference(
                 return Ok(None);
             };
 
+            validate_manual_adapter_selection(&guid)?;
+
             Ok(Some(AdapterBindingPreference {
                 guid,
                 source: BindingPreferenceSource::Manual,
@@ -175,6 +177,59 @@ pub(crate) fn current_binding_preference(
             }))
         }
     }
+}
+
+fn manual_adapter_unusable_reason(
+    adapter: &swifttunnel_core::vpn::NetworkAdapterInfo,
+) -> Option<&'static str> {
+    if !adapter.is_up {
+        return Some("adapter is down");
+    }
+
+    match adapter.kind.as_str() {
+        "loopback" => Some("loopback adapters cannot carry game traffic"),
+        "tunnel" => Some("VPN/tunnel adapters cannot be used as the physical adapter"),
+        _ => None,
+    }
+}
+
+fn manual_adapter_label(adapter: &swifttunnel_core::vpn::NetworkAdapterInfo) -> &str {
+    if !adapter.friendly_name.trim().is_empty() {
+        adapter.friendly_name.as_str()
+    } else if !adapter.description.trim().is_empty() {
+        adapter.description.as_str()
+    } else {
+        adapter.guid.as_str()
+    }
+}
+
+fn validate_manual_adapter_selection(guid: &str) -> Result<(), String> {
+    let normalized_guid = guid.trim().to_ascii_lowercase();
+    if normalized_guid.is_empty() {
+        return Ok(());
+    }
+
+    let adapters = swifttunnel_core::vpn::list_network_adapters()
+        .map_err(|e| format!("Failed to validate manual adapter selection: {}", e))?;
+
+    let Some(adapter) = adapters
+        .iter()
+        .find(|adapter| adapter.guid.eq_ignore_ascii_case(&normalized_guid))
+    else {
+        // Missing saved adapters are still allowed to fall back later. This can
+        // happen after a driver reinstall or Windows recreates an adapter GUID.
+        return Ok(());
+    };
+
+    if let Some(reason) = manual_adapter_unusable_reason(adapter) {
+        return Err(format!(
+            "Selected adapter is not usable for SwiftTunnel ({}: {}). Choose an [OK] adapter or switch to Smart Auto.",
+            manual_adapter_label(adapter),
+            reason
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) fn build_binding_preflight(
@@ -1091,6 +1146,42 @@ mod tests {
             ServerListSource::Api,
         );
         list
+    }
+
+    fn make_network_adapter(kind: &str, is_up: bool) -> swifttunnel_core::vpn::NetworkAdapterInfo {
+        swifttunnel_core::vpn::NetworkAdapterInfo {
+            guid: format!("{kind}-guid"),
+            friendly_name: kind.to_string(),
+            description: kind.to_string(),
+            if_index: 10,
+            is_up,
+            is_default_route: false,
+            kind: kind.to_string(),
+        }
+    }
+
+    #[test]
+    fn manual_adapter_validation_rejects_unusable_adapter_kinds() {
+        assert_eq!(
+            manual_adapter_unusable_reason(&make_network_adapter("loopback", true)),
+            Some("loopback adapters cannot carry game traffic")
+        );
+        assert_eq!(
+            manual_adapter_unusable_reason(&make_network_adapter("tunnel", true)),
+            Some("VPN/tunnel adapters cannot be used as the physical adapter")
+        );
+        assert_eq!(
+            manual_adapter_unusable_reason(&make_network_adapter("wifi", false)),
+            Some("adapter is down")
+        );
+    }
+
+    #[test]
+    fn manual_adapter_validation_allows_normal_up_adapter() {
+        assert_eq!(
+            manual_adapter_unusable_reason(&make_network_adapter("ethernet", true)),
+            None
+        );
     }
 
     #[test]

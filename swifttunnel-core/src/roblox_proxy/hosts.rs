@@ -106,11 +106,11 @@ const DIRECT_ONLY_BOOTSTRAP_DOMAINS: &[&str] = &[
 ];
 
 // Heavy Roblox CDN/asset hosts that ride the user's DIRECT path (not the relay)
-// under Route Assist: textures, avatar clothing, thumbnails, cutscene/model
-// payloads. Partial country-ban bypass now relays these TCP flows so Vietnam-
-// style users can load missing maps/avatars while gameplay UDP stays direct.
-// FULL country-ban bypass relays these too — in a fully-blocked country the CDN
-// is blocked as well, and "direct" means assets simply never load.
+// under Route Assist: textures, avatar clothing,
+// thumbnails, cutscene/model payloads. Relaying these through shared relay IPs
+// can trigger Roblox HTTP 429 throttles and leave request queues stuck.
+// Country-ban bypass modes relay these too — in blocked networks the CDN can be
+// blocked or throttled directly, and "direct" means assets simply never load.
 const ASSET_DIRECT_ROBLOX_DOMAINS: &[&str] = &[
     "assetgame.roblox.com",
     "assetdelivery.roblox.com",
@@ -181,6 +181,8 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     "friends.roblox.com",
     "chat.roblox.com",
     "chatsite.roblox.com",
+    "pulsar.roblox.com",
+    "silver.roblox.com",
     "locale.roblox.com",
     "setup.roblox.com",
     "captcha.roblox.com",
@@ -216,11 +218,15 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     // Roblox account verification/FunCaptcha. Arkose can load the challenge
     // script, iframe, verification API, and failover status endpoint from
     // separate exact hosts; Full Country Ban must relay all of them.
+    "arkoselabs.roblox.com",
     "cdn.arkoselabs.com",
+    "client.arkoselabs.com",
     "client-api.arkoselabs.com",
+    "iframe.arkoselabs.com",
     "roblox-api.arkoselabs.com",
     "roblox-verify.arkoselabs.com",
     "status.arkoselabs.com",
+    "verify.arkoselabs.com",
 ];
 
 fn hosts_path() -> PathBuf {
@@ -275,15 +281,16 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
     // Route Assist keeps heavy asset/CDN hosts, launch-critical settings hosts,
     // and Roblox UI/social/chat/avatar APIs DIRECT for fast textures and
     // reliable in-game menus; only the region/join control plane relays. The
-    // packet router treats Partial Bypass differently by relaying Roblox TCP
-    // while keeping gameplay UDP direct. FULL bypass relays everything.
+    // packet router treats Partial Bypass differently by relaying Roblox
+    // web/join/asset TCP while keeping gameplay UDP direct.
+    // FULL bypass relays everything.
     //
     // In the Route Assist allocator path, only relayed control-plane hosts are
     // written to hosts. Direct hosts still contribute to the direct-only IP set,
     // but they use the user's normal DNS path so stale SwiftTunnel pins cannot
     // break Roblox app startup/home loading. Partial Bypass uses this DNS repair
-    // path too, but the packet router relays Roblox TCP/assets and only keeps
-    // gameplay UDP direct.
+    // path too, but the packet router relays Roblox TCP assets/control while
+    // keeping gameplay UDP direct.
     let (overrides, active_ips, direct_only_ips) = if country_ban_bypass {
         let (active, direct_only) = country_ban_split_ips_from_overrides(&resolved);
         (resolved, active, direct_only)
@@ -915,8 +922,8 @@ fn allocate_route_assist_pins(
 /// whole platform is blocked (e.g. Egypt), and there the asset CDN is blocked
 /// too: keeping assets "direct" meant they simply never loaded, so games died
 /// seconds after join ("plays for 20s", "assets don't load"). Route Assist is
-/// still the bandwidth-conscious split. Partial Bypass relays Roblox TCP/assets
-/// but keeps gameplay UDP direct for normal in-game ping.
+/// still the bandwidth-conscious split. Partial Bypass relays Roblox TCP
+/// assets/control while keeping gameplay UDP direct.
 fn country_ban_split_ips_from_overrides(
     overrides: &[HostOverride],
 ) -> (HashSet<Ipv4Addr>, HashSet<Ipv4Addr>) {
@@ -1225,6 +1232,8 @@ mod tests {
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"notifications.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"assetgame.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"chatsite.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"pulsar.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"silver.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"setup.rbxcdn.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"js.rbxcdn.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"static.rbxcdn.com"));
@@ -1242,16 +1251,20 @@ mod tests {
             assert!(is_asset_direct_domain(raw_cdn_domain));
         }
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"captcha.roblox.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"arkoselabs.roblox.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"cdn.arkoselabs.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"client.arkoselabs.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"client-api.arkoselabs.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"iframe.arkoselabs.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox-api.arkoselabs.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox-verify.arkoselabs.com"));
         assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"status.arkoselabs.com"));
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&"verify.arkoselabs.com"));
     }
 
     #[test]
     fn domain_list_stays_allowlisted_and_exact() {
-        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 64);
+        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 70);
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"arkoselabs.com"));
@@ -1528,6 +1541,7 @@ mod tests {
         // is untouched by the Route Assist re-pin: nothing is direct-only.
         let auth_ip = Ipv4Addr::new(128, 116, 70, 9);
         let settings_ip = Ipv4Addr::new(128, 116, 46, 3);
+        let arkose_ip = Ipv4Addr::new(52, 84, 205, 98);
         let overrides = vec![
             HostOverride {
                 ip: auth_ip,
@@ -1537,12 +1551,17 @@ mod tests {
                 ip: settings_ip,
                 domain: "clientsettings.roblox.com".to_string(),
             },
+            HostOverride {
+                ip: arkose_ip,
+                domain: "iframe.arkoselabs.com".to_string(),
+            },
         ];
 
         let (active, direct_only) = country_ban_split_ips_from_overrides(&overrides);
 
         assert!(active.contains(&auth_ip));
         assert!(active.contains(&settings_ip));
+        assert!(active.contains(&arkose_ip));
         assert!(direct_only.is_empty());
     }
 

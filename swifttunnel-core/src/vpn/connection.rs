@@ -105,8 +105,8 @@ struct TunnelRoutingFlags {
 ///   wholesale, so nothing can be trusted to the direct path. GoodbyeDPI runs
 ///   on top; the relay is the fallback when DPI evasion alone isn't enough.
 /// - Partial country-ban bypass (only specific games blocked, e.g. Vietnam):
-///   relay Roblox TCP for web/search/join/avatar/CDN assets so banned games and
-///   content load, while gameplay UDP stays DIRECT for the player's real ping.
+///   relay the Roblox web/search/join control path so banned games appear and
+///   launch, while gameplay UDP and bulk assets stay DIRECT for normal ping.
 ///   If Route Assist is also enabled from an older/bad settings state, Partial
 ///   wins: stacking both has caused temporary joins followed by Roblox
 ///   server/menu failures.
@@ -1118,8 +1118,9 @@ impl VpnConnection {
     ) -> VpnResult<()> {
         // Both bypass modes need the relay for Roblox TCP traffic. They differ
         // on gameplay UDP: full bypass (whole platform blocked) relays it;
-        // partial bypass (specific games blocked, e.g. Vietnam) keeps UDP
-        // direct so the player keeps their real ping.
+        // partial bypass (specific games blocked, e.g. Vietnam) keeps UDP and
+        // bulk assets direct so the player keeps real ping and avoids relay
+        // asset throttling.
         let routing_flags = resolve_tunnel_routing_flags(
             enable_api_tunneling,
             enable_country_ban,
@@ -3145,8 +3146,8 @@ mod tests {
 
     #[test]
     fn partial_ban_bypass_keeps_gameplay_udp_direct_for_real_ping() {
-        // Vietnam-style game ban: relay Roblox TCP so banned games and assets
-        // load; gameplay UDP stays direct = real ping.
+        // Vietnam-style game ban: relay Roblox join/control TCP so banned
+        // games show and launch; gameplay UDP stays direct = real ping.
         let flags = resolve_tunnel_routing_flags(false, false, true);
 
         assert!(flags.api_tunneling);

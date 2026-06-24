@@ -580,6 +580,12 @@ impl SplitTunnelDriver {
             DriverRecommendedAction::Install | DriverRecommendedAction::Reinstall
         ) {
             if initial_health.recommended_action == DriverRecommendedAction::Reinstall {
+                if let Err(e) = super::winpkfilter::remove_installed_network_component() {
+                    log::warn!(
+                        "Failed to remove stale WinpkFilter network component: {}",
+                        e
+                    );
+                }
                 if let Err(e) = super::winpkfilter::remove_installed_driver_package() {
                     log::warn!("Failed to remove stale WinpkFilter driver package: {}", e);
                 }
@@ -705,6 +711,12 @@ impl SplitTunnelDriver {
         )?;
 
         if force_reinstall {
+            if let Err(e) = super::winpkfilter::remove_installed_network_component() {
+                log::warn!(
+                    "Failed to remove existing WinpkFilter network component: {}",
+                    e
+                );
+            }
             Self::cleanup_driver_service_for_uninstall().map_err(|e| {
                 format!(
                     "Failed to remove existing NDISRD service before reinstall: {}",
@@ -1190,6 +1202,14 @@ impl SplitTunnelDriver {
         // binding call hiccupped — strictly worse than attempting the MSI.
         if let Err(e) = Self::disable_winpkfilter_bindings_for_uninstall() {
             issues.push(format!("binding removal failed: {}", e));
+        }
+
+        // Binding removal can leave the network component registered even
+        // after the driver package disappears. Remove the component explicitly
+        // so Windows Settings / Control Panel uninstall does not leave users
+        // with a missing filter still attached to their adapter stack.
+        if let Err(e) = super::winpkfilter::remove_installed_network_component() {
+            issues.push(format!("network component removal failed: {}", e));
         }
 
         // Try to uninstall all known MSI variants (handles machines that may

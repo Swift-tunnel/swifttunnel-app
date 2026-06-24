@@ -384,6 +384,10 @@ fn driver_netcfg_install_command(inf_path: &str) -> (&'static str, [&str; 6]) {
     )
 }
 
+fn driver_netcfg_uninstall_command() -> (&'static str, [&'static str; 2]) {
+    ("netcfg", ["/u", DRIVER_COMPONENT_ID])
+}
+
 fn driver_pnputil_install_command(inf_path: &str) -> (&'static str, [&str; 3]) {
     ("pnputil", ["/add-driver", inf_path, "/install"])
 }
@@ -419,6 +423,17 @@ fn netcfg_already_installed_detail(detail: &str) -> bool {
     detail.contains("already installed")
         || detail.contains("already exists")
         || detail.contains("0x800700b7")
+}
+
+#[cfg(windows)]
+fn netcfg_not_installed_detail(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("not installed")
+        || detail.contains("not found")
+        || detail.contains("does not exist")
+        || detail.contains("doesn't exist")
+        || detail.contains("0x80070002")
+        || detail.contains("0x80070490")
 }
 
 #[cfg(windows)]
@@ -462,6 +477,54 @@ fn run_netcfg_install(inf_path: &str) -> Result<(), String> {
     } else {
         Err(format!("netcfg failed with code {}: {}", code, detail))
     }
+}
+
+#[cfg(windows)]
+pub fn remove_installed_network_component() -> Result<(), String> {
+    let (program, args) = driver_netcfg_uninstall_command();
+    let output = hidden_command(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("Failed to run netcfg /u: {}", e))?;
+
+    let code = output.status.code().unwrap_or(-1);
+    if output.status.success() {
+        log::info!("WinpkFilter network component unregistered with netcfg");
+        return Ok(());
+    }
+
+    let detail = pnputil_output_detail(&output);
+    if netcfg_not_installed_detail(&detail) {
+        log::info!(
+            "WinpkFilter network component was already absent according to netcfg: {}",
+            detail
+        );
+        return Ok(());
+    }
+
+    if pnputil_reboot_required_exit_code(code) {
+        if detail.is_empty() {
+            return Err(
+                "Reboot required to finish WinpkFilter network component removal. netcfg exited with code 3010."
+                    .to_string(),
+            );
+        }
+        return Err(format!(
+            "Reboot required to finish WinpkFilter network component removal. netcfg exited with code 3010: {}",
+            detail
+        ));
+    }
+
+    if detail.is_empty() {
+        Err(format!("netcfg /u failed with code {}", code))
+    } else {
+        Err(format!("netcfg /u failed with code {}: {}", code, detail))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn remove_installed_network_component() -> Result<(), String> {
+    Err("WinpkFilter network component removal is only supported on Windows".to_string())
 }
 
 /// Maximum number of pnputil install attempts before giving up.
@@ -937,6 +1000,10 @@ Provider Name:      NDISAPI
         let (pnputil_program, pnputil_args) = driver_pnputil_install_command(inf_path);
         assert_eq!(pnputil_program, "pnputil");
         assert_eq!(pnputil_args, ["/add-driver", inf_path, "/install"]);
+
+        let (netcfg_uninstall_program, netcfg_uninstall_args) = driver_netcfg_uninstall_command();
+        assert_eq!(netcfg_uninstall_program, "netcfg");
+        assert_eq!(netcfg_uninstall_args, ["/u", "nt_ndisrd"]);
     }
 
     #[test]
