@@ -165,7 +165,7 @@ describe("stores/settingsStore", () => {
       useSettingsStore.getState().settings.preferred_physical_adapter_guid,
     ).toBe(null);
     expect(useSettingsStore.getState().settings.adapter_binding_mode).toBe(
-      "smart_auto",
+      "manual",
     );
     expect(
       useSettingsStore.getState().settings.game_process_performance
