@@ -15,6 +15,8 @@ const {
   systemResetDriver,
   boostGetMetrics,
   boostCloseRoblox,
+  settingsLoad,
+  settingsSave,
 } = vi.hoisted(() => ({
   vpnGetState: vi.fn(),
   vpnPreflightBinding: vi.fn(),
@@ -30,6 +32,8 @@ const {
   systemResetDriver: vi.fn(),
   boostGetMetrics: vi.fn(),
   boostCloseRoblox: vi.fn(),
+  settingsLoad: vi.fn(),
+  settingsSave: vi.fn(),
 }));
 
 const { notify } = vi.hoisted(() => ({
@@ -51,6 +55,8 @@ vi.mock("../lib/commands", () => ({
   systemResetDriver,
   boostGetMetrics,
   boostCloseRoblox,
+  settingsLoad,
+  settingsSave,
 }));
 
 vi.mock("../lib/notifications", () => ({
@@ -105,6 +111,8 @@ describe("stores/vpnStore", () => {
     systemResetDriver.mockReset();
     boostGetMetrics.mockReset();
     boostCloseRoblox.mockReset();
+    settingsLoad.mockReset();
+    settingsSave.mockReset();
     notify.mockReset();
 
     vpnDisconnect.mockResolvedValue(undefined);
@@ -148,6 +156,7 @@ describe("stores/vpnStore", () => {
       candidates: [],
     });
     notify.mockResolvedValue(undefined);
+    settingsSave.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -268,6 +277,47 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("error");
     expect(useVpnStore.getState().driverSetupState).toBe("error");
     expect(useVpnStore.getState().error).toContain("network timeout");
+  });
+
+  it("cleans Windows driver installer failures before showing them in the app", async () => {
+    const uglyInstallerError =
+      "Split tunnel driver not available (Windows Packet Filter driver): failed to open \\\\.\\NDISRD: The system cannot find the file specified. (0x80070002) Repair failed: Driver service reset failed: Driver file not found, cannot create NDISRD service bundled package repair failed: netcfg binding install failed: netcfg failed with code 1753: Trying to install nt_ndisrd ... C:\\Program Files\\SwiftTunnel\\resources\\drivers\\winpkfilter\\x64\\win10\\ndisrd_lwf.inf was copied to C:\\Windows\\INF\\oem21.inf. failed. Error code: 0x800106d9. MSI repair failed: Driver install failed (msiexec code 1603). Installer log: C:\\ProgramData\\SwiftTunnel\\driver-work\\install-e6636099c08eb00d408c1ba2faa67f30\\install.log.";
+
+    systemCheckDriver.mockResolvedValueOnce(
+      driverStatus({
+        installed: false,
+        version: null,
+        ready: false,
+        status: "missing",
+        message: "Split tunnel driver not available (Windows Packet Filter driver).",
+        recommended_action: "install",
+      }),
+    );
+    systemRepairDriver.mockResolvedValueOnce(
+      driverStatus({
+        installed: false,
+        version: null,
+        ready: false,
+        status: "missing",
+        message: uglyInstallerError,
+        recommended_action: "install",
+      }),
+    );
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("error");
+    expect(useVpnStore.getState().error).toContain(
+      "Windows could not install SwiftTunnel's split-tunnel driver",
+    );
+    expect(useVpnStore.getState().error).toContain("contact support");
+    expect(useVpnStore.getState().error).not.toContain("oem21.inf");
+    expect(useVpnStore.getState().error).not.toContain("ProgramData");
+    expect(useVpnStore.getState().driverSetupError).toBe(
+      useVpnStore.getState().error,
+    );
   });
 
   it("keeps adapter-choice preflight visible instead of returning to silent ready", async () => {
@@ -891,6 +941,61 @@ describe("stores/vpnStore", () => {
 
     expect(useVpnStore.getState().state).toBe("connected");
     expect(useVpnStore.getState().region).toBe("singapore");
+  });
+
+  it("pins the next relay and reconnects when a relay stops returning traffic", async () => {
+    const useVpnStore = await loadStore();
+    const { useServerStore } = await import("./serverStore");
+    const { useSettingsStore } = await import("./settingsStore");
+
+    useServerStore.setState({
+      regions: [
+        {
+          id: "singapore",
+          name: "Singapore",
+          description: "SG",
+          country_code: "SG",
+          servers: ["singapore", "singapore-02", "singapore-03"],
+        },
+      ],
+      servers: [],
+      latencies: new Map(),
+      source: "test",
+      isLoading: false,
+      error: null,
+    });
+    useSettingsStore.getState().update({
+      selected_region: "singapore",
+      selected_game_presets: ["roblox"],
+      auto_routing_enabled: false,
+      forced_servers: {},
+    });
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+
+    useVpnStore.getState().handleStateEvent({
+      state: "error",
+      region: "Singapore",
+      server_endpoint: "1.2.3.4:51821",
+      assigned_ip: null,
+      error:
+        "Relay connection failed - SwiftTunnel stopped the session because the relay stopped returning traffic. Please reconnect or choose another relay.",
+    });
+
+    for (let i = 0; i < 10 && vpnConnect.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+
+    expect(useSettingsStore.getState().settings.forced_servers.singapore).toBe(
+      "singapore-02",
+    );
+    expect(settingsSave).toHaveBeenCalled();
+    expect(vpnConnect).toHaveBeenCalledWith("singapore", ["roblox"]);
+    expect(notify).toHaveBeenCalledWith(
+      "SwiftTunnel",
+      "Relay stopped responding. Switching singapore to singapore-02 and reconnecting.",
+    );
   });
 
   it("manual repair action marks driver as installed", async () => {

@@ -37,6 +37,96 @@ const MIN_WINDOW_WIDTH = 800;
 const MAX_WINDOW_WIDTH = 3840;
 const MIN_WINDOW_HEIGHT = 600;
 const MAX_WINDOW_HEIGHT = 2160;
+const CUSTOM_FFLAG_ALLOWLIST: Record<string, string> = {
+  FFlagHandleAltEnterFullscreenManually: "False",
+  FFlagDebugGraphicsPreferD3D11: "True",
+  FFlagDebugGraphicsPreferVulkan: "False",
+  FFlagDebugGraphicsPreferOpenGL: "False",
+  FIntDebugForceMSAASamples: "1",
+  DFFlagTextureQualityOverrideEnabled: "True",
+  DFIntTextureQualityOverride: "0",
+  DFFlagDisableDPIScale: "False",
+  DFIntDebugFRMQualityLevelOverride: "1",
+  FFlagDebugSkyGray: "True",
+  FIntFRMMinGrassDistance: "0",
+  FIntFRMMaxGrassDistance: "0",
+  FIntGrassMovementReducedMotionFactor: "0",
+  DFFlagDebugPauseVoxelizer: "True",
+  DFIntCSGLevelOfDetailSwitchingDistance: "0",
+  DFIntCSGLevelOfDetailSwitchingDistanceL12: "0",
+  DFIntCSGLevelOfDetailSwitchingDistanceL23: "0",
+  DFIntCSGLevelOfDetailSwitchingDistanceL34: "0",
+};
+
+function customFflagExpectsBoolean(key: string, defaultValue: string) {
+  return (
+    defaultValue.toLowerCase() === "true" ||
+    defaultValue.toLowerCase() === "false" ||
+    key.startsWith("FFlag") ||
+    key.startsWith("DFFlag")
+  );
+}
+
+function validateCustomFflags(enabled: boolean, raw: string): string | null {
+  if (!enabled) return null;
+  if (raw.trim().length === 0) {
+    return "Paste a JSON object before applying custom FFlags.";
+  }
+  if (raw.length > 8192) return "Custom FFlags must be under 8 KB.";
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return "Custom FFlags must be valid JSON.";
+  }
+
+  if (
+    parsed === null ||
+    Array.isArray(parsed) ||
+    typeof parsed !== "object"
+  ) {
+    return "Custom FFlags must be a JSON object.";
+  }
+
+  const entries = Object.entries(parsed);
+  if (entries.length === 0) {
+    return "Custom FFlags must include at least one allowlisted key.";
+  }
+
+  for (const [key, value] of entries) {
+    const defaultValue = CUSTOM_FFLAG_ALLOWLIST[key];
+    if (defaultValue === undefined) {
+      return `${key} is not in Roblox's FFlag allowlist.`;
+    }
+
+    if (customFflagExpectsBoolean(key, defaultValue)) {
+      if (typeof value === "boolean") continue;
+      if (
+        typeof value === "string" &&
+        ["true", "false"].includes(value.trim().toLowerCase())
+      ) {
+        continue;
+      }
+      return `${key} must be true or false.`;
+    }
+
+    const integer =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && value.trim() !== ""
+          ? Number(value.trim())
+          : Number.NaN;
+    if (!Number.isInteger(integer)) {
+      return `${key} must be an integer.`;
+    }
+    if (integer < -1_000_000 || integer > 1_000_000) {
+      return `${key} is outside the allowed integer range.`;
+    }
+  }
+
+  return null;
+}
 
 export function BoostTab() {
   const settings = useSettingsStore((s) => s.settings);
@@ -81,6 +171,7 @@ export function BoostTab() {
 
   // The two bypass modes route gameplay UDP opposite ways - only one at a time.
   const chooseFullBan = (v: boolean) => {
+    if (robloxControlsLocked) return;
     setDraftCountryBan(v);
     if (v) setDraftPartialBan(false);
   };
@@ -152,6 +243,7 @@ export function BoostTab() {
     }
   }, [addToast, boost, enableFullBanDraft]);
   const choosePartialBan = (v: boolean) => {
+    if (robloxControlsLocked) return;
     setDraftPartialBan(v);
     if (v) setDraftCountryBan(false);
   };
@@ -188,6 +280,8 @@ export function BoostTab() {
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
+  const robloxControlsLocked =
+    isRestarting || isApplying || fullBanChecking || fullBanClosing;
   const windowWidthError = validateWindowDimension(
     "Width",
     draft.roblox_settings.window_width,
@@ -201,6 +295,17 @@ export function BoostTab() {
     MAX_WINDOW_HEIGHT,
   );
   const windowValidationError = windowWidthError ?? windowHeightError;
+  const customFflagError = validateCustomFflags(
+    draft.roblox_settings.custom_fflags_enabled,
+    draft.roblox_settings.custom_fflags_json,
+  );
+  const fflagModeError =
+    draft.roblox_settings.ultraboost &&
+    draft.roblox_settings.custom_fflags_enabled
+      ? "Choose either Ultraboost or Custom FFlag Import, not both."
+      : null;
+  const validationError =
+    windowValidationError ?? fflagModeError ?? customFflagError;
 
   useEffect(() => {
     const id = setInterval(boost.fetchMetrics, 2000);
@@ -220,7 +325,7 @@ export function BoostTab() {
   }, [boost.fetchSystemMemory, boost.isCleaningRam]);
 
   const applyChanges = useCallback(async () => {
-    if (windowValidationError) return;
+    if (validationError || isApplying || isRestarting) return;
     setIsApplying(true);
     try {
       let appliedConfig = draft;
@@ -235,7 +340,7 @@ export function BoostTab() {
         enable_api_tunneling: draftPartialBan ? false : savedRouteAssist,
       });
       setDraft(appliedConfig);
-      saveSettings();
+      await saveSettings();
       const currentWarning = useBoostStore.getState().warning;
       if (currentWarning) {
         addToast({ type: "warning", message: "Boost applied with warnings" });
@@ -255,19 +360,20 @@ export function BoostTab() {
     saveSettings,
     updateSettings,
     boost,
-    windowValidationError,
+    validationError,
+    isApplying,
+    isRestarting,
     addToast,
   ]);
 
   const restartAndApply = useCallback(async () => {
-    if (windowValidationError) return;
+    if (validationError || isRestarting || isApplying) return;
     setIsRestarting(true);
     try {
       let appliedConfig = draft;
       if (hasConfigChanges) {
         appliedConfig = await boost.updateConfig(JSON.stringify(draft));
       }
-      await boost.restartRoblox();
       updateSettings({
         config: appliedConfig,
         game_process_performance: draftGPP,
@@ -276,7 +382,8 @@ export function BoostTab() {
         enable_api_tunneling: draftPartialBan ? false : savedRouteAssist,
       });
       setDraft(appliedConfig);
-      saveSettings();
+      await saveSettings();
+      await boost.restartRoblox();
     } finally {
       setIsRestarting(false);
     }
@@ -290,7 +397,9 @@ export function BoostTab() {
     saveSettings,
     updateSettings,
     boost,
-    windowValidationError,
+    validationError,
+    isRestarting,
+    isApplying,
   ]);
 
   const discardChanges = useCallback(() => {
@@ -351,6 +460,7 @@ export function BoostTab() {
   );
 
   function updateRblxOpt(p: Partial<RobloxSettingsConfig>) {
+    if (robloxControlsLocked) return;
     setDraft((prev) => ({
       ...prev,
       profile: "Custom",
@@ -376,10 +486,12 @@ export function BoostTab() {
   const rblxCount = [
     draft.roblox_settings.unlock_fps,
     draft.roblox_settings.ultraboost,
-    draftCountryBan,
-    draftPartialBan,
+    draft.roblox_settings.custom_fflags_enabled,
     draft.roblox_settings.window_fullscreen,
   ].filter(Boolean).length;
+  const countryBanCount = [draftCountryBan, draftPartialBan].filter(
+    Boolean,
+  ).length;
   const schedCount = [
     draftGPP.high_performance_gpu_binding,
     draftGPP.prefer_performance_cores,
@@ -454,39 +566,47 @@ export function BoostTab() {
       </section>
 
       {/* ── Roblox ── */}
-      <Section title="Roblox" tag={`${rblxCount} / 5 on`}>
+      <Section title="Roblox" tag={`${rblxCount} / 4 on`}>
         <SettingRow
           title="Unlock FPS"
           desc="Remove 60 FPS cap"
           enabled={draft.roblox_settings.unlock_fps}
           onChange={(v) => updateRblxOpt({ unlock_fps: v })}
+          disabled={robloxControlsLocked}
         />
         {draft.roblox_settings.unlock_fps && (
           <FpsSlider
             value={draft.roblox_settings.target_fps}
             onChange={(v) => updateRblxOpt({ target_fps: v })}
+            disabled={robloxControlsLocked}
           />
         )}
         <SettingRow
           title="Ultraboost"
           desc="Curated FPS-focused Roblox FFlags"
           enabled={draft.roblox_settings.ultraboost}
-          onChange={(v) => updateRblxOpt({ ultraboost: v })}
+          onChange={(v) =>
+            updateRblxOpt(
+              v
+                ? { ultraboost: true, custom_fflags_enabled: false }
+                : { ultraboost: false },
+            )
+          }
+          disabled={robloxControlsLocked}
         />
-        <SettingRow
-          title="Bypass Country Ban"
-          desc="ALL of Roblox is blocked in your country (e.g. Egypt)"
-          tooltip="Full bypass: DPI evasion (GoodbyeDPI) plus relaying all Roblox traffic - login, settings, and gameplay. Use when the whole platform is banned. Turns off Partial Ban."
-          enabled={draftCountryBan}
-          onChange={(v) => void requestFullBan(v)}
-          disabled={fullBanChecking || fullBanClosing}
-        />
-        <SettingRow
-          title="Bypass Partial Ban"
-          desc="Only specific games are blocked (e.g. TSB/JJS in Vietnam)"
-          tooltip="Relays Roblox discovery/join traffic while gameplay and assets stay direct for normal ping. Turns off Country Ban."
-          enabled={draftPartialBan}
-          onChange={choosePartialBan}
+        <CustomFflagsRow
+          enabled={draft.roblox_settings.custom_fflags_enabled}
+          json={draft.roblox_settings.custom_fflags_json}
+          error={customFflagError}
+          disabled={robloxControlsLocked}
+          onEnabledChange={(v) =>
+            updateRblxOpt(
+              v
+                ? { custom_fflags_enabled: true, ultraboost: false }
+                : { custom_fflags_enabled: false },
+            )
+          }
+          onJsonChange={(v) => updateRblxOpt({ custom_fflags_json: v })}
         />
         <ResolutionRow
           width={draft.roblox_settings.window_width}
@@ -508,16 +628,37 @@ export function BoostTab() {
             })
           }
           error={windowValidationError}
+          disabled={robloxControlsLocked}
         />
         <SettingRow
           title="Launch Fullscreen"
           desc="Set Roblox fullscreen default"
           enabled={draft.roblox_settings.window_fullscreen}
           onChange={(v) => updateRblxOpt({ window_fullscreen: v })}
+          disabled={robloxControlsLocked}
         />
       </Section>
 
       {/* ── System + Network side-by-side ── */}
+      <Section title="Country Ban" tag={`${countryBanCount} / 2 on`}>
+        <SettingRow
+          title="Bypass Country Ban"
+          desc="Use when the whole Roblox platform is blocked"
+          tooltip="Full bypass: DPI evasion plus relaying all Roblox traffic through the selected SwiftTunnel relay. Turns off Partial Ban."
+          enabled={draftCountryBan}
+          onChange={(v) => void requestFullBan(v)}
+          disabled={robloxControlsLocked}
+        />
+        <SettingRow
+          title="Bypass Partial Ban"
+          desc="Use when only specific Roblox games are blocked"
+          tooltip="Relays the Roblox discovery and join path while gameplay stays direct. Turns off Country Ban."
+          enabled={draftPartialBan}
+          onChange={choosePartialBan}
+          disabled={robloxControlsLocked}
+        />
+      </Section>
+
       <div className="grid gap-4 lg:grid-cols-2">
         <Section
           title="System"
@@ -612,8 +753,8 @@ export function BoostTab() {
           >
             <div className="flex w-full items-center justify-between rounded-[var(--radius-card)] surface-elevated px-4 py-2.5">
               <span className="text-[12px] font-medium text-text-secondary">
-                {windowValidationError
-                  ? windowValidationError
+                {validationError
+                  ? validationError
                   : hasRobloxChanges && boost.robloxRunning
                     ? "Roblox must restart for changes to apply"
                     : "Unsaved changes"}
@@ -634,7 +775,7 @@ export function BoostTab() {
                     onClick={() => {
                       void restartAndApply().catch(() => {});
                     }}
-                    disabled={isRestarting || Boolean(windowValidationError)}
+                    disabled={isRestarting || Boolean(validationError)}
                     loading={isRestarting}
                   >
                     Restart & Apply
@@ -645,7 +786,7 @@ export function BoostTab() {
                     size="sm"
                     onClick={applyChanges}
                     disabled={
-                      isRestarting || isApplying || Boolean(windowValidationError)
+                      isRestarting || isApplying || Boolean(validationError)
                     }
                     loading={isApplying}
                   >
@@ -769,12 +910,100 @@ function SettingRow({
   );
 }
 
+function CustomFflagsRow({
+  enabled,
+  json,
+  error,
+  disabled,
+  onEnabledChange,
+  onJsonChange,
+}: {
+  enabled: boolean;
+  json: string;
+  error: string | null;
+  disabled?: boolean;
+  onEnabledChange: (v: boolean) => void;
+  onJsonChange: (v: string) => void;
+}) {
+  return (
+    <div className="px-4 py-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-[13px] font-medium text-text-primary">
+              Custom FFlag Import
+            </span>
+            <span
+              className="rounded-[3px] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.1em]"
+              style={{
+                backgroundColor: "var(--color-bg-elevated)",
+                color: "var(--color-text-muted)",
+                border: "1px solid var(--color-border-subtle)",
+              }}
+            >
+              JSON
+            </span>
+            <Tooltip content="Only Roblox's allowlisted FFlags are accepted. Unknown keys are rejected.">
+              <span className="inline-flex">
+                <InfoIcon />
+              </span>
+            </Tooltip>
+          </div>
+          <p className="mt-0.5 text-[11px] text-text-muted">
+            Import custom values for allowlisted Roblox client flags.
+          </p>
+        </div>
+        <Toggle
+          enabled={enabled}
+          onChange={onEnabledChange}
+          disabled={disabled}
+          ariaLabel="Custom FFlag Import"
+        />
+      </div>
+      {enabled && (
+        <div className="mt-3 flex flex-col gap-2">
+          <textarea
+            value={json}
+            onChange={(e) => onJsonChange(e.target.value)}
+            disabled={disabled}
+            spellCheck={false}
+            placeholder={`{\n  "FFlagDebugSkyGray": true,\n  "DFIntTextureQualityOverride": 0\n}`}
+            className="boost-input min-h-[118px] resize-y rounded-[4px] px-3 py-2 font-mono text-[11px] leading-relaxed outline-none transition-colors"
+            style={{
+              backgroundColor: "var(--color-bg-elevated)",
+              border: `1px solid ${
+                error
+                  ? "var(--color-status-error-soft-40)"
+                  : "var(--color-border-default)"
+              }`,
+              color: "var(--color-text-primary)",
+            }}
+          />
+          <p
+            className="text-[10.5px] leading-relaxed"
+            style={{
+              color: error
+                ? "var(--color-status-error)"
+                : "var(--color-text-muted)",
+            }}
+          >
+            {error ??
+              "Accepted keys are limited to Roblox's local client FFlag allowlist."}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FpsSlider({
   value,
   onChange,
+  disabled,
 }: {
   value: number;
   onChange: (v: number) => void;
+  disabled?: boolean;
 }) {
   // Slider range: 30–1010. The last notch (1010) is the "uncapped" position.
   const UNCAP_POS = 1010;
@@ -828,6 +1057,7 @@ function FpsSlider({
           max={99999}
           value={inputText}
           placeholder="MAX"
+          disabled={disabled}
           onFocus={() => setInputFocused(true)}
           onChange={(e) => {
             setInputText(e.target.value);
@@ -858,6 +1088,7 @@ function FpsSlider({
         step={10}
         value={sliderValue}
         onChange={handleSlider}
+        disabled={disabled}
       />
       <div className="mt-1.5 flex justify-between font-mono text-[9.5px] text-text-dimmed">
         <span>30</span>
@@ -893,12 +1124,14 @@ function ResolutionRow({
   onWidthChange,
   onHeightChange,
   error,
+  disabled,
 }: {
   width: number;
   height: number;
   onWidthChange: (v: number) => void;
   onHeightChange: (v: number) => void;
   error: string | null;
+  disabled?: boolean;
 }) {
   return (
     <div className="px-4 py-3">
@@ -919,6 +1152,7 @@ function ResolutionRow({
             max={MAX_WINDOW_WIDTH}
             step={2}
             value={width}
+            disabled={disabled}
             onChange={(e) =>
               onWidthChange(
                 parseWindowDimensionInput(e.target.value, MIN_WINDOW_WIDTH),
@@ -943,6 +1177,7 @@ function ResolutionRow({
             max={MAX_WINDOW_HEIGHT}
             step={2}
             value={height}
+            disabled={disabled}
             onChange={(e) =>
               onHeightChange(
                 parseWindowDimensionInput(e.target.value, MIN_WINDOW_HEIGHT),

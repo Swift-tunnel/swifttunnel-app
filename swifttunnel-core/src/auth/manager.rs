@@ -4,7 +4,8 @@ use super::http_client::{AuthClient, UserProfileResponse};
 use super::oauth_server::{DEFAULT_OAUTH_PORT, OAuthServer, OAuthServerResult};
 use super::storage::SecureStorage;
 use super::types::{
-    AuthError, AuthSession, AuthState, OAuthPendingState, SupabaseAuthResponse, UserInfo,
+    AuthError, AuthSession, AuthState, OAuthPendingState, SupabaseAuthResponse, SupabaseUser,
+    UserInfo,
 };
 use chrono::{Duration, Utc};
 use log::{debug, error, info, warn};
@@ -785,20 +786,42 @@ impl AuthManager {
             exchange_response.email
         );
 
-        // Verify the magic link token to get access/refresh tokens
-        let auth_response = match self
-            .client
-            .verify_magic_link(&exchange_response.email, &exchange_response.token)
-            .await
-        {
-            Ok(response) => response,
-            Err(e) => {
-                error!("Failed to verify magic link: {}", e);
-                {
-                    let mut state = self.state.lock();
-                    *state = AuthState::Error(e.to_string());
+        // New web builds return a ready session so desktop does not need to
+        // contact auth.swifttunnel.net, which some networks block.
+        let auth_response = if let (Some(access_token), Some(refresh_token)) = (
+            exchange_response.access_token.as_ref(),
+            exchange_response.refresh_token.as_ref(),
+        ) {
+            info!("Using server-verified desktop OAuth session");
+            SupabaseAuthResponse {
+                access_token: access_token.clone(),
+                refresh_token: refresh_token.clone(),
+                expires_in: exchange_response.expires_in.unwrap_or(3600),
+                expires_at: exchange_response.expires_at,
+                token_type: exchange_response
+                    .session_token_type
+                    .clone()
+                    .unwrap_or_else(|| "bearer".to_string()),
+                user: SupabaseUser {
+                    id: exchange_response.user_id.clone(),
+                    email: Some(exchange_response.email.clone()),
+                },
+            }
+        } else {
+            match self
+                .client
+                .verify_magic_link(&exchange_response.email, &exchange_response.token)
+                .await
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    error!("Failed to verify magic link: {}", e);
+                    {
+                        let mut state = self.state.lock();
+                        *state = AuthState::Error(e.to_string());
+                    }
+                    return Err(e);
                 }
-                return Err(e);
             }
         };
 

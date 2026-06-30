@@ -136,6 +136,17 @@ pub struct ExchangeTokenResponse {
     pub email: String,
     /// User's ID
     pub user_id: String,
+    /// Ready session returned by the SwiftTunnel web fallback.
+    #[serde(default)]
+    pub access_token: Option<String>,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_in: Option<i64>,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+    #[serde(default, rename = "token_type")]
+    pub session_token_type: Option<String>,
 }
 
 /// Relay connection policy delivered by relay ticket bootstrap endpoint.

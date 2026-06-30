@@ -10,7 +10,8 @@ import {
 } from "./overlayBus";
 import { boostCursorPos } from "../../lib/commands";
 
-const IDLE_POLL_MS = 110;
+const IDLE_POLL_MS = 350;
+const HIDDEN_POLL_MS = 1000;
 const DRAG_POLL_MS = 16; // smooth window-follow while dragging
 // Slack (CSS px) around the bar so it's easy to land the cursor on it to grab.
 const GRAB_PAD = 8;
@@ -234,9 +235,14 @@ export function OverlayStatsBar() {
         /* ignore */
       }
       if (!disposed) {
+        const delay = dragRef.current
+          ? DRAG_POLL_MS
+          : shownRef.current
+            ? IDLE_POLL_MS
+            : HIDDEN_POLL_MS;
         timer = window.setTimeout(
           () => void tick(),
-          dragRef.current ? DRAG_POLL_MS : IDLE_POLL_MS,
+          delay,
         );
       }
     };

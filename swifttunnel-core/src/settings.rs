@@ -209,7 +209,7 @@ pub enum AdapterBindingMode {
 
 impl Default for AdapterBindingMode {
     fn default() -> Self {
-        Self::SmartAuto
+        Self::Manual
     }
 }
 
@@ -286,7 +286,7 @@ impl Default for AppSettings {
             whitelisted_regions: Vec::new(),
             preferred_physical_adapter_guid: None,
             network_binding_overrides: HashMap::new(),
-            adapter_binding_mode: AdapterBindingMode::SmartAuto,
+            adapter_binding_mode: AdapterBindingMode::Manual,
             game_process_performance: GameProcessPerformanceSettings::default(),
             enable_api_tunneling: false,
             enable_country_ban: false,
@@ -453,7 +453,7 @@ mod tests {
         assert!(!settings.auto_reconnect);
         assert!(!settings.resume_vpn_on_startup);
         assert!(settings.preferred_physical_adapter_guid.is_none());
-        assert_eq!(settings.adapter_binding_mode, AdapterBindingMode::SmartAuto);
+        assert_eq!(settings.adapter_binding_mode, AdapterBindingMode::Manual);
         assert!(
             !settings
                 .game_process_performance
@@ -515,10 +515,10 @@ mod tests {
     }
 
     #[test]
-    fn test_settings_adapter_binding_mode_defaults_to_smart_auto() {
+    fn test_settings_adapter_binding_mode_defaults_to_manual() {
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(loaded.adapter_binding_mode, AdapterBindingMode::SmartAuto);
+        assert_eq!(loaded.adapter_binding_mode, AdapterBindingMode::Manual);
     }
 
     #[test]

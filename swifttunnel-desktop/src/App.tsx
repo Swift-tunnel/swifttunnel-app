@@ -77,6 +77,10 @@ function App() {
   const fetchVpnState = useVpnStore((s) => s.fetchState);
   const connectVpn = useVpnStore((s) => s.connect);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
+  const autoCheckUpdates = useSettingsStore(
+    (s) => s.settings.update_settings.auto_check,
+  );
+  const updateChannel = useSettingsStore((s) => s.settings.update_channel);
 
   // Brief "preparing your connection" screen while the backend self-heals stale
   // network state at launch (see lib.rs recover_stale_network_state), so users
@@ -179,6 +183,34 @@ function App() {
     connectVpn,
     checkForUpdates,
   ]);
+
+  // Keep update announcements automatic while the app is open. Bootstrap checks
+  // once at launch; this catches releases that go live later without forcing
+  // users to dig into Settings -> Check now. The store suppresses releases the
+  // user already dismissed, so this does not pop every launch.
+  useEffect(() => {
+    if (!isSettingsLoaded || !autoCheckUpdates) return;
+
+    const runCheck = () => {
+      const status = useUpdaterStore.getState().status;
+      if (
+        status === "checking" ||
+        status === "installing" ||
+        status === "update_available"
+      ) {
+        return;
+      }
+      void useUpdaterStore.getState().checkForUpdates(false, false);
+    };
+
+    const firstCheck = window.setTimeout(runCheck, 10_000);
+    const interval = window.setInterval(runCheck, 30 * 60 * 1000);
+
+    return () => {
+      window.clearTimeout(firstCheck);
+      window.clearInterval(interval);
+    };
+  }, [isSettingsLoaded, autoCheckUpdates, updateChannel]);
 
   // Gate the UI behind the startup network self-heal. Keep it on screen at least
   // briefly (so it doesn't flash) and cap it (so a wedged backend never traps the
@@ -428,11 +460,21 @@ function App() {
   }
 
   if (authState === "banned") {
-    return <BannedScreen />;
+    return (
+      <>
+        <BannedScreen />
+        <WhatsNewDialog />
+      </>
+    );
   }
 
   if (authState !== "logged_in") {
-    return <LoginScreen />;
+    return (
+      <>
+        <LoginScreen />
+        <WhatsNewDialog />
+      </>
+    );
   }
 
   return (

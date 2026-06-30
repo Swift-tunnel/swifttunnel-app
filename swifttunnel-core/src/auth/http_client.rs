@@ -183,6 +183,48 @@ impl AuthClient {
         self.parse_password_sign_in_response(response).await
     }
 
+    async fn refresh_token_via_desktop_api(
+        &self,
+        refresh_token: &str,
+    ) -> Result<SupabaseAuthResponse, AuthError> {
+        let url = format!("{}/api/auth/desktop/refresh", API_BASE_URL);
+        let response = self
+            .send_with_network_fallback("desktop token refresh", |client| {
+                self.add_hwid_header(
+                    client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .json(&json!({
+                            "refresh_token": refresh_token,
+                        })),
+                )
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            error!("Desktop token refresh failed: {} - {}", status, body);
+
+            if let Some(error) = user_banned_error_from_body(&body) {
+                return Err(error);
+            }
+            if is_refresh_token_permanently_invalid(&body) {
+                return Err(AuthError::RefreshTokenInvalid);
+            }
+
+            return Err(AuthError::ApiError(format!(
+                "Refresh failed: {} - {}",
+                status, body
+            )));
+        }
+
+        response
+            .json()
+            .await
+            .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))
+    }
+
     /// Sign in with email and password via Supabase
     pub async fn sign_in_with_password(
         &self,
@@ -233,7 +275,7 @@ impl AuthClient {
 
         debug!("Refreshing token via Supabase");
 
-        let response = self
+        let response = match self
             .send_with_network_fallback("refresh token", |client| {
                 client
                     .post(&url)
@@ -243,7 +285,17 @@ impl AuthClient {
                         "refresh_token": refresh_token,
                     }))
             })
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(primary_error) => {
+                warn!(
+                    "Direct Supabase token refresh failed; trying desktop API fallback: {}",
+                    primary_error
+                );
+                return self.refresh_token_via_desktop_api(refresh_token).await;
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();

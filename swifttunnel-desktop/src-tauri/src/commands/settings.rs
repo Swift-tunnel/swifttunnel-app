@@ -68,9 +68,10 @@ pub async fn settings_save(
             discord.set_enabled(new_settings.enable_discord_rpc);
         }
 
-        // The ETW FPS trace runs only while the in-game overlay wants it
-        // (idempotent and cheap when the state is unchanged).
-        fps_monitor.set_enabled(new_settings.config.overlay.enabled);
+        // The ETW FPS trace runs only while the in-game overlay is actually
+        // showing FPS. Other metrics stay lighter and avoid the real-time DXGI
+        // present trace entirely.
+        fps_monitor.set_enabled(overlay_wants_fps(&new_settings));
 
         let run_on_startup = {
             let mut s = settings_arc.lock();
@@ -113,6 +114,16 @@ pub async fn settings_save(
     }
 
     Ok(())
+}
+
+fn overlay_wants_fps(settings: &AppSettings) -> bool {
+    settings.config.overlay.enabled
+        && settings
+            .config
+            .overlay
+            .metrics
+            .iter()
+            .any(|metric| metric == "fps")
 }
 
 fn current_timestamp_utc() -> String {

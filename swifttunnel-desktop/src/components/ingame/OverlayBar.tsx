@@ -68,7 +68,6 @@ export function OverlayBar({ metrics, values, size, color, style }: OverlayBarPr
         borderRadius: 8,
         background: layered ? "transparent" : "rgba(8,8,8,0.82)",
         border: layered ? "none" : "1px solid rgba(255,255,255,0.08)",
-        backdropFilter: layered ? undefined : "blur(2px)",
         fontVariantNumeric: "tabular-nums",
         fontFamily:
           "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",

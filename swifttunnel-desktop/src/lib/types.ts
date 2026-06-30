@@ -248,6 +248,8 @@ export interface RobloxSettingsConfig {
   window_height: number;
   window_fullscreen: boolean;
   ultraboost: boolean;
+  custom_fflags_enabled: boolean;
+  custom_fflags_json: string;
 }
 
 export interface NetworkConfig {
@@ -261,6 +263,7 @@ export type OverlayMetric =
   | "fps"
   | "time"
   | "playtime"
+  | "ping"
   | "battery"
   | "upload"
   | "download"

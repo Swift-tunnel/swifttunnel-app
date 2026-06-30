@@ -21,6 +21,19 @@ const CACHE_TTL_SECONDS: i64 = 3600;
 const MAX_STALE_CACHE_AGE_SECONDS: i64 = 24 * 3600;
 const STALE_CACHE_REJECT_REASON: &str = "ST_STALE_CACHE_REJECTED";
 
+fn build_server_http_client(use_system_proxy: bool) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder()
+        .user_agent("SwiftTunnel-Desktop/0.1.0")
+        .timeout(Duration::from_secs(10))
+        .use_native_tls();
+
+    if !use_system_proxy {
+        builder = builder.no_proxy();
+    }
+
+    builder.build()
+}
+
 /// Measured latency for a server
 #[derive(Debug, Clone)]
 pub struct ServerLatency {
@@ -254,16 +267,30 @@ pub fn save_servers_to_cache(data: &ServerListResponse) -> Result<(), std::io::E
 pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
     log::info!("Fetching server list from API: {}", SERVERS_API_URL);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
+    let client = build_server_http_client(true)
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    let direct_client = build_server_http_client(false)
+        .map_err(|e| format!("Failed to create direct HTTP client: {}", e))?;
 
-    let response = client
-        .get(SERVERS_API_URL)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch server list: {}", e))?;
+    let response = match client.get(SERVERS_API_URL).send().await {
+        Ok(response) => response,
+        Err(primary_error) => {
+            log::warn!(
+                "Server list fetch failed through the system network path: {}. Retrying direct.",
+                primary_error
+            );
+            direct_client
+                .get(SERVERS_API_URL)
+                .send()
+                .await
+                .map_err(|direct_error| {
+                    format!(
+                        "Failed to fetch server list: {}. Direct retry also failed: {}",
+                        primary_error, direct_error
+                    )
+                })?
+        }
+    };
 
     if !response.status().is_success() {
         return Err(format!("API returned error status: {}", response.status()));

@@ -1758,6 +1758,31 @@ impl RobloxOptimizer {
         ("DFIntCSGLevelOfDetailSwitchingDistanceL34", "0"),
     ];
 
+    /// Roblox's local client configuration FFlag allowlist accepted by Custom
+    /// FFlag Import. This intentionally stays broader than Ultraboost:
+    /// Ultraboost writes only SwiftTunnel's performance preset, while custom
+    /// import may accept any Roblox-allowlisted key.
+    const CUSTOM_FFLAG_ALLOWLIST: &[(&str, &str)] = &[
+        ("DFIntCSGLevelOfDetailSwitchingDistance", "0"),
+        ("DFIntCSGLevelOfDetailSwitchingDistanceL12", "0"),
+        ("DFIntCSGLevelOfDetailSwitchingDistanceL23", "0"),
+        ("DFIntCSGLevelOfDetailSwitchingDistanceL34", "0"),
+        ("FFlagHandleAltEnterFullscreenManually", "False"),
+        ("DFFlagTextureQualityOverrideEnabled", "True"),
+        ("DFIntTextureQualityOverride", "0"),
+        ("FIntDebugForceMSAASamples", "1"),
+        ("DFFlagDisableDPIScale", "False"),
+        ("FFlagDebugGraphicsPreferD3D11", "True"),
+        ("FFlagDebugSkyGray", "True"),
+        ("DFFlagDebugPauseVoxelizer", "True"),
+        ("DFIntDebugFRMQualityLevelOverride", "1"),
+        ("FIntFRMMaxGrassDistance", "0"),
+        ("FIntFRMMinGrassDistance", "0"),
+        ("FFlagDebugGraphicsPreferVulkan", "False"),
+        ("FFlagDebugGraphicsPreferOpenGL", "False"),
+        ("FIntGrassMovementReducedMotionFactor", "0"),
+    ];
+
     /// Retired FFlag. Previously written for FPS unlock, but the framerate cap is
     /// now driven solely by `FramerateCap` in GlobalBasicSettings. Still removed
     /// from existing ClientAppSettings so prior versions' entries are cleaned up.
@@ -1782,6 +1807,116 @@ impl RobloxOptimizer {
     /// client flag, but it favors sharper high-DPI rendering over maximum FPS
     /// so it is no longer written by Ultraboost.
     const REMOVED_ULTRABOOST_FFLAGS: &[&str] = &["DFFlagDisableDPIScale"];
+
+    fn parse_custom_fflags(config: &RobloxSettingsConfig) -> Result<HashMap<String, String>> {
+        if !config.custom_fflags_enabled {
+            return Ok(HashMap::new());
+        }
+        if config.ultraboost {
+            return Err(anyhow::anyhow!(
+                "Choose either Ultraboost or Custom FFlag Import, not both."
+            ));
+        }
+
+        let raw = config.custom_fflags_json.trim();
+        if raw.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Paste a JSON object before applying custom FFlags."
+            ));
+        }
+        if raw.len() > 8192 {
+            return Err(anyhow::anyhow!(
+                "Custom FFlag JSON is too large. Keep it under 8 KB."
+            ));
+        }
+
+        let value: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| anyhow::anyhow!("Custom FFlags must be valid JSON: {}", e))?;
+        let Some(object) = value.as_object() else {
+            return Err(anyhow::anyhow!(
+                "Custom FFlags must be a JSON object like {{ \"FFlagName\": true }}."
+            ));
+        };
+        if object.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Custom FFlags must include at least one allowlisted key."
+            ));
+        }
+
+        let mut output = HashMap::new();
+        for (key, value) in object {
+            let Some((_, expected)) = Self::CUSTOM_FFLAG_ALLOWLIST
+                .iter()
+                .find(|(allowed_key, _)| *allowed_key == key)
+            else {
+                return Err(anyhow::anyhow!(
+                    "Custom FFlag '{}' is not in Roblox's local client FFlag allowlist.",
+                    key
+                ));
+            };
+
+            let normalized = Self::normalize_custom_fflag_value(key, expected, value)?;
+            output.insert(key.clone(), normalized);
+        }
+
+        Ok(output)
+    }
+
+    fn normalize_custom_fflag_value(
+        key: &str,
+        expected: &str,
+        value: &serde_json::Value,
+    ) -> Result<String> {
+        let expects_bool = expected.eq_ignore_ascii_case("true")
+            || expected.eq_ignore_ascii_case("false")
+            || key.starts_with("FFlag")
+            || key.starts_with("DFFlag");
+
+        if expects_bool {
+            if let Some(v) = value.as_bool() {
+                return Ok(if v { "True" } else { "False" }.to_string());
+            }
+            if let Some(v) = value.as_str() {
+                return match v.trim().to_ascii_lowercase().as_str() {
+                    "true" => Ok("True".to_string()),
+                    "false" => Ok("False".to_string()),
+                    _ => Err(anyhow::anyhow!(
+                        "Custom FFlag '{}' must be true or false.",
+                        key
+                    )),
+                };
+            }
+            return Err(anyhow::anyhow!(
+                "Custom FFlag '{}' must be true or false.",
+                key
+            ));
+        }
+
+        let integer = if let Some(v) = value.as_i64() {
+            Some(v)
+        } else if let Some(v) = value.as_u64() {
+            i64::try_from(v).ok()
+        } else if let Some(v) = value.as_str() {
+            v.trim().parse::<i64>().ok()
+        } else {
+            None
+        };
+
+        let Some(integer) = integer else {
+            return Err(anyhow::anyhow!(
+                "Custom FFlag '{}' must be an integer.",
+                key
+            ));
+        };
+        if !(-1_000_000..=1_000_000).contains(&integer) {
+            return Err(anyhow::anyhow!(
+                "Custom FFlag '{}' is outside the allowed integer range.",
+                key
+            ));
+        }
+
+        Ok(integer.to_string())
+    }
 
     /// Known Bloxstrap-family persistent ClientSettings locations under LOCALAPPDATA.
     ///
@@ -2056,11 +2191,12 @@ impl RobloxOptimizer {
     }
 
     /// Apply FFlag optimizations to ClientAppSettings.json
-    /// When ultraboost is enabled, writes curated allowlisted performance FFlags.
+    /// When ultraboost or custom FFlags are enabled, writes curated allowlisted performance FFlags.
     /// FPS unlock is handled separately via GlobalBasicSettings `FramerateCap`.
     /// Always cleans up old blocked or retired FFlags from previous versions.
     fn apply_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<FFlagApplyOutcome> {
-        let should_write_fflags = config.ultraboost;
+        let custom_fflags_requested = !Self::parse_custom_fflags(config)?.is_empty();
+        let should_write_fflags = config.ultraboost || custom_fflags_requested;
         let client_settings_paths = Self::get_client_settings_paths(should_write_fflags)?;
         if client_settings_paths.is_empty() {
             if should_write_fflags {
@@ -2085,7 +2221,8 @@ impl RobloxOptimizer {
         config: &RobloxSettingsConfig,
         local_app_data: &PathBuf,
     ) -> Result<FFlagApplyOutcome> {
-        let should_write_fflags = config.ultraboost;
+        let custom_fflags_requested = !Self::parse_custom_fflags(config)?.is_empty();
+        let should_write_fflags = config.ultraboost || custom_fflags_requested;
         let client_settings_paths = Self::get_client_settings_paths_for_local_app_data(
             local_app_data,
             should_write_fflags,
@@ -2198,6 +2335,14 @@ impl RobloxOptimizer {
             for (key, _) in Self::ULTRABOOST_FFLAGS {
                 settings.remove(*key);
             }
+        }
+
+        let custom_fflags = Self::parse_custom_fflags(config)?;
+        if !custom_fflags.is_empty() {
+            for (key, value) in custom_fflags {
+                settings.insert(key, serde_json::json!(value));
+            }
+            info!("Custom allowlisted FFlags applied");
         }
 
         // FPS unlock is driven by GlobalBasicSettings `FramerateCap`; the old
@@ -2706,6 +2851,7 @@ mod tests {
             window_height: 601,
             window_fullscreen: true,
             ultraboost: false,
+            ..Default::default()
         };
 
         opt.apply_optimizations(&config).unwrap();
@@ -2767,6 +2913,106 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_fflags_apply_allowlisted_json() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_custom_fflag_apply");
+        let _ = fs::remove_dir_all(&dir);
+        let client_settings = dir
+            .join("Bloxstrap")
+            .join("Modifications")
+            .join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#"{
+                "FFlagDebugSkyGray": true,
+                "DFIntTextureQualityOverride": 0
+            }"#
+            .to_string(),
+            ..Default::default()
+        };
+
+        opt.apply_client_fflags_for_local_app_data(&config, &dir)
+            .unwrap();
+
+        let content = fs::read_to_string(client_settings.join("ClientAppSettings.json")).unwrap();
+        let settings: HashMap<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            settings.get("FFlagDebugSkyGray"),
+            Some(&serde_json::json!("True"))
+        );
+        assert_eq!(
+            settings.get("DFIntTextureQualityOverride"),
+            Some(&serde_json::json!("0"))
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_fflags_reject_unknown_keys() {
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#"{ "FFlagTotallyUnsafe": true }"#.to_string(),
+            ..Default::default()
+        };
+
+        let err = RobloxOptimizer::parse_custom_fflags(&config).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("not in Roblox's local client FFlag allowlist")
+        );
+    }
+
+    #[test]
+    fn custom_fflags_accept_official_allowlisted_dpi_scale_flag() {
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#"{ "DFFlagDisableDPIScale": true }"#.to_string(),
+            ..Default::default()
+        };
+
+        let parsed = RobloxOptimizer::parse_custom_fflags(&config).unwrap();
+
+        assert_eq!(
+            parsed.get("DFFlagDisableDPIScale"),
+            Some(&"True".to_string())
+        );
+    }
+
+    #[test]
+    fn custom_fflags_reject_empty_json_when_enabled() {
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: String::new(),
+            ..Default::default()
+        };
+
+        let err = RobloxOptimizer::parse_custom_fflags(&config).unwrap_err();
+
+        assert!(err.to_string().contains("Paste a JSON object"));
+    }
+
+    #[test]
+    fn custom_fflags_reject_ultraboost_overlap() {
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#"{ "FFlagDebugSkyGray": true }"#.to_string(),
+            ..Default::default()
+        };
+
+        let err = RobloxOptimizer::parse_custom_fflags(&config).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("either Ultraboost or Custom FFlag")
+        );
     }
 
     #[test]

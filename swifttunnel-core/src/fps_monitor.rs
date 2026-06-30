@@ -43,10 +43,14 @@ const DXGI_PROVIDER_GUID: GUID = GUID::from_values(
     [0xa6, 0xad, 0xf0, 0x3c, 0xfe, 0xd5, 0xd3, 0xc9],
 );
 
-/// `IDXGISwapChain::Present` start — one per presented frame.
-const EVENT_ID_DXGI_PRESENT_START: u16 = 42;
+/// DXGI present tasks. Roblox can report frames through the older `Present`
+/// task or the newer swap-chain partner tasks depending on the renderer /
+/// driver path, so count present-start tasks instead of one hard-coded event id.
+const DXGI_PRESENT_TASKS: &[u16] = &[9, 80, 468, 482];
+const ETW_OPCODE_START: u8 = 1;
 
 const SESSION_NAME: &str = "SwiftTunnelFpsMonitor";
+const TRACE_MATCH_ANY_KEYWORD_ALL: u64 = u64::MAX;
 
 /// Sanity ceiling so a delayed buffer flush can't briefly report absurd FPS.
 const MAX_REPORTABLE_FPS: u32 = 2000;
@@ -97,6 +101,7 @@ impl FpsRuntime {
 /// overlay tears the session down again.
 pub struct FpsMonitor {
     runtime: std::sync::Mutex<Option<FpsRuntime>>,
+    target_pid: AtomicU32,
 }
 
 impl FpsMonitor {
@@ -104,6 +109,7 @@ impl FpsMonitor {
     pub fn new() -> Self {
         Self {
             runtime: std::sync::Mutex::new(None),
+            target_pid: AtomicU32::new(0),
         }
     }
 
@@ -128,7 +134,7 @@ impl FpsMonitor {
         }
 
         let shared = Arc::new(FpsShared {
-            target_pid: AtomicU32::new(0),
+            target_pid: AtomicU32::new(self.target_pid.load(Ordering::Acquire)),
             present_count: AtomicU64::new(0),
             current_fps: AtomicU32::new(0),
             stop_flag: AtomicBool::new(false),
@@ -160,8 +166,8 @@ impl FpsMonitor {
 
     /// Point the monitor at a game process (0 to clear). Switching targets
     /// resets the window so a new game never inherits the old one's count.
-    /// No-op while disabled.
     pub fn set_target_pid(&self, pid: u32) {
+        self.target_pid.store(pid, Ordering::Release);
         let Ok(runtime) = self.runtime.lock() else {
             return;
         };
@@ -322,15 +328,16 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
             return Err(format!("StartTraceW failed: 0x{:08X}", result.0));
         }
 
-        // Enable DXGI. MatchAnyKeyword = 0 captures every DXGI event (we filter
-        // to Present in the callback); VERBOSE so present events are never level-
-        // filtered out.
+        // Enable all DXGI keywords and filter to Present-start in the callback. A
+        // zero keyword mask can miss non-default provider events on some
+        // systems, which leaves the overlay showing "--" even though the trace
+        // started correctly.
         let result = EnableTraceEx2(
             session_handle,
             &DXGI_PROVIDER_GUID,
             EVENT_CONTROL_CODE_ENABLE_PROVIDER.0,
             TRACE_LEVEL_VERBOSE as u8,
-            0,
+            TRACE_MATCH_ANY_KEYWORD_ALL,
             0,
             0,
             None,
@@ -419,8 +426,9 @@ fn stop_existing_session() {
     }
 }
 
-/// ETW callback — counts a present for the target process. Kept to a handful of
-/// atomic ops since it fires for every present from every process system-wide.
+/// ETW callback — counts a present-start for the target process. Kept to a
+/// handful of atomic ops since it fires for every present from every process
+/// system-wide.
 unsafe extern "system" fn present_event_callback(event_record: *mut EVENT_RECORD) {
     if event_record.is_null() {
         return;
@@ -438,7 +446,8 @@ unsafe extern "system" fn present_event_callback(event_record: *mut EVENT_RECORD
     if record.EventHeader.ProviderId != DXGI_PROVIDER_GUID {
         return;
     }
-    if record.EventHeader.EventDescriptor.Id != EVENT_ID_DXGI_PRESENT_START {
+    let descriptor = record.EventHeader.EventDescriptor;
+    if !DXGI_PRESENT_TASKS.contains(&descriptor.Task) || descriptor.Opcode != ETW_OPCODE_START {
         return;
     }
     let target = shared.target_pid.load(Ordering::Acquire);
@@ -464,6 +473,7 @@ impl FpsMonitor {
                 etw_thread: None,
                 sampler_thread: None,
             })),
+            target_pid: AtomicU32::new(0),
         }
     }
 
@@ -517,7 +527,8 @@ mod tests {
     #[test]
     fn disabled_monitor_is_a_safe_no_op() {
         let monitor = FpsMonitor::new();
-        // No session, no threads: reads are 0 and writes don't panic.
+        // No session, no threads: reads are 0 and writes don't panic. The
+        // target is still remembered so enabling later can start hot.
         monitor.set_target_pid(1234);
         assert_eq!(monitor.current_fps(), 0);
         // Disabling an already-disabled monitor is fine.

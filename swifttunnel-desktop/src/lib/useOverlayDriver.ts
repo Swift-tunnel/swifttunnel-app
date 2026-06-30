@@ -26,6 +26,11 @@ function formatClock(ms: number): string {
   return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }
 
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return "--";
+  return `${Math.round(Math.min(100, Math.max(0, value)))}%`;
+}
+
 interface BoostSnapshot {
   fps: number;
   cpuUsage: number;
@@ -43,15 +48,20 @@ function computeValues(
   b: BoostSnapshot,
   sessionMs: number,
   tunnelRates: TunnelRateSnapshot,
+  pingMs: number | null,
 ): Partial<Record<OverlayMetric, string>> {
   const now = new Date();
   const ramPct =
     b.ramTotal > 0 ? Math.round((b.ramUsage / b.ramTotal) * 100) : null;
   return {
     fps: b.fps > 0 ? String(Math.round(b.fps)) : "--",
+    ping:
+      pingMs !== null && Number.isFinite(pingMs)
+        ? `${Math.round(pingMs)} ms`
+        : "--",
     time: `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`,
     playtime: b.robloxRunning ? formatClock(sessionMs) : "00:00:00",
-    cpu: `${Math.round(b.cpuUsage)}%`,
+    cpu: formatPercent(b.cpuUsage),
     ram: ramPct === null ? "--" : `${ramPct}%`,
     download: formatRate(tunnelRates.downloadBps),
     upload: formatRate(tunnelRates.uploadBps),
@@ -74,12 +84,14 @@ export function useOverlayDriver() {
   const overlay = useSettingsStore((s) => s.settings.config.overlay);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
   const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
+  const fetchPing = useVpnStore((s) => s.fetchPing);
   const ovRef = useRef<OverlayConfig>(overlay);
   const trafficRef = useRef<{
     bytesUp: number;
     bytesDown: number;
     at: number;
   } | null>(null);
+  const overlayMetricsKey = overlay.metrics.join("|");
   ovRef.current = overlay;
 
   // Push render snapshots.
@@ -104,21 +116,33 @@ export function useOverlayDriver() {
     let wasRunning = false;
 
     const tick = async () => {
+      const cfgBefore = ovRef.current;
       if (disposed) return;
+      const vpnBefore = useVpnStore.getState();
       try {
-        await fetchMetrics();
+        await fetchMetrics({
+          overlayWantsFps: cfgBefore.metrics.includes("fps"),
+          overlayWantsPing: false,
+        });
       } catch {
         /* keep last values */
       }
       const needsThroughput =
-        ovRef.current.metrics.includes("upload") ||
-        ovRef.current.metrics.includes("download");
-      const vpnBefore = useVpnStore.getState();
+        cfgBefore.metrics.includes("upload") ||
+        cfgBefore.metrics.includes("download");
+      const needsPing = cfgBefore.metrics.includes("ping");
       if (needsThroughput && vpnBefore.state === "connected") {
         try {
           await fetchThroughput();
         } catch {
           /* keep last throughput sample */
+        }
+      }
+      if (needsPing && vpnBefore.state === "connected") {
+        try {
+          await fetchPing();
+        } catch {
+          /* keep last ping sample */
         }
       }
       const b = useBoostStore.getState();
@@ -170,6 +194,7 @@ export function useOverlayDriver() {
                 b,
                 sessionStart ? Date.now() - sessionStart : 0,
                 tunnelRates,
+                vpn.ping,
               )
             : {},
       }).catch(() => {});
@@ -181,7 +206,7 @@ export function useOverlayDriver() {
       disposed = true;
       window.clearInterval(id);
     };
-  }, [overlay.enabled, fetchMetrics, fetchThroughput]);
+  }, [overlay.enabled, overlayMetricsKey, fetchMetrics, fetchThroughput, fetchPing]);
 
   // Persist the position when the user drags the bar on the overlay.
   const updateSettings = useSettingsStore((s) => s.update);

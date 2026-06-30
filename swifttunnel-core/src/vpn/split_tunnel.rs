@@ -1848,12 +1848,8 @@ impl SplitTunnelDriver {
 
     /// Clear configuration
     pub fn clear(&mut self) -> VpnResult<()> {
-        let had_interceptor = self.parallel_interceptor.is_some();
         if let Some(interceptor) = &mut self.parallel_interceptor {
             interceptor.stop();
-        }
-        if had_interceptor {
-            Self::cleanup_winpkfilter_bindings_after_stop("clear");
         }
         self.config = None;
         self.state = DriverState::NotConfigured;
@@ -1865,12 +1861,8 @@ impl SplitTunnelDriver {
     pub fn close(&mut self) -> VpnResult<()> {
         log::info!("Closing split tunnel driver...");
 
-        let had_interceptor = self.parallel_interceptor.is_some();
         if let Some(mut interceptor) = self.parallel_interceptor.take() {
             interceptor.stop();
-        }
-        if had_interceptor {
-            Self::cleanup_winpkfilter_bindings_after_stop("close");
         }
 
         self.config = None;
@@ -1879,23 +1871,6 @@ impl SplitTunnelDriver {
 
         log::info!("Split tunnel driver closed");
         Ok(())
-    }
-
-    fn cleanup_winpkfilter_bindings_after_stop(context: &str) {
-        #[cfg(windows)]
-        match Self::disable_leftover_winpkfilter_bindings() {
-            Ok(disabled) if !disabled.is_empty() => log::info!(
-                "Split tunnel {context}: disabled WinpkFilter binding on adapter(s): {}",
-                disabled.join(", ")
-            ),
-            Ok(_) => {}
-            Err(e) => log::warn!("Split tunnel {context}: WinpkFilter binding cleanup failed: {e}"),
-        }
-
-        #[cfg(not(windows))]
-        {
-            let _ = context;
-        }
     }
 
     /// Get current state

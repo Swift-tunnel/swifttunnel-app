@@ -26,6 +26,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
       window_height: 720,
       window_fullscreen: false,
       ultraboost: false,
+      custom_fflags_enabled: false,
+      custom_fflags_json: "",
     },
     network_settings: {
       enable_network_boost: false,
@@ -37,7 +39,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     show_overlay: true,
     overlay: {
       enabled: false,
-      metrics: ["fps", "time", "playtime", "cpu", "ram", "download"],
+      metrics: ["fps", "ping", "time", "playtime", "cpu", "ram", "download"],
       size: "small",
       style: "straight",
       color: "#fafafa",
@@ -75,7 +77,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   whitelisted_regions: [],
   preferred_physical_adapter_guid: null,
   network_binding_overrides: {},
-  adapter_binding_mode: "smart_auto",
+  adapter_binding_mode: "manual",
   game_process_performance: {
     high_performance_gpu_binding: false,
     prefer_performance_cores: false,

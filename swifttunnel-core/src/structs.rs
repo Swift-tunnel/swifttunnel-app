@@ -49,8 +49,9 @@ impl Default for Config {
 pub struct OverlayConfig {
     /// Master on/off for the in-game stats overlay.
     pub enabled: bool,
-    /// Selected metrics, in display order (max 12). Ids: fps, time, playtime,
-    /// battery, upload, download, cpu, cpu_temp, gpu, gpu_temp, ram, disk.
+    /// Selected metrics, in display order (max 12). Ids: fps, ping, time,
+    /// playtime, battery, upload, download, cpu, cpu_temp, gpu, gpu_temp, ram,
+    /// disk.
     pub metrics: Vec<String>,
     /// "small" | "medium" | "large".
     pub size: String,
@@ -81,6 +82,7 @@ impl Default for OverlayConfig {
             enabled: false,
             metrics: vec![
                 "fps".into(),
+                "ping".into(),
                 "time".into(),
                 "playtime".into(),
                 "cpu".into(),
@@ -180,6 +182,11 @@ pub struct RobloxSettingsConfig {
     /// Ultraboost: applies curated allowlisted performance FFlags for maximum FPS
     #[serde(default)]
     pub ultraboost: bool,
+    /// Custom FFlag import: only keys from SwiftTunnel's curated allowlist are accepted.
+    #[serde(default)]
+    pub custom_fflags_enabled: bool,
+    #[serde(default)]
+    pub custom_fflags_json: String,
 }
 
 impl Default for RobloxSettingsConfig {
@@ -192,6 +199,8 @@ impl Default for RobloxSettingsConfig {
             window_height: default_roblox_window_height(),
             window_fullscreen: default_roblox_window_fullscreen(),
             ultraboost: false,
+            custom_fflags_enabled: false,
+            custom_fflags_json: String::new(),
         }
     }
 }
@@ -685,6 +694,8 @@ mod tests {
         assert_eq!(cfg.window_height, 720);
         assert!(!cfg.window_fullscreen);
         assert!(!cfg.ultraboost);
+        assert!(!cfg.custom_fflags_enabled);
+        assert!(cfg.custom_fflags_json.is_empty());
     }
 
     #[test]

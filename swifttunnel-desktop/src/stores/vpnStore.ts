@@ -24,6 +24,7 @@ import {
 import { reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
 import { useSettingsStore } from "./settingsStore";
+import { useServerStore } from "./serverStore";
 
 type DriverSetupState =
   | "idle"
@@ -43,6 +44,31 @@ function getErrorMessage(error: unknown): string {
 const FULL_COUNTRY_BAN_ROBLOX_RUNNING_MESSAGE =
   "Close Roblox before connecting with Full Country Ban. Then connect SwiftTunnel and reopen Roblox so login and game traffic use the bypass.";
 
+const WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE =
+  "Windows could not install SwiftTunnel's split-tunnel driver because Windows networking/driver services are not responding cleanly. Restart Windows once, then open SwiftTunnel and try again. If it still fails, contact support with the log file.";
+
+function isWindowsDriverInstallerFailureMessage(message: string): boolean {
+  const haystack = message.toLowerCase();
+  return (
+    (haystack.includes("netcfg failed with code 1753") ||
+      haystack.includes("0x800106d9") ||
+      haystack.includes("msiexec code 1603") ||
+      haystack.includes("there are no more endpoints available from the endpoint mapper") ||
+      haystack.includes("driver file not found, cannot create ndisrd service")) &&
+    (haystack.includes("winpkfilter") ||
+      haystack.includes("windows packet filter") ||
+      haystack.includes("nt_ndisrd") ||
+      haystack.includes("ndisrd"))
+  );
+}
+
+function cleanDriverSetupMessage(message: string): string {
+  if (isWindowsDriverInstallerFailureMessage(message)) {
+    return WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE;
+  }
+  return message;
+}
+
 function isRebootRequiredMessage(
   vpnError: string | null,
   driverSetupError: string | null,
@@ -52,7 +78,9 @@ function isRebootRequiredMessage(
 }
 
 function driverStatusMessage(status: DriverCheckResponse): string {
-  return status.message || "Split tunnel driver is not ready.";
+  return cleanDriverSetupMessage(
+    status.message || "Split tunnel driver is not ready.",
+  );
 }
 
 function isPendingDriverInstallReboot(status: DriverCheckResponse): boolean {
@@ -215,6 +243,8 @@ async function cleanupFailedConnectAttempt(): Promise<string | null> {
 let connectAttemptSeq = 0;
 const autoRepairedBindingSignatures = new Set<string>();
 const autoRepairedFirewallSignatures = new Set<string>();
+let relayFailoverInFlight = false;
+let lastRelayFailoverAt = 0;
 
 function nextConnectAttempt(): number {
   connectAttemptSeq += 1;
@@ -225,29 +255,138 @@ function isCurrentConnectAttempt(attempt: number): boolean {
   return attempt === connectAttemptSeq;
 }
 
+function isRelayStoppedReturningTrafficMessage(message: string | null): boolean {
+  const haystack = (message ?? "").toLowerCase();
+  return (
+    haystack.includes("relay connection failed") &&
+    haystack.includes("relay stopped returning traffic")
+  );
+}
+
+function sameRegionKey(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+}
+
+function resolveFailoverRegionId(
+  eventRegion: string | null,
+  selectedRegion: string,
+): string | null {
+  const regions = useServerStore.getState().regions;
+  const candidates = [eventRegion, selectedRegion].filter(
+    (value): value is string => Boolean(value && value.trim()),
+  );
+
+  for (const candidate of candidates) {
+    const normalized = sameRegionKey(candidate);
+    const region = regions.find(
+      (r) =>
+        sameRegionKey(r.id) === normalized ||
+        sameRegionKey(r.name) === normalized,
+    );
+    if (region) return region.id;
+  }
+
+  return null;
+}
+
+function chooseNextRelayForRegion(
+  regionId: string,
+  currentForcedServer: string | undefined,
+): string | null {
+  const region = useServerStore
+    .getState()
+    .regions.find((candidate) => candidate.id === regionId);
+  const relays = region?.servers.filter(Boolean) ?? [];
+  if (relays.length < 2) return null;
+
+  if (currentForcedServer) {
+    const currentIndex = relays.indexOf(currentForcedServer);
+    if (currentIndex >= 0) {
+      return relays[(currentIndex + 1) % relays.length] ?? null;
+    }
+  }
+
+  return relays[1] ?? null;
+}
+
+async function failoverRelayAfterDeadSession(
+  event: VpnStateEvent,
+  connect: (region: string, gamePresets: string[]) => Promise<void>,
+): Promise<void> {
+  if (relayFailoverInFlight) return;
+
+  const now = Date.now();
+  if (now - lastRelayFailoverAt < 5_000) return;
+
+  const settingsStore = useSettingsStore.getState();
+  const settings = settingsStore.settings;
+  if (useServerStore.getState().regions.length === 0) {
+    await useServerStore.getState().fetchList();
+  }
+  const regionId = resolveFailoverRegionId(event.region, settings.selected_region);
+  if (!regionId) return;
+
+  const nextRelay = chooseNextRelayForRegion(
+    regionId,
+    settings.forced_servers[regionId],
+  );
+  if (!nextRelay) return;
+
+  relayFailoverInFlight = true;
+  lastRelayFailoverAt = now;
+  try {
+    settingsStore.update({
+      selected_region: regionId,
+      auto_routing_enabled: false,
+      forced_servers: {
+        ...settings.forced_servers,
+        [regionId]: nextRelay,
+      },
+    });
+    await settingsStore.save();
+    await notify(
+      "SwiftTunnel",
+      `Relay stopped responding. Switching ${regionId} to ${nextRelay} and reconnecting.`,
+    );
+    await connect(regionId, settings.selected_game_presets);
+  } catch (error) {
+    reportError("Failed to fail over after relay stopped returning traffic", error, {
+      dedupeKey: "vpn-relay-failover",
+    });
+  } finally {
+    relayFailoverInFlight = false;
+  }
+}
+
 function bindingRepairFailedStatus(reason: string): DriverCheckResponse {
+  const message = isWindowsDriverInstallerFailureMessage(reason)
+    ? WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE
+    : "SwiftTunnel repaired the split-tunnel driver, but Windows still has not attached the network filter to the active adapter. Restart Windows once, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: " +
+      reason;
+
   return {
     installed: true,
     version: null,
     ready: false,
     status: "reboot_required",
-    message:
-      "SwiftTunnel repaired the split-tunnel driver, but Windows still has not attached the network filter to the active adapter. Restart Windows once, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: " +
-      reason,
+    message,
     reboot_required: true,
     recommended_action: "reboot",
   };
 }
 
 function driverRebootRequiredStatus(reason: string): DriverCheckResponse {
+  const message = isWindowsDriverInstallerFailureMessage(reason)
+    ? WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE
+    : "Restart Windows once to finish setting up SwiftTunnel's network driver, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: " +
+      reason;
+
   return {
     installed: true,
     version: null,
     ready: false,
     status: "reboot_required",
-    message:
-      "Restart Windows once to finish setting up SwiftTunnel's network driver, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: " +
-      reason,
+    message,
     reboot_required: true,
     recommended_action: "reboot",
   };
@@ -395,7 +534,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       }
       set({ driverSetupState: "idle", driverSetupError: null });
     } catch (e) {
-      const message = getErrorMessage(e);
+      const message = cleanDriverSetupMessage(getErrorMessage(e));
       set({ driverSetupState: "error", driverSetupError: message });
       throw new Error(message);
     }
@@ -424,7 +563,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverResetAttempted: false,
       });
     } catch (e) {
-      const raw = getErrorMessage(e);
+      const raw = cleanDriverSetupMessage(getErrorMessage(e));
       set({
         state: "error",
         error: raw,
@@ -464,7 +603,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         driverResetAttempted: false,
       });
     } catch (e) {
-      const raw = getErrorMessage(e);
+      const raw = cleanDriverSetupMessage(getErrorMessage(e));
       set((current) => {
         const priorRebootRequired = isRebootRequiredMessage(
           current.error,
@@ -750,7 +889,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       autoRepairedFirewallSignatures.clear();
     } catch (e) {
       if (!isCurrentConnectAttempt(attempt)) return;
-      const message = getErrorMessage(e);
+      const message = cleanDriverSetupMessage(getErrorMessage(e));
       set((current) => ({
         state: "error",
         error: message,
@@ -873,6 +1012,10 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   handleStateEvent: (event) => {
+    const shouldFailoverRelay =
+      event.state === "error" &&
+      isRelayStoppedReturningTrafficMessage(event.error);
+
     set((current) => {
       const staleReadyEvent =
         event.state === "disconnected" &&
@@ -910,6 +1053,10 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
             : current.connectAttemptInFlight,
       };
     });
+
+    if (shouldFailoverRelay) {
+      void failoverRelayAfterDeadSession(event, get().connect);
+    }
   },
 
   handleThroughputEvent: (event) => {

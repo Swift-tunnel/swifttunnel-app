@@ -15,6 +15,7 @@ import {
   boostSyncEffectiveConfig,
   boostRestartRoblox,
 } from "../lib/commands";
+import type { BoostMetricsOptions } from "../lib/commands";
 import { reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
 
@@ -48,7 +49,7 @@ interface BoostStore {
   cpuCount: number;
 
   // Actions
-  fetchMetrics: () => Promise<void>;
+  fetchMetrics: (options?: BoostMetricsOptions) => Promise<void>;
   fetchSystemMemory: () => Promise<void>;
   fetchSystemInfo: () => Promise<void>;
   updateConfig: (configJson: string) => Promise<Config>;
@@ -83,9 +84,9 @@ export const useBoostStore = create<BoostStore>((set) => ({
   osVersion: "",
   cpuCount: 1,
 
-  fetchMetrics: async () => {
+  fetchMetrics: async (options) => {
     try {
-      const m = await boostGetMetrics();
+      const m = await boostGetMetrics(options);
       set({
         fps: m.fps,
         cpuUsage: m.cpu_usage,

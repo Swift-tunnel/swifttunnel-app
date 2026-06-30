@@ -96,8 +96,16 @@ export const serverSmartSelect = (regionId: string) =>
 
 // ── Boost / Optimizer ──
 
-export const boostGetMetrics = () =>
-  invoke<PerformanceMetricsResponse>("boost_get_metrics");
+export interface BoostMetricsOptions {
+  overlayWantsFps?: boolean;
+  overlayWantsPing?: boolean;
+}
+
+export const boostGetMetrics = (options: BoostMetricsOptions = {}) =>
+  invoke<PerformanceMetricsResponse>("boost_get_metrics", {
+    overlayWantsFps: options.overlayWantsFps ?? null,
+    overlayWantsPing: options.overlayWantsPing ?? null,
+  });
 
 export const boostCursorPos = () =>
   invoke<CursorPosResponse>("boost_cursor_pos");

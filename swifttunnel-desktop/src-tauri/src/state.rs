@@ -85,7 +85,7 @@ impl AppState {
         // in-game overlay wants FPS. `settings_save` keeps it in sync after
         // toggles.
         let fps_monitor = Arc::new(FpsMonitor::new());
-        fps_monitor.set_enabled(settings.config.overlay.enabled);
+        fps_monitor.set_enabled(overlay_wants_fps(&settings));
 
         let vpn_connection = VpnConnection::new();
         let vpn_state_handle = vpn_connection.state_handle();
@@ -131,4 +131,14 @@ impl AppState {
             }
         }
     }
+}
+
+fn overlay_wants_fps(settings: &AppSettings) -> bool {
+    settings.config.overlay.enabled
+        && settings
+            .config
+            .overlay
+            .metrics
+            .iter()
+            .any(|metric| metric == "fps")
 }

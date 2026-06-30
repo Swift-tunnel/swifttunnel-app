@@ -116,6 +116,7 @@ const FULL_SCAN_MIN_INTERVAL: Duration = Duration::from_secs(4);
 pub struct PerformanceMonitor {
     system: System,
     last_full_scan: Option<std::time::Instant>,
+    last_metrics: PerformanceMetrics,
 }
 
 impl PerformanceMonitor {
@@ -126,11 +127,18 @@ impl PerformanceMonitor {
         Self {
             system: System::new(),
             last_full_scan: None,
+            last_metrics: PerformanceMetrics::default(),
         }
     }
 
     /// Update performance metrics
     pub fn update_metrics(&mut self, metrics: &mut PerformanceMetrics) {
+        // Keep the last known Roblox PID across calls. Overlay polling creates a
+        // fresh `PerformanceMetrics` each tick, while full process scans are
+        // intentionally throttled; without this cache most ticks briefly looked
+        // like "Roblox not running" and cleared the FPS target.
+        *metrics = self.last_metrics.clone();
+
         // If we know the PID from last scan, only refresh that one process
         if let Some(pid) = metrics.process_id {
             let pid = sysinfo::Pid::from_u32(pid);
@@ -139,7 +147,7 @@ impl PerformanceMonitor {
 
             // Check if process is still alive
             if let Some(process) = self.system.process(pid) {
-                metrics.cpu_usage = process.cpu_usage();
+                metrics.cpu_usage = normalize_process_cpu(process.cpu_usage());
                 metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
             } else {
                 // Process exited, clear state and do full scan next time
@@ -161,7 +169,7 @@ impl PerformanceMonitor {
             if scan_due && let Some((pid, process)) = self.find_roblox_process() {
                 metrics.roblox_running = true;
                 metrics.process_id = Some(pid);
-                metrics.cpu_usage = process.cpu_usage();
+                metrics.cpu_usage = normalize_process_cpu(process.cpu_usage());
                 metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
             } else {
                 metrics.roblox_running = false;
@@ -174,6 +182,7 @@ impl PerformanceMonitor {
         // Get total system RAM
         self.system.refresh_memory();
         metrics.ram_total = self.system.total_memory() as f64 / 1024.0 / 1024.0;
+        self.last_metrics = metrics.clone();
     }
 
     /// Find Roblox process
@@ -221,6 +230,14 @@ impl PerformanceMonitor {
             tokio::time::sleep(interval).await;
         }
     }
+}
+
+fn normalize_process_cpu(raw_cpu: f32) -> f32 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1) as f32;
+    (raw_cpu / cores).clamp(0.0, 100.0)
 }
 
 impl Default for PerformanceMonitor {
