@@ -45,7 +45,7 @@ windows = { version = "0.62", features = [
 ] }
 
 # System utilities
-sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+sysinfo = { version = "0.32", default-features = false, features = ["system", "windows"] }
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "time", "net", "sync", "fs", "io-util", "macros"] }

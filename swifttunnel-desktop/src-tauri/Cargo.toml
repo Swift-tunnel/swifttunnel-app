@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "2.5.19"
+version = "2.5.20"
 default-run = "swifttunnel-desktop"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
@@ -38,7 +38,7 @@ base64 = "0.22"
 ring = "0.17"
 url = "2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+sysinfo = { version = "0.32", default-features = false, features = ["system", "windows"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

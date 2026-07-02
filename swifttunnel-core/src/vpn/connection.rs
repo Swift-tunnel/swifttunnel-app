@@ -1638,6 +1638,30 @@ impl VpnConnection {
                     candidate_queue_full_mode
                 );
 
+                if ticket.token.trim().is_empty() && !ticket.auth_required {
+                    relay_auth_mode = "auth_disabled_legacy".to_string();
+                    selected_relay_region = candidate_region.clone();
+                    relay_addr = *candidate_addr;
+                    queue_full_mode = candidate_queue_full_mode;
+                    attempt_results.push(RelayCandidateAttempt {
+                        region: candidate_region.clone(),
+                        addr: *candidate_addr,
+                        authenticated: true,
+                        policy_known: true,
+                        auth_required: false,
+                        preflight_mode: candidate_preflight_mode,
+                        queue_full_mode: candidate_queue_full_mode,
+                    });
+                    authenticated = true;
+                    log::warn!(
+                        "V3: Relay ticket auth disabled by backend; using legacy no-auth relay mode for '{}' (session {}, key_id={})",
+                        candidate_region,
+                        session_id_hex,
+                        ticket.key_id
+                    );
+                    break;
+                }
+
                 match relay.authenticate_with_ticket(&ticket.token) {
                     Ok(Some(status)) if status.is_authenticated() => {
                         relay_auth_mode = "authenticated".to_string();
