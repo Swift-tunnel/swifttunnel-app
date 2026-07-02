@@ -37,9 +37,9 @@ struct ApiErrorResponse {
     banned_reason: Option<String>,
 }
 
-const API_BASE_URL: &str = "https://swifttunnel.net";
-const SUPABASE_URL: &str = "https://auth.swifttunnel.net";
-const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvbnVnanZvcWtsdmdibmh4c2hnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyNTU3ODksImV4cCI6MjA4MDgzMTc4OX0.Jmme0whahuX2KEmklBZQzCcJnsHJemyO8U9TdynbyNE";
+const API_BASE_URL: &str = "https://www.swifttunnel.net";
+const SUPABASE_URL: &str = "https://ppwacjpkeonxdblwygqo.supabase.co";
+const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBwd2FjanBrZW9ueGRibHd5Z3FvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4OTY1NTksImV4cCI6MjA5ODQ3MjU1OX0.WSRbDCg2NUJhZ4DiWh8PKbCKoi9oHO5td86HJFK7iBw";
 
 /// HTTP client for authentication API calls
 pub struct AuthClient {
@@ -231,9 +231,25 @@ impl AuthClient {
         email: &str,
         password: &str,
     ) -> Result<SupabaseAuthResponse, AuthError> {
-        let url = format!("{}/auth/v1/token?grant_type=password", SUPABASE_URL);
-
         debug!("Signing in user: {}", email);
+
+        match self
+            .sign_in_with_password_via_desktop_api(email, password)
+            .await
+        {
+            Ok(data) => {
+                info!("Sign in successful for user {}", data.user.id);
+                return Ok(data);
+            }
+            Err(primary_error) => {
+                warn!(
+                    "Desktop API sign in failed; trying direct Supabase fallback: {}",
+                    primary_error
+                );
+            }
+        }
+
+        let url = format!("{}/auth/v1/token?grant_type=password", SUPABASE_URL);
 
         let response = match self
             .send_with_network_fallback("sign in", |client| {
@@ -249,15 +265,7 @@ impl AuthClient {
             .await
         {
             Ok(response) => response,
-            Err(primary_error) => {
-                warn!(
-                    "Direct Supabase sign in failed; trying desktop API fallback: {}",
-                    primary_error
-                );
-                return self
-                    .sign_in_with_password_via_desktop_api(email, password)
-                    .await;
-            }
+            Err(primary_error) => return Err(primary_error),
         };
 
         let data = self.parse_password_sign_in_response(response).await?;
@@ -271,9 +279,20 @@ impl AuthClient {
         &self,
         refresh_token: &str,
     ) -> Result<SupabaseAuthResponse, AuthError> {
-        let url = format!("{}/auth/v1/token?grant_type=refresh_token", SUPABASE_URL);
-
         debug!("Refreshing token via Supabase");
+
+        match self.refresh_token_via_desktop_api(refresh_token).await {
+            Ok(data) => return Ok(data),
+            Err(AuthError::RefreshTokenInvalid) => return Err(AuthError::RefreshTokenInvalid),
+            Err(primary_error) => {
+                warn!(
+                    "Desktop API token refresh failed; trying direct Supabase fallback: {}",
+                    primary_error
+                );
+            }
+        }
+
+        let url = format!("{}/auth/v1/token?grant_type=refresh_token", SUPABASE_URL);
 
         let response = match self
             .send_with_network_fallback("refresh token", |client| {
@@ -288,13 +307,7 @@ impl AuthClient {
             .await
         {
             Ok(response) => response,
-            Err(primary_error) => {
-                warn!(
-                    "Direct Supabase token refresh failed; trying desktop API fallback: {}",
-                    primary_error
-                );
-                return self.refresh_token_via_desktop_api(refresh_token).await;
-            }
+            Err(primary_error) => return Err(primary_error),
         };
 
         if !response.status().is_success() {
