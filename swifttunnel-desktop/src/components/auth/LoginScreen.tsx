@@ -8,7 +8,7 @@ import { SwiftLogo } from "../common/SwiftLogo";
 declare const __APP_VERSION__: string;
 
 const OAUTH_TIMEOUT_MS = 120_000;
-const SIGNUP_URL = "https://swifttunnel.net/signup";
+const SIGNUP_URL = "https://www.swifttunnel.net/signup";
 
 const FEATURES = [
   {

@@ -45,3 +45,4 @@ PC-BOOSTS.md
 !Windows-testbench/*.exe
 !Windows-testbench/*.dll
 !Windows-testbench/*.md
+cargo-core.log

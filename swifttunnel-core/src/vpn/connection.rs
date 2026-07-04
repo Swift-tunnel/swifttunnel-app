@@ -338,7 +338,7 @@ fn select_candidate_after_preflight(
     Ok((
         fallback.region.clone(),
         fallback.addr,
-        fallback.queue_full_mode,
+        RelayQueueFullMode::Bypass,
     ))
 }
 
@@ -1642,7 +1642,7 @@ impl VpnConnection {
                     relay_auth_mode = "auth_disabled_legacy".to_string();
                     selected_relay_region = candidate_region.clone();
                     relay_addr = *candidate_addr;
-                    queue_full_mode = candidate_queue_full_mode;
+                    queue_full_mode = RelayQueueFullMode::Bypass;
                     attempt_results.push(RelayCandidateAttempt {
                         region: candidate_region.clone(),
                         addr: *candidate_addr,
@@ -1650,7 +1650,7 @@ impl VpnConnection {
                         policy_known: true,
                         auth_required: false,
                         preflight_mode: candidate_preflight_mode,
-                        queue_full_mode: candidate_queue_full_mode,
+                        queue_full_mode: RelayQueueFullMode::Bypass,
                     });
                     authenticated = true;
                     log::warn!(
@@ -4317,6 +4317,29 @@ mod tests {
                 queue_full_mode: RelayQueueFullMode::Drop,
             },
         ];
+
+        let selected = select_candidate_after_preflight(&attempts).unwrap();
+        assert_eq!(
+            selected,
+            (
+                "germany-01".to_string(),
+                parse_addr("10.0.0.1:51821"),
+                RelayQueueFullMode::Bypass
+            )
+        );
+    }
+
+    #[test]
+    fn test_select_candidate_after_preflight_legacy_fallback_forces_bypass_queue() {
+        let attempts = vec![RelayCandidateAttempt {
+            region: "germany-01".to_string(),
+            addr: parse_addr("10.0.0.1:51821"),
+            authenticated: false,
+            policy_known: true,
+            auth_required: false,
+            preflight_mode: RelayPreflightMode::Legacy,
+            queue_full_mode: RelayQueueFullMode::Drop,
+        }];
 
         let selected = select_candidate_after_preflight(&attempts).unwrap();
         assert_eq!(

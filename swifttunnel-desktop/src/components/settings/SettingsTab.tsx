@@ -4,6 +4,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useToastStore } from "../../stores/toastStore";
+import { MAINTENANCE_MODE } from "../../lib/maintenance";
 import {
   Toggle,
   Button,
@@ -262,7 +263,7 @@ export function SettingsTab() {
             enabled={
               settings.enable_api_tunneling && !routeAssistDisabledByPartial
             }
-            disabled={routeAssistDisabledByPartial}
+            disabled={routeAssistDisabledByPartial || MAINTENANCE_MODE}
             ariaLabel="Roblox Route Assist"
             onChange={(v) => set({ enable_api_tunneling: v })}
           />

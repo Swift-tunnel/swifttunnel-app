@@ -24,6 +24,8 @@ import {
 import { AdapterSelectionPanel } from "./AdapterSelectionPanel";
 import { StatusRing } from "./StatusRing";
 import { Button, EmptyState, Tooltip, InfoIcon, Toggle } from "../ui";
+import { MaintenanceScreen } from "../shell/MaintenanceScreen";
+import { MAINTENANCE_MODE } from "../../lib/maintenance";
 import type { ServerRegion } from "../../lib/types";
 
 type ConnectStatus = ReturnType<typeof resolveConnectStatus>;
@@ -328,6 +330,11 @@ export function ConnectTab() {
         : "primary";
 
   const hasRegions = regions.length > 0;
+
+  // Tunneling is under maintenance — the rest of the app still works.
+  if (MAINTENANCE_MODE) {
+    return <MaintenanceScreen />;
+  }
 
   return (
     <div className="flex w-full flex-col gap-4 pb-6">

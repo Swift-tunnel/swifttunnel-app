@@ -12,7 +12,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-const GAME_SERVER_REGION_API_URL: &str = "https://swifttunnel.net/api/vpn/game-server-region";
+const GAME_SERVER_REGION_API_URL: &str = "https://www.swifttunnel.net/api/vpn/game-server-region";
 
 /// Shared HTTP client with a short timeout for geolocation lookups
 fn geo_http_client() -> &'static reqwest::Client {
@@ -40,6 +40,24 @@ fn get_cache() -> Arc<Mutex<HashMap<Ipv4Addr, String>>> {
 
 fn get_semaphore() -> &'static Semaphore {
     API_SEMAPHORE.get_or_init(|| Semaphore::new(2))
+}
+
+/// Cache of resolved game-server regions. A region maps to a fixed Roblox data
+/// center, so a resolved IP→region answer is stable — caching it avoids
+/// re-hitting the web resolver for the same server across reconnects. The
+/// resolver already caches server-side, but every client call still costs a
+/// backend request (and counts toward hosting limits), so this trims real load.
+const REGION_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+const REGION_CACHE_MAX_ENTRIES: usize = 4096;
+static REGION_CACHE: std::sync::OnceLock<
+    Arc<Mutex<HashMap<Ipv4Addr, (GameServerRegionLookup, std::time::Instant)>>>,
+> = std::sync::OnceLock::new();
+
+fn get_region_cache() -> Arc<Mutex<HashMap<Ipv4Addr, (GameServerRegionLookup, std::time::Instant)>>>
+{
+    REGION_CACHE
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
 }
 
 /// Response from ipinfo.io API
@@ -570,13 +588,38 @@ pub enum GameServerRegionLookup {
 /// the provider token/cache/overrides. Auto-routing only receives a region when
 /// the resolver returns a recognized structured region id.
 pub async fn lookup_game_server_region(ip: Ipv4Addr) -> GameServerRegionLookup {
-    match resolve_game_server_region_from_api(ip).await {
+    // Serve a fresh cached answer if we have one — regions are stable, so this
+    // avoids re-resolving the same server on reconnects/new sessions.
+    {
+        let cache = get_region_cache();
+        let guard = cache.lock();
+        if let Some((cached, at)) = guard.get(&ip) {
+            if at.elapsed() < REGION_CACHE_TTL {
+                return cached.clone();
+            }
+        }
+    }
+
+    let result = match resolve_game_server_region_from_api(ip).await {
         None => GameServerRegionLookup::Failed,
         Some(response) => match resolve_api_response(ip, Some(response)) {
             Some((region, location)) => GameServerRegionLookup::Resolved(region, location),
             None => GameServerRegionLookup::NoRegion,
         },
+    };
+
+    // Cache definitive answers only; a transport-level Failed is worth retrying,
+    // so it is never cached.
+    if !matches!(result, GameServerRegionLookup::Failed) {
+        let cache = get_region_cache();
+        let mut guard = cache.lock();
+        if guard.len() >= REGION_CACHE_MAX_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(ip, (result.clone(), std::time::Instant::now()));
     }
+
+    result
 }
 
 #[cfg(test)]

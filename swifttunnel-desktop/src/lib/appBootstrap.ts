@@ -1,6 +1,7 @@
 import type { AppSettings, AuthState, VpnState } from "./types";
 import { shouldAutoReconnectOnLaunch } from "./startup";
 import { reportError } from "./errors";
+import { MAINTENANCE_MODE } from "./maintenance";
 
 type AppBootstrapDeps = {
   initEventListeners: () => Promise<void>;
@@ -52,6 +53,8 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
 
   const loadedSettings = deps.getSettings();
   if (
+    // Tunneling is under maintenance — never auto-connect to (down) relays.
+    !MAINTENANCE_MODE &&
     shouldAutoReconnectOnLaunch(
       deps.getAuthState(),
       deps.getVpnState(),

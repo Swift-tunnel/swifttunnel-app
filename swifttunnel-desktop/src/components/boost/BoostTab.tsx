@@ -5,6 +5,7 @@ import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
 import { boostCloseRoblox, boostGetMetrics } from "../../lib/commands";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
+import { MAINTENANCE_MODE } from "../../lib/maintenance";
 import {
   Toggle,
   SectionHeader,
@@ -647,7 +648,7 @@ export function BoostTab() {
           tooltip="Full bypass: DPI evasion plus relaying all Roblox traffic through the selected SwiftTunnel relay. Turns off Partial Ban."
           enabled={draftCountryBan}
           onChange={(v) => void requestFullBan(v)}
-          disabled={robloxControlsLocked}
+          disabled={robloxControlsLocked || MAINTENANCE_MODE}
         />
         <SettingRow
           title="Bypass Partial Ban"
@@ -655,7 +656,7 @@ export function BoostTab() {
           tooltip="Relays the Roblox discovery and join path while gameplay stays direct. Turns off Country Ban."
           enabled={draftPartialBan}
           onChange={choosePartialBan}
-          disabled={robloxControlsLocked}
+          disabled={robloxControlsLocked || MAINTENANCE_MODE}
         />
       </Section>
 

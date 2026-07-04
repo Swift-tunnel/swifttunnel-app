@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 /// API endpoint for fetching server list
-const SERVERS_API_URL: &str = "https://swifttunnel.net/api/vpn/servers";
+const SERVERS_API_URL: &str = "https://www.swifttunnel.net/api/vpn/servers";
 
 /// Cache TTL in seconds (1 hour)
 const CACHE_TTL_SECONDS: i64 = 3600;
@@ -119,7 +119,7 @@ pub fn measure_latency_icmp(_ip: &str) -> Option<u32> {
 }
 
 // No hardcoded server data - everything is fetched from the API
-// See: https://swifttunnel.net/api/vpn/servers
+// See: https://www.swifttunnel.net/api/vpn/servers
 
 // =============================================================================
 // DYNAMIC SERVER LIST (Fetched from API)

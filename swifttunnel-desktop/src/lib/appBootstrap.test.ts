@@ -2,6 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "./settings";
 import { runAppBootstrap } from "./appBootstrap";
 
+// Auto-connect is gated behind MAINTENANCE_MODE. These tests cover the normal
+// (not-in-maintenance) launch behavior, so pin the flag off.
+vi.mock("./maintenance", () => ({
+  MAINTENANCE_MODE: false,
+  COMMUNITY_URL: "",
+}));
+
 describe("app bootstrap", () => {
   it("loads dependencies, reconnects, and checks updates", async () => {
     const initEventListeners = vi.fn().mockResolvedValue(undefined);

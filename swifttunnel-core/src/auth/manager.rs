@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 use url::form_urlencoded;
 
-const OAUTH_LOGIN_URL: &str = "https://swifttunnel.net/login";
+const OAUTH_LOGIN_URL: &str = "https://www.swifttunnel.net/login";
 
 /// Maximum number of token refresh retries
 const MAX_REFRESH_RETRIES: u32 = 3;
