@@ -1621,6 +1621,79 @@ impl RobloxOptimizer {
         Ok(())
     }
 
+    /// Undo everything SwiftTunnel applied to the Roblox client, whether or not a
+    /// backup exists: strip our FFlags from ClientAppSettings.json and, when a
+    /// GlobalBasicSettings backup exists, restore it. Backs the Repair tab's
+    /// "reset Roblox settings" fix.
+    pub fn reset_swifttunnel_changes(&self) -> Result<()> {
+        if let Err(e) = self.remove_all_fflags() {
+            warn!("reset: could not remove FFlags: {}", e);
+        }
+
+        if self.backup_path.exists() {
+            let settings_path = self.resolve_settings_path();
+            if Self::is_readonly_path(&settings_path) {
+                let _ = Self::remove_readonly_path(&settings_path);
+            }
+            if let Err(e) = fs::copy(&self.backup_path, &settings_path) {
+                warn!("reset: could not restore settings backup: {}", e);
+            }
+        }
+
+        let _ = Self::sync_gpu_preference(false);
+        let _ = Self::sync_nvidia_profile(false);
+        Ok(())
+    }
+
+    /// Whether SwiftTunnel's Ultraboost FFlags are actually present in the live
+    /// ClientAppSettings.json — a Roblox update or the user can wipe them.
+    fn ultraboost_fflags_present(&self) -> bool {
+        let Some((probe_key, _)) = Self::ULTRABOOST_FFLAGS.first() else {
+            return false;
+        };
+        let Ok(paths) = Self::get_client_settings_paths(false) else {
+            return false;
+        };
+        for client_settings in paths {
+            let settings_path = client_settings.join("ClientAppSettings.json");
+            if let Ok(settings) = Self::read_client_app_settings(&settings_path) {
+                if settings.contains_key(*probe_key) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Reconcile a saved Roblox config against what's ACTUALLY applied to the
+    /// client, so the Optimize page reflects external changes (e.g. a Roblox
+    /// update or the user wiping the FFlags / FPS cap). Defensive: only turns
+    /// things off when it can confirm they're gone, and only for FFlags + FPS.
+    pub fn effective_roblox_config(&self, config: &RobloxSettingsConfig) -> RobloxSettingsConfig {
+        let mut effective = config.clone();
+        if !self.is_roblox_installed() {
+            return effective;
+        }
+
+        // Ultraboost lives in ClientAppSettings.json FFlags.
+        if config.ultraboost && !self.ultraboost_fflags_present() {
+            effective.ultraboost = false;
+        }
+
+        // FPS unlock lives in GlobalBasicSettings `FramerateCap` (<= 60 = gone).
+        if config.unlock_fps {
+            if let Ok(current) = self.read_current_settings() {
+                if current.fps_cap <= 60 {
+                    effective.unlock_fps = false;
+                } else {
+                    effective.target_fps = current.fps_cap;
+                }
+            }
+        }
+
+        effective
+    }
+
     /// Check if Roblox is installed (settings file exists)
     pub fn is_roblox_installed(&self) -> bool {
         self.resolve_settings_path().exists()

@@ -22,7 +22,7 @@ export function SupportSection({
       ) : (
         <SectionHeader label={title} />
       )}
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
+      <div className="instrument overflow-hidden divide-y divide-[color:var(--color-border-subtle)]">
         {children}
       </div>
     </section>

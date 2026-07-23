@@ -10,6 +10,7 @@ import {
 } from "../../lib/utils";
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
+import { RouteDiagram } from "./RouteDiagram";
 import {
   isConnectActionBusy,
   resolveConnectStatus,
@@ -24,8 +25,6 @@ import {
 import { AdapterSelectionPanel } from "./AdapterSelectionPanel";
 import { StatusRing } from "./StatusRing";
 import { Button, EmptyState, Tooltip, InfoIcon, Toggle } from "../ui";
-import { MaintenanceScreen } from "../shell/MaintenanceScreen";
-import { MAINTENANCE_MODE } from "../../lib/maintenance";
 import type { ServerRegion } from "../../lib/types";
 
 type ConnectStatus = ReturnType<typeof resolveConnectStatus>;
@@ -331,21 +330,19 @@ export function ConnectTab() {
 
   const hasRegions = regions.length > 0;
 
-  // Tunneling is under maintenance — the rest of the app still works.
-  if (MAINTENANCE_MODE) {
-    return <MaintenanceScreen />;
-  }
-
   return (
     <div className="flex w-full flex-col gap-4 pb-6">
       {/* ── Hero: command deck ── */}
       <section
-        className={`relative overflow-hidden rounded-[var(--radius-card)] surface-card ${isConnected ? "connected-ambience" : ""}`}
+        className={`corner-frame relative overflow-hidden rounded-[var(--radius-card)] surface-card ${isConnected ? "connected-ambience" : ""}`}
       >
         <div
-          className="dot-grid pointer-events-none absolute inset-x-0 top-0 h-[140px]"
-          style={{ opacity: 0.55 }}
+          className="dot-grid pointer-events-none absolute inset-0"
+          style={{ opacity: 0.8 }}
         />
+        {/* Light source behind the deck so it has atmosphere, and turns green
+            once the tunnel is actually carrying traffic. */}
+        <div className={`aurora ${isConnected ? "aurora-live" : ""}`} aria-hidden />
 
         <div className="relative flex items-center gap-5 px-6 pb-5 pt-6">
           <StatusRing state={vpnState} />
@@ -369,13 +366,13 @@ export function ConnectTab() {
 
             <div className="mt-2 flex items-center gap-2.5">
               {heroRegion && (
-                <span className="text-[22px] leading-none">
+                <span className="text-[24px] leading-none">
                   {countryFlag(heroRegion.country_code)}
                 </span>
               )}
               <span
-                className="truncate text-[24px] font-semibold leading-[1.05] text-text-primary"
-                style={{ letterSpacing: "-0.022em" }}
+                className="truncate text-[26px] font-semibold leading-[1.05] text-text-primary"
+                style={{ letterSpacing: "-0.024em" }}
               >
                 {heroRegionName}
               </span>
@@ -414,13 +411,31 @@ export function ConnectTab() {
           </div>
         )}
 
+        {/* Route diagram lives inside the deck: the connect state and the path
+            it produces are one instrument, not two stacked cards. */}
+        <RouteDiagram
+          regionName={
+            (isConnected ? connectedRegion : selectedRegion)?.name ?? null
+          }
+          countryCode={
+            (isConnected ? connectedRegion : selectedRegion)?.country_code ??
+            null
+          }
+          /* Same source as the Latency stat below — the two must never
+             disagree, and the region's cached latency is a real measurement
+             even when we're disconnected. */
+          ping={heroLatency}
+          connected={isConnected}
+          relayName={isConnected ? connectedServerLabel : null}
+        />
+
         {/* Stats strip */}
         <div
           className="relative grid grid-cols-3 border-t"
           style={{ borderColor: "var(--color-border-subtle)" }}
         >
           <HeroStat
-            label="Latency"
+            label="Relay RTT"
             value={heroLatency !== null ? String(heroLatency) : "—"}
             unit={heroLatency !== null ? "ms" : undefined}
             color={
@@ -577,7 +592,7 @@ export function ConnectTab() {
             }
           />
         ) : (
-          <div className="flex flex-col overflow-hidden rounded-[var(--radius-card)] surface-card">
+          <div className="instrument flex flex-col overflow-hidden">
             <AutoRouteRow
               active={settings.auto_routing_enabled}
               disabled={isConnected || isTransitioning}
@@ -636,7 +651,7 @@ function HeroStat({
 }) {
   return (
     <div
-      className="flex flex-col gap-1 px-6 py-3.5"
+      className="flex flex-col gap-1.5 px-6 py-4"
       style={{
         borderRight: divider
           ? "1px solid var(--color-border-subtle)"
@@ -648,12 +663,15 @@ function HeroStat({
       </span>
       <div className="flex items-baseline gap-1">
         <span
-          className="lcd-readout text-[17px] font-medium leading-none"
-          style={{ color: color || "var(--color-text-primary)" }}
+          className="lcd-readout text-[30px] font-semibold leading-none"
+          style={{
+            color: color || "var(--color-text-primary)",
+            letterSpacing: "-0.04em",
+          }}
         >
           {value}
         </span>
-        {unit && <span className="text-[10.5px] text-text-muted">{unit}</span>}
+        {unit && <span className="text-[12px] text-text-muted">{unit}</span>}
       </div>
     </div>
   );

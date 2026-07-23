@@ -4,6 +4,8 @@ interface SectionHeaderProps {
   label: string;
   tag?: string;
   action?: ReactNode;
+  /** Rendered right after the tag (grouped left), unlike `action` (far right). */
+  inlineAction?: ReactNode;
   description?: string;
   className?: string;
   size?: "sm" | "md";
@@ -13,6 +15,7 @@ export function SectionHeader({
   label,
   tag,
   action,
+  inlineAction,
   description,
   className,
   size = "md",
@@ -39,6 +42,7 @@ export function SectionHeader({
             {tag}
           </span>
         )}
+        {inlineAction}
         {action && <span className="ml-auto">{action}</span>}
       </div>
       {description && (

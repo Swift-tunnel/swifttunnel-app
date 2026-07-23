@@ -27,7 +27,7 @@ export async function showRamOverlay(freedMb: number): Promise<void> {
   const overlay = (await getAllWindows()).find((w) => w.label === "overlay");
   if (!overlay) {
     throw new Error(
-      "Overlay window not found - fully quit and reopen SwiftTunnel so the new overlay window loads.",
+      "Overlay window not found — fully quit and reopen SwiftTunnel so the new overlay window loads.",
     );
   }
   await overlay.show();

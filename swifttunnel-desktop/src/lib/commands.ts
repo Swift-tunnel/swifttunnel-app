@@ -54,6 +54,15 @@ export const authLogout = () =>
 export const authRefreshProfile = () =>
   invoke<void>("auth_refresh_profile");
 
+// Forced-update gate: returns the server's "please update" message when this
+// build has been locked out (old-build lockout), else null.
+export const authUpdateRequired = () =>
+  invoke<string | null>("auth_update_required");
+
+// Retire the boot splash window once the main window is up.
+export const closeSplash = () =>
+  invoke<void>("close_splash");
+
 // ── VPN ──
 
 export const vpnGetState = () =>
@@ -131,6 +140,9 @@ export const boostRestartRoblox = () =>
 export const boostCloseRoblox = () =>
   invoke<void>("boost_close_roblox");
 
+export const boostResetRobloxSettings = () =>
+  invoke<void>("boost_reset_roblox_settings");
+
 // ── Network Tests ──
 
 export const networkStartStabilityTest = (durationSecs: number) =>
@@ -156,6 +168,12 @@ export const settingsGenerateNetworkDiagnosticsBundle = () =>
   invoke<NetworkDiagnosticsBundleResponse>(
     "settings_generate_network_diagnostics_bundle",
   );
+
+export const presetSaveToDownloads = (fileName: string, contents: string) =>
+  invoke<NetworkDiagnosticsBundleResponse>("preset_save_to_downloads", {
+    fileName,
+    contents,
+  });
 
 // ── Updater ──
 
@@ -197,6 +215,9 @@ export const systemInstallDriver = (force = false) =>
 
 export const systemRepairDriver = () =>
   invoke<DriverCheckResponse>("system_repair_driver");
+
+export const systemReinstallDriver = () =>
+  invoke<DriverCheckResponse>("system_reinstall_driver");
 
 export const systemRepairWindowsFirewall = () =>
   invoke<WindowsFirewallRepairResponse>("system_repair_windows_firewall");

@@ -6,8 +6,8 @@
 //! - Jitter (standard deviation)
 //! - Packet loss percentage
 
+use super::icmp;
 use super::types::{ConnectionQuality, PingSample, StabilityTestProgress, StabilityTestResults};
-use crate::hidden_command;
 use log::{debug, error, info};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -104,52 +104,10 @@ pub async fn run_stability_test(
     Ok(results)
 }
 
-/// Perform a single ping and return latency in milliseconds
+/// Perform a single ping and return latency in milliseconds.
+/// Uses raw ICMP (not `ping.exe`) so it works on any Windows display language.
 async fn ping_once(target: &str) -> Option<u32> {
-    // Use Windows ping command with:
-    // -n 1: send only 1 packet
-    // -w <timeout>: timeout in ms
-    let output = tokio::task::spawn_blocking(move || {
-        hidden_command("ping")
-            .args(["-n", "1", "-w", &PING_TIMEOUT_MS.to_string(), PING_TARGET])
-            .output()
-    })
-    .await
-    .ok()?
-    .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse ping output - look for "time=XXms" or "time<1ms"
-    // Windows format: "Reply from X.X.X.X: bytes=32 time=14ms TTL=56"
-    // Or for very fast: "Reply from X.X.X.X: bytes=32 time<1ms TTL=56"
-    for line in stdout.lines() {
-        if line.contains("time=") {
-            // Extract time value
-            if let Some(time_start) = line.find("time=") {
-                let time_str = &line[time_start + 5..];
-                if let Some(ms_end) = time_str.find("ms") {
-                    if let Ok(ms) = time_str[..ms_end].trim().parse::<u32>() {
-                        return Some(ms);
-                    }
-                }
-            }
-        } else if line.contains("time<1ms") {
-            // Very fast ping, report as 1ms
-            return Some(1);
-        }
-    }
-
-    // Check for timeout patterns
-    if stdout.contains("Request timed out") || stdout.contains("Destination host unreachable") {
-        return None;
-    }
-
-    None
+    icmp::ping_ms(target, PING_TIMEOUT_MS as u32).await
 }
 
 /// Calculate statistics from ping samples

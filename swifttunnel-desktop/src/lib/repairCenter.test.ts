@@ -3,6 +3,7 @@ import { DEFAULT_SETTINGS } from "./settings";
 import {
   parseSavedRepairResult,
   restoreRepairRollback,
+  runDriverReinstall,
   runRepairIssue,
   type RepairCenterDeps,
 } from "./repairCenter";
@@ -130,6 +131,9 @@ const healthyNetworkRepair: NetworkRepairResponse = {
 function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
   return {
     now: () => 1_800_000_000_000,
+    boostResetRobloxSettings: vi.fn().mockResolvedValue(undefined),
+    i18nResetCache: vi.fn().mockResolvedValue(0),
+    overlayResetLayout: vi.fn().mockResolvedValue(undefined),
     serverGetLatencies: vi.fn().mockResolvedValue([{ region: "Singapore", latency_ms: 18 }]),
     serverRefresh: vi.fn().mockResolvedValue("ok"),
     systemCheckDriver: vi.fn().mockResolvedValue(readyDriver),
@@ -140,6 +144,7 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
     }),
     systemIsAdmin: vi.fn().mockResolvedValue({ is_admin: true }),
     systemRepairDriver: vi.fn().mockResolvedValue(readyDriver),
+    systemReinstallDriver: vi.fn().mockResolvedValue(readyDriver),
     systemRepairNetwork: vi.fn().mockResolvedValue(healthyNetworkRepair),
     systemRepairWindowsFirewall: vi.fn().mockResolvedValue(healthyFirewall),
     systemRepairStartupRegistration: vi.fn().mockResolvedValue({
@@ -267,7 +272,11 @@ describe("repair center logic", () => {
     expect(report.nextStep).toContain("split tunnel driver repair");
   });
 
-  it("runs driver repair even when global health is ready so adapter bindings can be refreshed", async () => {
+  it("skips driver repair when the driver is already healthy", async () => {
+    // Repair-all runs this on every click; reinstalling a healthy driver would
+    // report changed=true and force the post-repair app restart each time.
+    // Binding refresh still happens at connect time (preflight) and via
+    // Internet recovery.
     const deps = makeDeps({
       systemRepairDriver: vi.fn().mockResolvedValue(readyDriver),
     });
@@ -276,9 +285,9 @@ describe("repair center logic", () => {
       settings: DEFAULT_SETTINGS,
     });
 
-    expect(report.status).toBe("fixed");
-    expect(report.changed).toBe(true);
-    expect(deps.systemRepairDriver).toHaveBeenCalledTimes(1);
+    expect(report.status).toBe("healthy");
+    expect(report.changed).toBe(false);
+    expect(deps.systemRepairDriver).not.toHaveBeenCalled();
   });
 
   it("does not run driver repair when Windows requires a reboot first", async () => {
@@ -317,7 +326,12 @@ describe("repair center logic", () => {
   });
 
   it("keeps driver context when the repair command rejects", async () => {
-    const systemCheckDriver = vi.fn().mockResolvedValue(readyDriver);
+    // Not-ready before-state so the repair path actually executes; the
+    // after-failure re-check then reports ready (partial recovery).
+    const systemCheckDriver = vi
+      .fn()
+      .mockResolvedValueOnce(missingDriver)
+      .mockResolvedValue(readyDriver);
     const deps = makeDeps({
       systemCheckDriver,
       systemRepairDriver: vi.fn().mockRejectedValue(new Error("repair crashed")),
@@ -676,5 +690,161 @@ describe("repair center logic", () => {
     );
 
     expect(parsed).toBeNull();
+  });
+
+  it("reports translations healthy when there is no cache to clear", async () => {
+    const deps = makeDeps();
+
+    const report = await runRepairIssue("translations", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("healthy");
+    expect(report.changed).toBe(false);
+    expect(deps.i18nResetCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the translation cache without forcing an app restart", async () => {
+    const deps = makeDeps({
+      i18nResetCache: vi.fn().mockResolvedValue(2),
+    });
+
+    const report = await runRepairIssue("translations", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("fixed");
+    // App-local repair — changed must stay false so Repair-all doesn't
+    // trigger the restart + UAC flow for a cache clear.
+    expect(report.changed).toBe(false);
+    expect(report.entries).toContainEqual(
+      expect.objectContaining({ label: "Cached languages cleared", value: "2" }),
+    );
+  });
+
+  it("reports overlay layout healthy at defaults without touching settings", async () => {
+    const deps = makeDeps();
+
+    const report = await runRepairIssue("overlay_layout", deps, {
+      settings: DEFAULT_SETTINGS,
+    });
+
+    expect(report.status).toBe("healthy");
+    expect(report.changed).toBe(false);
+    expect(deps.overlayResetLayout).not.toHaveBeenCalled();
+  });
+
+  it("resets an off-screen overlay layout without forcing an app restart", async () => {
+    const deps = makeDeps();
+
+    const report = await runRepairIssue("overlay_layout", deps, {
+      settings: {
+        ...DEFAULT_SETTINGS,
+        config: {
+          ...DEFAULT_SETTINGS.config,
+          overlay: {
+            ...DEFAULT_SETTINGS.config.overlay,
+            custom_x: -9000,
+            custom_y: 40,
+          },
+        },
+      },
+    });
+
+    expect(report.status).toBe("fixed");
+    expect(report.changed).toBe(false);
+    expect(deps.overlayResetLayout).toHaveBeenCalledTimes(1);
+    expect(report.entries).toContainEqual(
+      expect.objectContaining({
+        label: "Previous custom offset",
+        value: "-9000, 40",
+      }),
+    );
+  });
+
+  it("does not force-reinstall the driver while a session is active", async () => {
+    const deps = makeDeps({
+      vpnGetState: vi.fn().mockResolvedValue({
+        ...disconnectedState,
+        state: "connected",
+      }),
+    });
+
+    const report = await runDriverReinstall(deps);
+
+    expect(report.status).toBe("partial");
+    expect(report.changed).toBe(false);
+    expect(deps.systemReinstallDriver).not.toHaveBeenCalled();
+  });
+
+  it("blocks driver reinstall while Windows has a pending reboot", async () => {
+    const deps = makeDeps({
+      systemCheckDriver: vi.fn().mockResolvedValue({
+        ...readyDriver,
+        reboot_required: true,
+        recommended_action: "reboot",
+      }),
+    });
+
+    const report = await runDriverReinstall(deps);
+
+    expect(report.status).toBe("needs_reboot");
+    expect(report.changed).toBe(false);
+    expect(deps.systemReinstallDriver).not.toHaveBeenCalled();
+  });
+
+  it("reports a verified full driver reinstall", async () => {
+    const deps = makeDeps();
+
+    const report = await runDriverReinstall(deps);
+
+    expect(report.status).toBe("fixed");
+    expect(report.changed).toBe(true);
+    expect(deps.systemReinstallDriver).toHaveBeenCalledTimes(1);
+    expect(report.summary).toContain("reinstalled");
+  });
+
+  it("displays exactly why a driver reinstall could not complete", async () => {
+    const deps = makeDeps({
+      systemReinstallDriver: vi.fn().mockResolvedValue({
+        ...missingDriver,
+        status: "repair_failed",
+        message:
+          "bundled package reinstall failed: access denied\nMSI reinstall failed: exit code 1603",
+        recommended_action: "reinstall",
+      }),
+      systemIsAdmin: vi.fn().mockResolvedValue({ is_admin: false }),
+    });
+
+    const report = await runDriverReinstall(deps);
+
+    expect(report.status).toBe("failed");
+    expect(report.summary).toBe("Driver reinstall could not complete.");
+    // The user-facing report must carry the actual reason…
+    expect(report.entries).toContainEqual(
+      expect.objectContaining({
+        label: "After message",
+        value: expect.stringContaining("MSI reinstall failed"),
+      }),
+    );
+    // …and a concrete next step for the non-elevated case.
+    expect(report.nextStep).toContain("Administrator");
+  });
+
+  it("returns a failed report when the reinstall command itself rejects", async () => {
+    const deps = makeDeps({
+      systemReinstallDriver: vi
+        .fn()
+        .mockRejectedValue(new Error("Driver operation lock is poisoned")),
+    });
+
+    const report = await runDriverReinstall(deps);
+
+    expect(report.status).toBe("failed");
+    expect(report.entries).toContainEqual(
+      expect.objectContaining({
+        value: expect.stringContaining("lock is poisoned"),
+      }),
+    );
   });
 });

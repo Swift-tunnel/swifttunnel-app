@@ -51,7 +51,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
       show_max_fps_message: false,
     },
   },
-  window_state: { x: null, y: null, width: 560, height: 750, maximized: false },
+  window_state: { x: null, y: null, width: 1020, height: 660, maximized: false },
   selected_region: "singapore",
   selected_server: "singapore",
   current_tab: "connect",
@@ -143,9 +143,10 @@ export function mergeAppSettings(
   const settings = {
     ...DEFAULT_SETTINGS,
     ...raw,
-    // Older releases saved false by default even though there is no UI for this
-    // preference. Migrate those installs so taskbar/X close hides to tray.
-    minimize_to_tray: true,
+    // Older releases saved false as a default with no UI to change it, so a
+    // missing value means "never chose" and must land on true, not inherit that.
+    // Settings → General owns this now, so an explicit choice is honored.
+    minimize_to_tray: raw?.minimize_to_tray ?? true,
     selected_game_presets: DEFAULT_SETTINGS.selected_game_presets,
     config: {
       ...DEFAULT_SETTINGS.config,

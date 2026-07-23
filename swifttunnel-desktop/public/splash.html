@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SwiftTunnel</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        -webkit-user-select: none;
+        user-select: none;
+        cursor: default;
+        font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, -apple-system, sans-serif;
+      }
+      /* Inset leaves room for the card's drop shadow inside the transparent window. */
+      .card {
+        position: absolute;
+        inset: 10px;
+        display: flex;
+        flex-direction: column;
+        border-radius: 16px;
+        overflow: hidden;
+        color: #f5f5f5;
+        /* App palette: near-black base lifting to a faint top glow. */
+        background: radial-gradient(125% 100% at 50% -12%, #1c1c1f 0%, #101012 46%, #060606 100%);
+        border: 1px solid #262628;
+        box-shadow:
+          0 26px 64px -24px rgba(0, 0, 0, 0.85),
+          inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      }
+      /* Faint dot field + radial mask for depth (matches the brand). */
+      .card::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background-image: radial-gradient(rgba(255, 255, 255, 0.13) 1.3px, transparent 1.3px);
+        background-size: 16px 16px;
+        -webkit-mask-image: radial-gradient(120% 78% at 50% 32%, #000 28%, transparent 82%);
+        mask-image: radial-gradient(120% 78% at 50% 32%, #000 28%, transparent 82%);
+      }
+      /* Thin sweeping accent line for subtle motion. */
+      .scan {
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.5), transparent);
+        animation: scan 4.5s ease-in-out infinite;
+      }
+      .main {
+        position: relative;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+      }
+      .logo-wrap {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 92px;
+        width: 92px;
+      }
+      .halo {
+        position: absolute;
+        inset: -6px;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(255, 255, 255, 0.10), transparent 66%);
+        animation: pulse 3.6s ease-in-out infinite;
+      }
+      .logo {
+        position: relative;
+        width: 60px;
+        height: 60px;
+        object-fit: contain;
+        filter: drop-shadow(0 0 18px rgba(255, 255, 255, 0.16));
+        animation: breathe 3.6s ease-in-out infinite;
+      }
+      .name {
+        margin-top: 15px;
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        color: #f5f5f5;
+      }
+      .tag {
+        margin-top: 5px;
+        font-size: 11px;
+        letter-spacing: 0.01em;
+        color: #8a8a8a;
+      }
+      /* Medal-style footer status strip. */
+      .footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        height: 42px;
+        padding: 0 16px;
+        border-top: 1px solid #262628;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent);
+      }
+      .brand { display: flex; align-items: center; gap: 8px; }
+      .brand img { width: 17px; height: 17px; object-fit: contain; opacity: 0.85; }
+      .brand span {
+        font-size: 11.5px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        color: #cfcfcf;
+      }
+      .status { display: flex; align-items: center; gap: 8px; font-size: 10.5px; letter-spacing: 0.05em; color: #7c7c7c; }
+      .spinner {
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 1.5px solid #3a3a3d;
+        border-top-color: #f5f5f5;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      @keyframes breathe { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+      @keyframes pulse { 0%, 100% { opacity: 0.6; transform: scale(0.94); } 50% { opacity: 1; transform: scale(1.05); } }
+      @keyframes scan { 0% { opacity: 0; transform: translateY(0); } 12% { opacity: 1; } 88% { opacity: 1; } 100% { opacity: 0; transform: translateY(190px); } }
+      @media (prefers-reduced-motion: reduce) {
+        .logo, .halo, .spinner, .scan { animation: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="scan"></div>
+      <div class="main">
+        <div class="logo-wrap">
+          <div class="halo"></div>
+          <img class="logo" src="/swift.png" alt="SwiftTunnel" draggable="false" />
+        </div>
+        <div class="name">SwiftTunnel</div>
+        <div class="tag">Lower ping. Pure signal.</div>
+      </div>
+      <div class="footer">
+        <div class="brand">
+          <img src="/swift.png" alt="" draggable="false" />
+          <span>SwiftTunnel</span>
+        </div>
+        <div class="status"><span>Starting</span><span class="spinner"></span></div>
+      </div>
+    </div>
+  </body>
+</html>

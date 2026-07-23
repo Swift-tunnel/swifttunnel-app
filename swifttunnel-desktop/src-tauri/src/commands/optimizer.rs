@@ -308,6 +308,7 @@ pub async fn boost_sync_effective_config(
 ) -> Result<BoostUpdateResult, String> {
     let settings = state.settings.clone();
     let network_booster = state.network_booster.clone();
+    let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
         let mut current_config = {
@@ -322,9 +323,16 @@ pub async fn boost_sync_effective_config(
             let nb = network_booster.lock();
             nb.effective_network_config(&current_config.network_settings)
         };
+        // Reflect the Roblox client's real state — FFlags/FPS wiped by a Roblox
+        // update or the user should show as off on the Optimize page.
+        let effective_roblox_config = {
+            let ro = roblox_optimizer.lock();
+            ro.effective_roblox_config(&current_config.roblox_settings)
+        };
 
         let mut applied_config = current_config.clone();
         applied_config.network_settings = effective_network_config;
+        applied_config.roblox_settings = effective_roblox_config;
 
         let mut warnings = Vec::new();
         if current_config.network_settings.disable_nagle
@@ -341,11 +349,12 @@ pub async fn boost_sync_effective_config(
                 "Network booster: Disable network throttling was not active on Windows".to_string(),
             );
         }
-        if applied_config.network_settings.disable_nagle
+        let network_changed = applied_config.network_settings.disable_nagle
             != current_config.network_settings.disable_nagle
             || applied_config.network_settings.disable_network_throttling
-                != current_config.network_settings.disable_network_throttling
-        {
+                != current_config.network_settings.disable_network_throttling;
+        let roblox_changed = applied_config.roblox_settings != current_config.roblox_settings;
+        if network_changed || roblox_changed {
             let mut s = settings.lock();
             s.config = applied_config.clone();
             swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
@@ -358,6 +367,33 @@ pub async fn boost_sync_effective_config(
     })
     .await
     .map_err(|e| format!("Boost config sync task failed: {}", e))?
+}
+
+/// Reset all SwiftTunnel changes to the Roblox client — clears our FFlags
+/// (Ultraboost / custom), restores the GlobalBasicSettings backup (FPS, window,
+/// graphics) when present, and resets the saved Roblox config to defaults. Used
+/// by the Repair tab's "reset Roblox settings" fix.
+#[tauri::command]
+pub async fn boost_reset_roblox_settings(state: State<'_, AppState>) -> Result<(), String> {
+    let settings = state.settings.clone();
+    let roblox_optimizer = state.roblox_optimizer.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        {
+            let ro = roblox_optimizer.lock();
+            if let Err(e) = ro.reset_swifttunnel_changes() {
+                log::warn!("Reset Roblox settings: {}", e);
+            }
+        }
+        {
+            let mut s = settings.lock();
+            s.config.roblox_settings = swifttunnel_core::structs::RobloxSettingsConfig::default();
+            swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Reset Roblox task failed: {}", e))?
 }
 
 #[tauri::command]

@@ -24,7 +24,10 @@ export type RepairIssueId =
   | "network_booster"
   | "startup"
   | "relay"
-  | "installer";
+  | "installer"
+  | "translations"
+  | "overlay_layout"
+  | "roblox_reset";
 
 export type RepairStatus =
   | "not_checked"
@@ -89,6 +92,12 @@ export interface RepairContext {
 
 export interface RepairCenterDeps {
   now: () => number;
+  boostResetRobloxSettings: () => Promise<void>;
+  /** Clears all cached translations and re-applies the saved language.
+   *  Resolves with the number of cached language stores removed. */
+  i18nResetCache: () => Promise<number>;
+  /** Resets the in-game overlay position/size back to defaults and saves. */
+  overlayResetLayout: () => Promise<void>;
   serverGetLatencies: () => Promise<LatencyEntry[]>;
   serverRefresh: () => Promise<string>;
   systemCheckDriver: () => Promise<DriverCheckResponse>;
@@ -96,6 +105,8 @@ export interface RepairCenterDeps {
   systemGetStartupRegistration: () => Promise<StartupRegistrationSnapshot>;
   systemIsAdmin: () => Promise<{ is_admin: boolean }>;
   systemRepairDriver: () => Promise<DriverCheckResponse>;
+  /** Force a full driver reinstall regardless of reported health. */
+  systemReinstallDriver: () => Promise<DriverCheckResponse>;
   systemRepairWindowsFirewall: () => Promise<WindowsFirewallRepairResponse>;
   systemRepairNetwork: () => Promise<NetworkRepairResponse>;
   systemRepairStartupRegistration: (
@@ -189,6 +200,30 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
     description: "Checks driver install state used by support triage.",
     actionLabel: "Check",
     systemChanging: false,
+  },
+  {
+    id: "translations",
+    label: "Translations",
+    description:
+      "Clears the saved translation cache and re-translates the app in your language — fixes garbled, mixed-language, or stuck-in-English text.",
+    actionLabel: "Repair",
+    systemChanging: false,
+  },
+  {
+    id: "overlay_layout",
+    label: "Overlay position",
+    description:
+      "Brings the in-game overlay back on screen by resetting its position and size — for when it was dragged off-screen or a monitor was unplugged.",
+    actionLabel: "Repair",
+    systemChanging: false,
+  },
+  {
+    id: "roblox_reset",
+    label: "Reset Roblox settings",
+    description:
+      "Clears every SwiftTunnel change to the Roblox client — Ultraboost and custom FFlags, FPS unlock, window size and graphics — restoring your original client settings.",
+    actionLabel: "Repair",
+    systemChanging: true,
   },
 ];
 
@@ -341,9 +376,130 @@ export async function runRepairIssue(
         return await checkRelay(deps);
       case "installer":
         return await checkInstaller(deps);
+      case "translations":
+        return await repairTranslations(deps);
+      case "overlay_layout":
+        return await repairOverlayLayout(deps, context.settings);
+      case "roblox_reset":
+        return await repairResetRoblox(deps, context.settings);
     }
   } catch (error) {
     return errorReport(deps, "Repair failed", formatErrorMessage(error));
+  }
+}
+
+/**
+ * On-demand full driver reinstall. Deliberately NOT part of `REPAIR_ISSUES`:
+ * Repair-all must never force-reinstall a healthy driver on every click. This
+ * is the explicit "reinstall the driver" support action for when the driver
+ * *reports* healthy but misbehaves — and when it can't finish, the report
+ * says exactly why (not elevated, reboot pending, installer error).
+ */
+export const DRIVER_REINSTALL_ISSUE: RepairIssueDefinition = {
+  id: "driver",
+  label: "Reinstall split tunnel driver",
+  description:
+    "Fully removes and reinstalls the Windows Packet Filter driver, even when it reports healthy. Use this when connections keep failing after normal repair.",
+  actionLabel: "Repair",
+  systemChanging: true,
+};
+
+export async function runDriverReinstall(
+  deps: RepairCenterDeps,
+): Promise<RepairReport> {
+  try {
+    const state = await deps.vpnGetState().catch(() => null);
+    if (
+      state !== null &&
+      state.state !== "disconnected" &&
+      state.state !== "error"
+    ) {
+      return {
+        status: "partial",
+        summary: "Driver reinstall did not run because SwiftTunnel is connected.",
+        nextStep: "Disconnect SwiftTunnel, then run the reinstall again.",
+        changed: false,
+        reversible: false,
+        ranAt: deps.now(),
+        entries: [{ label: "State", value: state.state, tone: "warn" }],
+      };
+    }
+
+    const [before, admin] = await Promise.all([
+      deps.systemCheckDriver().catch(() => null),
+      deps.systemIsAdmin().catch(() => ({ is_admin: false })),
+    ]);
+
+    if (before?.status === "unsupported") {
+      return {
+        status: "unsupported",
+        summary: "Driver reinstall is only available on Windows.",
+        nextStep: "No changes were made.",
+        changed: false,
+        reversible: false,
+        ranAt: deps.now(),
+        entries: [],
+      };
+    }
+
+    // A pending Windows driver change blocks a clean reinstall — surface that
+    // instead of stacking another install on top of it.
+    if (before && (before.reboot_required || before.recommended_action === "reboot")) {
+      return {
+        status: "needs_reboot",
+        summary:
+          "Windows has a pending driver change — reboot before reinstalling.",
+        nextStep: "Restart Windows, then run the driver reinstall again.",
+        changed: false,
+        reversible: false,
+        ranAt: deps.now(),
+        entries: driverEntries(before),
+      };
+    }
+
+    const after = await deps.systemReinstallDriver();
+
+    const status: RepairStatus = after.ready
+      ? "fixed"
+      : after.reboot_required
+        ? "needs_reboot"
+        : after.status === "unsupported"
+          ? "unsupported"
+          : "failed";
+
+    return {
+      status,
+      summary: after.ready
+        ? "Driver fully reinstalled and verified."
+        : after.reboot_required
+          ? "Driver reinstalled — Windows needs a reboot to finish."
+          : "Driver reinstall could not complete.",
+      nextStep: after.ready
+        ? "Try connecting again."
+        : after.reboot_required
+          ? "Restart Windows, then try connecting again."
+          : !admin.is_admin
+            ? "Relaunch SwiftTunnel as Administrator, then run the reinstall again."
+            : "Reboot Windows and run the reinstall again. If it still fails, copy this result and the log file for support.",
+      changed: true,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [
+        {
+          label: "Admin",
+          value: admin.is_admin ? "elevated" : "standard user",
+          tone: admin.is_admin ? "default" : "warn",
+        },
+        ...(before ? prefixEntries("Before", driverEntries(before)) : []),
+        ...prefixEntries("After", driverEntries(after)),
+      ],
+    };
+  } catch (error) {
+    return errorReport(
+      deps,
+      "Driver reinstall could not complete.",
+      formatErrorMessage(error),
+    );
   }
 }
 
@@ -534,6 +690,20 @@ async function repairDriver(deps: RepairCenterDeps): Promise<RepairReport> {
       before,
       "needs_reboot",
       "Windows requires a reboot before driver repair can continue.",
+      false,
+      admin,
+    );
+  }
+
+  // Already healthy — don't reinstall/rebind for nothing. Repair-all runs this
+  // on every click; an unconditional reinstall would report changed=true and
+  // force the post-repair app restart even on perfectly healthy machines.
+  if (before.ready) {
+    return driverReport(
+      deps,
+      before,
+      "healthy",
+      "Split tunnel driver is healthy.",
       false,
       admin,
     );
@@ -1040,6 +1210,144 @@ async function checkInstaller(deps: RepairCenterDeps): Promise<RepairReport> {
     reversible: false,
     ranAt: deps.now(),
     entries: driverEntries(driver),
+  };
+}
+
+// Both repairs below only touch app-local state (localStorage / settings.json),
+// never the system — so they always report changed:false, which keeps the
+// Repair-all flow from forcing a pointless app restart + UAC prompt.
+
+async function repairTranslations(deps: RepairCenterDeps): Promise<RepairReport> {
+  const cleared = await deps.i18nResetCache();
+
+  if (cleared === 0) {
+    return {
+      status: "healthy",
+      summary: "No cached translations to clear.",
+      nextStep:
+        "If text still looks wrong, pick your language again in Settings.",
+      changed: false,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [{ label: "Translation cache", value: "empty" }],
+    };
+  }
+
+  return {
+    status: "fixed",
+    summary: "Translation cache cleared and your language re-applied fresh.",
+    nextStep:
+      "Check the tab that looked wrong. If text is still garbled, copy this result for support.",
+    changed: false,
+    reversible: false,
+    ranAt: deps.now(),
+    entries: [
+      {
+        label: "Cached languages cleared",
+        value: String(cleared),
+        tone: "good",
+      },
+    ],
+  };
+}
+
+async function repairOverlayLayout(
+  deps: RepairCenterDeps,
+  settings: AppSettings,
+): Promise<RepairReport> {
+  const ov = settings.config.overlay;
+  const deviated =
+    ov.position !== "top-left" ||
+    ov.custom_x !== null ||
+    ov.custom_y !== null ||
+    ov.size !== "small";
+
+  if (!deviated) {
+    return {
+      status: "healthy",
+      summary: "Overlay layout is already at the default position.",
+      nextStep:
+        "If the overlay still isn't visible, enable it from the In-Game tab.",
+      changed: false,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [
+        { label: "Position", value: ov.position },
+        { label: "Size", value: ov.size },
+      ],
+    };
+  }
+
+  await deps.overlayResetLayout();
+
+  return {
+    status: "fixed",
+    summary: "Overlay moved back to the default on-screen position.",
+    nextStep:
+      "Enable the overlay from the In-Game tab and re-position it where you like.",
+    changed: false,
+    reversible: false,
+    ranAt: deps.now(),
+    entries: [
+      { label: "Previous position", value: ov.position },
+      {
+        label: "Previous custom offset",
+        value:
+          ov.custom_x !== null && ov.custom_y !== null
+            ? `${ov.custom_x}, ${ov.custom_y}`
+            : "none",
+        mono: true,
+      },
+      { label: "Previous size", value: ov.size },
+      { label: "Now", value: "top-left, small", tone: "good" },
+    ],
+  };
+}
+
+async function repairResetRoblox(
+  deps: RepairCenterDeps,
+  settings: AppSettings,
+): Promise<RepairReport> {
+  // Only reset when SwiftTunnel actually has Roblox changes applied. Without
+  // this guard, "Repair" would wipe nothing yet still report changed=true —
+  // forcing the app-restart loop on every click and confusing users.
+  const rs = settings.config.roblox_settings;
+  const hasChanges =
+    rs.ultraboost ||
+    rs.custom_fflags_enabled ||
+    rs.unlock_fps ||
+    rs.window_fullscreen;
+  if (!hasChanges) {
+    return {
+      status: "healthy",
+      summary: "No SwiftTunnel Roblox changes to reset.",
+      nextStep: "Nothing was changed.",
+      changed: false,
+      reversible: false,
+      ranAt: deps.now(),
+      entries: [
+        { label: "Roblox client", value: "already at your own settings" },
+      ],
+    };
+  }
+
+  await deps.boostResetRobloxSettings();
+  return {
+    status: "fixed",
+    summary:
+      "Roblox settings reset — Ultraboost/custom FFlags, FPS unlock, and window tweaks cleared.",
+    nextStep:
+      "Reopen Roblox, then re-enable any optimizations you want from the Games tab.",
+    changed: true,
+    reversible: false,
+    ranAt: deps.now(),
+    entries: [
+      {
+        label: "Roblox client",
+        value: "reset to original settings",
+        tone: "good",
+      },
+    ],
   };
 }
 

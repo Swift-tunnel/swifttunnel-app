@@ -9,8 +9,9 @@ use std::time::Duration;
 use std::os::windows::process::CommandExt;
 
 /// Windows CREATE_NO_WINDOW flag to prevent console windows from appearing
+/// (public so other modules can hide raw `std::process::Command` spawns too)
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
+pub const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Create a Command that won't show a console window on Windows
 ///
@@ -559,31 +560,67 @@ pub fn relaunch_elevated_with_args() -> std::io::Result<()> {
     ))
 }
 
+/// Run `exe` elevated (UAC prompt) via pure Win32 `ShellExecuteExW`, wait for
+/// it to exit, and return its exit code.
+///
+/// This replaces the old PowerShell `Start-Process -Verb RunAs -Wait` wrapper —
+/// no PowerShell process is spawned, so nothing can ever flash a console
+/// window. `hide_window` controls the elevated child's own window (use `true`
+/// for console tools like msiexec; `false` when relaunching the GUI app).
 #[cfg(windows)]
-fn escape_powershell_single_quoted(value: &str) -> String {
-    value.replace('\'', "''")
-}
+pub fn run_elevated_and_wait(
+    exe: &str,
+    params: &str,
+    hide_window: bool,
+) -> std::io::Result<i32> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
+    use windows::core::PCWSTR;
 
-#[cfg(windows)]
-fn build_elevated_wait_script(exe_path: &str, args: &[String]) -> String {
-    let escaped_exe = escape_powershell_single_quoted(exe_path);
-    let arg_list = if args.is_empty() {
-        "$argList=@(); ".to_string()
-    } else {
-        let rendered_args = args
-            .iter()
-            .map(|arg| format!("'{}'", escape_powershell_single_quoted(arg)))
-            .collect::<Vec<_>>()
-            .join(",");
-        format!("$argList=@({rendered_args}); ")
+    let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = OsStr::new(exe).encode_wide().chain(Some(0)).collect();
+    let params_w: Vec<u16> = OsStr::new(params).encode_wide().chain(Some(0)).collect();
+
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params_w.as_ptr()),
+        nShow: if hide_window {
+            SW_HIDE.0
+        } else {
+            SW_SHOWNORMAL.0
+        },
+        ..Default::default()
     };
 
-    format!(
-        "$ErrorActionPreference='Stop'; \
-         {arg_list}\
-         $p=Start-Process -FilePath '{escaped_exe}' -Verb RunAs -ArgumentList $argList -Wait -PassThru; \
-         exit $p.ExitCode"
-    )
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("Elevation was declined or failed: {e}"),
+        )
+    })?;
+
+    let process = info.hProcess;
+    if process.is_invalid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Elevated process started but no handle was returned",
+        ));
+    }
+
+    let mut code: u32 = 1;
+    unsafe {
+        WaitForSingleObject(process, INFINITE);
+        let _ = GetExitCodeProcess(process, &mut code);
+        let _ = CloseHandle(process);
+    }
+    Ok(code as i32)
 }
 
 /// Relaunch the current process elevated and wait for the elevated child to exit.
@@ -595,26 +632,13 @@ fn build_elevated_wait_script(exe_path: &str, args: &[String]) -> String {
 pub fn relaunch_elevated_with_args_and_wait() -> std::io::Result<i32> {
     let exe_path = std::env::current_exe()?;
     let exe_path_str = exe_path.to_string_lossy().to_string();
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let script = build_elevated_wait_script(&exe_path_str, &args);
+    let args_joined = std::env::args()
+        .skip(1)
+        .map(|a| quote_windows_arg(&a))
+        .collect::<Vec<_>>()
+        .join(" ");
 
-    let output = hidden_command("powershell")
-        .args(["-NoProfile", "-Command", &script])
-        .output()?;
-
-    let exit_code = output.status.code().unwrap_or(1);
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let detail = if !stderr.is_empty() { stderr } else { stdout };
-
-    if !output.status.success() && !detail.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("Failed to elevate and wait: {detail}"),
-        ));
-    }
-
-    Ok(exit_code)
+    run_elevated_and_wait(&exe_path_str, &args_joined, false)
 }
 
 #[cfg(not(windows))]
@@ -919,16 +943,10 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn test_build_elevated_wait_script_escapes_single_quotes() {
-        let script = build_elevated_wait_script(
-            "C:\\Program Files\\Swift'Tunnel\\swifttunnel-desktop.exe",
-            &["--cleanup".to_string(), "O'Hara".to_string()],
-        );
-        assert!(script.contains("Swift''Tunnel"));
-        assert!(script.contains("'--cleanup'"));
-        assert!(script.contains("'O''Hara'"));
-        assert!(script.contains("Start-Process -FilePath"));
-        assert!(script.contains("-Wait -PassThru"));
+    fn test_run_elevated_and_wait_is_linked() {
+        // Verify the pure-Win32 elevation path exists without invoking it
+        // (invoking would show a real UAC prompt).
+        let _f: fn(&str, &str, bool) -> std::io::Result<i32> = run_elevated_and_wait;
     }
 
     #[test]

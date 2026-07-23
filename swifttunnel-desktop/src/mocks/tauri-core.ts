@@ -53,7 +53,7 @@ const MOCK_SETTINGS: AppSettings = {
       show_max_fps_message: false,
     },
   },
-  window_state: { x: null, y: null, width: 560, height: 750, maximized: false },
+  window_state: { x: null, y: null, width: 1020, height: 660, maximized: false },
   selected_region: "singapore",
   selected_server: "singapore",
   current_tab: "connect",
@@ -551,6 +551,10 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   settings_generate_network_diagnostics_bundle: () => ({
     file_path:
       "C:\\Users\\Evelyn\\Desktop\\SwiftTunnel_NetworkDiagnostics_20260606_120000.txt",
+    folder_path: "C:\\Users\\Evelyn\\Desktop",
+  }),
+  preset_save_to_downloads: () => ({
+    file_path: "C:\\Users\\Evelyn\\Desktop\\SwiftTunnel-Preset-My-Setup.txt",
     folder_path: "C:\\Users\\Evelyn\\Desktop",
   }),
   system_copy_log_to_clipboard: () => ({

@@ -168,7 +168,7 @@ pub enum PowerPlan {
 }
 
 /// Roblox-specific settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RobloxSettingsConfig {
     pub graphics_quality: GraphicsQuality,
     pub unlock_fps: bool,

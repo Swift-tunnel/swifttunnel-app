@@ -25,10 +25,7 @@ export function EmptyState({
         border: "1px solid var(--color-border-subtle)",
       }}
     >
-      <div
-        className="flex h-10 w-10 items-center justify-center rounded-full"
-        style={{ backgroundColor: "var(--color-bg-elevated)" }}
-      >
+      <div className="icon-orb flex h-10 w-10 items-center justify-center">
         {loading ? (
           <Spinner size={18} color="var(--color-text-muted)" />
         ) : (

@@ -528,6 +528,54 @@ pub async fn settings_generate_network_diagnostics_bundle(
     })
 }
 
+/// Sanitize a caller-supplied preset filename so it can never escape the output
+/// directory (no path separators, traversal or exotic characters).
+fn sanitize_preset_filename(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(['-', '.']);
+    let base = if trimmed.is_empty() {
+        "SwiftTunnel-Preset"
+    } else {
+        trimmed
+    };
+    if base.to_ascii_lowercase().ends_with(".txt") {
+        base.to_string()
+    } else {
+        format!("{base}.txt")
+    }
+}
+
+/// Write a shareable preset as a `.txt` next to where diagnostics land (Desktop,
+/// falling back to Downloads), and return the path so the UI can reveal it.
+#[tauri::command]
+pub fn preset_save_to_downloads(
+    app: AppHandle,
+    file_name: String,
+    contents: String,
+) -> Result<NetworkDiagnosticsBundleResponse, String> {
+    let output_dir = resolve_output_dir(&app);
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("Failed to create output directory: {e}"))?;
+
+    let file_path = output_dir.join(sanitize_preset_filename(&file_name));
+    std::fs::write(&file_path, contents)
+        .map_err(|e| format!("Failed to write preset file: {e}"))?;
+
+    Ok(NetworkDiagnosticsBundleResponse {
+        file_path: file_path.to_string_lossy().to_string(),
+        folder_path: output_dir.to_string_lossy().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

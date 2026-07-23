@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_WINDOW_HEIGHT,
+  MAX_WINDOW_WIDTH,
   MIN_WINDOW_HEIGHT,
   MIN_WINDOW_WIDTH,
   ensureWindowStateVisible,
@@ -23,7 +25,7 @@ describe("windowState", () => {
     expect(normalized.height).toBe(MIN_WINDOW_HEIGHT);
   });
 
-  it("preserves valid persisted window state", () => {
+  it("preserves valid persisted geometry and maximized state", () => {
     const normalized = normalizeWindowState({
       x: 200,
       y: 100,
@@ -39,6 +41,19 @@ describe("windowState", () => {
       height: 840,
       maximized: true,
     });
+  });
+
+  it("clamps a size saved before the window cap existed", () => {
+    const normalized = normalizeWindowState({
+      x: 0,
+      y: 0,
+      width: 1811,
+      height: 1040,
+      maximized: false,
+    });
+
+    expect(normalized.width).toBe(MAX_WINDOW_WIDTH);
+    expect(normalized.height).toBe(MAX_WINDOW_HEIGHT);
   });
 
   it("treats minimized-like dimensions as non-persistable", () => {

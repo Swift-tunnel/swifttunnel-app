@@ -1,7 +1,12 @@
 import type { WindowState } from "./types";
 
-export const MIN_WINDOW_WIDTH = 940;
-export const MIN_WINDOW_HEIGHT = 620;
+export const MIN_WINDOW_WIDTH = 900;
+export const MIN_WINDOW_HEIGHT = 600;
+/** Must track maxWidth/maxHeight for the "main" window in tauri.conf.json.
+ *  Without clamping here, a size saved before the cap existed is restored
+ *  verbatim on the next launch and silently defeats it. */
+export const MAX_WINDOW_WIDTH = 1360;
+export const MAX_WINDOW_HEIGHT = 860;
 
 export type MonitorWorkArea = {
   x: number;
@@ -22,14 +27,18 @@ export function isPersistableWindowSize(width: number, height: number): boolean 
   );
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
 export function normalizeWindowState(state: WindowState): WindowState {
   const x = state.x !== null && Number.isFinite(state.x) ? state.x : null;
   const y = state.y !== null && Number.isFinite(state.y) ? state.y : null;
   const width = Number.isFinite(state.width)
-    ? Math.max(state.width, MIN_WINDOW_WIDTH)
+    ? clamp(state.width, MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH)
     : MIN_WINDOW_WIDTH;
   const height = Number.isFinite(state.height)
-    ? Math.max(state.height, MIN_WINDOW_HEIGHT)
+    ? clamp(state.height, MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT)
     : MIN_WINDOW_HEIGHT;
 
   return {
@@ -38,11 +47,8 @@ export function normalizeWindowState(state: WindowState): WindowState {
     y,
     width,
     height,
+    maximized: state.maximized === true,
   };
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
 }
 
 function rectsIntersect(a: MonitorWorkArea, b: MonitorWorkArea): boolean {

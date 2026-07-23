@@ -8,6 +8,7 @@ use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::OnceLock;
 
 /// Response from the user profile API
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -35,11 +36,41 @@ struct ApiErrorResponse {
     code: Option<String>,
     #[serde(default)]
     banned_reason: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 const API_BASE_URL: &str = "https://www.swifttunnel.net";
 const SUPABASE_URL: &str = "https://ppwacjpkeonxdblwygqo.supabase.co";
 const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBwd2FjanBrZW9ueGRibHd5Z3FvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4OTY1NTksImV4cCI6MjA5ODQ3MjU1OX0.WSRbDCg2NUJhZ4DiWh8PKbCKoi9oHO5td86HJFK7iBw";
+
+/// The running app version, reported to the API in the `X-SwiftTunnel-Version`
+/// header so the server can lock out builds pulled from old GitHub releases.
+/// Set once at startup by the desktop shell via [`set_client_version`]; falls
+/// back to this crate's version if never set (e.g. in tests).
+static CLIENT_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Record the running app version. Call once at startup from the Tauri shell.
+pub fn set_client_version(version: impl Into<String>) {
+    let _ = CLIENT_VERSION.set(version.into());
+}
+
+fn client_version() -> &'static str {
+    CLIENT_VERSION
+        .get()
+        .map(String::as_str)
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
+/// Set the first time the server rejects this build as too old (old-build
+/// lockout). Once set, the app shows the forced-update gate until the user
+/// updates and restarts.
+static UPDATE_REQUIRED_MESSAGE: OnceLock<String> = OnceLock::new();
+
+/// The "please update" message if the server has locked this build out, else None.
+pub fn update_required_message() -> Option<String> {
+    UPDATE_REQUIRED_MESSAGE.get().cloned()
+}
 
 /// HTTP client for authentication API calls
 pub struct AuthClient {
@@ -50,7 +81,9 @@ pub struct AuthClient {
 
 fn build_http_client(use_system_proxy: bool) -> Client {
     let mut builder = Client::builder()
-        .user_agent("SwiftTunnel-Desktop/0.1.0")
+        // Real build version (set at startup) so server logs/WAF can tell
+        // client versions apart instead of the old hardcoded "0.1.0".
+        .user_agent(format!("SwiftTunnel-Desktop/{}", client_version()))
         .timeout(std::time::Duration::from_secs(30))
         .use_native_tls();
 
@@ -86,7 +119,9 @@ impl AuthClient {
         }
     }
 
-    fn add_hwid_header(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn add_common_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        // Report the running build so the server can lock out old versions.
+        let request = request.header("X-SwiftTunnel-Version", client_version());
         match &self.device_hwid {
             Some(hwid) => request.header("X-SwiftTunnel-HWID", hwid),
             None => request,
@@ -168,7 +203,7 @@ impl AuthClient {
         let url = format!("{}/api/auth/desktop/password", API_BASE_URL);
         let response = self
             .send_with_network_fallback("desktop password sign in", |client| {
-                self.add_hwid_header(
+                self.add_common_headers(
                     client
                         .post(&url)
                         .header("Content-Type", "application/json")
@@ -190,7 +225,7 @@ impl AuthClient {
         let url = format!("{}/api/auth/desktop/refresh", API_BASE_URL);
         let response = self
             .send_with_network_fallback("desktop token refresh", |client| {
-                self.add_hwid_header(
+                self.add_common_headers(
                     client
                         .post(&url)
                         .header("Content-Type", "application/json")
@@ -347,7 +382,7 @@ impl AuthClient {
 
         let response = self
             .send_with_network_fallback("VPN config", |client| {
-                self.add_hwid_header(client.post(&url))
+                self.add_common_headers(client.post(&url))
                     .header("Authorization", format!("Bearer {}", access_token))
                     .json(&json!({
                         "region": region,
@@ -359,6 +394,9 @@ impl AuthClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             error!("Get VPN config failed: {} - {}", status, body);
+            if let Some(error) = update_required_error(status, &body) {
+                return Err(error);
+            }
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
             }
@@ -393,7 +431,7 @@ impl AuthClient {
 
         let response = self
             .send_with_network_fallback("relay ticket", |client| {
-                self.add_hwid_header(client.post(&url))
+                self.add_common_headers(client.post(&url))
                     .header("Authorization", format!("Bearer {}", access_token))
                     .header("Content-Type", "application/json")
                     .json(&json!({
@@ -407,6 +445,9 @@ impl AuthClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             error!("Relay ticket fetch failed: {} - {}", status, body);
+            if let Some(error) = update_required_error(status, &body) {
+                return Err(error);
+            }
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
             }
@@ -444,7 +485,7 @@ impl AuthClient {
 
         let response = self
             .send_with_network_fallback("desktop auth exchange", |client| {
-                self.add_hwid_header(client.put(&url))
+                self.add_common_headers(client.put(&url))
                     .header("Content-Type", "application/json")
                     .json(&self.exchange_oauth_payload(exchange_token, state))
             })
@@ -499,7 +540,7 @@ impl AuthClient {
 
         let response = self
             .send_with_network_fallback("user profile", |client| {
-                self.add_hwid_header(client.get(&url))
+                self.add_common_headers(client.get(&url))
                     .header("Authorization", format!("Bearer {}", access_token))
             })
             .await?;
@@ -508,6 +549,9 @@ impl AuthClient {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             error!("Fetch user profile failed: {} - {}", status, body);
+            if let Some(error) = update_required_error(status, &body) {
+                return Err(error);
+            }
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
             }
@@ -612,6 +656,26 @@ pub(crate) fn is_refresh_token_permanently_invalid(body: &str) -> bool {
         || body.contains("refresh_token_already_used")
 }
 
+/// Detect a server "update required" (old-build lockout) response: HTTP 426, or
+/// an explicit `{"code":"update_required"}` body. Returns the user-facing
+/// message so the app can prompt an update instead of a raw API error.
+fn update_required_error(status: reqwest::StatusCode, body: &str) -> Option<AuthError> {
+    let parsed: Option<ApiErrorResponse> = serde_json::from_str(body).ok();
+    let code_matches =
+        parsed.as_ref().and_then(|p| p.code.as_deref()) == Some("update_required");
+    if status.as_u16() != 426 && !code_matches {
+        return None;
+    }
+    let message = parsed.and_then(|p| p.error).unwrap_or_else(|| {
+        "This version of SwiftTunnel is no longer supported. Please update to continue."
+            .to_string()
+    });
+    // Latch it so the app can show a forced-update gate even if this particular
+    // request's error is otherwise swallowed upstream.
+    let _ = UPDATE_REQUIRED_MESSAGE.set(message.clone());
+    Some(AuthError::UpdateRequired(message))
+}
+
 fn user_banned_error_from_body(body: &str) -> Option<AuthError> {
     let parsed: ApiErrorResponse = serde_json::from_str(body).ok()?;
     if parsed.code.as_deref() != Some("user_banned") {
@@ -696,5 +760,47 @@ mod tests {
         let payload = client.exchange_oauth_payload("exchange", "state");
 
         assert!(payload.get("device_hwid").is_none());
+    }
+
+    #[test]
+    fn update_required_detected_by_status_426() {
+        let err = update_required_error(
+            reqwest::StatusCode::from_u16(426).unwrap(),
+            r#"{"error":"Please update.","code":"update_required","min_version":"2.6.0"}"#,
+        )
+        .unwrap();
+        assert!(matches!(err, AuthError::UpdateRequired(_)));
+        assert_eq!(err.to_string(), "Please update.");
+    }
+
+    #[test]
+    fn update_required_detected_by_code_without_426() {
+        let err = update_required_error(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":"Old build.","code":"update_required"}"#,
+        )
+        .unwrap();
+        assert_eq!(err.to_string(), "Old build.");
+    }
+
+    #[test]
+    fn update_required_falls_back_to_default_message_on_bare_426() {
+        let err = update_required_error(
+            reqwest::StatusCode::from_u16(426).unwrap(),
+            "upgrade required",
+        )
+        .unwrap();
+        assert!(err.to_string().contains("no longer supported"));
+    }
+
+    #[test]
+    fn non_update_errors_are_not_update_required() {
+        assert!(
+            update_required_error(
+                reqwest::StatusCode::FORBIDDEN,
+                r#"{"error":"User banned","code":"user_banned"}"#,
+            )
+            .is_none()
+        );
     }
 }

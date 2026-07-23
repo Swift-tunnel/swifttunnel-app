@@ -5,18 +5,18 @@ import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
 import { boostCloseRoblox, boostGetMetrics } from "../../lib/commands";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
-import { MAINTENANCE_MODE } from "../../lib/maintenance";
 import {
   Toggle,
   SectionHeader,
+  Panel,
   Tooltip,
   InfoIcon,
   Button,
   Row,
-  Slider,
   ErrorBanner,
   Dialog,
 } from "../ui";
+import { FpsSlider } from "./FpsSlider";
 import {
   PROFILES,
   configsEqual,
@@ -515,7 +515,7 @@ export function BoostTab() {
           tag={draft.profile === "Custom" ? "Custom" : undefined}
         />
         <div
-          className="grid gap-1 rounded-[var(--radius-card)] surface-card p-1"
+          className="instrument grid gap-1 p-1"
           style={{
             gridTemplateColumns: `repeat(${PROFILES.length}, minmax(0, 1fr))`,
           }}
@@ -570,6 +570,7 @@ export function BoostTab() {
       <Section title="Roblox" tag={`${rblxCount} / 4 on`}>
         <SettingRow
           title="Unlock FPS"
+          anchorId="unlock_fps"
           desc="Remove 60 FPS cap"
           enabled={draft.roblox_settings.unlock_fps}
           onChange={(v) => updateRblxOpt({ unlock_fps: v })}
@@ -584,6 +585,7 @@ export function BoostTab() {
         )}
         <SettingRow
           title="Ultraboost"
+          anchorId="ultraboost"
           desc="Curated FPS-focused Roblox FFlags"
           enabled={draft.roblox_settings.ultraboost}
           onChange={(v) =>
@@ -633,6 +635,7 @@ export function BoostTab() {
         />
         <SettingRow
           title="Launch Fullscreen"
+          anchorId="launch_fullscreen"
           desc="Set Roblox fullscreen default"
           enabled={draft.roblox_settings.window_fullscreen}
           onChange={(v) => updateRblxOpt({ window_fullscreen: v })}
@@ -644,19 +647,21 @@ export function BoostTab() {
       <Section title="Country Ban" tag={`${countryBanCount} / 2 on`}>
         <SettingRow
           title="Bypass Country Ban"
+          anchorId="country_ban"
           desc="Use when the whole Roblox platform is blocked"
           tooltip="Full bypass: DPI evasion plus relaying all Roblox traffic through the selected SwiftTunnel relay. Turns off Partial Ban."
           enabled={draftCountryBan}
           onChange={(v) => void requestFullBan(v)}
-          disabled={robloxControlsLocked || MAINTENANCE_MODE}
+          disabled={robloxControlsLocked}
         />
         <SettingRow
           title="Bypass Partial Ban"
+          anchorId="partial_ban"
           desc="Use when only specific Roblox games are blocked"
           tooltip="Relays the Roblox discovery and join path while gameplay stays direct. Turns off Country Ban."
           enabled={draftPartialBan}
           onChange={choosePartialBan}
-          disabled={robloxControlsLocked || MAINTENANCE_MODE}
+          disabled={robloxControlsLocked}
         />
       </Section>
 
@@ -667,12 +672,14 @@ export function BoostTab() {
         >
           <SettingRow
             title="High Priority Mode"
+            anchorId="high_priority"
             desc="Boost game process priority (+5-15 FPS)"
             enabled={draft.system_optimization.set_high_priority}
             onChange={(v) => updateSysOpt({ set_high_priority: v })}
           />
           <SettingRow
             title="0.5ms Timer Resolution"
+            anchorId="timer_resolution"
             desc="Max precision frame pacing"
             tooltip="Reduces the Windows timer interrupt interval to 0.5ms for more precise frame pacing. Slightly increases CPU usage."
             enabled={draft.system_optimization.timer_resolution_1ms}
@@ -680,6 +687,7 @@ export function BoostTab() {
           />
           <SettingRow
             title="MMCSS Gaming Profile"
+            anchorId="mmcss"
             desc="Better thread scheduling, stable frame times"
             tooltip="Multimedia Class Scheduler Service — prioritizes game threads for CPU time."
             enabled={draft.system_optimization.mmcss_gaming_profile}
@@ -687,6 +695,7 @@ export function BoostTab() {
           />
           <SettingRow
             title="Windows Game Mode"
+            anchorId="game_mode"
             desc="System resource prioritization"
             enabled={draft.system_optimization.game_mode_enabled}
             onChange={(v) => updateSysOpt({ game_mode_enabled: v })}
@@ -696,6 +705,7 @@ export function BoostTab() {
         <Section title="Network" tag={`${netCount} / 2 on`}>
           <SettingRow
             title="Disable Nagle's Algorithm"
+            anchorId="disable_nagle"
             desc="Faster packet delivery (-5-15ms)"
             tooltip="Nagle batches small packets to reduce overhead. Disabling sends immediately — better for real-time games."
             enabled={draft.network_settings.disable_nagle}
@@ -704,6 +714,7 @@ export function BoostTab() {
           />
           <SettingRow
             title="Disable Network Throttling"
+            anchorId="network_throttling"
             desc="Full bandwidth while gaming"
             tooltip="Windows throttles network I/O when multimedia is playing. Disabling prevents sudden bandwidth drops."
             enabled={draft.network_settings.disable_network_throttling}
@@ -719,18 +730,21 @@ export function BoostTab() {
       <Section title="Process Scheduling" tag={`${schedCount} / 3 on`}>
         <SettingRow
           title="High-Performance GPU Binding"
+          anchorId="gpu_binding"
           desc="Bind target games to the high-performance GPU while connected"
           enabled={draftGPP.high_performance_gpu_binding}
           onChange={(v) => updateGPP({ high_performance_gpu_binding: v })}
         />
         <SettingRow
           title="Prefer Performance Cores"
+          anchorId="performance_cores"
           desc="Steer target games to P-cores on hybrid CPUs"
           enabled={draftGPP.prefer_performance_cores}
           onChange={(v) => updateGPP({ prefer_performance_cores: v })}
         />
         <SettingRow
           title="Unbind CPU0"
+          anchorId="unbind_cpu0"
           desc="Exclude logical CPU 0 when enough cores are available"
           enabled={draftGPP.unbind_cpu0}
           onChange={(v) => updateGPP({ unbind_cpu0: v })}
@@ -745,12 +759,8 @@ export function BoostTab() {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 28 }}
             transition={{ type: "spring", damping: 24, stiffness: 280 }}
-            className="fixed z-40"
-            style={{
-              left: `calc(var(--spacing-sidebar) + var(--spacing-content))`,
-              right: "var(--spacing-content)",
-              bottom: "12px",
-            }}
+            className="sticky z-40"
+            style={{ bottom: "12px" }}
           >
             <div className="flex w-full items-center justify-between rounded-[var(--radius-card)] surface-elevated px-4 py-2.5">
               <span className="text-[12px] font-medium text-text-secondary">
@@ -862,13 +872,32 @@ function Section({
   tag?: string;
   children: ReactNode;
 }) {
+  // Group title now titles the panel it belongs to, rather than floating above
+  // it as a caption over a separate slab.
   return (
-    <section>
-      <SectionHeader label={title} tag={tag} />
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
+    <Panel
+      flush
+      eyebrow={title}
+      className="overflow-hidden"
+      actions={
+        tag ? (
+          <span
+            className="pill-base"
+            style={{
+              backgroundColor: "var(--color-accent-primary-soft-10)",
+              color: "var(--color-text-secondary)",
+              border: "1px solid var(--color-border-subtle)",
+            }}
+          >
+            {tag}
+          </span>
+        ) : undefined
+      }
+    >
+      <div className="divide-y divide-[color:var(--color-border-subtle)] border-t border-[color:var(--color-border-subtle)]">
         {children}
       </div>
-    </section>
+    </Panel>
   );
 }
 
@@ -879,6 +908,7 @@ function SettingRow({
   enabled,
   onChange,
   disabled,
+  anchorId,
 }: {
   title: string;
   desc: string;
@@ -886,11 +916,13 @@ function SettingRow({
   enabled: boolean;
   onChange: (v: boolean) => void;
   disabled?: boolean;
+  anchorId?: string;
 }) {
   return (
     <Row
       label={title}
       desc={desc}
+      anchorId={anchorId}
       tooltip={
         tooltip && (
           <Tooltip content={tooltip}>
@@ -927,7 +959,7 @@ function CustomFflagsRow({
   onJsonChange: (v: string) => void;
 }) {
   return (
-    <div className="px-4 py-3">
+    <div className="px-4 py-3" data-search-anchor="custom_fflags">
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
@@ -997,128 +1029,6 @@ function CustomFflagsRow({
   );
 }
 
-function FpsSlider({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: number;
-  onChange: (v: number) => void;
-  disabled?: boolean;
-}) {
-  // Slider range: 30–1010. The last notch (1010) is the "uncapped" position.
-  const UNCAP_POS = 1010;
-  const isUncapped = value >= 9999;
-  const sliderValue = isUncapped
-    ? UNCAP_POS
-    : Math.max(30, Math.min(value, 1000));
-  const [inputText, setInputText] = useState(isUncapped ? "" : String(value));
-  const [inputFocused, setInputFocused] = useState(false);
-
-  useEffect(() => {
-    if (!inputFocused) {
-      setInputText(isUncapped ? "" : String(value));
-    }
-  }, [value, isUncapped, inputFocused]);
-
-  function commitInput(raw: string) {
-    const v = Number.parseInt(raw, 10);
-    if (!Number.isFinite(v) || v < 30) {
-      setInputText(isUncapped ? "" : String(value));
-      return;
-    }
-    onChange(Math.min(v, 99999));
-  }
-
-  function handleSlider(v: number) {
-    if (v >= UNCAP_POS) onChange(99999);
-    else onChange(Math.min(v, 1000));
-  }
-
-  return (
-    <div className="px-4 py-3">
-      <div className="mb-2 flex items-center justify-between">
-        <div className="flex items-baseline gap-2">
-          <span className="text-[11px] text-text-muted">Target FPS</span>
-          {isUncapped && (
-            <span
-              className="rounded-[3px] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.1em]"
-              style={{
-                backgroundColor: "var(--color-accent-primary-soft-15)",
-                color: "var(--color-accent-secondary)",
-              }}
-            >
-              Uncapped
-            </span>
-          )}
-        </div>
-        <input
-          type="number"
-          min={30}
-          max={99999}
-          value={inputText}
-          placeholder="MAX"
-          disabled={disabled}
-          onFocus={() => setInputFocused(true)}
-          onChange={(e) => {
-            setInputText(e.target.value);
-            const v = Number.parseInt(e.target.value, 10);
-            if (Number.isFinite(v) && v >= 30 && v <= 99999) onChange(v);
-          }}
-          onBlur={(e) => {
-            setInputFocused(false);
-            commitInput(e.target.value);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-          }}
-          className="boost-input w-[78px] rounded-[4px] px-2 py-1 text-right font-mono text-[12px] font-semibold outline-none transition-colors"
-          style={{
-            backgroundColor: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-border-default)",
-            color: isUncapped
-              ? "var(--color-accent-secondary)"
-              : "var(--color-text-primary)",
-          }}
-        />
-      </div>
-      <Slider
-        ariaLabel="Target FPS slider"
-        min={30}
-        max={UNCAP_POS}
-        step={10}
-        value={sliderValue}
-        onChange={handleSlider}
-        disabled={disabled}
-      />
-      <div className="mt-1.5 flex justify-between font-mono text-[9.5px] text-text-dimmed">
-        <span>30</span>
-        <span>120</span>
-        <span>240</span>
-        <span>360</span>
-        <span
-          style={{
-            color:
-              !isUncapped && value >= 1000
-                ? "var(--color-text-primary)"
-                : undefined,
-          }}
-        >
-          1000
-        </span>
-        <span
-          style={{
-            color: isUncapped ? "var(--color-accent-secondary)" : undefined,
-            fontWeight: isUncapped ? 700 : undefined,
-          }}
-        >
-          MAX
-        </span>
-      </div>
-    </div>
-  );
-}
-
 function ResolutionRow({
   width,
   height,
@@ -1135,7 +1045,7 @@ function ResolutionRow({
   disabled?: boolean;
 }) {
   return (
-    <div className="px-4 py-3">
+    <div className="px-4 py-3" data-search-anchor="window_resolution">
       <div className="mb-0.5 text-[13px] font-medium text-text-primary">
         Window resolution
       </div>

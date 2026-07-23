@@ -7566,7 +7566,6 @@ fn should_relay_udp_for_mode(
     dst_port: u16,
     protocol: Protocol,
     full_country_ban_routing: bool,
-    process_owned: bool,
 ) -> bool {
     if protocol != Protocol::Udp {
         return false;
@@ -7577,8 +7576,6 @@ fn should_relay_udp_for_mode(
     }
 
     super::process_cache::is_likely_gameplay_udp(dst_ip, dst_port, protocol)
-        || (process_owned
-            && super::process_cache::is_roblox_game_server(dst_ip, dst_port, protocol, false))
 }
 
 fn should_route_to_vpn_with_routing_flags(
@@ -7814,13 +7811,7 @@ where
     if snapshot_tunnel_hit && !(protocol == Protocol::Tcp && api_tunneling) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         let result = if protocol == Protocol::Udp {
-            should_relay_udp_for_mode(
-                dst_ip,
-                dst_port,
-                protocol,
-                is_full_country_ban_routing,
-                true,
-            )
+            should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
         } else {
             super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
         };
@@ -7880,13 +7871,7 @@ where
                         || is_partial_country_ban_routing
                         || is_route_assist_control_tcp_dst)
             } else if protocol == Protocol::Udp {
-                should_relay_udp_for_mode(
-                    dst_ip,
-                    dst_port,
-                    protocol,
-                    is_full_country_ban_routing,
-                    true,
-                )
+                should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
             } else {
                 super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
                     && !dst_is_direct_tcp
@@ -8110,13 +8095,7 @@ where
                     || is_partial_country_ban_routing
                     || is_route_assist_control_tcp_dst)
         } else if protocol == Protocol::Udp {
-            should_relay_udp_for_mode(
-                dst_ip,
-                dst_port,
-                protocol,
-                is_full_country_ban_routing,
-                true,
-            )
+            should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
         } else {
             super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
                 && !dst_is_direct_tcp
@@ -14954,43 +14933,6 @@ mod tests {
             cache.is_empty(),
             "direct UDP/443 must not poison the inline cache"
         );
-    }
-
-    #[test]
-    fn test_normal_tunnel_relays_process_owned_game_server_udp_443() {
-        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
-        crate::roblox_proxy::hosts::set_country_ban_bypass_routing_for_test(false);
-        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
-
-        let src_ip = Ipv4Addr::new(192, 168, 1, 100);
-        let dst_ip = Ipv4Addr::new(128, 116, 50, 100);
-        let src_port = 50000;
-        let dst_port = 443;
-        let pid = 1234;
-
-        let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
-
-        let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
-        let snapshot = ProcessSnapshot {
-            connections,
-            pid_names: HashMap::new(),
-            tunnel_apps: HashSet::new(),
-            tunnel_pids,
-            explicit_tunnel_udp_ports: HashSet::new(),
-            explicit_tunnel_tcp_ports: HashSet::new(),
-            tunnel_udp_ports: HashSet::new(),
-            tunnel_tcp_ports: HashSet::new(),
-            version: 0,
-            created_at: std::time::Instant::now(),
-        };
-
-        let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
-        let mut cache: InlineCache = HashMap::new();
-
-        assert!(should_route_to_vpn_with_inline_cache(
-            &frame, &snapshot, &mut cache, false,
-        ));
     }
 
     #[test]

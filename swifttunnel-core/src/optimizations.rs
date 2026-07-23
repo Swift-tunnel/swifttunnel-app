@@ -666,6 +666,333 @@ const TWEAKS: &[Tweak] = &[
             value: 1,
         }],
     },
+    // ── Game Booster specials ────────────────────────────────────────────────
+    Tweak {
+        // Turn off Cortana via Windows Search policy — no background assistant.
+        id: "cortana_disable",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Windows\Windows Search",
+            name: "AllowCortana",
+            value: 0,
+        }],
+    },
+    Tweak {
+        // Disable the Windows key via a keyboard Scancode Map so it can't yank
+        // you out of a fullscreen game. Machine-wide; applies after a reboot.
+        id: "windows_key_disable",
+        requires_admin: true,
+        requires_reboot: true,
+        actions: &[Action::RegBinary {
+            hive: Hive::Hklm,
+            path: r"SYSTEM\CurrentControlSet\Control\Keyboard Layout",
+            name: "Scancode Map",
+            value: &[
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x5B, 0xE0, 0x00, 0x00, 0x5C, 0xE0, 0x00, 0x00, 0x00, 0x00,
+            ],
+        }],
+    },
+    // ── Speed Up ─────────────────────────────────────────────────────────────
+    Tweak {
+        id: "su_app_timeouts",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[
+            Action::RegString {
+                hive: Hive::Hkcu,
+                path: r"Control Panel\Desktop",
+                name: "HungAppTimeout",
+                value: "1000",
+            },
+            Action::RegString {
+                hive: Hive::Hkcu,
+                path: r"Control Panel\Desktop",
+                name: "WaitToKillAppTimeout",
+                value: "2000",
+            },
+            Action::RegString {
+                hive: Hive::Hkcu,
+                path: r"Control Panel\Desktop",
+                name: "LowLevelHooksTimeout",
+                value: "1000",
+            },
+        ],
+    },
+    Tweak {
+        id: "su_auto_end_tasks",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegString {
+            hive: Hive::Hkcu,
+            path: r"Control Panel\Desktop",
+            name: "AutoEndTasks",
+            value: "1",
+        }],
+    },
+    Tweak {
+        id: "su_foreground_lock",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hkcu,
+            path: r"Control Panel\Desktop",
+            name: "ForegroundLockTimeout",
+            value: 0,
+        }],
+    },
+    Tweak {
+        id: "su_system_responsiveness",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile",
+            name: "SystemResponsiveness",
+            value: 10,
+        }],
+    },
+    Tweak {
+        id: "su_ntfs_bookkeeping",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Control\FileSystem",
+                name: "NtfsDisableLastAccessUpdate",
+                value: 1,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Control\FileSystem",
+                name: "NtfsDisable8dot3NameCreation",
+                value: 1,
+            },
+        ],
+    },
+    Tweak {
+        id: "su_ntfs_memory",
+        requires_admin: true,
+        requires_reboot: true,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SYSTEM\CurrentControlSet\Control\FileSystem",
+            name: "NtfsMemoryUsage",
+            value: 2,
+        }],
+    },
+    Tweak {
+        id: "su_disable_paging_exec",
+        requires_admin: true,
+        requires_reboot: true,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management",
+            name: "DisablePagingExecutive",
+            value: 1,
+        }],
+    },
+    Tweak {
+        id: "su_wait_kill_service",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegString {
+            hive: Hive::Hklm,
+            path: r"SYSTEM\CurrentControlSet\Control",
+            name: "WaitToKillServiceTimeout",
+            value: "2000",
+        }],
+    },
+    Tweak {
+        id: "su_disable_auto_defrag",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::TaskDisable {
+            path: r"\Microsoft\Windows\Defrag\ScheduledDefrag",
+        }],
+    },
+    Tweak {
+        id: "su_disable_settings_suggestions",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                name: "SubscribedContent-338393Enabled",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                name: "SubscribedContent-353694Enabled",
+                value: 0,
+            },
+            Action::RegDword {
+                hive: Hive::Hkcu,
+                path: r"Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager",
+                name: "SubscribedContent-353696Enabled",
+                value: 0,
+            },
+        ],
+    },
+    Tweak {
+        id: "su_keyboard_response",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[
+            Action::RegString {
+                hive: Hive::Hkcu,
+                path: r"Control Panel\Keyboard",
+                name: "KeyboardDelay",
+                value: "0",
+            },
+            Action::RegString {
+                hive: Hive::Hkcu,
+                path: r"Control Panel\Keyboard",
+                name: "KeyboardSpeed",
+                value: "31",
+            },
+        ],
+    },
+    Tweak {
+        id: "su_disable_autoplay",
+        requires_admin: false,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hkcu,
+            path: r"Software\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers",
+            name: "DisableAutoplay",
+            value: 1,
+        }],
+    },
+    Tweak {
+        id: "su_tcp_ttl",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+            name: "DefaultTTL",
+            value: 64,
+        }],
+    },
+    Tweak {
+        id: "su_tcp_pmtu",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+                name: "EnablePMTUDiscovery",
+                value: 1,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+                name: "EnablePMTUBHDetect",
+                value: 1,
+            },
+        ],
+    },
+    Tweak {
+        id: "su_tcp_window_scaling",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters",
+            name: "Tcp1323Opts",
+            value: 1,
+        }],
+    },
+    Tweak {
+        id: "su_dns_cache",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters",
+                name: "CacheHashTableBucketSize",
+                value: 1,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters",
+                name: "CacheHashTableSize",
+                value: 384,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters",
+                name: "MaxCacheEntryTtlLimit",
+                value: 64000,
+            },
+            Action::RegDword {
+                hive: Hive::Hklm,
+                path: r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters",
+                name: "MaxSOACacheEntryTtlLimit",
+                value: 301,
+            },
+        ],
+    },
+    Tweak {
+        id: "su_qos_bandwidth",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Windows\Psched",
+            name: "NonBestEffortLimit",
+            value: 0,
+        }],
+    },
+    Tweak {
+        id: "su_edge_personalization",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::RegDword {
+            hive: Hive::Hklm,
+            path: r"SOFTWARE\Policies\Microsoft\Edge",
+            name: "PersonalizationReportingEnabled",
+            value: 0,
+        }],
+    },
+    Tweak {
+        id: "su_svc_remote_registry",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::ServiceDisable {
+            name: "RemoteRegistry",
+        }],
+    },
+    Tweak {
+        id: "su_svc_peer_networking",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[
+            Action::ServiceDisable { name: "PNRPsvc" },
+            Action::ServiceDisable { name: "p2psvc" },
+            Action::ServiceDisable { name: "p2pimsvc" },
+        ],
+    },
+    Tweak {
+        id: "su_svc_webclient",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::ServiceDisable { name: "WebClient" }],
+    },
+    Tweak {
+        id: "su_svc_winrm",
+        requires_admin: true,
+        requires_reboot: false,
+        actions: &[Action::ServiceDisable { name: "WinRM" }],
+    },
 ];
 
 fn find_tweak(id: &str) -> Option<&'static Tweak> {
@@ -1278,6 +1605,30 @@ mod tests {
             "notifications_disable",
             "lock_screen_disable",
             "lock_screen_blur_disable",
+            "cortana_disable",
+            "windows_key_disable",
+            "su_app_timeouts",
+            "su_auto_end_tasks",
+            "su_foreground_lock",
+            "su_system_responsiveness",
+            "su_ntfs_bookkeeping",
+            "su_ntfs_memory",
+            "su_disable_paging_exec",
+            "su_wait_kill_service",
+            "su_disable_auto_defrag",
+            "su_disable_settings_suggestions",
+            "su_keyboard_response",
+            "su_disable_autoplay",
+            "su_tcp_ttl",
+            "su_tcp_pmtu",
+            "su_tcp_window_scaling",
+            "su_dns_cache",
+            "su_qos_bandwidth",
+            "su_edge_personalization",
+            "su_svc_remote_registry",
+            "su_svc_peer_networking",
+            "su_svc_webclient",
+            "su_svc_winrm",
         ];
         for id in expected {
             assert!(find_tweak(id).is_some(), "missing tweak: {id}");

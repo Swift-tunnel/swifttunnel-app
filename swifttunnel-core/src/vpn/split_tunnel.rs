@@ -674,10 +674,14 @@ impl SplitTunnelDriver {
             msi_path.display()
         );
 
-        let output = std::process::Command::new("msiexec")
-            .args(["/i", &msi_path.to_string_lossy(), "/qn", "/norestart"])
-            .output()
-            .map_err(|e| format!("Failed to run msiexec: {}", e))?;
+        let output = {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("msiexec")
+                .args(["/i", &msi_path.to_string_lossy(), "/qn", "/norestart"])
+                .creation_flags(crate::utils::CREATE_NO_WINDOW)
+                .output()
+                .map_err(|e| format!("Failed to run msiexec: {}", e))?
+        };
 
         let code = output.status.code().unwrap_or(-1);
         if matches!(code, 0 | 1638 | 1641 | 3010) {
@@ -1223,10 +1227,13 @@ impl SplitTunnelDriver {
                     msi_path.display()
                 );
 
-                match std::process::Command::new("msiexec")
-                    .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
-                    .output()
-                {
+                match {
+                    use std::os::windows::process::CommandExt;
+                    std::process::Command::new("msiexec")
+                        .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
+                        .creation_flags(crate::utils::CREATE_NO_WINDOW)
+                        .output()
+                } {
                     Ok(output) => {
                         let code = output.status.code().unwrap_or(-1);
                         if Self::driver_uninstall_success_exit_code(code) {

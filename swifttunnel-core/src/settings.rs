@@ -62,8 +62,8 @@ impl Default for WindowState {
         Self {
             x: None, // Let OS center the window
             y: None,
-            width: 560.0,  // Good default width for the UI
-            height: 750.0, // Good default height
+            width: 1020.0,
+            height: 660.0,
             maximized: false,
         }
     }
@@ -424,12 +424,35 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
         Err(e) => return Err(format!("Failed to serialize settings: {}", e)),
     };
 
-    match fs::write(&path, json) {
+    // Write-then-rename so a crash/power loss mid-write can never leave a
+    // half-written settings.json (which would reset every setting on the next
+    // launch). Rename within the same directory is atomic on NTFS.
+    let tmp_path = dir.join(format!("{}.tmp", SETTINGS_FILE));
+    if let Err(e) = fs::write(&tmp_path, &json) {
+        return Err(format!("Failed to write settings file: {}", e));
+    }
+    match fs::rename(&tmp_path, &path) {
         Ok(_) => {
             info!("Saved settings to {:?}", path);
             Ok(())
         }
-        Err(e) => Err(format!("Failed to write settings file: {}", e)),
+        Err(rename_err) => {
+            // Rename can fail if another process holds the destination open
+            // (AV scanners, backup tools). Fall back to a direct write so the
+            // save still lands, and clean up the temp file.
+            let fallback = fs::write(&path, &json);
+            let _ = fs::remove_file(&tmp_path);
+            match fallback {
+                Ok(_) => {
+                    info!("Saved settings to {:?} (direct write fallback)", path);
+                    Ok(())
+                }
+                Err(e) => Err(format!(
+                    "Failed to write settings file: {} (rename failed first: {})",
+                    e, rename_err
+                )),
+            }
+        }
     }
 }
 

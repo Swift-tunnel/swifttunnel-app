@@ -17,6 +17,14 @@ pub const ROBLOX_PROCESS_NAMES: &[&str] = &[
     "robloxplayerinstaller.exe",
 ];
 
+/// The in-game player clients — present only while the user is actually inside a
+/// Roblox experience (RobloxPlayerBeta launches on join and exits on leave).
+/// Deliberately excludes the launcher/bootstrapper (which lingers while the app
+/// idles on the website), Studio, and installers, so the UI can tell "in a game"
+/// apart from "the Roblox app is merely open in the background".
+pub const ROBLOX_PLAYER_PROCESS_NAMES: &[&str] =
+    &["robloxplayerbeta.exe", "robloxplayer.exe"];
+
 /// Third-party Roblox bootstrappers ("strappers").
 ///
 /// These are tunnelled ONLY while "Bypass Country Bans" is enabled (the
@@ -88,6 +96,15 @@ pub fn process_name_matches_any_tunnel_app<'a>(
 
 pub fn is_roblox_process_name(process_name: &str) -> bool {
     ROBLOX_PROCESS_NAMES
+        .iter()
+        .any(|candidate| process_name_matches_alias(process_name, candidate))
+}
+
+/// True only for the in-game Roblox player (see `ROBLOX_PLAYER_PROCESS_NAMES`).
+/// Use this for "is the user actually in a game" — not `is_roblox_process_name`,
+/// which also matches the launcher, Studio and installers.
+pub fn is_roblox_player_process_name(process_name: &str) -> bool {
+    ROBLOX_PLAYER_PROCESS_NAMES
         .iter()
         .any(|candidate| process_name_matches_alias(process_name, candidate))
 }
@@ -195,6 +212,35 @@ mod tests {
             "windows10universal.exe",
             "windows10universal.exe"
         ));
+    }
+
+    #[test]
+    fn player_detection_means_in_game_only() {
+        for in_game in [
+            "RobloxPlayerBeta.exe",
+            "robloxplayer.exe",
+            r"C:\Users\me\AppData\Local\Roblox\Versions\v1\RobloxPlayerBeta.exe",
+        ] {
+            assert!(
+                is_roblox_player_process_name(in_game),
+                "expected {in_game} to count as in-game"
+            );
+        }
+        // The launcher/app host, Studio and installers all run while NOT in a
+        // game — they must not read as "in a game".
+        for idle in [
+            "RobloxPlayerLauncher.exe",
+            "robloxplayerlauncher.exe",
+            "RobloxStudioBeta.exe",
+            "RobloxPlayerInstaller.exe",
+            "Windows10Universal.exe",
+            "chrome.exe",
+        ] {
+            assert!(
+                !is_roblox_player_process_name(idle),
+                "expected {idle} NOT to count as in-game"
+            );
+        }
     }
 
     #[test]

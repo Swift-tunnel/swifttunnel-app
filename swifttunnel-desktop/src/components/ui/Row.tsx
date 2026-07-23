@@ -6,11 +6,14 @@ interface RowProps {
   tooltip?: ReactNode;
   children: ReactNode;
   dense?: boolean;
+  /** Marks this row as a deep-link/search target for scroll-to + highlight. */
+  anchorId?: string;
 }
 
-export function Row({ label, desc, tooltip, children, dense }: RowProps) {
+export function Row({ label, desc, tooltip, children, dense, anchorId }: RowProps) {
   return (
     <div
+      data-search-anchor={anchorId}
       className={`group flex items-center justify-between gap-4 transition-colors duration-100 ${
         dense ? "px-3.5 py-2" : "px-3.5 py-2.5"
       }`}

@@ -1,7 +1,6 @@
 import type { AppSettings, AuthState, VpnState } from "./types";
 import { shouldAutoReconnectOnLaunch } from "./startup";
 import { reportError } from "./errors";
-import { MAINTENANCE_MODE } from "./maintenance";
 
 type AppBootstrapDeps = {
   initEventListeners: () => Promise<void>;
@@ -19,6 +18,9 @@ type AppBootstrapDeps = {
     showNoUpdatesMessage: boolean,
     autoInstall?: boolean,
   ) => Promise<void>;
+  /** Coerce a stale saved `selected_region` to a valid one once the server list
+   *  is loaded (e.g. after a relay-fleet swap removed the user's region). */
+  reconcileSelectedRegion?: () => void;
 };
 
 async function safeAwait(label: string, task: () => Promise<void>) {
@@ -45,6 +47,10 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
     deps.fetchVpnState(),
   ]);
 
+  // Server list + settings are loaded now: coerce a stale saved region to a
+  // valid one BEFORE the auto-connect decision below reads selected_region.
+  deps.reconcileSelectedRegion?.();
+
   const authState = deps.getAuthState();
   if (authState === "logged_in") {
     await safeAwait("refreshAuthProfile", deps.refreshAuthProfile);
@@ -53,8 +59,6 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
 
   const loadedSettings = deps.getSettings();
   if (
-    // Tunneling is under maintenance — never auto-connect to (down) relays.
-    !MAINTENANCE_MODE &&
     shouldAutoReconnectOnLaunch(
       deps.getAuthState(),
       deps.getVpnState(),

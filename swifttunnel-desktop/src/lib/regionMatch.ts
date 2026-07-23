@@ -42,3 +42,41 @@ export function findRegionForVpnRegion(
   return undefined;
 }
 
+/**
+ * Return a valid region id for a possibly-stale saved `selected`, or `null` when
+ * it is already valid and canonical (nothing to change).
+ *
+ * Keeps a user's saved region usable across a server-list change — e.g. a full
+ * relay-fleet swap. A legacy/suffixed id that still maps to a region (via
+ * {@link findRegionForVpnRegion}, which prefix-matches "singapore-03" ->
+ * "singapore") is normalized to that region's canonical id; a region that no
+ * longer exists at all falls back to the lowest-latency available region, or the
+ * first one in the list when no latencies are known yet.
+ */
+export function resolveValidRegion(
+  regions: ServerRegion[],
+  selected: string | null,
+  latencies?: Map<string, number | null>,
+): string | null {
+  if (regions.length === 0) return null;
+
+  const match = findRegionForVpnRegion(regions, selected);
+  if (match) {
+    return match.id === selected ? null : match.id;
+  }
+
+  // Stale/unknown region → closest one we can measure, else the first.
+  let best = regions[0];
+  let bestLatency = Number.POSITIVE_INFINITY;
+  if (latencies) {
+    for (const region of regions) {
+      const latency = latencies.get(region.id);
+      if (typeof latency === "number" && latency >= 0 && latency < bestLatency) {
+        bestLatency = latency;
+        best = region;
+      }
+    }
+  }
+  return best.id;
+}
+

@@ -6,6 +6,7 @@
 //! - Bufferbloat test (latency under load)
 
 pub mod bufferbloat_test;
+pub mod icmp;
 pub mod speed_test;
 pub mod stability_test;
 pub mod types;

@@ -7,8 +7,8 @@
 //! 3) Measure ping while load is active
 //! 4) Compute delta + grade
 
+use super::icmp;
 use super::types::{BufferbloatGrade, BufferbloatTestResults};
-use crate::hidden_command;
 use log::{debug, info, warn};
 use reqwest::Client;
 use std::sync::mpsc::Sender;
@@ -135,43 +135,9 @@ fn median_u32(vals: &mut [u32]) -> Option<u32> {
 }
 
 /// Perform a single ping and return latency in milliseconds.
+/// Uses raw ICMP (not `ping.exe`) so it works on any Windows display language.
 async fn ping_once(target: &str, timeout_ms: u64) -> Option<u32> {
-    let target = target.to_string();
-    let timeout = timeout_ms.to_string();
-    let output = tokio::task::spawn_blocking(move || {
-        hidden_command("ping")
-            .args(["-n", "1", "-w", &timeout, &target])
-            .output()
-    })
-    .await
-    .ok()?
-    .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Windows ping output:
-    // "Reply from X.X.X.X: bytes=32 time=14ms TTL=56"
-    // or "Reply from X.X.X.X: bytes=32 time<1ms TTL=56"
-    for line in stdout.lines() {
-        if line.contains("time=") {
-            if let Some(time_start) = line.find("time=") {
-                let time_str = &line[time_start + 5..];
-                if let Some(ms_end) = time_str.find("ms") {
-                    if let Ok(ms) = time_str[..ms_end].trim().parse::<u32>() {
-                        return Some(ms);
-                    }
-                }
-            }
-        } else if line.contains("time<1ms") {
-            return Some(1);
-        }
-    }
-
-    None
+    icmp::ping_ms(target, timeout_ms as u32).await
 }
 
 async fn download_load_loop(client: Client) {

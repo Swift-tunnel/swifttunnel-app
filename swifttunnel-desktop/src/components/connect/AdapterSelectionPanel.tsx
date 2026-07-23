@@ -30,11 +30,11 @@ function pickRecommendedManualAdapter(
 }
 
 function adapterStatusLabel(adapter: NetworkAdapterInfo): string {
-  if (!adapter.is_up) return "[X] down";
+  if (!adapter.is_up) return "✕ down";
   if (adapter.kind === "loopback" || adapter.kind === "tunnel") {
-    return "[X] not usable";
+    return "✕ not usable";
   }
-  return "[OK] usable";
+  return "✓ usable";
 }
 
 function adapterNotUsableReason(adapter: NetworkAdapterInfo): string | null {
@@ -257,6 +257,8 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
               })
             }
             disabled={disabled || networkAdaptersLoading}
+            // Adapter names are hardware identifiers, never UI copy.
+            data-no-translate=""
             className="w-full rounded-[var(--radius-input)] px-3 py-2 text-[12.5px] outline-none transition-colors disabled:cursor-not-allowed disabled:opacity-50"
             style={{
               backgroundColor: "var(--color-bg-elevated)",
@@ -267,7 +269,7 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
             {manualAdapterSelectValue === "" && (
               <option value="" disabled>
                 {networkAdaptersLoading
-                  ? "Loading adapters..."
+                  ? "Loading adapters…"
                   : "No usable adapter found"}
               </option>
             )}
@@ -277,15 +279,15 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
               const status = adapterStatusLabel(adapter);
               return (
                 <option key={adapter.guid} value={adapter.guid}>
-                  {tags ? `${status} - ${label} (${tags})` : `${status} - ${label}`}
+                  {tags ? `${status} — ${label} (${tags})` : `${status} — ${label}`}
                 </option>
               );
             })}
           </select>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[10.5px] text-text-dimmed">
-            <span>[OK] = usable for manual selection</span>
+            <span>✓ = usable for manual selection</span>
             <span>/</span>
-            <span>[X] = down, loopback, or tunnel adapter</span>
+            <span>✕ = down, loopback, or tunnel adapter</span>
           </div>
           {adapterMissing && (
             <p className="mt-2 text-[11px] text-status-error">
@@ -302,7 +304,8 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
 
       {networkAdaptersError && (
         <div className="mt-3 text-[11px] text-status-error">
-          Failed to load adapters: {networkAdaptersError}
+          Couldn&apos;t load your network adapters. Try the Repair tab if this
+          keeps happening.
         </div>
       )}
     </section>

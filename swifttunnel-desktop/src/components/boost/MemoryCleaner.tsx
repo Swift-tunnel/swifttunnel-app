@@ -79,7 +79,7 @@ export function MemoryCleaner() {
   return (
     <section className="flex flex-col gap-3">
       {/* ── Hero ── */}
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card px-5 pt-4 pb-3">
+      <div className="corner-frame overflow-hidden rounded-[var(--radius-card)] surface-card px-5 pt-4 pb-3">
         <div className="flex items-start justify-between gap-6">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
@@ -163,7 +163,7 @@ export function MemoryCleaner() {
       </div>
 
       {/* ── Memory detail card ── */}
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card">
+      <div className="instrument overflow-hidden">
         <div className="flex gap-5 px-4 py-3 text-[11px]">
           <MemStat label="Used" value={`${formatGbFromMb(usedMb)} GB`} />
           <MemStat label="Total" value={`${formatGbFromMb(totalMb)} GB`} />

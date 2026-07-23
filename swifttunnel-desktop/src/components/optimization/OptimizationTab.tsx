@@ -4,6 +4,7 @@ import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip } from "..
 import { MemoryCleaner } from "../boost/MemoryCleaner";
 import { showRamOverlay } from "../overlay/RamOverlay";
 import { useOptimizationStore } from "../../stores/optimizationStore";
+import { useDeepLinkStore } from "../../stores/deepLinkStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
@@ -15,15 +16,36 @@ import {
 import type { Config } from "../../lib/types";
 import {
   OPTIMIZATIONS,
+  SPEEDUP_OPTIMIZATIONS,
+  SPEEDUP_CATEGORY_ORDER,
   TIER_ORDER,
   TIER_DESCRIPTION,
   type OptimizationDef,
   type OptCategory,
   type OptTier,
+  type SpeedUpCategory,
+  type SpeedUpDef,
 } from "./optimizationCatalog";
 
 /** Cards shown per carousel page (2 columns x 2 rows). */
 const CARDS_PER_PAGE = 4;
+
+/** One summary toast for a bulk apply/revert instead of one toast per item. */
+function summarizeBulk(
+  verb: string,
+  changed: number,
+  failed: number,
+  reboot: number,
+) {
+  if (changed === 0 && failed === 0) return;
+  const parts = [`${verb} ${changed} ${changed === 1 ? "tweak" : "tweaks"}`];
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (reboot > 0) parts.push(`${reboot} need a restart`);
+  useToastStore.getState().addToast({
+    type: failed > 0 ? "warning" : "success",
+    message: parts.join(" · "),
+  });
+}
 
 /** Small category chip shown on each card. */
 function CategoryChip({ category }: { category: OptCategory }) {
@@ -36,7 +58,11 @@ function CategoryChip({ category }: { category: OptCategory }) {
 
 /** The (i) tooltip: exactly what this optimization changes, plus any
  *  admin/restart requirement. Mirrors the boost page's info affordance. */
-function changesTooltip(def: OptimizationDef): ReactNode {
+function changesTooltip(def: {
+  changes: string[];
+  requiresAdmin: boolean;
+  requiresReboot: boolean;
+}): ReactNode {
   return (
     <div className="flex flex-col gap-1.5">
       <span className="text-[10.5px] font-semibold uppercase tracking-[0.07em] text-text-dimmed">
@@ -140,12 +166,39 @@ const CARD_DESCRIPTION_CLAMP: React.CSSProperties = {
   overflow: "hidden",
 };
 
-function CardShell({ children }: { children: ReactNode }) {
+function CardShell({
+  children,
+  anchor,
+  active,
+}: {
+  children: ReactNode;
+  anchor?: string;
+  /** Applied tweak — lights the card's left rail so an active grid is
+   *  scannable at a glance instead of hunting for toggle positions. */
+  active?: boolean;
+}) {
   return (
     <div
-      className="surface-card flex min-h-[148px] flex-col gap-1.5 rounded-[var(--radius-card)] px-3 pb-2.5 pt-3"
-      style={{ border: "1px solid var(--color-border-subtle)" }}
+      data-search-anchor={anchor}
+      className="surface-card relative flex min-h-[148px] flex-col gap-1.5 overflow-hidden rounded-[var(--radius-card)] px-3 pb-2.5 pt-3 transition-transform duration-150 hover:-translate-y-0.5"
+      style={{
+        border: `1px solid ${
+          active
+            ? "var(--color-status-connected-soft-20)"
+            : "var(--color-border-subtle)"
+        }`,
+      }}
     >
+      {active && (
+        <span
+          aria-hidden
+          className="absolute inset-y-0 left-0 w-[2px]"
+          style={{
+            background: "var(--color-status-connected)",
+            boxShadow: "0 0 12px -2px var(--color-status-connected)",
+          }}
+        />
+      )}
       {children}
     </div>
   );
@@ -199,7 +252,7 @@ function OptimizationCard({ def }: { def: OptimizationDef }) {
   const isBusy = status === "activating" || status === "deactivating";
 
   return (
-    <CardShell>
+    <CardShell anchor={def.id} active={isActive}>
       <div className="flex items-center justify-between gap-2">
         <CategoryChip category={def.category} />
         <CardBadges def={def} />
@@ -361,15 +414,29 @@ function TierCarousel({ tier, cards }: { tier: OptTier; cards: TierCard[] }) {
   const powerPlanEnabled = useSettingsStore(
     (s) => s.settings.config.system_optimization.power_plan === "SwiftTunnel",
   );
+  const deepLinkAnchor = useDeepLinkStore((s) => s.anchor);
   const [page, setPage] = useState(0);
 
   const pages = useMemo(() => chunk(cards, CARDS_PER_PAGE), [cards]);
   const pageCount = pages.length;
   const current = Math.min(page, pageCount - 1);
 
+  // Deep-link: if a search targeted one of our cards, page to it so it's
+  // on-screen when the highlight flashes.
+  useEffect(() => {
+    if (!deepLinkAnchor) return;
+    const idx = pages.findIndex((pg) =>
+      pg.some((c) => c.kind === "opt" && c.def.id === deepLinkAnchor),
+    );
+    if (idx >= 0) setPage(idx);
+  }, [deepLinkAnchor, pages]);
+
   const activeCount = cards.filter((card) =>
     card.kind === "power" ? powerPlanEnabled : statuses[card.def.id] === "active",
   ).length;
+  const optDefs = cards.flatMap((card) =>
+    card.kind === "opt" ? [card.def] : [],
+  );
 
   const go = (delta: number) => {
     setPage((p) =>
@@ -383,6 +450,7 @@ function TierCarousel({ tier, cards }: { tier: OptTier; cards: TierCard[] }) {
         <SectionHeader
           label={tier}
           tag={`${activeCount} / ${cards.length} on`}
+          inlineAction={<BulkToggle items={optDefs} />}
           description={TIER_DESCRIPTION[tier]}
         />
         {pageCount > 1 && (
@@ -482,7 +550,7 @@ function AutoRamCleanRow() {
       await showRamOverlay(4096);
       addToast({
         type: "info",
-        message: "Test overlay sent - check the top-right of your screen.",
+        message: "Test overlay sent — check the top-right of your screen.",
       });
     } catch (e) {
       addToast({
@@ -513,7 +581,7 @@ function AutoRamCleanRow() {
   }
 
   return (
-    <div className="overflow-hidden rounded-[var(--radius-card)] surface-card">
+    <div className="instrument overflow-hidden">
       <Row
         label="Auto-clean RAM on game launch"
         desc="Frees standby memory automatically when a game starts, with an in-game overlay."
@@ -555,22 +623,470 @@ function AutoRamCleanRow() {
 
 export function OptimizationTab() {
   const loadActive = useOptimizationStore((s) => s.loadActive);
+  const [view, setView] = useState<"boost" | "speedup">("boost");
+  const deepLinkAnchor = useDeepLinkStore((s) => s.anchor);
 
   // Reflect which optimizations are already applied (persisted on disk).
   useEffect(() => {
     void loadActive();
   }, [loadActive]);
 
+  // Deep-link: switch to whichever sub-tab owns the searched optimization.
+  useEffect(() => {
+    if (!deepLinkAnchor) return;
+    if (SPEEDUP_OPTIMIZATIONS.some((o) => o.id === deepLinkAnchor)) {
+      setView("speedup");
+    } else if (OPTIMIZATIONS.some((o) => o.id === deepLinkAnchor)) {
+      setView("boost");
+    }
+  }, [deepLinkAnchor]);
+
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
-      <MemoryCleaner />
-      <AutoRamCleanRow />
+      {/* Sub-tabs + restore-to-defaults. */}
+      <div className="flex items-center justify-between gap-3">
+        <div
+          className="flex w-fit items-center gap-1 rounded-[10px] p-1"
+          style={{
+            backgroundColor: "var(--color-bg-card)",
+            border: "1px solid var(--color-border-subtle)",
+          }}
+        >
+          {(["boost", "speedup"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setView(v)}
+              className="rounded-[7px] px-4 py-1.5 text-[12px] font-medium transition-colors"
+              style={{
+                backgroundColor:
+                  view === v ? "var(--color-bg-active)" : "transparent",
+                color:
+                  view === v
+                    ? "var(--color-text-primary)"
+                    : "var(--color-text-muted)",
+              }}
+            >
+              {v === "boost" ? "Game Boost" : "Speed Up"}
+            </button>
+          ))}
+        </div>
+        <RestoreDefaultsButton />
+      </div>
 
-      {TIER_ORDER.map((tier) => {
-        const cards = tierCards(tier);
-        if (cards.length === 0) return null;
-        return <TierCarousel key={tier} tier={tier} cards={cards} />;
+      {/* Scoped to the active sub-tab ("N tweaks ready · Game Boost"), so it
+          belongs UNDER the switcher — above it, it read as a page header that
+          silently changed meaning when you switched sub-tabs. */}
+      <OptimizeAllHeader view={view} />
+
+      {/* RAM cleaner stays mounted across both sub-tabs. */}
+      <MemoryCleaner />
+
+      {view === "boost" ? (
+        <>
+          <AutoRamCleanRow />
+          {TIER_ORDER.map((tier) => {
+            const cards = tierCards(tier);
+            if (cards.length === 0) return null;
+            return <TierCarousel key={tier} tier={tier} cards={cards} />;
+          })}
+        </>
+      ) : (
+        <SpeedUpView />
+      )}
+    </div>
+  );
+}
+
+function RocketIcon() {
+  return (
+    <svg
+      width="22"
+      height="22"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="var(--color-accent-primary)"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" />
+      <path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" />
+      <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
+      <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
+    </svg>
+  );
+}
+
+/** "Enable all" for a section — flips to "Disable all" once every item is on. */
+function BulkToggle({ items }: { items: { id: string; name: string }[] }) {
+  const statuses = useOptimizationStore((s) => s.status);
+  const activate = useOptimizationStore((s) => s.activate);
+  const deactivate = useOptimizationStore((s) => s.deactivate);
+  const [busy, setBusy] = useState(false);
+
+  if (items.length === 0) return null;
+
+  const allActive = items.every((i) => statuses[i.id] === "active");
+  const inFlight =
+    busy ||
+    items.some((i) => {
+      const s = statuses[i.id];
+      return s === "activating" || s === "deactivating";
+    });
+
+  async function toggleAll() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      let changed = 0;
+      let failed = 0;
+      let reboot = 0;
+      for (const item of items) {
+        const active = statuses[item.id] === "active";
+        let outcome = null;
+        if (allActive && active) outcome = await deactivate(item, { silent: true });
+        else if (!allActive && !active)
+          outcome = await activate(item, { silent: true });
+        if (!outcome) continue;
+        if (!outcome.ok) failed += 1;
+        else {
+          changed += 1;
+          if (outcome.requiresReboot) reboot += 1;
+        }
+      }
+      summarizeBulk(allActive ? "Reverted" : "Enabled", changed, failed, reboot);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        void toggleAll();
+      }}
+      disabled={inFlight}
+      className="shrink-0 rounded-[6px] px-2 py-[3px] text-[10px] font-semibold uppercase tracking-[0.04em] transition-colors hover:bg-bg-hover disabled:opacity-50"
+      style={{
+        border: "1px solid var(--color-border-subtle)",
+        backgroundColor: "var(--color-bg-elevated)",
+        color: "var(--color-text-secondary)",
+      }}
+    >
+      {allActive ? "Disable all" : "Enable all"}
+    </button>
+  );
+}
+
+/** Reverts every applied optimization (both sub-tabs) back to Windows defaults. */
+function RestoreDefaultsButton() {
+  const statuses = useOptimizationStore((s) => s.status);
+  const deactivate = useOptimizationStore((s) => s.deactivate);
+  const [busy, setBusy] = useState(false);
+
+  const active = [...OPTIMIZATIONS, ...SPEEDUP_OPTIMIZATIONS].filter(
+    (o) => statuses[o.id] === "active",
+  );
+
+  async function restore() {
+    if (busy || active.length === 0) return;
+    setBusy(true);
+    try {
+      let changed = 0;
+      let failed = 0;
+      let reboot = 0;
+      for (const item of active) {
+        const outcome = await deactivate(
+          { id: item.id, name: item.name },
+          { silent: true },
+        );
+        if (!outcome.ok) failed += 1;
+        else {
+          changed += 1;
+          if (outcome.requiresReboot) reboot += 1;
+        }
+      }
+      summarizeBulk("Restored", changed, failed, reboot);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void restore()}
+      disabled={busy || active.length === 0}
+      title="Revert every applied optimization back to Windows defaults"
+      className="flex shrink-0 items-center gap-1.5 rounded-[8px] px-3 py-1.5 text-[11.5px] font-medium transition-colors hover:bg-bg-hover disabled:opacity-45"
+      style={{ color: "var(--color-text-muted)" }}
+    >
+      <svg
+        width="13"
+        height="13"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className={busy ? "animate-spin" : ""}
+        aria-hidden
+      >
+        <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+        <path d="M21 3v5h-5" />
+        <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+        <path d="M3 21v-5h5" />
+      </svg>
+      {busy ? "Restoring…" : "Restore Windows defaults"}
+    </button>
+  );
+}
+
+/** Razer-style hero: count of pending tweaks + a one-click "Optimize all". */
+function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
+  const statuses = useOptimizationStore((s) => s.status);
+  const activate = useOptimizationStore((s) => s.activate);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+
+  const pending = useMemo(() => {
+    if (view === "speedup") {
+      return SPEEDUP_OPTIMIZATIONS.filter((o) => statuses[o.id] !== "active");
+    }
+    // Game Boost bulk-apply skips "caution" tweaks — those stay opt-in.
+    return OPTIMIZATIONS.filter(
+      (o) => o.safety !== "caution" && statuses[o.id] !== "active",
+    );
+  }, [view, statuses]);
+
+  const total = pending.length;
+
+  async function optimizeAll() {
+    if (running || total === 0) return;
+    setRunning(true);
+    setProgress(0);
+    try {
+      let done = 0;
+      let failed = 0;
+      let reboot = 0;
+      for (const def of pending) {
+        const outcome = await activate(
+          { id: def.id, name: def.name },
+          { silent: true },
+        );
+        if (!outcome.ok) failed += 1;
+        else if (outcome.requiresReboot) reboot += 1;
+        done += 1;
+        setProgress(done);
+      }
+      summarizeBulk("Optimized", done - failed, failed, reboot);
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const label = running
+    ? `Optimizing… ${progress}/${total}`
+    : total === 0
+      ? "All optimized"
+      : "Optimize all";
+
+  return (
+    <section
+      className="corner-frame relative flex items-center justify-between gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card"
+      style={{ padding: "16px 20px" }}
+    >
+      <div
+        aria-hidden="true"
+        className="dot-grid pointer-events-none absolute inset-0"
+        style={{ opacity: 0.55 }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(circle at 14% 8%, var(--color-accent-primary-soft-12), transparent 34%)",
+        }}
+      />
+      <div className="relative z-[1] flex min-w-0 items-center gap-3.5">
+        <span
+          className="icon-orb neon-edge flex h-12 w-12 shrink-0 items-center justify-center"
+          style={{
+            backgroundColor: "var(--color-accent-primary-soft-12)",
+            color: "var(--color-accent-primary)",
+          }}
+        >
+          <RocketIcon />
+        </span>
+        <div className="min-w-0">
+          <h2 className="text-[16px] font-semibold leading-tight text-text-primary">
+            {total === 0
+              ? "Everything's optimized"
+              : `${total} ${total === 1 ? "tweak" : "tweaks"} ready to optimize`}
+          </h2>
+          <p className="mt-0.5 text-[11.5px] leading-snug text-text-muted">
+            {view === "speedup" ? "Speed Up" : "Game Boost"} · one click applies
+            them all — every change is reversible.
+          </p>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => void optimizeAll()}
+        disabled={running || total === 0}
+        className="repair-cta relative z-[1] flex shrink-0 items-center overflow-hidden rounded-[10px] px-5 py-2.5 text-[13px] font-semibold transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-60"
+        style={{
+          background: "linear-gradient(180deg, #ffffff 0%, #e9e9e9 100%)",
+          color: "#0a0a0a",
+          boxShadow:
+            "inset 0 1px 0 rgba(255,255,255,0.9), 0 2px 10px rgba(0,0,0,0.35)",
+        }}
+      >
+        <span className="relative z-[1] flex items-center gap-2">
+          {running && <Spinner size={14} color="#0a0a0a" />}
+          {label}
+        </span>
+      </button>
+    </section>
+  );
+}
+
+/** Speed Up sub-tab: optimizations grouped by category in collapsible sections. */
+function SpeedUpView() {
+  return (
+    <div className="flex w-full flex-col gap-4">
+      {SPEEDUP_CATEGORY_ORDER.map((cat) => {
+        const items = SPEEDUP_OPTIMIZATIONS.filter((o) => o.category === cat);
+        if (items.length === 0) return null;
+        return <SpeedUpSection key={cat} category={cat} items={items} />;
       })}
     </div>
+  );
+}
+
+function SpeedUpSection({
+  category,
+  items,
+}: {
+  category: SpeedUpCategory;
+  items: SpeedUpDef[];
+}) {
+  const statuses = useOptimizationStore((s) => s.status);
+  const anchor = useDeepLinkStore((s) => s.anchor);
+  const activeCount = items.filter((i) => statuses[i.id] === "active").length;
+  const [open, setOpen] = useState(true);
+
+  // Expand if a search deep-linked to one of this section's items.
+  useEffect(() => {
+    if (anchor && items.some((i) => i.id === anchor)) setOpen(true);
+  }, [anchor, items]);
+
+  return (
+    <section>
+      <div className="mb-2 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="flex min-w-0 items-center gap-2"
+        >
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="var(--color-text-muted)"
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{
+              transform: open ? "rotate(90deg)" : "none",
+              transition: "transform 0.15s ease",
+            }}
+          >
+            <path d="M9 6l6 6-6 6" />
+          </svg>
+          <span className="text-[13px] font-semibold text-text-primary">
+            {category}
+          </span>
+          <span className="pill-base">
+            {activeCount} / {items.length} on
+          </span>
+        </button>
+        <BulkToggle items={items} />
+      </div>
+      {open && (
+        <div className="instrument p-1.5">
+          <div className="grid grid-cols-1 gap-x-4 gap-y-0.5 sm:grid-cols-2">
+            {items.map((def) => (
+              <SpeedUpItem key={def.id} def={def} />
+            ))}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** One optimization in the 2-up grid: a check indicator + name/description,
+ *  click anywhere to toggle. */
+function SpeedUpItem({ def }: { def: SpeedUpDef }) {
+  const status = useOptimizationStore((s) => s.status[def.id] ?? "inactive");
+  const activate = useOptimizationStore((s) => s.activate);
+  const deactivate = useOptimizationStore((s) => s.deactivate);
+  const isActive = status === "active";
+  const isBusy = status === "activating" || status === "deactivating";
+
+  return (
+    <button
+      type="button"
+      data-search-anchor={def.id}
+      onClick={() => {
+        if (isBusy) return;
+        if (isActive) void deactivate(def);
+        else void activate(def);
+      }}
+      className="flex items-start gap-2.5 rounded-[8px] px-2 py-1.5 text-left transition-colors hover:bg-[color:var(--color-bg-hover)]"
+    >
+      <span
+        className="mt-[1px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full transition-colors"
+        style={{
+          backgroundColor: isActive
+            ? "var(--color-accent-primary)"
+            : "transparent",
+          border: isActive ? "none" : "1.5px solid var(--color-border-strong)",
+        }}
+      >
+        {isBusy ? (
+          <Spinner size={11} color="var(--color-accent-primary)" />
+        ) : isActive ? (
+          <svg
+            width="11"
+            height="11"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#0a0a0a"
+            strokeWidth="3.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M20 6 9 17l-5-5" />
+          </svg>
+        ) : null}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[12px] font-medium text-text-primary">
+          {def.name}
+        </span>
+        <span className="block text-[10.5px] leading-snug text-text-muted">
+          {def.description}
+        </span>
+      </span>
+    </button>
   );
 }

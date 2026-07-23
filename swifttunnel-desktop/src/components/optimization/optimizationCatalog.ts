@@ -603,4 +603,323 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
       "HKLM\\...\\DriverSearching → SearchOrderConfig = 0",
     ],
   },
+
+  // ── Game Booster specials ──
+  {
+    id: "cortana_disable",
+    name: "Disable Cortana",
+    description:
+      "Turns off the Cortana assistant via Windows Search policy, so it stops running and indexing in the background.",
+    tier: "Intermediate",
+    category: "Privacy",
+    safety: "low",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Windows Search → AllowCortana = 0",
+    ],
+  },
+  {
+    id: "windows_key_disable",
+    name: "Disable Windows Key",
+    description:
+      "Blocks the Windows key with a keyboard scancode map so it can't minimize or pull you out of a fullscreen game. Applies after a restart.",
+    tier: "Intermediate",
+    category: "Input",
+    // caution keeps this OUT of "Optimize all" — silently losing the Windows
+    // key (reboot to undo) must be an explicit choice.
+    safety: "caution",
+    requiresAdmin: true,
+    requiresReboot: true,
+    changes: [
+      "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Keyboard Layout → Scancode Map (disables the Windows key)",
+    ],
+  },
+];
+
+// ── Speed Up: a separate, category-grouped catalog (Razer Cortex style). Every
+// id maps 1:1 to a backend tweak in optimizations.rs, same as OPTIMIZATIONS. ──
+
+export type SpeedUpCategory =
+  | "System Response"
+  | "File System"
+  | "Memory & Cache"
+  | "Network"
+  | "Startup & Shutdown"
+  | "Windows Services";
+
+export const SPEEDUP_CATEGORY_ORDER: SpeedUpCategory[] = [
+  "System Response",
+  "File System",
+  "Memory & Cache",
+  "Network",
+  "Startup & Shutdown",
+  "Windows Services",
+];
+
+export interface SpeedUpDef {
+  id: string;
+  name: string;
+  description: string;
+  category: SpeedUpCategory;
+  requiresAdmin: boolean;
+  requiresReboot: boolean;
+  changes: string[];
+}
+
+export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
+  {
+    id: "su_app_timeouts",
+    name: "Speed up unresponsive programs",
+    description:
+      "Shortens how long Windows waits on a frozen app, mouse, or keyboard before it reacts.",
+    category: "System Response",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\Control Panel\\Desktop → HungAppTimeout = 1000",
+      "HKCU\\Control Panel\\Desktop → WaitToKillAppTimeout = 2000",
+      "HKCU\\Control Panel\\Desktop → LowLevelHooksTimeout = 1000",
+    ],
+  },
+  {
+    id: "su_auto_end_tasks",
+    name: "Auto-end unresponsive programs",
+    description:
+      "Lets Windows automatically close frozen programs on shutdown instead of waiting on them.",
+    category: "System Response",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: ["HKCU\\Control Panel\\Desktop → AutoEndTasks = 1"],
+  },
+  {
+    id: "su_foreground_lock",
+    name: "Instant window focus",
+    description:
+      "Removes the delay before a game or app is allowed to take foreground focus.",
+    category: "System Response",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: ["HKCU\\Control Panel\\Desktop → ForegroundLockTimeout = 0"],
+  },
+  {
+    id: "su_system_responsiveness",
+    name: "Prioritize games over background tasks",
+    description:
+      "Tells the multimedia scheduler to reserve less CPU for background work, favoring the game in front.",
+    category: "System Response",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\...\\Multimedia\\SystemProfile → SystemResponsiveness = 10 (default 20)",
+    ],
+  },
+  {
+    id: "su_ntfs_bookkeeping",
+    name: "Reduce NTFS bookkeeping",
+    description:
+      "Stops NTFS from updating last-access timestamps and creating legacy 8.3 short names — less disk overhead on every file operation.",
+    category: "File System",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SYSTEM\\...\\FileSystem → NtfsDisableLastAccessUpdate = 1",
+      "HKLM\\SYSTEM\\...\\FileSystem → NtfsDisable8dot3NameCreation = 1",
+    ],
+  },
+  {
+    id: "su_ntfs_memory",
+    name: "Increase NTFS cache memory",
+    description:
+      "Gives the NTFS file system more memory for caching, which can speed up file-heavy workloads. Applies after a restart.",
+    category: "File System",
+    requiresAdmin: true,
+    requiresReboot: true,
+    changes: ["HKLM\\SYSTEM\\...\\FileSystem → NtfsMemoryUsage = 2"],
+  },
+  {
+    id: "su_disable_paging_exec",
+    name: "Keep the kernel in RAM",
+    description:
+      "Stops Windows paging core kernel and driver code to disk, keeping it in memory for faster response. Best with 8 GB+ RAM. Applies after a restart.",
+    category: "Memory & Cache",
+    requiresAdmin: true,
+    requiresReboot: true,
+    changes: [
+      "HKLM\\SYSTEM\\...\\Memory Management → DisablePagingExecutive = 1",
+    ],
+  },
+  {
+    id: "su_wait_kill_service",
+    name: "Faster shutdown",
+    description:
+      "Shortens how long Windows waits for services to close during shutdown.",
+    category: "Startup & Shutdown",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SYSTEM\\CurrentControlSet\\Control → WaitToKillServiceTimeout = 2000 (default 5000)",
+    ],
+  },
+  {
+    id: "su_disable_auto_defrag",
+    name: "Disable scheduled defragmentation",
+    description:
+      "Turns off Windows' automatic disk defragmentation task — unnecessary on SSDs and avoids surprise disk churn.",
+    category: "Startup & Shutdown",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "Scheduled task \\Microsoft\\Windows\\Defrag\\ScheduledDefrag → disabled",
+    ],
+  },
+  {
+    id: "su_disable_settings_suggestions",
+    name: "Disable suggested content",
+    description:
+      "Stops Windows from fetching and showing 'suggested content' tips and ads in the Settings app.",
+    category: "System Response",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\...\\ContentDeliveryManager → SubscribedContent-338393/353694/353696 = 0",
+    ],
+  },
+  {
+    id: "su_keyboard_response",
+    name: "Faster keyboard response",
+    description:
+      "Sets the shortest key-repeat delay and fastest repeat rate so keys register quicker.",
+    category: "System Response",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\Control Panel\\Keyboard → KeyboardDelay = 0",
+      "HKCU\\Control Panel\\Keyboard → KeyboardSpeed = 31",
+    ],
+  },
+  {
+    id: "su_disable_autoplay",
+    name: "Disable AutoPlay",
+    description:
+      "Turns off AutoPlay for USB drives and discs — no surprise prompts and a smaller malware surface.",
+    category: "File System",
+    requiresAdmin: false,
+    requiresReboot: false,
+    changes: [
+      "HKCU\\...\\Explorer\\AutoplayHandlers → DisableAutoplay = 1",
+    ],
+  },
+  {
+    id: "su_tcp_ttl",
+    name: "Optimize default TTL",
+    description:
+      "Sets a standard 64-hop TTL so packets aren't dropped early or wasted, keeping more usable bandwidth.",
+    category: "Network",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: ["HKLM\\SYSTEM\\...\\Tcpip\\Parameters → DefaultTTL = 64"],
+  },
+  {
+    id: "su_tcp_pmtu",
+    name: "MTU + black-hole detection",
+    description:
+      "Lets Windows auto-detect the best packet size and route around 'black hole' routers that silently drop large packets.",
+    category: "Network",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SYSTEM\\...\\Tcpip\\Parameters → EnablePMTUDiscovery = 1",
+      "HKLM\\SYSTEM\\...\\Tcpip\\Parameters → EnablePMTUBHDetect = 1",
+    ],
+  },
+  {
+    id: "su_tcp_window_scaling",
+    name: "Enable TCP window scaling",
+    description:
+      "Turns on TCP window scaling and timestamps for higher throughput on fast or high-latency connections.",
+    category: "Network",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: ["HKLM\\SYSTEM\\...\\Tcpip\\Parameters → Tcp1323Opts = 1"],
+  },
+  {
+    id: "su_dns_cache",
+    name: "Tune the DNS cache",
+    description:
+      "Enlarges the DNS resolver cache and caps entry lifetimes so repeat lookups resolve from memory faster.",
+    category: "Network",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SYSTEM\\...\\Dnscache\\Parameters → CacheHashTableBucketSize = 1, CacheHashTableSize = 384",
+      "HKLM\\SYSTEM\\...\\Dnscache\\Parameters → MaxCacheEntryTtlLimit = 64000, MaxSOACacheEntryTtlLimit = 301",
+    ],
+  },
+  {
+    id: "su_qos_bandwidth",
+    name: "Reclaim reserved bandwidth",
+    description:
+      "Removes the 20% of bandwidth Windows reserves for QoS by default, freeing it for games and downloads.",
+    category: "Network",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Psched → NonBestEffortLimit = 0",
+    ],
+  },
+  {
+    id: "su_edge_personalization",
+    name: "Disable Edge web tracking",
+    description:
+      "Turns off Microsoft Edge's personalized web/ad experience so it stops collecting browsing data in the background.",
+    category: "Network",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "HKLM\\SOFTWARE\\Policies\\Microsoft\\Edge → PersonalizationReportingEnabled = 0",
+    ],
+  },
+  {
+    id: "su_svc_remote_registry",
+    name: "Disable Remote Registry",
+    description:
+      "Stops the Remote Registry service — lets no one edit your registry over the network. Safe for home PCs.",
+    category: "Windows Services",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: ["Service RemoteRegistry → stopped + Disabled (restored on revert)"],
+  },
+  {
+    id: "su_svc_peer_networking",
+    name: "Disable peer-to-peer networking",
+    description:
+      "Stops the Windows Peer-to-Peer grouping/identity services (PNRP), which most home setups never use.",
+    category: "Windows Services",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: [
+      "Services PNRPsvc, p2psvc, p2pimsvc → stopped + Disabled (restored on revert)",
+    ],
+  },
+  {
+    id: "su_svc_webclient",
+    name: "Disable WebClient (WebDAV)",
+    description:
+      "Stops the WebClient service used for WebDAV network folders — rarely needed and a common attack vector.",
+    category: "Windows Services",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: ["Service WebClient → stopped + Disabled (restored on revert)"],
+  },
+  {
+    id: "su_svc_winrm",
+    name: "Disable WinRM",
+    description:
+      "Stops Windows Remote Management. Not needed unless you remotely administer this PC with PowerShell.",
+    category: "Windows Services",
+    requiresAdmin: true,
+    requiresReboot: false,
+    changes: ["Service WinRM → stopped + Disabled (restored on revert)"],
+  },
 ];

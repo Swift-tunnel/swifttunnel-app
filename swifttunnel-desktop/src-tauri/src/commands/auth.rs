@@ -204,6 +204,14 @@ pub async fn auth_get_state(state: State<'_, AppState>) -> Result<AuthStateRespo
     Ok(map_auth_state(auth_state))
 }
 
+/// The forced-update ("please update") message if the server has locked this
+/// build out (old-build lockout), else null. The UI polls this to show the
+/// blocking update gate. Sync + lock-free: it just reads a latched flag.
+#[tauri::command]
+pub fn auth_update_required() -> Option<String> {
+    swifttunnel_core::auth::update_required_message()
+}
+
 #[tauri::command]
 pub async fn auth_start_oauth(
     state: State<'_, AppState>,

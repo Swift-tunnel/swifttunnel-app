@@ -234,9 +234,40 @@ pub fn recover_tunnel_mode_on_startup() {
             );
         }
         TunnelModeRecoveryPlan::RepairWithRetries => {
+            // The native mode-flag reset couldn't verify clean after every retry
+            // — this is the "internet only works while SwiftTunnel is running"
+            // blackhole. Escalate to fully unbinding the leftover WinpkFilter
+            // binding (the manual `Disable-NetAdapterBinding -ComponentId
+            // nt_ndisrd` fix support has been handing out) so it self-heals on
+            // launch, with no Repair tab or terminal. Safe here: we're
+            // disconnected, and the next connect re-binds the active adapter.
+            #[cfg(windows)]
+            match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+                Ok(adapters) if !adapters.is_empty() => {
+                    log::warn!(
+                        "Tunnel-mode recovery escalated after {} failed reset attempt(s): unbound leftover WinpkFilter binding on adapter(s): {}. Internet restored.",
+                        outcome.attempts,
+                        adapters.join(", ")
+                    );
+                    delete_tunnel_mode_marker();
+                }
+                Ok(_) => {
+                    log::error!(
+                        "Tunnel-mode recovery FAILED after {} attempt(s); no leftover bindings found to unbind. Marker kept so the next launch retries. Restart Windows once to clear the kernel filter state.",
+                        outcome.attempts
+                    );
+                }
+                Err(e) => {
+                    log::error!(
+                        "Tunnel-mode recovery FAILED after {} attempt(s); escalation unbind also failed: {}. Marker kept so the next launch retries.",
+                        outcome.attempts,
+                        e
+                    );
+                }
+            }
+            #[cfg(not(windows))]
             log::error!(
-                "Tunnel-mode recovery FAILED after {} attempt(s); marker kept so the next launch retries. \
-                 Restart Windows once to clear the kernel filter state; if it returns, contact support with the log file.",
+                "Tunnel-mode recovery FAILED after {} attempt(s); marker kept so the next launch retries.",
                 outcome.attempts
             );
         }

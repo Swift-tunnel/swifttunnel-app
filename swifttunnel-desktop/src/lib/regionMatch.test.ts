@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { ServerRegion } from "./types";
-import { findRegionForVpnRegion } from "./regionMatch";
+import { findRegionForVpnRegion, resolveValidRegion } from "./regionMatch";
 
 function makeRegions(): ServerRegion[] {
   return [
@@ -80,6 +80,49 @@ describe("findRegionForVpnRegion", () => {
     expect(findRegionForVpnRegion(regions, "singapore-99")?.id).toBe(
       "singapore",
     );
+  });
+});
+
+describe("resolveValidRegion", () => {
+  test("returns null when the saved region is already valid and canonical", () => {
+    const regions = makeRegions();
+    expect(resolveValidRegion(regions, "singapore")).toBeNull();
+    expect(resolveValidRegion(regions, "us-east")).toBeNull();
+  });
+
+  test("normalizes a legacy suffixed id to its base region", () => {
+    const regions = makeRegions();
+    // Saved "singapore-03" before a fleet swap → rewritten to the "singapore" id.
+    expect(resolveValidRegion(regions, "singapore-03")).toBe("singapore");
+    expect(resolveValidRegion(regions, "us-east-nj")).toBe("us-east");
+  });
+
+  test("falls back to the first region when the saved one is gone entirely", () => {
+    const regions = makeRegions();
+    // "sydney"/"brazil" no longer exist in the fleet at all.
+    expect(resolveValidRegion(regions, "sydney-03")).toBe("singapore");
+    expect(resolveValidRegion(regions, "brazil")).toBe("singapore");
+  });
+
+  test("falls back for an empty or null saved region", () => {
+    const regions = makeRegions();
+    expect(resolveValidRegion(regions, null)).toBe("singapore");
+    expect(resolveValidRegion(regions, "")).toBe("singapore");
+  });
+
+  test("prefers the lowest-latency region when latencies are known", () => {
+    const regions = makeRegions();
+    const latencies = new Map<string, number | null>([
+      ["singapore", 180],
+      ["us-east", 40],
+      ["us-west", 95],
+      ["us-central", null],
+    ]);
+    expect(resolveValidRegion(regions, "sydney", latencies)).toBe("us-east");
+  });
+
+  test("returns null when there are no regions to choose from", () => {
+    expect(resolveValidRegion([], "singapore")).toBeNull();
   });
 });
 

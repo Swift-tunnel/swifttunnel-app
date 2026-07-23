@@ -1,4 +1,4 @@
-use crate::process_names::is_roblox_process_name;
+use crate::process_names::{is_roblox_player_process_name, is_roblox_process_name};
 use crate::structs::*;
 use std::time::Duration;
 use sysinfo::{Process, ProcessesToUpdate, System};
@@ -185,11 +185,14 @@ impl PerformanceMonitor {
         self.last_metrics = metrics.clone();
     }
 
-    /// Find Roblox process
+    /// Find the in-game Roblox player process (the thing whose FPS/CPU/RAM we
+    /// report, and what "Roblox running" on the dashboard means). Only the
+    /// player counts — the launcher/app host lingering in the background does
+    /// not mean the user is in a game.
     fn find_roblox_process(&self) -> Option<(u32, &Process)> {
         for (pid, process) in self.system.processes() {
             let process_name = process.name().to_string_lossy();
-            if is_roblox_process_name(&process_name) {
+            if is_roblox_player_process_name(&process_name) {
                 return Some((pid.as_u32(), process));
             }
         }

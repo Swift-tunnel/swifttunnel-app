@@ -10,14 +10,17 @@ class MockPhysicalPosition {
 }
 
 class MockWindow {
+  /** main.tsx branches on this to pick App vs the overlay roots. */
+  label = "main";
+
   async outerPosition() {
     return new MockPhysicalPosition(100, 100);
   }
   async outerSize() {
-    return { width: 560, height: 750 };
+    return { width: 1020, height: 660 };
   }
   async innerSize() {
-    return { width: 560, height: 750 };
+    return { width: 1020, height: 660 };
   }
   async isMaximized() {
     return false;
@@ -28,9 +31,19 @@ class MockWindow {
   async setSize() {}
   async setPosition() {}
   async maximize() {}
+  async minimize() {}
+  async toggleMaximize() {}
+  /** Used after a capped maximise to re-centre the window. */
+  async center() {}
+  async unmaximize() {}
+  async startDragging() {}
   async hide() {}
   async show() {}
   async close() {}
+  /** Used by the stats overlay to toggle click-through. */
+  async setIgnoreCursorEvents(ignore: boolean) {
+    void ignore;
+  }
   async onMoved(handler: () => void) {
     void handler;
     return () => {};
@@ -71,5 +84,14 @@ export async function availableMonitors() {
 }
 
 export async function primaryMonitor() {
+  return mockMonitor;
+}
+
+/**
+ * Required by OverlayStatsBar. Missing this export used to fail the whole ESM
+ * module graph (main.tsx imports OverlayStatsBar eagerly), which blanked the
+ * page in browser-preview mode — `npm run dev` rendered nothing at all.
+ */
+export async function currentMonitor() {
   return mockMonitor;
 }

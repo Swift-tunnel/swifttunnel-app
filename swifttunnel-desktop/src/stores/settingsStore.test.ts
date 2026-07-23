@@ -197,7 +197,20 @@ describe("stores/settingsStore", () => {
     ).toBe(false);
   });
 
-  it("migrates legacy saved minimize_to_tray false to true", async () => {
+  it("defaults minimize_to_tray to true when the save has no value", async () => {
+    settingsLoad.mockResolvedValue({
+      ...DEFAULT_SETTINGS,
+      minimize_to_tray: undefined,
+    });
+
+    const useSettingsStore = await loadStore();
+    await useSettingsStore.getState().load();
+
+    expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(true);
+  });
+
+  // Settings → General exposes this now, so a saved false is a real choice.
+  it("honors an explicit minimize_to_tray opt-out", async () => {
     settingsLoad.mockResolvedValue({
       ...DEFAULT_SETTINGS,
       minimize_to_tray: false,
@@ -206,7 +219,7 @@ describe("stores/settingsStore", () => {
     const useSettingsStore = await loadStore();
     await useSettingsStore.getState().load();
 
-    expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(true);
+    expect(useSettingsStore.getState().settings.minimize_to_tray).toBe(false);
   });
 
   it("save persists activeTab into current_tab", async () => {

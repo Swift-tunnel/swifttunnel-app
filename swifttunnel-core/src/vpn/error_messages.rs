@@ -43,7 +43,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             } else if lc.contains("internet interface") || lc.contains("no default gateway") {
                 "No internet connection detected.\n\nPlease check your network connection and try again.".to_string()
             } else {
-                format!("Split tunnel setup failed.\n\n{}", msg)
+                "SwiftTunnel couldn't set up game-traffic routing.\n\nOpen the Repair tab and run a repair, then reconnect. If it keeps happening, restart Windows once and contact support with your log file.".to_string()
             }
         }
 
@@ -58,11 +58,9 @@ pub fn user_friendly_error(error: &VpnError) -> String {
         // Route issues
         VpnError::Route(msg) => {
             if msg.contains("No default gateway") || msg.contains("no gateway") {
-                "No internet connection detected.\n\nPlease check your network connection.".to_string()
-            } else if msg.contains("PowerShell") || msg.contains("powershell") {
-                "Network configuration failed.\n\nPlease ensure PowerShell is available on your system.".to_string()
+                "No internet connection detected.\n\nPlease check your network connection and try again.".to_string()
             } else {
-                format!("Failed to configure game routes.\n\n{}", simplify_message(msg))
+                "SwiftTunnel couldn't set up game routes.\n\nOpen the Repair tab and run a repair, then reconnect.".to_string()
             }
         }
 
@@ -73,7 +71,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             } else if msg.contains("in progress") {
                 "Connection in progress. Please wait.".to_string()
             } else {
-                format!("Connection failed.\n\n{}", simplify_message(msg))
+                "Couldn't connect.\n\nCheck your internet connection and try again. If it keeps happening, open the Repair tab and run a repair.".to_string()
             }
         }
 
@@ -84,7 +82,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             } else if msg.contains("DNS") || msg.contains("resolve") {
                 "DNS lookup failed.\n\nPlease check your internet connection.".to_string()
             } else {
-                format!("Network error.\n\n{}", simplify_message(msg))
+                "Network error.\n\nCheck your internet connection and try again.".to_string()
             }
         }
 
@@ -97,12 +95,12 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             } else if msg.contains("timeout") {
                 "Failed to reach server.\n\nPlease check your internet connection.".to_string()
             } else {
-                format!("Failed to get configuration.\n\n{}", simplify_message(msg))
+                "SwiftTunnel couldn't reach its servers.\n\nCheck your internet connection and try again in a moment.".to_string()
             }
         }
 
-        VpnError::InvalidConfig(msg) => {
-            format!("Invalid configuration.\n\n{}", simplify_message(msg))
+        VpnError::InvalidConfig(_) => {
+            "SwiftTunnel received an unexpected response from the server.\n\nPlease try again in a moment.".to_string()
         }
 
         // Auth issues
@@ -119,13 +117,13 @@ pub fn user_friendly_error(error: &VpnError) -> String {
         }
 
         // Split tunnel generic
-        VpnError::SplitTunnel(msg) => {
-            format!("Split tunnel error.\n\n{}", simplify_message(msg))
+        VpnError::SplitTunnel(_) => {
+            "SwiftTunnel's network filter ran into a problem.\n\nOpen the Repair tab and run a repair, then reconnect.".to_string()
         }
 
         // IO errors
-        VpnError::Io(e) => {
-            format!("System error.\n\n{}", e)
+        VpnError::Io(_) => {
+            "SwiftTunnel hit a system error.\n\nPlease try again. If it keeps happening, open the Repair tab and run a repair.".to_string()
         }
     }
 }
@@ -173,7 +171,10 @@ fn admin_or_access_denied_message(is_admin: bool) -> String {
     }
 }
 
-/// Simplify a technical message by removing error codes and hex values
+/// Simplify a technical message by removing error codes and hex values.
+/// Retained (and unit-tested) for diagnostics/logging use even though the
+/// user-facing messages above are now fully generic.
+#[allow(dead_code)]
 fn simplify_message(msg: &str) -> String {
     // Remove common Windows error code patterns
     let simplified = msg
@@ -373,5 +374,71 @@ mod tests {
         let msg = user_friendly_error(&error);
         assert_eq!(msg, "This account is banned: abuse.");
         assert_eq!(short_error(&error), "Account banned");
+    }
+
+    #[test]
+    fn test_unknown_split_tunnel_setup_failure_is_generic_and_points_to_repair() {
+        let error = VpnError::SplitTunnelSetupFailed(
+            "some brand new low-level failure 0xDEADBEEF nobody has mapped yet".to_string(),
+        );
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("Repair tab"));
+        assert!(!msg.contains("0xDEADBEEF"));
+        assert!(!msg.contains("low-level"));
+    }
+
+    #[test]
+    fn test_unknown_route_failure_points_to_repair_without_raw_detail() {
+        let error = VpnError::Route("netsh add route failed 0x80070005".to_string());
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("Repair tab"));
+        assert!(!msg.contains("netsh"));
+        assert!(!msg.contains("0x80070005"));
+    }
+
+    #[test]
+    fn test_route_no_gateway_still_flags_internet() {
+        let error = VpnError::Route("No default gateway on interface".to_string());
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("No internet connection"));
+    }
+
+    #[test]
+    fn test_split_tunnel_generic_points_to_repair_without_raw_detail() {
+        let error = VpnError::SplitTunnel("ioctl 0x1234 exploded".to_string());
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("Repair tab"));
+        assert!(!msg.contains("ioctl"));
+        assert!(!msg.contains("0x1234"));
+    }
+
+    #[test]
+    fn test_io_error_is_generic_without_raw_detail() {
+        let error = VpnError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "raw os error 5: access is denied",
+        ));
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("system error"));
+        assert!(msg.contains("Repair tab"));
+        assert!(!msg.contains("raw os error"));
+    }
+
+    #[test]
+    fn test_unknown_connection_failure_is_generic_without_raw_detail() {
+        let error = VpnError::Connection("relay handshake byte 0x4F mismatch".to_string());
+        let msg = user_friendly_error(&error);
+        assert!(!msg.contains("0x4F"));
+        assert!(!msg.contains("handshake"));
+        assert!(msg.to_lowercase().contains("connect"));
+    }
+
+    #[test]
+    fn test_config_fetch_unknown_is_generic_without_raw_detail() {
+        let error = VpnError::ConfigFetch("HTTP 502 upstream <html> gibberish".to_string());
+        let msg = user_friendly_error(&error);
+        assert!(!msg.contains("502"));
+        assert!(!msg.contains("<html>"));
+        assert!(msg.contains("servers"));
     }
 }

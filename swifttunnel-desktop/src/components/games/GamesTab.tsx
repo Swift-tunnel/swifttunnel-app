@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { BoostTab } from "../boost/BoostTab";
 import { Button } from "../ui";
 import { useBoostStore } from "../../stores/boostStore";
+import { useDeepLinkStore } from "../../stores/deepLinkStore";
 
 /** Optional bundled override: drop an image at `src/assets/games/<id>.<ext>`
  *  (png/jpg/jpeg/webp) and it wins over the remote `backgroundUrl`. */
@@ -73,7 +74,11 @@ function GameCard({
     <motion.article
       whileHover={{ y: -2 }}
       transition={{ duration: 0.15, ease: "easeOut" }}
-      className="flex flex-col overflow-hidden rounded-[var(--radius-card)] surface-card"
+      /* Only a running game glows, and only because that's real state. Idle
+         cards stay plain — if every card glows, nothing reads as live. */
+      className={`flex flex-col overflow-hidden rounded-[var(--radius-card)] surface-card ${
+        running ? "neon-edge-live" : ""
+      }`}
     >
       {/* Art header (vertical, full-bleed cover art) */}
       <div
@@ -159,6 +164,8 @@ export function GamesTab() {
   const [optimizing, setOptimizing] = useState<GameId | null>(null);
   const robloxRunning = useBoostStore((s) => s.robloxRunning);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
+  const requestedGame = useDeepLinkStore((s) => s.game);
+  const clearGame = useDeepLinkStore((s) => s.clearGame);
 
   // Keep the running indicator current while browsing the library.
   useEffect(() => {
@@ -166,6 +173,14 @@ export function GamesTab() {
     const id = setInterval(() => void fetchMetrics(), 3000);
     return () => clearInterval(id);
   }, [fetchMetrics]);
+
+  // Deep-link: search can request a game (e.g. "ffs" → Roblox → Optimize).
+  useEffect(() => {
+    if (requestedGame && GAMES.some((g) => g.id === requestedGame)) {
+      setOptimizing(requestedGame as GameId);
+      clearGame();
+    }
+  }, [requestedGame, clearGame]);
 
   // Only Roblox has live detection today; other games default to not-running.
   const isGameRunning = (id: GameId) => (id === "roblox" ? robloxRunning : false);

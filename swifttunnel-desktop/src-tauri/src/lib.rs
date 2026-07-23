@@ -541,6 +541,8 @@ pub fn run() {
             commands::auth::auth_complete_oauth,
             commands::auth::auth_logout,
             commands::auth::auth_refresh_profile,
+            commands::auth::auth_update_required,
+            commands::system::close_splash,
             // VPN
             commands::vpn::vpn_get_state,
             commands::vpn::vpn_preflight_binding,
@@ -565,6 +567,7 @@ pub fn run() {
             commands::optimizer::boost_get_system_info,
             commands::optimizer::boost_restart_roblox,
             commands::optimizer::boost_close_roblox,
+            commands::optimizer::boost_reset_roblox_settings,
             // Network
             commands::network::network_start_stability_test,
             commands::network::network_start_speed_test,
@@ -573,6 +576,7 @@ pub fn run() {
             commands::settings::settings_load,
             commands::settings::settings_save,
             commands::settings::settings_generate_network_diagnostics_bundle,
+            commands::settings::preset_save_to_downloads,
             // Updater
             commands::updater::updater_check_channel,
             commands::updater::updater_install_channel,
@@ -582,6 +586,7 @@ pub fn run() {
             commands::system::system_check_driver,
             commands::system::system_install_driver,
             commands::system::system_repair_driver,
+            commands::system::system_reinstall_driver,
             commands::system::system_repair_windows_firewall,
             commands::system::system_reset_driver,
             commands::system::system_get_startup_registration,
@@ -599,10 +604,16 @@ pub fn run() {
             commands::optimization::optimization_apply,
             commands::optimization::optimization_revert,
             commands::optimization::optimization_get_active,
+            // i18n
+            commands::i18n::i18n_translate,
         ])
         .setup(move |app| {
             info!("SwiftTunnel desktop app starting up");
             sync_runtime_assets(app);
+
+            // Report our version to the API so the server can lock out old builds
+            // (X-SwiftTunnel-Version). Set before any auth/relay-ticket call.
+            swifttunnel_core::auth::set_client_version(app.package_info().version.to_string());
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_icon(APP_ICON.clone());
@@ -657,6 +668,31 @@ pub fn run() {
             // Window starts hidden via tauri.conf.json ("visible": false).
             // The frontend will call getCurrentWindow().show() after React loads,
             // unless launched_from_startup is true (user clicks tray to reveal).
+
+            // Boot splash: interactive launches only. On silent auto-start with
+            // Windows the app lives in the tray, so the splash must never flash
+            // over the desktop. Declared visible:false in tauri.conf.json and
+            // shown here, before any slow work runs.
+            if let Some(splash) = app.get_webview_window("splash") {
+                if launched_from_startup {
+                    let _ = splash.close();
+                } else {
+                    let _ = splash.show();
+                }
+            }
+
+            // Boot splash safety net: the frontend closes it once the main window
+            // is shown (close_splash), but if the frontend never loads, retire it
+            // after a bit so it can't sit alwaysOnTop forever.
+            {
+                let splash_handle = app.handle().clone();
+                runtime.spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    if let Some(splash) = splash_handle.get_webview_window("splash") {
+                        let _ = splash.close();
+                    }
+                });
+            }
 
             // Set up system tray
             if let Err(e) = tray::setup_tray(app.handle()) {

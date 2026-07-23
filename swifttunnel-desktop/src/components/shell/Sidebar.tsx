@@ -80,47 +80,43 @@ function NavButton({
   return (
     <button
       onClick={() => setTab(item.id)}
-      title={collapsed ? item.label : undefined}
-      className={`group relative flex h-8 w-full items-center rounded-[6px] text-left transition-colors duration-100 ${
-        collapsed ? "justify-center px-0" : "gap-2.5 px-2"
+      title={`${item.label} — Ctrl+${item.shortcut}`}
+      className={`group flex w-full items-center rounded-[8px] text-left ${
+        collapsed ? "justify-center px-0 py-[3px]" : "gap-2 px-1 py-[3px]"
       }`}
-      style={{
-        backgroundColor: active
-          ? "var(--color-accent-primary-soft-8)"
-          : "transparent",
-      }}
-      onMouseEnter={(e) => {
-        if (!active)
-          e.currentTarget.style.backgroundColor = "var(--color-bg-hover)";
-      }}
-      onMouseLeave={(e) => {
-        if (!active) e.currentTarget.style.backgroundColor = "transparent";
-      }}
       aria-label={item.label}
       aria-current={active ? "page" : undefined}
     >
-      {active && (
-        <span
-          className="absolute -left-2 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-r"
-          style={{ backgroundColor: "var(--color-accent-primary)" }}
-        />
-      )}
-      <svg
-        width="15"
-        height="15"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke={
-          active ? "var(--color-text-primary)" : "var(--color-text-muted)"
-        }
-        strokeWidth="1.85"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        className="shrink-0 transition-colors duration-100 group-hover:stroke-[color:var(--color-text-secondary)]"
-        style={{ marginLeft: collapsed ? 0 : 2 }}
+      {/* Circular icon well — fills with accent when active, Medal-style. */}
+      <span
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-[background-color] duration-150 ${
+          active ? "" : "group-hover:bg-[color:var(--color-bg-hover)]"
+        }`}
+        style={{
+          backgroundColor: active
+            ? "var(--color-accent-primary-soft-12)"
+            : undefined,
+          boxShadow: active
+            ? "inset 0 0 0 1px var(--color-accent-primary-soft-15)"
+            : undefined,
+        }}
       >
-        <path d={item.icon} />
-      </svg>
+        <svg
+          width="22"
+          height="22"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={
+            active ? "var(--color-text-primary)" : "var(--color-text-muted)"
+          }
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="transition-colors duration-150 group-hover:stroke-[color:var(--color-text-secondary)]"
+        >
+          <path d={item.icon} />
+        </svg>
+      </span>
       {!collapsed && (
         <>
           <span
@@ -134,13 +130,16 @@ function NavButton({
           >
             {item.label}
           </span>
+          {/* Reveal on hover, not just on the active tab — you learn the key
+              for where you're going, not for where you already are. */}
           <kbd
-            className="flex h-[16px] min-w-[16px] items-center justify-center rounded-[3px] px-1 font-mono text-[9px] font-medium leading-none transition-opacity duration-100"
+            className={`flex h-[16px] min-w-[16px] items-center justify-center rounded-[3px] px-1 font-mono text-[9px] font-medium leading-none transition-opacity duration-100 ${
+              active ? "opacity-100" : "opacity-0 group-hover:opacity-70"
+            }`}
             style={{
               color: "var(--color-text-dimmed)",
               border: "1px solid var(--color-border-subtle)",
               backgroundColor: "var(--color-bg-base)",
-              opacity: active ? 1 : 0,
             }}
           >
             {item.shortcut}
@@ -279,39 +278,61 @@ export function Sidebar() {
   return (
     <nav
       data-tauri-drag-region
-      className="flex h-full shrink-0 flex-col border-r"
+      className="flex h-full shrink-0 flex-col"
       style={{
-        width: collapsed ? 56 : 224,
+        width: collapsed ? 56 : 200,
         backgroundColor: "var(--color-bg-sidebar)",
-        borderColor: "var(--color-border-subtle)",
         transition: "width 0.18s cubic-bezier(0.4, 0, 0.2, 1)",
       }}
     >
       {/* Brand */}
       <div
         data-tauri-drag-region
-        className={`flex items-center pb-3 pt-[18px] ${
-          collapsed ? "flex-col gap-2 px-0" : "gap-2.5 px-4"
-        }`}
+        className="group/brand relative flex shrink-0 items-center"
+        style={{ height: "var(--spacing-topbar)" }}
       >
-        <SwiftLogo size={26} />
-        {!collapsed && (
-          <div
-            className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-none text-text-primary"
-            style={{ letterSpacing: "-0.018em" }}
-          >
-            SwiftTunnel
+        {collapsed ? (
+          <div className="relative flex w-full items-center justify-center">
+            {/* On hover the logo cross-fades to the expand toggle so nothing
+                overlaps it; clicking anywhere in the corner expands. */}
+            <span className="flex items-center justify-center transition-opacity duration-150 group-hover/brand:opacity-0">
+              <SwiftLogo size={66} />
+            </span>
+            <button
+              onClick={toggleCollapsed}
+              title="Expand sidebar"
+              aria-label="Expand sidebar"
+              className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity duration-150 group-hover/brand:opacity-100"
+              style={{ color: "var(--color-text-secondary)" }}
+            >
+              <CollapseIcon collapsed />
+            </button>
+          </div>
+        ) : (
+          <div className="flex w-full items-center justify-between pl-1 pr-2">
+            <div className="flex min-w-0 items-center">
+              <SwiftLogo size={66} className="-mr-1.5 shrink-0" />
+              <span
+                className="truncate text-[15px] font-medium leading-none"
+                style={{
+                  color: "var(--color-text-primary)",
+                  letterSpacing: "-0.015em",
+                }}
+              >
+                SwiftTunnel
+              </span>
+            </div>
+            <button
+              onClick={toggleCollapsed}
+              title="Collapse sidebar"
+              aria-label="Collapse sidebar"
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[5px] opacity-60 transition-all duration-150 hover:bg-bg-hover hover:opacity-100"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              <CollapseIcon collapsed={false} />
+            </button>
           </div>
         )}
-        <button
-          onClick={toggleCollapsed}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[5px] transition-colors duration-100 hover:bg-bg-hover"
-          style={{ color: "var(--color-text-muted)" }}
-        >
-          <CollapseIcon collapsed={collapsed} />
-        </button>
       </div>
 
       {/* Nav sections */}
@@ -376,6 +397,9 @@ export function Sidebar() {
         {!collapsed && (
           <>
             <span
+              // The account name (email prefix) is an identifier — never
+              // translate it. The "Not signed in" fallback still translates.
+              data-no-translate={email ? "" : undefined}
               className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-text-secondary"
               style={{ letterSpacing: "-0.005em" }}
             >

@@ -231,6 +231,11 @@ pub enum AuthError {
 
     #[error("Account banned{0}")]
     UserBanned(String),
+
+    /// The server rejected this build as too old (old-build lockout). The string
+    /// is the user-facing "please update" message from the API.
+    #[error("{0}")]
+    UpdateRequired(String),
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ interface SettingsStore {
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   settings: DEFAULT_SETTINGS,
-  activeTab: "connect",
+  activeTab: "home",
   isLoaded: false,
 
   load: async () => {
@@ -31,7 +31,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         settings.current_tab === "boost" ? "games" : settings.current_tab;
       set({
         settings,
-        activeTab: (persistedTab as TabId) || "connect",
+        activeTab: (persistedTab as TabId) || "home",
         isLoaded: true,
       });
     } catch (error) {

@@ -4,7 +4,6 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useToastStore } from "../../stores/toastStore";
-import { MAINTENANCE_MODE } from "../../lib/maintenance";
 import {
   Toggle,
   Button,
@@ -13,7 +12,7 @@ import {
   Segmented,
   Tooltip,
   InfoIcon,
-  SectionHeader,
+  Panel,
   Slider,
   Dialog,
 } from "../ui";
@@ -135,21 +134,27 @@ export function SettingsTab() {
   return (
     <div className="flex w-full flex-col gap-4 pb-6">
       {/* ── Account hero ── */}
-      <section className="relative overflow-hidden rounded-[var(--radius-card)] surface-card">
+      <section className="corner-frame relative overflow-hidden rounded-[var(--radius-card)] surface-card">
         <div
-          className="dot-grid pointer-events-none absolute inset-x-0 top-0 h-[110px]"
-          style={{ opacity: 0.45 }}
+          className="dot-grid pointer-events-none absolute inset-0"
+          style={{ opacity: 0.55 }}
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(circle at 14% 8%, var(--color-accent-primary-soft-12), transparent 34%)",
+          }}
         />
 
-        <div className="relative flex items-center gap-4 px-6 pb-5 pt-6">
+        <div className="relative z-[1] flex items-center gap-4 px-6 pb-5 pt-6">
           <div
-            className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-[17px] font-semibold"
+            className="icon-orb neon-edge flex h-12 w-12 shrink-0 items-center justify-center text-[17px] font-semibold"
             style={{
               background:
                 "linear-gradient(135deg, var(--color-bg-elevated), var(--color-bg-active))",
               color: "var(--color-text-primary)",
-              border: "1px solid var(--color-border-default)",
-              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.06)",
             }}
           >
             {email?.[0]?.toUpperCase() || "?"}
@@ -159,6 +164,7 @@ export function SettingsTab() {
             <span className="eyebrow">Signed in as</span>
             <div className="mt-1.5 flex items-center gap-2">
               <span
+                data-no-translate={email ? "" : undefined}
                 className="truncate text-[17px] font-semibold leading-none text-text-primary"
                 style={{ letterSpacing: "-0.018em" }}
               >
@@ -206,6 +212,7 @@ export function SettingsTab() {
       <Section title="General">
         <Row
           label="Run on startup"
+          anchorId="run_on_startup"
           desc="Launch SwiftTunnel when you sign in to Windows"
         >
           <Toggle
@@ -215,7 +222,19 @@ export function SettingsTab() {
           />
         </Row>
         <Row
+          label="Close to tray"
+          anchorId="minimize_to_tray"
+          desc="Keep SwiftTunnel running in the tray when you press X"
+        >
+          <Toggle
+            enabled={settings.minimize_to_tray}
+            ariaLabel="Close to tray"
+            onChange={(v) => set({ minimize_to_tray: v })}
+          />
+        </Row>
+        <Row
           label="Auto-reconnect tunnel"
+          anchorId="auto_reconnect"
           desc="Reconnect after restart if last session was connected"
         >
           <Toggle
@@ -226,6 +245,7 @@ export function SettingsTab() {
         </Row>
         <Row
           label="Discord Rich Presence"
+          anchorId="discord_rpc"
           desc="Show tunnel status in your Discord profile"
         >
           <Toggle
@@ -240,6 +260,7 @@ export function SettingsTab() {
       <Section title="Tunnel">
         <Row
           label="Roblox Route Assist"
+          anchorId="route_assist"
           desc={
             routeAssistDisabledByPartial
               ? "Disabled while Partial Bypass is active"
@@ -263,7 +284,7 @@ export function SettingsTab() {
             enabled={
               settings.enable_api_tunneling && !routeAssistDisabledByPartial
             }
-            disabled={routeAssistDisabledByPartial || MAINTENANCE_MODE}
+            disabled={routeAssistDisabledByPartial}
             ariaLabel="Roblox Route Assist"
             onChange={(v) => set({ enable_api_tunneling: v })}
           />
@@ -358,6 +379,7 @@ export function SettingsTab() {
       <Section title="Updates">
         <Row
           label="Update channel"
+          anchorId="updates"
           desc="Stable for vetted releases, Live for pre-release"
         >
           <Segmented
@@ -368,6 +390,7 @@ export function SettingsTab() {
         </Row>
         <Row
           label="Auto update"
+          anchorId="auto_update"
           desc="Automatically check for updates on startup"
         >
           <Toggle
@@ -580,6 +603,7 @@ export function SettingsTab() {
         <div>
         <Row
           label="Uninstall SwiftTunnel"
+          anchorId="uninstall"
           desc="Remove app and revert all system changes"
         >
           <Button
@@ -663,13 +687,33 @@ function Section({
   tag?: string;
   children: ReactNode;
 }) {
+  // The group title used to float above its card as a loose label. It now
+  // titles the panel it belongs to, so each settings group is one instrument
+  // rather than a caption plus a separate slab.
   return (
-    <section>
-      <SectionHeader label={title} tag={tag} />
-      <div className="overflow-hidden rounded-[var(--radius-card)] surface-card divide-y divide-[color:var(--color-border-subtle)]">
+    <Panel
+      flush
+      eyebrow={title}
+      className="overflow-hidden"
+      actions={
+        tag ? (
+          <span
+            className="pill-base"
+            style={{
+              backgroundColor: "var(--color-accent-primary-soft-10)",
+              color: "var(--color-text-secondary)",
+              border: "1px solid var(--color-border-subtle)",
+            }}
+          >
+            {tag}
+          </span>
+        ) : undefined
+      }
+    >
+      <div className="divide-y divide-[color:var(--color-border-subtle)] border-t border-[color:var(--color-border-subtle)]">
         {children}
       </div>
-    </section>
+    </Panel>
   );
 }
 

@@ -18,6 +18,13 @@ export const NAV_SECTIONS: NavSection[] = [
     label: "Tunnel",
     items: [
       {
+        id: "home",
+        label: "Home",
+        description: "Your SwiftTunnel at a glance",
+        shortcut: "0",
+        icon: "M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10",
+      },
+      {
         id: "connect",
         label: "Connect",
         description: "Route game traffic through the fastest relay",
@@ -53,7 +60,7 @@ export const NAV_SECTIONS: NavSection[] = [
       {
         id: "ingame",
         label: "In-Game",
-        description: "On-screen overlay - FPS, CPU, RAM, network",
+        description: "On-screen overlay — FPS, CPU, RAM, network",
         shortcut: "7",
         icon: "M3 5h18a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z M8 21h8 M12 17v4 M6 9h5 M6 12h3",
       },

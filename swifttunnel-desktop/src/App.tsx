@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
+import { useCallback, useEffect, useState } from "react";
+import { PhysicalSize } from "@tauri-apps/api/dpi";
 import {
   availableMonitors,
   getCurrentWindow,
@@ -7,6 +7,7 @@ import {
 } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/shell/AppShell";
+import { HomeTab } from "./components/home/HomeTab";
 import { StartupScreen } from "./components/shell/StartupScreen";
 import { LoginScreen } from "./components/auth/LoginScreen";
 import { BannedScreen } from "./components/auth/BannedScreen";
@@ -18,6 +19,7 @@ import { NetworkTab } from "./components/network/NetworkTab";
 import { RepairTab } from "./components/repair/RepairTab";
 import { SettingsTab } from "./components/settings/SettingsTab";
 import { WhatsNewDialog } from "./components/updater/WhatsNewDialog";
+import { UpdateRequiredScreen } from "./components/updater/UpdateRequiredScreen";
 import { useAuthStore } from "./stores/authStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useServerStore } from "./stores/serverStore";
@@ -27,10 +29,14 @@ import { useUpdaterStore } from "./stores/updaterStore";
 import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { runAppBootstrap } from "./lib/appBootstrap";
+import { resolveValidRegion } from "./lib/regionMatch";
 import { useAutoRamClean } from "./lib/useAutoRamClean";
 import { useOverlayDriver } from "./lib/useOverlayDriver";
 import { reportError } from "./lib/errors";
+import { addTunneledMs } from "./lib/tunnelTime";
 import {
+  authUpdateRequired,
+  closeSplash,
   systemLaunchedFromStartup,
   systemStartupRecoveryDone,
 } from "./lib/commands";
@@ -43,6 +49,8 @@ import type { TabId } from "./lib/types";
 
 function tabComponent(tab: TabId) {
   switch (tab) {
+    case "home":
+      return <HomeTab />;
     case "connect":
       return <ConnectTab />;
     case "optimization":
@@ -73,6 +81,8 @@ function App() {
   const saveSettings = useSettingsStore((s) => s.save);
   const loadSettings = useSettingsStore((s) => s.load);
   const fetchServers = useServerStore((s) => s.fetchList);
+  const serverRegions = useServerStore((s) => s.regions);
+  const serversLoaded = useServerStore((s) => s.hasLoaded);
   const fetchSystemInfo = useBoostStore((s) => s.fetchSystemInfo);
   const fetchVpnState = useVpnStore((s) => s.fetchState);
   const connectVpn = useVpnStore((s) => s.connect);
@@ -86,6 +96,40 @@ function App() {
   // network state at launch (see lib.rs recover_stale_network_state), so users
   // land on a working connection instead of a leftover-broken one.
   const [recovering, setRecovering] = useState(true);
+
+  // Forced-update gate. The native core latches a "please update" message when
+  // the server locks this build out (old-build lockout); we poll it so an old
+  // build is walled off at launch (via the bootstrap profile fetch) or on any
+  // later 426. null = not gated.
+  const [updateRequiredMsg, setUpdateRequiredMsg] = useState<string | null>(
+    null,
+  );
+
+  // Coerce a stale saved region (e.g. after a relay-fleet swap removed it) to
+  // one that still exists, so auto-connect and the connect button never target
+  // a region that's gone. Normalizes legacy suffixed ids to their base region
+  // and otherwise falls back to the closest available one.
+  const reconcileSelectedRegion = useCallback(() => {
+    const regions = useServerStore.getState().regions;
+    if (regions.length === 0) return;
+    const current = useSettingsStore.getState().settings.selected_region;
+    const next = resolveValidRegion(
+      regions,
+      current,
+      useServerStore.getState().latencies,
+    );
+    if (next && next !== current) {
+      updateSettings({ selected_region: next });
+      void saveSettings();
+    }
+  }, [updateSettings, saveSettings]);
+
+  // Also re-run it whenever the live server list changes at runtime (a
+  // mid-session fleet swap pushed via SERVER_LIST_UPDATED).
+  useEffect(() => {
+    if (!isSettingsLoaded) return;
+    reconcileSelectedRegion();
+  }, [isSettingsLoaded, serverRegions, reconcileSelectedRegion]);
 
   // Auto-clean RAM on game launch + show the in-game overlay (opt-in).
   useAutoRamClean();
@@ -112,6 +156,9 @@ function App() {
             await getCurrentWindow().show();
           } catch {}
         }
+      } finally {
+        // The main window (or its attempt) is up — retire the boot splash.
+        void closeSplash();
       }
     };
 
@@ -125,6 +172,10 @@ function App() {
           error:
             "Could not reach the SwiftTunnel backend. Try restarting the app or running Repair.",
         });
+      }
+      // Don't let a wedged server fetch hang the launch screen either.
+      if (!useServerStore.getState().hasLoaded) {
+        useServerStore.setState({ hasLoaded: true });
       }
     }, 8000);
 
@@ -145,6 +196,7 @@ function App() {
           getVpnState: () => useVpnStore.getState().state,
           connectVpn,
           checkForUpdates,
+          reconcileSelectedRegion,
         });
       } catch (error) {
         reportError("App bootstrap threw", error, {
@@ -182,6 +234,7 @@ function App() {
     refreshAuthProfile,
     connectVpn,
     checkForUpdates,
+    reconcileSelectedRegion,
   ]);
 
   // Keep update announcements automatic while the app is open. Bootstrap checks
@@ -369,11 +422,7 @@ function App() {
             new PhysicalSize(Math.round(ws.width), Math.round(ws.height)),
           );
         }
-        if (ws.x !== null && ws.y !== null) {
-          await appWindow.setPosition(
-            new PhysicalPosition(Math.round(ws.x), Math.round(ws.y)),
-          );
-        }
+        await appWindow.center();
         if (ws.maximized) {
           await appWindow.maximize();
         }
@@ -414,6 +463,46 @@ function App() {
     };
   }, [isSettingsLoaded, saveSettings, updateSettings]);
 
+  // Poll the native forced-update flag. The bootstrap profile fetch latches it
+  // for old builds within the first second or two, so check shortly after
+  // launch and then periodically (also catches a mid-session 426).
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const msg = await authUpdateRequired();
+        if (!cancelled && msg) setUpdateRequiredMsg(msg);
+      } catch {
+        // Command unavailable (older backend) — ignore.
+      }
+    };
+    const first = window.setTimeout(() => void check(), 1500);
+    const interval = window.setInterval(() => void check(), 20000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(first);
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  // Accumulate lifetime "time tunneled" (persisted) regardless of active tab,
+  // flushed every 10s so an app close mid-session loses at most 10s.
+  useEffect(() => {
+    let baseline = Date.now();
+    const flush = () => {
+      const now = Date.now();
+      if (useVpnStore.getState().state === "connected") {
+        addTunneledMs(now - baseline);
+      }
+      baseline = now;
+    };
+    const id = window.setInterval(flush, 10_000);
+    return () => {
+      flush();
+      window.clearInterval(id);
+    };
+  }, []);
+
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) {
@@ -430,6 +519,7 @@ function App() {
       }
 
       const map: Record<string, TabId> = {
+        "0": "home",
         "1": "connect",
         "2": "optimization",
         "3": "games",
@@ -455,8 +545,21 @@ function App() {
   // already in flight here) — so the app only reveals once it's ready, instead of
   // flashing a second bare spinner. The bootstrap's own 8s safety net clears
   // isLoading if the backend is unreachable, so this can't hang forever.
-  if (recovering || isLoading) {
+  // Hold the launch screen until the server list has also resolved for logged-in
+  // users, so Home/Connect open already populated instead of spiking regions in
+  // a beat later. Logged-out users don't need the list, so they aren't held.
+  if (
+    recovering ||
+    isLoading ||
+    (authState === "logged_in" && !serversLoaded)
+  ) {
     return <StartupScreen />;
+  }
+
+  // Old-build lockout takes precedence over everything else — a walled-off
+  // build can't usefully log in or connect, so send the user straight to update.
+  if (updateRequiredMsg) {
+    return <UpdateRequiredScreen message={updateRequiredMsg} />;
   }
 
   if (authState === "banned") {

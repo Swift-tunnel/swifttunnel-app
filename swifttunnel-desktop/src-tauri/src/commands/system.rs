@@ -24,6 +24,16 @@ static DRIVER_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
+/// Close the boot splash window once the main UI is up (invoked from the
+/// frontend after the main window is shown). No-op if it's already gone.
+#[tauri::command]
+pub fn close_splash(app: tauri::AppHandle) {
+    use tauri::Manager;
+    if let Some(splash) = app.get_webview_window("splash") {
+        let _ = splash.close();
+    }
+}
+
 #[cfg(windows)]
 fn program_data_swifttunnel_dir() -> PathBuf {
     let program_data =
@@ -649,29 +659,29 @@ fn default_driver_install_log_path() -> PathBuf {
 }
 
 #[cfg(windows)]
-fn build_elevated_msiexec_script(
+/// Build the msiexec command line for a driver install. Passed straight to the
+/// pure-Win32 elevation helper — no PowerShell wrapper, so a repair can never
+/// flash a console window.
+fn build_msiexec_install_args(
     msi_path: &str,
     log_path: &str,
     passive: bool,
     reinstall: bool,
 ) -> String {
-    // PowerShell single-quote escaping.
-    let escaped_msi = msi_path.replace('\'', "''");
-    let escaped_log = log_path.replace('\'', "''");
     let ui_flag = if passive { "/passive" } else { "/qn" };
-
-    let reinstall_args = if reinstall {
-        ",'REINSTALL=ALL','REINSTALLMODE=vamus'"
-    } else {
-        ""
-    };
-
-    format!(
-        "$ErrorActionPreference='Stop'; \
-         $args=@('/i','{escaped_msi}','{ui_flag}','/norestart','/L*V','{escaped_log}'{reinstall_args}); \
-         $p=Start-Process -FilePath 'msiexec.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $args -Wait -PassThru; \
-         exit $p.ExitCode"
-    )
+    let mut args = vec![
+        "/i".to_string(),
+        swifttunnel_core::utils::quote_windows_arg(msi_path),
+        ui_flag.to_string(),
+        "/norestart".to_string(),
+        "/L*V".to_string(),
+        swifttunnel_core::utils::quote_windows_arg(log_path),
+    ];
+    if reinstall {
+        args.push("REINSTALL=ALL".to_string());
+        args.push("REINSTALLMODE=vamus".to_string());
+    }
+    args.join(" ")
 }
 
 #[cfg(windows)]
@@ -821,20 +831,16 @@ fn install_winpkfilter_driver_from_msi(
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
             ))
         } else {
-            let script =
-                build_elevated_msiexec_script(&msi_string, log_string, passive, use_reinstall_mode);
+            let args =
+                build_msiexec_install_args(&msi_string, log_string, passive, use_reinstall_mode);
 
-            let output = swifttunnel_core::hidden_command("powershell")
-                .args(["-NoProfile", "-Command", &script])
-                .output()
-                .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
+            // Pure Win32 elevation (UAC prompt for msiexec) — no PowerShell
+            // wrapper process, and the installer window stays hidden.
+            let code =
+                swifttunnel_core::utils::run_elevated_and_wait("msiexec.exe", &args, true)
+                    .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
 
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok((
-                output.status.code().unwrap_or(-1),
-                if !stderr.is_empty() { stderr } else { stdout },
-            ))
+            Ok((code, String::new()))
         }
     };
 
@@ -1879,6 +1885,109 @@ pub async fn system_install_driver(
     }
 }
 
+/// Force a full driver reinstall regardless of what the health check says.
+///
+/// `system_repair_driver` deliberately short-circuits when the driver reports
+/// healthy — right for automated Repair-all, but useless when the driver
+/// *reports* ready yet misbehaves in practice (corrupted files, flaky binding
+/// that passes checks). This is the explicit "reinstall the driver" support
+/// action: bundled package first (no UAC when already elevated), elevated MSI
+/// as fallback, then a fresh health check + binding preflight so the caller
+/// can show exactly where it landed — or exactly why it couldn't.
+#[tauri::command]
+pub async fn system_reinstall_driver(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<DriverCheckResponse, String> {
+    #[cfg(windows)]
+    {
+        let resource_dir = app.path().resource_dir().ok();
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let program_files_dir = PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
+        );
+        let binding_preference = {
+            let mut settings = state.settings.lock();
+            repair_binding_preference_from_settings(&mut settings)
+        };
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let _guard = DRIVER_OPERATION_LOCK
+                .lock()
+                .map_err(|_| "Driver operation lock is poisoned".to_string())?;
+
+            let is_admin = swifttunnel_core::is_administrator();
+            let mut reinstall_errors: Vec<String> = Vec::new();
+
+            if is_admin {
+                match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
+                    resource_dir.as_deref(),
+                    exe_dir.as_deref(),
+                    &program_files_dir,
+                    true, // force: uninstall + clean install even if present
+                ) {
+                    Ok(()) => {
+                        let health =
+                            swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                        let preflight = swifttunnel_core::vpn::preflight_binding_for_connect(
+                            binding_preference.clone(),
+                        );
+                        return Ok(driver_repair_response_after_binding_preflight(
+                            health, preflight,
+                        ));
+                    }
+                    Err(e) => {
+                        log::warn!("Bundled driver package reinstall failed: {}", e);
+                        reinstall_errors
+                            .push(format!("bundled package reinstall failed: {}", e));
+                    }
+                }
+            } else {
+                reinstall_errors.push(
+                    "not elevated; using the elevated installer instead".to_string(),
+                );
+            }
+
+            match install_winpkfilter_driver_from_msi(
+                &app,
+                resource_dir.as_deref(),
+                exe_dir.as_deref(),
+                &program_files_dir,
+                true,
+            ) {
+                Ok(()) => {
+                    let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                    let preflight = swifttunnel_core::vpn::preflight_binding_for_connect(
+                        binding_preference,
+                    );
+                    Ok(driver_repair_response_after_binding_preflight(
+                        health, preflight,
+                    ))
+                }
+                Err(e) => {
+                    log::warn!("MSI driver reinstall failed: {}", e);
+                    reinstall_errors.push(format!("MSI reinstall failed: {}", e));
+                    let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                    Ok(DriverCheckResponse::repair_failure(
+                        health,
+                        reinstall_errors.join("\n"),
+                    ))
+                }
+            }
+        })
+        .await
+        .map_err(|e| format!("Driver reinstall task failed: {}", e))?
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (app, state);
+        Ok(DriverCheckResponse::unsupported())
+    }
+}
+
 #[tauri::command]
 pub async fn system_repair_driver(
     app: tauri::AppHandle,
@@ -2590,22 +2699,36 @@ mod tests {
     }
 
     #[test]
-    fn build_elevated_msiexec_script_escapes_single_quotes() {
-        let script = build_elevated_msiexec_script(
-            "C:\\path\\ev'elyn\\WinpkFilter-x64.msi",
-            "C:\\Temp\\log's\\winpk.log",
+    fn build_msiexec_install_args_quotes_paths_and_flags() {
+        let args = build_msiexec_install_args(
+            "C:\\path with spaces\\WinpkFilter-x64.msi",
+            "C:\\Temp\\log dir\\winpk.log",
             true,
             true,
         );
-        assert!(script.contains("ev''elyn"));
-        assert!(script.contains("log''s"));
-        assert!(script.contains("Start-Process"));
-        assert!(script.contains("msiexec.exe"));
-        assert!(script.contains("-WindowStyle Hidden"));
-        assert!(script.contains("/passive"));
-        assert!(script.contains("/L*V"));
-        assert!(script.contains("REINSTALL=ALL"));
-        assert!(script.contains("REINSTALLMODE=vamus"));
+        // Paths with spaces must be quoted for msiexec's command line.
+        assert!(args.contains("\"C:\\path with spaces\\WinpkFilter-x64.msi\""));
+        assert!(args.contains("\"C:\\Temp\\log dir\\winpk.log\""));
+        assert!(args.contains("/passive"));
+        assert!(args.contains("/L*V"));
+        assert!(args.contains("REINSTALL=ALL"));
+        assert!(args.contains("REINSTALLMODE=vamus"));
+        // The args string is handed to ShellExecuteExW directly — it must
+        // never contain a PowerShell wrapper again.
+        assert!(!args.contains("Start-Process"));
+    }
+
+    #[test]
+    fn build_msiexec_install_args_quiet_without_reinstall() {
+        let args = build_msiexec_install_args(
+            "C:\\pkg\\WinpkFilter-x64.msi",
+            "C:\\Temp\\winpk.log",
+            false,
+            false,
+        );
+        assert!(args.contains("/qn"));
+        assert!(!args.contains("/passive"));
+        assert!(!args.contains("REINSTALL=ALL"));
     }
 
     #[test]

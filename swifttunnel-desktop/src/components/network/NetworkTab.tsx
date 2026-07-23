@@ -4,10 +4,14 @@ import { useNetworkStore } from "../../stores/networkStore";
 import type { PingSample } from "../../lib/types";
 import {
   Button,
-  Card,
   Chip,
   MetricGrid,
   MetricCell,
+  Meter,
+  Panel,
+  Readout,
+  StatRail,
+  TickRule,
 } from "../ui";
 
 const DURATIONS = [5, 10, 30, 300] as const;
@@ -112,69 +116,23 @@ export function NetworkTab() {
   const stabilityPingSamples = net.stabilityResult?.ping_samples ?? [];
 
   return (
-    <div className="flex w-full flex-col gap-4 pb-4">
-      {/* ── Hero ── */}
-      <section
-        className="overflow-hidden rounded-[var(--radius-card)] surface-card"
-        style={{ padding: "20px 22px" }}
-      >
-        <div className="flex items-start justify-between gap-6">
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span
-                className="h-2 w-2 rounded-full"
-                style={{
-                  backgroundColor: anyRunning
-                    ? "var(--color-accent-primary)"
-                    : grade
-                      ? heroBigColor
-                      : "var(--color-text-dimmed)",
-                  animation: anyRunning
-                    ? "status-breath 1.4s ease-in-out infinite"
-                    : "none",
-                }}
-              />
-              <span className="eyebrow">{heroLabel}</span>
-              {anyRunning && (
-                <span
-                  className="pill-base"
-                  style={{
-                    backgroundColor: "var(--color-accent-primary-soft-12)",
-                    color: "var(--color-text-primary)",
-                    border: "1px solid var(--color-accent-primary-soft-20)",
-                  }}
-                >
-                  Live
-                </span>
-              )}
-            </div>
-            <div className="mt-2.5 flex items-center gap-2.5">
-              <span
-                className="text-[20px] font-semibold leading-none text-text-primary"
-                style={{ letterSpacing: "-0.02em" }}
-              >
-                {heroState}
-              </span>
-              <span className="font-mono text-[11.5px] text-text-muted">
-                {anyRunning
-                  ? `${completedCount}/3 done`
-                  : completedCount === 0
-                    ? "no tests run yet"
-                    : `${completedCount}/3 tests`}
-              </span>
-            </div>
-            <div className="mt-4 flex items-baseline gap-1.5">
-              <span
-                className="lcd-readout text-[28px] font-medium leading-none"
-                style={{ color: heroBigColor }}
-              >
-                {heroBigValue}
-              </span>
-              {heroHint && (
-                <span className="text-[12px] text-text-muted">{heroHint}</span>
-              )}
-            </div>
-          </div>
+    <div className="flex w-full flex-col gap-4 pb-6">
+      {/* ── Console head: overall grade, then per-instrument state ── */}
+      <Panel
+        grid
+        aurora
+        corners
+        live={anyRunning}
+        eyebrow={heroLabel}
+        title={<span className="display-hero">{heroState}</span>}
+        desc={
+          anyRunning
+            ? `${completedCount}/3 done`
+            : completedCount === 0
+              ? "No tests run yet"
+              : `${completedCount}/3 tests`
+        }
+        actions={
           <Button
             variant={anyRunning ? "secondary" : "primary"}
             size="lg"
@@ -184,10 +142,27 @@ export function NetworkTab() {
           >
             {anyRunning ? "Running…" : "Run All Tests"}
           </Button>
-        </div>
-      </section>
+        }
+      >
+        <Readout
+          size="xl"
+          value={heroBigValue}
+          unit={heroHint ?? undefined}
+          tone={heroBigColor}
+        />
+        <TickRule className="mt-4" />
+        <StatRail
+          className="mt-3"
+          items={[
+            <TestState key="stability" label="Stability" status={net.stabilityStatus} />,
+            <TestState key="speed" label="Speed" status={net.speedStatus} />,
+            <TestState key="bloat" label="Bufferbloat" status={net.bufferbloatStatus} />,
+          ]}
+        />
+      </Panel>
 
       <TestCard
+        anchor="test_stability"
         title="Stability"
         desc="Ping, jitter, and packet loss over time"
         status={net.stabilityStatus}
@@ -268,26 +243,18 @@ export function NetworkTab() {
                 <span className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
                   Packet loss
                 </span>
-                <div
-                  className="flex-1 overflow-hidden rounded-full"
-                  style={{
-                    height: 4,
-                    backgroundColor: "var(--color-bg-elevated)",
-                  }}
-                >
-                  <div
-                    className="h-full rounded-full transition-all"
-                    style={{
-                      width: `${Math.max(2, Math.min(100, net.stabilityResult.packet_loss * 20))}%`,
-                      backgroundColor:
-                        net.stabilityResult.packet_loss === 0
-                          ? "var(--color-latency-excellent)"
-                          : net.stabilityResult.packet_loss < 1
-                            ? "var(--color-latency-good)"
-                            : "var(--color-latency-bad)",
-                    }}
-                  />
-                </div>
+                <Meter
+                  className="flex-1"
+                  segments
+                  value={Math.max(0.02, net.stabilityResult.packet_loss * 0.2)}
+                  tone={
+                    net.stabilityResult.packet_loss === 0
+                      ? "var(--color-latency-excellent)"
+                      : net.stabilityResult.packet_loss < 1
+                        ? "var(--color-latency-good)"
+                        : "var(--color-latency-bad)"
+                  }
+                />
                 <span className="font-mono text-[11.5px] font-semibold text-text-primary">
                   {net.stabilityResult.packet_loss.toFixed(1)}%
                 </span>
@@ -302,6 +269,7 @@ export function NetworkTab() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <TestCard
+          anchor="test_speed"
           title="Speed"
           desc="Download and upload bandwidth"
           status={net.speedStatus}
@@ -334,6 +302,7 @@ export function NetworkTab() {
         />
 
         <TestCard
+          anchor="test_bufferbloat"
           title="Bufferbloat"
           desc="Latency under load"
           status={net.bufferbloatStatus}
@@ -418,6 +387,7 @@ function TestCard({
   disabled,
   controls,
   result,
+  anchor,
 }: {
   title: string;
   desc: string;
@@ -427,19 +397,19 @@ function TestCard({
   disabled: boolean;
   controls?: ReactNode;
   result: ReactNode;
+  anchor?: string;
 }) {
   const isRunning = status === "running";
 
   return (
-    <Card padding="md">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-[13px] font-semibold text-text-primary">
-            {title}
-          </h3>
-          <p className="mt-0.5 text-[11px] text-text-muted">{desc}</p>
-        </div>
-        <div className="flex items-center gap-2">
+    <Panel
+      anchorId={anchor}
+      corners
+      live={isRunning}
+      title={title}
+      desc={desc}
+      actions={
+        <>
           {controls}
           <Button
             size="sm"
@@ -454,13 +424,56 @@ function TestCard({
                 ? "Rerun"
                 : "Run"}
           </Button>
-        </div>
-      </div>
-      {error && (
-        <p className="mt-3 text-[11px] text-status-error">{error}</p>
-      )}
+        </>
+      }
+    >
+      {error && <p className="text-[11px] text-status-error">{error}</p>}
       {result}
-    </Card>
+    </Panel>
+  );
+}
+
+/** One instrument's state in the console head's stat rail. */
+function TestState({ label, status }: { label: string; status: TestStatus }) {
+  const tone =
+    status === "complete"
+      ? "var(--color-status-connected)"
+      : status === "running"
+        ? "var(--color-accent-primary)"
+        : status === "error"
+          ? "var(--color-status-error)"
+          : "var(--color-text-dimmed)";
+  const state =
+    status === "complete"
+      ? "Done"
+      : status === "running"
+        ? "Live"
+        : status === "error"
+          ? "Failed"
+          : "Idle";
+
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-2">
+      <span
+        className="h-1.5 w-1.5 shrink-0 rounded-full"
+        style={{
+          backgroundColor: tone,
+          animation:
+            status === "running"
+              ? "status-breath 1.4s ease-in-out infinite"
+              : "none",
+        }}
+      />
+      <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-text-secondary">
+        {label}
+      </span>
+      <span
+        className="shrink-0 text-[10px] font-semibold uppercase tracking-[0.08em]"
+        style={{ color: tone }}
+      >
+        {state}
+      </span>
+    </div>
   );
 }
 
@@ -476,13 +489,7 @@ function SpeedCard({
   direction: "up" | "down";
 }) {
   return (
-    <div
-      className="rounded-[var(--radius-card)] p-3"
-      style={{
-        backgroundColor: "var(--color-bg-elevated)",
-        border: "1px solid var(--color-border-subtle)",
-      }}
-    >
+    <div className="instrument-well p-3">
       <div className="flex items-center gap-1.5">
         <svg
           width="12"
@@ -506,19 +513,15 @@ function SpeedCard({
             </>
           )}
         </svg>
-        <span className="text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-dimmed">
-          {label}
-        </span>
+        <span className="eyebrow">{label}</span>
       </div>
-      <div className="mt-1 flex items-baseline gap-1">
-        <span
-          className="font-mono text-[22px] font-bold leading-none"
-          style={{ color }}
-        >
-          {value}
-        </span>
-        <span className="text-[11px] font-medium text-text-muted">Mbps</span>
-      </div>
+      <Readout
+        className="mt-2"
+        size="lg"
+        value={value}
+        unit="Mbps"
+        tone={color}
+      />
     </div>
   );
 }

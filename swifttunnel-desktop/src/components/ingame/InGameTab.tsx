@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { SectionHeader, Toggle, Chip } from "../ui";
+import { Toggle, Chip, Panel, Readout, StatRail } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import type {
@@ -82,52 +82,67 @@ export function InGameTab() {
 
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
-      {/* Master toggle + hotkey */}
-      <section className="surface-card rounded-[var(--radius-card)] px-4 py-3.5">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <h3 className="text-[13px] font-semibold text-text-primary">
-              In-Game Overlay
-            </h3>
+      {/* Console head — overlay state, bound key and payload at a glance. */}
+      <Panel
+        grid
+        aurora
+        corners
+        live={ov.enabled}
+        status={ov.enabled ? "connected" : null}
+        anchorId="overlay_enabled"
+        eyebrow="In-Game Overlay"
+        title={
+          <span className="flex items-center gap-2">
+            <span className="display-hero">
+              {ov.enabled ? "Overlay armed" : "Overlay off"}
+            </span>
             <Chip size="xs" tone="accent">
               BETA
             </Chip>
-          </div>
-          <div className="flex items-center gap-3">
-            <span
-              className="rounded-[5px] px-2 py-[3px] font-mono text-[10px]"
-              style={{
-                backgroundColor: "var(--color-bg-elevated)",
-                color: "var(--color-text-muted)",
-                border: "1px solid var(--color-border-subtle)",
-              }}
-            >
-              {ov.hotkey}
-            </span>
-            <Toggle
-              enabled={ov.enabled}
-              ariaLabel="In-Game Overlay"
-              onChange={(v) => patch({ enabled: v })}
-            />
-          </div>
-        </div>
-        <p className="mt-1 text-[11px] text-text-muted">
-          A movable on-screen bar showing live FPS, CPU, RAM, network and more —
-          drawn over the game without touching it (anti-cheat safe).
-        </p>
-      </section>
+          </span>
+        }
+        desc="A movable on-screen bar showing live FPS, CPU, RAM, network and more — drawn over the game without touching it (anti-cheat safe)."
+        actions={
+          <Toggle
+            enabled={ov.enabled}
+            ariaLabel="In-Game Overlay"
+            onChange={(v) => patch({ enabled: v })}
+          />
+        }
+      >
+        <StatRail
+          items={[
+            <Readout
+              key="state"
+              size="md"
+              value={ov.enabled ? "ON" : "OFF"}
+              label="State"
+              tone={
+                ov.enabled ? "var(--color-status-connected)" : undefined
+              }
+            />,
+            <Readout key="hotkey" size="md" value={ov.hotkey} label="Hotkey" />,
+            <Readout
+              key="metrics"
+              size="md"
+              value={`${ov.metrics.length}/${MAX_OVERLAY_METRICS}`}
+              label="Metrics"
+            />,
+          ]}
+        />
+      </Panel>
 
       <div
         className={disabled ? "pointer-events-none opacity-50" : ""}
         style={{ transition: "opacity 120ms" }}
       >
-        {/* Live preview */}
-        <section className="surface-card mb-4 rounded-[var(--radius-card)] px-4 py-4">
-          <SectionHeader label="Overlay preview" size="sm" />
-          <div
-            className="flex min-h-[52px] items-center justify-center rounded-lg px-3 py-4"
-            style={{ background: "var(--color-bg-base)" }}
-          >
+        {/* Live preview, sunk into the panel face like a screen. */}
+        <Panel
+          className="mb-4"
+          anchorId="overlay_preview"
+          eyebrow="Overlay preview"
+        >
+          <div className="instrument-well flex min-h-[52px] items-center justify-center px-3 py-4">
             <OverlayBar
               metrics={ov.metrics}
               values={OVERLAY_SAMPLE_VALUES}
@@ -136,15 +151,16 @@ export function InGameTab() {
               style={ov.style}
             />
           </div>
-        </section>
+        </Panel>
 
         {/* Metrics */}
-        <section className="surface-card mb-4 rounded-[var(--radius-card)] px-4 py-4">
-          <SectionHeader
-            label="Metrics"
-            tag={`${ov.metrics.length} / ${MAX_OVERLAY_METRICS}`}
-            description="Pick what to display. Temperatures arrive in a later update."
-          />
+        <Panel
+          className="mb-4"
+          anchorId="overlay_metrics"
+          eyebrow="Metrics"
+          title={`${ov.metrics.length} / ${MAX_OVERLAY_METRICS} selected`}
+          desc="Pick what to display. Temperatures arrive in a later update."
+        >
           <div className="flex flex-col gap-3">
             {OVERLAY_METRIC_GROUPS.map((group) => {
               const items = OVERLAY_METRICS.filter((m) => m.group === group);
@@ -205,10 +221,10 @@ export function InGameTab() {
               );
             })}
           </div>
-        </section>
+        </Panel>
 
         {/* Style + Size + Color */}
-        <section className="surface-card mb-4 rounded-[var(--radius-card)] px-4 py-4">
+        <Panel className="mb-4" anchorId="overlay_style" eyebrow="Appearance">
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
             <div>
               <h4 className="eyebrow mb-2 text-text-secondary">Display style</h4>
@@ -260,29 +276,29 @@ export function InGameTab() {
               </div>
             </div>
           </div>
-        </section>
+        </Panel>
 
         {/* Position */}
-        <section className="surface-card mb-4 rounded-[var(--radius-card)] px-4 py-4">
-          <SectionHeader
-            label="Position"
-            size="sm"
-            description={
-              hasCustomPos
-                ? "Custom spot set by dragging in-game. Pick a corner to snap back."
-                : "Pick a corner here, or just grab the bar in-game to move it anywhere."
-            }
-            action={
-              hasCustomPos ? (
-                <SegBtn
-                  active={false}
-                  onClick={() => patch({ custom_x: null, custom_y: null })}
-                >
-                  Reset
-                </SegBtn>
-              ) : undefined
-            }
-          />
+        <Panel
+          className="mb-4"
+          anchorId="overlay_position"
+          eyebrow="Position"
+          desc={
+            hasCustomPos
+              ? "Custom spot set by dragging in-game. Pick a corner to snap back."
+              : "Pick a corner here, or just grab the bar in-game to move it anywhere."
+          }
+          actions={
+            hasCustomPos ? (
+              <SegBtn
+                active={false}
+                onClick={() => patch({ custom_x: null, custom_y: null })}
+              >
+                Reset
+              </SegBtn>
+            ) : undefined
+          }
+        >
           <div className="flex justify-center">
             <div
               className="rounded-xl p-3"
@@ -303,7 +319,7 @@ export function InGameTab() {
                       onClick={() =>
                         patch({ position: pos, custom_x: null, custom_y: null })
                       }
-                      className="flex items-center justify-center rounded-md text-[8px] font-semibold uppercase tracking-wide transition-colors"
+                      className="rounded-md transition-colors"
                       style={{
                         border: `1px dashed ${active ? "transparent" : "var(--color-border-default)"}`,
                         backgroundColor: active
@@ -313,26 +329,26 @@ export function InGameTab() {
                           ? "var(--color-bg-base)"
                           : "var(--color-text-muted)",
                       }}
-                    >
-                      {active ? "INFO" : ""}
-                    </button>
+                    />
                   );
                 })}
               </div>
               <div className="mx-auto mt-2 h-1 w-16 rounded-full bg-[color:var(--color-border-default)]" />
             </div>
           </div>
-        </section>
+        </Panel>
 
       </div>
 
       {/* When my game starts - independent of the overlay master toggle:
           auto-RAM-clean (and its toast) works without the stats HUD. */}
-      <section className="surface-card overflow-hidden rounded-[var(--radius-card)]">
-        <div className="px-4 pb-1 pt-3">
-          <h4 className="eyebrow text-text-secondary">When my game starts</h4>
-        </div>
-        <div className="divide-y divide-[color:var(--color-border-subtle)]">
+      <Panel
+        flush
+        className="overflow-hidden"
+        anchorId="auto_ram_clean"
+        eyebrow="When my game starts"
+      >
+        <div className="divide-y divide-[color:var(--color-border-subtle)] border-t border-[color:var(--color-border-subtle)]">
           <ToggleRow
             label="Auto-clean RAM on game launch"
             desc="Frees memory when you join a game and shows a 'RAM freed' overlay."
@@ -353,7 +369,7 @@ export function InGameTab() {
             onChange={(v) => patch({ show_max_fps_message: v })}
           />
         </div>
-      </section>
+      </Panel>
     </div>
   );
 }

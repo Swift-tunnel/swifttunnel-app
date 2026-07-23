@@ -14,6 +14,10 @@ interface ServerStore {
   latencies: Map<string, number | null>;
   source: string;
   isLoading: boolean;
+  /** True once the first list fetch has resolved (success OR failure). The
+   *  launch loading screen waits on this so regions are on-screen before the
+   *  UI reveals, instead of popping in a beat later. */
+  hasLoaded: boolean;
   error: string | null;
 
   // Actions
@@ -30,6 +34,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   latencies: new Map(),
   source: "",
   isLoading: false,
+  hasLoaded: false,
   error: null,
 
   fetchList: async () => {
@@ -41,10 +46,13 @@ export const useServerStore = create<ServerStore>((set, get) => ({
         servers: resp.servers,
         source: resp.source,
         isLoading: false,
+        hasLoaded: true,
         error: null,
       });
     } catch (e) {
-      set({ isLoading: false, error: String(e) });
+      // Even a failed fetch counts as "loaded" so the launch screen can't hang
+      // waiting on an unreachable backend.
+      set({ isLoading: false, hasLoaded: true, error: String(e) });
     }
   },
 
