@@ -41,6 +41,14 @@ const DNS_REPAIR_RESOLVERS: &[&str] = &[
     "https://94.140.14.14/resolve",
 ];
 
+/// Resolvers that honor `edns_client_subnet` (Google's JSON DoH API). Cloudflare
+/// (1.1.1.1) and Quad9 strip ECS, so they must NOT be used for region steering —
+/// they'd return the edge nearest the resolver, not the tunneled region.
+const ECS_DOH_RESOLVERS: &[&str] = &[
+    "https://8.8.8.8/resolve",
+    "https://8.8.4.4/resolve",
+];
+
 /// Maximum IPs pinned per Roblox bootstrap domain.
 ///
 /// Roblox serves these hostnames from a CDN/anycast pool, so a single edge IP
@@ -642,6 +650,62 @@ async fn resolve_domain_ips(
     ))
 }
 
+/// Resolve the Route Assist region control-plane hosts (gamejoin/games/lms) to
+/// the tunneled region's Roblox anycast edge, by querying an ECS-honoring
+/// resolver with `ecs_subnet` (the relay's public /24).
+///
+/// Roblox picks the game-server region from *which anycast edge answers* these
+/// hosts, not from which relay carries the packets. Resolved from the user's own
+/// ISP they return the user's local edge (e.g. Mumbai `bom`), so the player
+/// lands there. Feeding the relay's subnet as EDNS Client Subnet returns the
+/// relay region's edge instead (e.g. Singapore `sin`, 128.116.54.x). Pinned and
+/// carried by Route Assist's TCP tunneling, that places the game server in the
+/// tunneled region.
+///
+/// Best-effort: returns whatever resolved. An empty map leaves the local-DoH
+/// pins in place, so a lookup failure can never break the join.
+pub async fn resolve_region_edges_via_ecs(
+    ecs_subnet: &str,
+) -> std::collections::HashMap<String, Vec<Ipv4Addr>> {
+    let mut out: std::collections::HashMap<String, Vec<Ipv4Addr>> =
+        std::collections::HashMap::new();
+    let client = match reqwest::Client::builder()
+        .timeout(DNS_REPAIR_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            warn!("Route Assist ECS resolver build failed: {e}");
+            return out;
+        }
+    };
+    for domain in ROUTE_ASSIST_RELAY_DOMAINS {
+        for resolver in ECS_DOH_RESOLVERS {
+            let url = build_doh_url_ecs(resolver, domain, Some(ecs_subnet));
+            let ips = match client
+                .get(&url)
+                .header("accept", "application/dns-json")
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => match response.text().await {
+                    Ok(body) => parse_usable_a_records(&body).unwrap_or_default(),
+                    Err(_) => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            if !ips.is_empty() {
+                out.insert(
+                    (*domain).to_string(),
+                    dedup_and_cap_ips(ips, MAX_PINNED_IPS_PER_DOMAIN),
+                );
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Deduplicate IPs (preserving first-seen order) and cap the count.
 fn dedup_and_cap_ips(ips: Vec<Ipv4Addr>, cap: usize) -> Vec<Ipv4Addr> {
     let mut seen = HashSet::new();
@@ -1092,11 +1156,20 @@ fn build_hosts_block(overrides: &[HostOverride]) -> String {
 }
 
 fn build_doh_url(resolver: &str, domain: &str) -> String {
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("name", domain)
-        .append_pair("type", "A")
-        .finish();
-    format!("{resolver}?{query}")
+    build_doh_url_ecs(resolver, domain, None)
+}
+
+/// Like [`build_doh_url`] but optionally attaches an `edns_client_subnet` so the
+/// resolver returns the Roblox anycast edge nearest that subnet (used to steer
+/// Route Assist joins to the tunneled region's edge). Only ECS-honoring
+/// resolvers (Google) respect it; Cloudflare strips it.
+fn build_doh_url_ecs(resolver: &str, domain: &str, ecs: Option<&str>) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("name", domain).append_pair("type", "A");
+    if let Some(subnet) = ecs {
+        serializer.append_pair("edns_client_subnet", subnet);
+    }
+    format!("{resolver}?{}", serializer.finish())
 }
 
 fn parse_usable_a_records(body: &str) -> Result<Vec<Ipv4Addr>, String> {
