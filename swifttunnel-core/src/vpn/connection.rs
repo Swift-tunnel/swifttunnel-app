@@ -1359,13 +1359,34 @@ impl VpnConnection {
             (Vec::new(), false, "legacy_fallback".to_string())
         };
 
-        // Full bypass + a real DNS block (Egypt): local DoH is dead and system DNS
-        // is poisoned, so the pins above may be missing/wrong and the player would
-        // reach poisoned addresses the relay can't forward to ("problem reaching
-        // our servers"). Now that the relay tunnel is up, resolve Roblox's real
-        // IPs *through* the relay (which sits outside the censorship) and merge
-        // them into the pins. Best-effort: an older relay just returns nothing.
-        if enable_country_ban {
+        // Resolve Roblox's real IPs *through* the relay (which resolves from the
+        // relay's own region, outside the user's ISP) and merge them into the
+        // pins. Two triggers:
+        //
+        // * Full country-ban bypass (Egypt): local DoH is dead and system DNS is
+        //   poisoned, so the pins above may be missing/wrong and the player would
+        //   reach poisoned addresses the relay can't forward to ("problem
+        //   reaching our servers"). Resolve every bootstrap host through the
+        //   relay (which sits outside the censorship).
+        //
+        // * Route Assist: gamejoin/games/lms decide server placement by *which
+        //   regional edge answers*, and Roblox uses anycast — resolved from the
+        //   user's own ISP they return the user's local edge (e.g. Mumbai), so
+        //   the player lands there no matter which relay carries the packets.
+        //   Resolving just those region control-plane hosts through the relay
+        //   yields the tunneled region's edge (e.g. Singapore), which is what
+        //   actually places the game server in the tunneled region.
+        //
+        // Best-effort: an older relay without resolve support returns nothing and
+        // the pins fall back to the local-DoH results above.
+        let relay_resolve_domains: &[&str] = if enable_country_ban {
+            crate::roblox_proxy::hosts::ROBLOX_BOOTSTRAP_DOMAINS
+        } else if enable_api_tunneling {
+            crate::roblox_proxy::hosts::ROUTE_ASSIST_RELAY_DOMAINS
+        } else {
+            &[]
+        };
+        if !relay_resolve_domains.is_empty() {
             if let Some(relay) = self
                 .split_tunnel
                 .as_ref()
@@ -1373,7 +1394,7 @@ impl VpnConnection {
             {
                 let resolved = relay
                     .resolve_roblox_hosts(
-                        crate::roblox_proxy::hosts::ROBLOX_BOOTSTRAP_DOMAINS,
+                        relay_resolve_domains,
                         std::time::Duration::from_secs(3),
                     )
                     .await;
@@ -1383,10 +1404,15 @@ impl VpnConnection {
                     );
                 } else {
                     let count = resolved.len();
+                    let mode = if enable_country_ban {
+                        "full-bypass"
+                    } else {
+                        "route-assist"
+                    };
                     match crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved).await
                     {
                         Ok(()) => log::info!(
-                            "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay)"
+                            "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay, mode={mode})"
                         ),
                         Err(e) => {
                             log::warn!("Relay-resolved Roblox pins could not be applied: {e}")

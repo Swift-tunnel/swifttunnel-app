@@ -135,7 +135,7 @@ const PINNED_ASSET_DIRECT_ROBLOX_DOMAINS: &[&str] = &[
 // when it rides a shared relay NAT, showing as missing chat, empty menus, and
 // unloaded player icons. Full country-ban bypass ignores this split and relays
 // every pinned host.
-const ROUTE_ASSIST_RELAY_DOMAINS: &[&str] = &[
+pub const ROUTE_ASSIST_RELAY_DOMAINS: &[&str] = &[
     "gamejoin.roblox.com",
     "games.roblox.com",
     // Roblox latency measurement influences placement. Keep it on the relay so
