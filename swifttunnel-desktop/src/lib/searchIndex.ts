@@ -374,7 +374,7 @@ const SETTINGS_ROWS: SearchEntry[] = (
       anchor: "route_assist",
       label: "Roblox Route Assist",
       keywords:
-        "route assist roblox servers near region matchmaking join nearby server region lock",
+        "route assist roblox auto relay fastest lowest latency best server region switch matchmaking automatic optimal ping",
     },
     {
       anchor: "auto_update",

@@ -264,14 +264,14 @@ export function SettingsTab() {
           desc={
             routeAssistDisabledByPartial
               ? "Disabled while Partial Bypass is active"
-              : "Lands you in game servers near your tunneled region"
+              : "Auto-selects the fastest relay for the game server you join"
           }
           tooltip={
             <Tooltip
               content={
                 routeAssistDisabledByPartial
                   ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
-                  : "Routes Roblox matchmaking/login traffic through the relay so Roblox places you near your tunneled region. For blocked countries, use the Bypass toggles in Optimize instead."
+                  : "Detects the region of the game server Roblox puts you on, then automatically routes you through the lowest-latency relay for it — no manual server picking. Most effective with relays in several regions. For blocked countries, use the Bypass toggles in Optimize instead."
               }
             >
               <span className="inline-flex">

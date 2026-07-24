@@ -1359,66 +1359,37 @@ impl VpnConnection {
             (Vec::new(), false, "legacy_fallback".to_string())
         };
 
-        // Steer Roblox's region control-plane to the tunneled region's edge.
-        // Roblox picks the game-server region from *which anycast edge answers*
-        // gamejoin/games/lms — not from which relay carries the packets — so both
-        // triggers below repoint those hosts; Route Assist's TCP tunneling then
-        // carries the pinned IPs.
-        //
-        // * Full country-ban bypass (Egypt): local DoH is dead and system DNS is
-        //   poisoned. Resolve every bootstrap host *through the relay* (which
-        //   sits outside the censorship) so the player reaches real Roblox IPs.
-        //
-        // * Route Assist: resolved via the user's own ISP, gamejoin/games/lms
-        //   return the user's local edge (e.g. Mumbai `bom`), so the player lands
-        //   there. Re-resolve just those hosts via an ECS-honoring resolver,
-        //   feeding the relay's public /24 as EDNS Client Subnet, so they return
-        //   the tunneled region's edge (e.g. Singapore `sin`, 128.116.54.x) and
-        //   the game server lands there.
-        //
-        // Best-effort: an empty result leaves the local-DoH pins in place, so a
-        // lookup failure can never break the join.
-        if enable_country_ban || enable_api_tunneling {
+        // Full bypass + a real DNS block (Egypt): local DoH is dead and system DNS
+        // is poisoned, so the pins above may be missing/wrong and the player would
+        // reach poisoned addresses the relay can't forward to ("problem reaching
+        // our servers"). Now that the relay tunnel is up, resolve Roblox's real
+        // IPs *through* the relay (which sits outside the censorship) and merge
+        // them into the pins. Best-effort: an older relay just returns nothing.
+        if enable_country_ban {
             if let Some(relay) = self
                 .split_tunnel
                 .as_ref()
                 .and_then(|st| st.try_lock().ok().and_then(|d| d.get_relay_context()))
             {
-                let resolved = if enable_country_ban {
-                    relay
-                        .resolve_roblox_hosts(
-                            crate::roblox_proxy::hosts::ROBLOX_BOOTSTRAP_DOMAINS,
-                            std::time::Duration::from_secs(3),
-                        )
-                        .await
-                } else {
-                    match relay.relay_addr().ip() {
-                        std::net::IpAddr::V4(v4) => {
-                            let o = v4.octets();
-                            let ecs = format!("{}.{}.{}.0/24", o[0], o[1], o[2]);
-                            crate::roblox_proxy::hosts::resolve_region_edges_via_ecs(&ecs).await
-                        }
-                        std::net::IpAddr::V6(_) => std::collections::HashMap::new(),
-                    }
-                };
+                let resolved = relay
+                    .resolve_roblox_hosts(
+                        crate::roblox_proxy::hosts::ROBLOX_BOOTSTRAP_DOMAINS,
+                        std::time::Duration::from_secs(3),
+                    )
+                    .await;
                 if resolved.is_empty() {
                     log::info!(
-                        "Region-edge resolution returned nothing (relay without resolve support, or ECS lookup failed)"
+                        "Relay-resolved DNS returned nothing (relay without resolve support, or hosts unresolved)"
                     );
                 } else {
                     let count = resolved.len();
-                    let mode = if enable_country_ban {
-                        "full-bypass"
-                    } else {
-                        "route-assist-ecs"
-                    };
                     match crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved).await
                     {
                         Ok(()) => log::info!(
-                            "Applied region-edge pins for {count} Roblox host(s) (mode={mode})"
+                            "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay)"
                         ),
                         Err(e) => {
-                            log::warn!("Region-edge pins could not be applied: {e}")
+                            log::warn!("Relay-resolved Roblox pins could not be applied: {e}")
                         }
                     }
                 }
