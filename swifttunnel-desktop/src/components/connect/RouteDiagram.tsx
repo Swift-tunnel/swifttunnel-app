@@ -255,12 +255,13 @@ function Leg({
       />
       {boosted && label && (
         <span
-          className="lcd-readout relative rounded-[6px] px-2 py-1 text-[9.5px] font-bold uppercase leading-none tracking-[0.12em]"
+          className="lcd-readout relative rounded-[6px] px-2 py-1 text-[9.5px] font-semibold uppercase leading-none tracking-[0.12em]"
           style={{
             backgroundColor: "var(--color-bg-elevated)",
-            border: "1px solid var(--color-status-connected)",
-            color: "var(--color-status-connected)",
-            boxShadow: "0 0 12px -4px var(--color-status-connected-glow)",
+            border:
+              "1px solid color-mix(in srgb, var(--color-status-connected) 40%, transparent)",
+            color:
+              "color-mix(in srgb, var(--color-status-connected) 78%, var(--color-text-secondary))",
           }}
         >
           {label}

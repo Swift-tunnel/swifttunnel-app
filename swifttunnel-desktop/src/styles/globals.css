@@ -448,13 +448,18 @@ body {
 .route-leg-boosted {
   background-image: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--color-status-connected) 22%, transparent) 0%,
-    var(--color-status-connected-glow) 45%,
-    color-mix(in srgb, var(--color-status-connected) 22%, transparent) 100%
+    color-mix(in srgb, var(--color-status-connected) 10%, transparent) 0%,
+    color-mix(in srgb, var(--color-status-connected) 55%, transparent) 45%,
+    color-mix(in srgb, var(--color-status-connected) 10%, transparent) 100%
+  );
+  background-color: color-mix(
+    in srgb,
+    var(--color-status-connected) 12%,
+    transparent
   );
   background-size: 55% 100%;
   background-repeat: no-repeat;
-  animation: route-flow 2.1s linear infinite;
+  animation: route-flow 2.4s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
