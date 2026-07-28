@@ -294,7 +294,7 @@ export function ConnectTab() {
     : isTransitioning
       ? stateLabel(vpnState)
       : settings.auto_routing_enabled
-        ? "Auto Route"
+        ? "Auto"
         : selectedRegion?.name || "Select a region";
 
   const heroSubline = isConnected
@@ -768,13 +768,13 @@ function RouteAssistPanel({
               className="text-[12.5px] font-semibold text-text-primary"
               style={{ letterSpacing: "-0.005em" }}
             >
-              Roblox Route Assist
+              Tunnel join traffic
             </h3>
             <Tooltip
               content={
                 partialBypassActive
                   ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
-                  : "Detects the region of the game server Roblox puts you on, then automatically routes you through the lowest-latency relay for it — no manual server picking. Most effective with relays in several regions. For blocked countries, use the Bypass toggles in Optimize instead."
+                  : "Sends Roblox's connection setup — matchmaking, login and API calls — through the relay as well, instead of only your gameplay. Roblox then sees the relay's location when placing you, and login works on networks that block it. Leave off if you only want lower ping. For blocked countries, use the Bypass toggles in Optimize instead."
               }
             >
               <span className="inline-flex">
@@ -785,14 +785,14 @@ function RouteAssistPanel({
           <p className="mt-0.5 truncate text-[11px] leading-snug text-text-muted">
             {partialBypassActive
               ? "Disabled while Partial Bypass is active."
-              : "Auto-selects the fastest relay for the game server you join."}
+              : "Route Roblox's login and matchmaking through the relay too."}
           </p>
         </div>
       </div>
       <Toggle
         enabled={enabled}
         disabled={disabled}
-        ariaLabel="Roblox Route Assist"
+        ariaLabel="Tunnel join traffic"
         onChange={onChange}
       />
     </section>
@@ -955,7 +955,7 @@ function AutoRouteRow({
             className="text-[12.5px] font-medium text-text-primary"
             style={{ letterSpacing: "-0.005em" }}
           >
-            Auto Route
+            Auto
           </span>
           <Tooltip content="Picks the fastest relay to the game server each match.">
             <span className="inline-flex">

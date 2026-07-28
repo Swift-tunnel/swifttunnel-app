@@ -372,9 +372,11 @@ const SETTINGS_ROWS: SearchEntry[] = (
     },
     {
       anchor: "route_assist",
-      label: "Roblox Route Assist",
+      label: "Tunnel join traffic",
       keywords:
-        "route assist roblox auto relay fastest lowest latency best server region switch matchmaking automatic optimal ping",
+        // "route assist" kept as an alias: it was the old name, and users who
+        // learned it from Discord or older builds should still find the toggle.
+        "tunnel join traffic route assist roblox matchmaking login api connection setup placement region relay tcp",
     },
     {
       anchor: "auto_update",

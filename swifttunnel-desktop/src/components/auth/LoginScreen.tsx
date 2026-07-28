@@ -1,5 +1,6 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAuthStore } from "../../stores/authStore";
 import { systemOpenUrl } from "../../lib/commands";
 import { Button, Spinner } from "../ui";
@@ -24,7 +25,11 @@ const FEATURES = [
   {
     icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20",
     title: "Global relay",
-    desc: "28 servers across 12 regions",
+    // Hardcoded because the fleet list is only fetched after sign-in. Update
+    // alongside PING_ENABLED_REGIONS in the web repo when the fleet changes —
+    // this said "28 servers across 12 regions" for a while after the fleet was
+    // rebuilt down to 10.
+    desc: "10 relays across 5 regions",
   },
 ];
 
@@ -100,10 +105,85 @@ export function LoginScreen() {
   return (
     <div
       data-tauri-drag-region
-      className="flex h-screen w-screen items-center justify-center"
+      className="relative flex h-screen w-screen items-center justify-center overflow-hidden"
       style={{ backgroundColor: "var(--color-bg-base)" }}
     >
-      <div className="flex w-full max-w-[360px] flex-col gap-6 px-8">
+      {/* Grid atmosphere — two pitches read as depth where one reads as
+          wallpaper. Masked to fade out at the edges so the sign-in card stays
+          the focal point. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 opacity-90"
+        style={{
+          backgroundImage:
+            "linear-gradient(to right, rgba(255,255,255,0.055) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.055) 1px, transparent 1px)",
+          backgroundSize: "48px 48px",
+          maskImage:
+            "radial-gradient(ellipse 85% 75% at 50% 45%, black 40%, transparent)",
+          WebkitMaskImage:
+            "radial-gradient(ellipse 85% 75% at 50% 45%, black 40%, transparent)",
+        }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 opacity-70"
+        style={{
+          backgroundImage:
+            "linear-gradient(to right, rgba(255,255,255,0.05) 1px, transparent 1px), linear-gradient(to bottom, rgba(255,255,255,0.05) 1px, transparent 1px)",
+          backgroundSize: "192px 192px",
+          maskImage:
+            "radial-gradient(ellipse 80% 70% at 50% 45%, black 35%, transparent)",
+          WebkitMaskImage:
+            "radial-gradient(ellipse 80% 70% at 50% 45%, black 35%, transparent)",
+        }}
+      />
+      {/* Glow behind the logo, and a floor shadow so the card is grounded. */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(ellipse 50% 40% at 50% 30%, rgba(255,255,255,0.06), transparent 70%)",
+        }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-1/3"
+        style={{
+          background: "linear-gradient(to top, rgba(0,0,0,0.5), transparent)",
+        }}
+      />
+
+      {/* Window controls. The sign-in screen previously had none at all, so the
+          only way to close the app before signing in was Alt+F4. Kept outside
+          the drag region's mousedown so clicks aren't swallowed by dragging. */}
+      <div
+        className="absolute right-0 top-0 z-20 flex items-center"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          aria-label="Minimize"
+          onClick={() => void getCurrentWindow().minimize()}
+          className="flex h-9 w-11 items-center justify-center text-text-muted transition-colors hover:bg-white/5 hover:text-text-primary"
+        >
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
+            <path d="M1 5.5h9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          aria-label="Close"
+          onClick={() => void getCurrentWindow().close()}
+          className="flex h-9 w-11 items-center justify-center text-text-muted transition-colors hover:bg-[#e81123] hover:text-white"
+        >
+          <svg width="11" height="11" viewBox="0 0 11 11" fill="none" aria-hidden="true">
+            <path d="M1.5 1.5l8 8M9.5 1.5l-8 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
+
+      <div className="relative z-10 flex w-full max-w-[360px] flex-col gap-6 px-8">
         {/* Brand */}
         <motion.div
           initial={{ opacity: 0, y: 6 }}
@@ -119,7 +199,7 @@ export function LoginScreen() {
                 style={{ backgroundColor: "var(--color-status-connected)" }}
               />
               <span className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.18em] text-text-muted">
-                Gaming · Relay · 28 Servers
+                Gaming · Relay · 10 Servers
               </span>
             </div>
             <h1 className="text-[22px] font-semibold tracking-[-0.02em] text-text-primary">

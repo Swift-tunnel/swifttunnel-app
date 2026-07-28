@@ -259,19 +259,19 @@ export function SettingsTab() {
       {/* Tunnel */}
       <Section title="Tunnel">
         <Row
-          label="Roblox Route Assist"
+          label="Tunnel join traffic"
           anchorId="route_assist"
           desc={
             routeAssistDisabledByPartial
               ? "Disabled while Partial Bypass is active"
-              : "Auto-selects the fastest relay for the game server you join"
+              : "Route Roblox's login and matchmaking through the relay too"
           }
           tooltip={
             <Tooltip
               content={
                 routeAssistDisabledByPartial
                   ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
-                  : "Detects the region of the game server Roblox puts you on, then automatically routes you through the lowest-latency relay for it — no manual server picking. Most effective with relays in several regions. For blocked countries, use the Bypass toggles in Optimize instead."
+                  : "Sends Roblox's connection setup — matchmaking, login and API calls — through the relay as well, instead of only your gameplay. Roblox then sees the relay's location when placing you, and login works on networks that block it. Leave off if you only want lower ping. For blocked countries, use the Bypass toggles in Optimize instead."
               }
             >
               <span className="inline-flex">
@@ -285,7 +285,7 @@ export function SettingsTab() {
               settings.enable_api_tunneling && !routeAssistDisabledByPartial
             }
             disabled={routeAssistDisabledByPartial}
-            ariaLabel="Roblox Route Assist"
+            ariaLabel="Tunnel join traffic"
             onChange={(v) => set({ enable_api_tunneling: v })}
           />
         </Row>

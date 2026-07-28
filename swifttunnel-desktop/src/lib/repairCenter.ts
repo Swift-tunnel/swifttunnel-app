@@ -161,7 +161,7 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
   },
   {
     id: "route_assist",
-    label: "Route Assist",
+    label: "Tunnel join traffic",
     description: "Checks Roblox API/browser routing state without changing it.",
     actionLabel: "Check",
     systemChanging: false,
@@ -1016,23 +1016,23 @@ async function checkRouteAssist(
         ? "enabled"
         : "disabled";
   const routeAssistNextStep = fullBypassActive
-    ? "Full Country Ban already relays Roblox routing. Route Assist does not need to be enabled separately."
+    ? "Full Country Ban already relays Roblox routing. Tunnel join traffic does not need to be enabled separately."
     : partialBypassActive
       ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
       : routeAssistEffectivelyEnabled
-        ? "Route Assist is enabled. Copy this result for support if browser login/API routing still fails."
-        : "Route Assist is disabled. Enable it only when Roblox browser login or API routing needs relay help.";
+        ? "Tunnel join traffic is enabled. Copy this result for support if browser login/API routing still fails."
+        : "Tunnel join traffic is disabled. Enable it only when Roblox browser login or API routing needs relay help.";
 
   return {
     status: "checked",
-    summary: "Route Assist state checked.",
+    summary: "Tunnel join traffic state checked.",
     nextStep: routeAssistNextStep,
     changed: false,
     reversible: false,
     ranAt: deps.now(),
     entries: [
       {
-        label: "Route Assist",
+        label: "Tunnel join traffic",
         value: routeAssistValue,
         tone:
           routeAssistEffectivelyEnabled || fullBypassActive
