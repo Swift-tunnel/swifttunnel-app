@@ -234,16 +234,21 @@ function Leg({
               }
         }
       />
-      <span
-        className="lcd-readout relative rounded-[6px] px-2 py-1 text-[10px] font-semibold leading-none"
-        style={{
-          backgroundColor: "var(--color-bg-elevated)",
-          border: "1px solid var(--color-border-subtle)",
-          color: value ? tone : "var(--color-text-dimmed)",
-        }}
-      >
-        {value ?? "not measured"}
-      </span>
+      {/* No chip on an unmeasured leg. A "not measured" pill drew the eye to
+          the one thing we cannot report and made the route look broken; the
+          dashed line already says the leg is unquantified. */}
+      {value !== null && (
+        <span
+          className="lcd-readout relative rounded-[6px] px-2 py-1 text-[10px] font-semibold leading-none"
+          style={{
+            backgroundColor: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-border-subtle)",
+            color: tone,
+          }}
+        >
+          {value}
+        </span>
+      )}
     </div>
   );
 }
@@ -266,17 +271,21 @@ function UserIcon() {
   );
 }
 
-/** Roblox mark: a tilted square with a tilted square cut out of it.
- *  Drawn with fillRule="evenodd" so the inner square punches a hole rather
- *  than sitting on top, which keeps it correct on any background. Uses
- *  currentColor so it inherits the node's connected/idle tint. */
+/** Roblox mark: a tilted square with a smaller tilted square cut out.
+ *
+ *  Built from two axis-aligned squares under one rotate() rather than
+ *  hand-written diagonal coordinates, which is what I got wrong first time.
+ *  fillRule="evenodd" makes the inner square punch a hole instead of sitting
+ *  on top, so it reads correctly on any background, and currentColor keeps it
+ *  inheriting the node's connected/idle tint. */
 function RobloxIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
       <path
         fillRule="evenodd"
         clipRule="evenodd"
-        d="M4.92 1.6 1.6 15.02 19.08 22.4 22.4 8.98 4.92 1.6Zm4.4 7.55 5.86 2.48-1.24 5.03-5.86-2.48 1.24-5.03Z"
+        transform="rotate(-13 12 12)"
+        d="M4.2 4.2h15.6v15.6H4.2V4.2Zm5.85 5.85v3.9h3.9v-3.9h-3.9Z"
       />
     </svg>
   );
