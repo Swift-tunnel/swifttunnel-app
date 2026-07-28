@@ -26,7 +26,7 @@ const FEATURES = [
     icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20",
     title: "Global relay",
     // Hardcoded because the fleet list is only fetched after sign-in. Update
-    // alongside PING_ENABLED_REGIONS in the web repo when the fleet changes —
+    // alongside PING_ENABLED_REGIONS in the web repo when the fleet changes
     // this said "28 servers across 12 regions" for a while after the fleet was
     // rebuilt down to 10.
     desc: "10 relays across 5 regions",
@@ -108,7 +108,7 @@ export function LoginScreen() {
       className="relative flex h-screen w-screen items-center justify-center overflow-hidden"
       style={{ backgroundColor: "var(--color-bg-base)" }}
     >
-      {/* Grid atmosphere — two pitches read as depth where one reads as
+      {/* Grid atmosphere, two pitches read as depth where one reads as
           wallpaper. Masked to fade out at the edges so the sign-in card stays
           the focal point. */}
       <div

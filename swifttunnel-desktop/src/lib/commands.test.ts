@@ -134,7 +134,7 @@ describe("lib/commands", () => {
           id: "adapter_modes",
           label: "Adapter packet filter modes",
           status: "fixed",
-          detail: "1 adapter(s) were stuck — reset and verified.",
+          detail: "1 adapter(s) were stuck, reset and verified.",
         },
       ],
     };

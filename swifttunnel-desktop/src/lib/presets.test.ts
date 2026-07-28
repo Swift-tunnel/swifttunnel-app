@@ -35,13 +35,13 @@ describe("presets", () => {
     const code = encodePreset(buildPreset("x", sampleSettings(), []));
     expect(code.trimStart().startsWith("{")).toBe(true);
     expect(() => JSON.parse(code)).not.toThrow();
-    // A human can read the field names — it clearly isn't a cookie/token.
+    // A human can read the field names, it clearly isn't a cookie/token.
     expect(code).toContain("roblox_settings");
   });
 
   it("extracts the config even when wrapped in surrounding text", () => {
     const code = encodePreset(buildPreset("Wrapped", sampleSettings(), ["a"]));
-    const wrapped = `SwiftTunnel config — "Wrapped"\nCreated now\n\n${code}\n`;
+    const wrapped = `SwiftTunnel config, "Wrapped"\nCreated now\n\n${code}\n`;
     expect(decodePreset(wrapped).name).toBe("Wrapped");
   });
 

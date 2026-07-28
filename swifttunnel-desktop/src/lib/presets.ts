@@ -1,8 +1,8 @@
 // Shareable SwiftTunnel presets.
 //
-// A preset captures *everything the user configured except tunneling* — Roblox
+// A preset captures *everything the user configured except tunneling*, Roblox
 // settings, the overlay, network/system optimization toggles, the applied
-// optimization catalog items and selected game presets — as a compact,
+// optimization catalog items and selected game presets, as a compact,
 // copy-pasteable code. Tunneling (region, relay, adapter, auto-routing) lives on
 // `AppSettings`, never inside `Config`, so it is naturally excluded.
 //
@@ -18,7 +18,7 @@ export const PRESET_VERSION = 1;
 
 /**
  * The machine-portable slice of system_optimization. We deliberately drop
- * `cpu_cores`, `set_cpu_affinity` and `previous_power_plan` — those are specific
+ * `cpu_cores`, `set_cpu_affinity` and `previous_power_plan`, those are specific
  * to the sender's hardware / revert-state and must never overwrite the importer.
  */
 export type PortableSystem = Pick<
@@ -104,7 +104,7 @@ function fromBase64(b64: string): string {
 }
 
 /**
- * A preset is shared as plain, readable JSON — anyone can see it's just their
+ * A preset is shared as plain, readable JSON, anyone can see it's just their
  * settings, never a token or account data. The legacy `SWT1.<base64>` token is
  * still accepted on import for anything shared before this change.
  */
@@ -188,7 +188,7 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
 
   const D = DEFAULT_SETTINGS.config;
 
-  // Never write un-parseable FastFlags text to Roblox — disable it if invalid.
+  // Never write un-parseable FastFlags text to Roblox, disable it if invalid.
   let customEnabled = asBool(
     r.custom_fflags_enabled,
     D.roblox_settings.custom_fflags_enabled,
@@ -432,9 +432,9 @@ export function presetFileName(name: string): string {
 /** Human-shareable .txt body: a friendly header + the readable config. */
 export function presetFileContents(preset: SwiftTunnelPreset): string {
   return [
-    `SwiftTunnel config — "${preset.name}"`,
+    `SwiftTunnel config, "${preset.name}"`,
     `Created ${preset.created}`,
-    "It only contains game/optimization settings — no account, login or region data.",
+    "It only contains game/optimization settings, no account, login or region data.",
     "Import it in SwiftTunnel → Home → Import config (paste this whole file).",
     "",
     encodePreset(preset),

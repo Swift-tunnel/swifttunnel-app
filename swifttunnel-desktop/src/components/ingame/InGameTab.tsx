@@ -82,7 +82,7 @@ export function InGameTab() {
 
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
-      {/* Console head — overlay state, bound key and payload at a glance. */}
+      {/* Console head, overlay state, bound key and payload at a glance. */}
       <Panel
         grid
         aurora
@@ -101,7 +101,7 @@ export function InGameTab() {
             </Chip>
           </span>
         }
-        desc="A movable on-screen bar showing live FPS, CPU, RAM, network and more — drawn over the game without touching it (anti-cheat safe)."
+        desc="A movable on-screen bar showing live FPS, CPU, RAM, network and more, drawn over the game without touching it (anti-cheat safe)."
         actions={
           <Toggle
             enabled={ov.enabled}

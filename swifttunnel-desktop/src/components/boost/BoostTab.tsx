@@ -689,7 +689,7 @@ export function BoostTab() {
             title="MMCSS Gaming Profile"
             anchorId="mmcss"
             desc="Better thread scheduling, stable frame times"
-            tooltip="Multimedia Class Scheduler Service — prioritizes game threads for CPU time."
+            tooltip="Multimedia Class Scheduler Service, prioritizes game threads for CPU time."
             enabled={draft.system_optimization.mmcss_gaming_profile}
             onChange={(v) => updateSysOpt({ mmcss_gaming_profile: v })}
           />
@@ -707,7 +707,7 @@ export function BoostTab() {
             title="Disable Nagle's Algorithm"
             anchorId="disable_nagle"
             desc="Faster packet delivery (-5-15ms)"
-            tooltip="Nagle batches small packets to reduce overhead. Disabling sends immediately — better for real-time games."
+            tooltip="Nagle batches small packets to reduce overhead. Disabling sends immediately, better for real-time games."
             enabled={draft.network_settings.disable_nagle}
             onChange={(v) => void applyNetworkOpt({ disable_nagle: v })}
             disabled={networkApplying}

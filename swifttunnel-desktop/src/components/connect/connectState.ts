@@ -39,7 +39,7 @@ export function isDriverMissing(vpnError: string | null): boolean {
  * The backend emits these strings from `system_install_driver` whenever
  * msiexec returns 1641/3010, or when the post-install self-test fails
  * immediately after a reboot-signaling exit code. Substring-matching keeps
- * us decoupled from structured errors across the Tauri boundary — the
+ * us decoupled from structured errors across the Tauri boundary, the
  * invariant is that both source strings begin with "Reboot required to
  * finish driver installation" so a single lowercase substring is enough.
  */
@@ -110,9 +110,9 @@ export function resolveConnectStatus(input: {
    * Set by the store once the user has clicked "Reset driver service" and
    * it failed. When true, this function stops returning `driver_outdated`
    * (which renders the reset button) and falls through to plain text, so
-   * the UI surfaces the full remediation message from the backend —
+   * the UI surfaces the full remediation message from the backend
    * typically "Uninstall the other tool's driver, then reinstall
-   * SwiftTunnel's driver." — instead of offering the same button that
+   * SwiftTunnel's driver.", instead of offering the same button that
    * just didn't work. Optional for backward compatibility with callers
    * that don't thread this state through.
    */
@@ -196,7 +196,7 @@ export function resolveConnectStatus(input: {
 
   // Reboot-required takes priority over the driver-missing / outdated paths:
   // if a prior install signaled "reboot to finish" we must NOT redirect the
-  // user into another reinstall loop — that's exactly the state the 1.25.2
+  // user into another reinstall loop, that's exactly the state the 1.25.2
   // support reports showed (install -> "no driver" -> install -> "no driver",
   // until the user happened to reboot on their own).
   //

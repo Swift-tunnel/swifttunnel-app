@@ -423,7 +423,7 @@ interface VpnStore {
   // Ping (real-time ICMP to relay)
   ping: number | null;
 
-  // Temporary free-tier allowance. Both null when no limit applies — either
+  // Temporary free-tier allowance. Both null when no limit applies, either
   // the backend has it switched off, or it predates the feature.
   freeTierRemaining: number | null;
   freeTierLimit: number | null;
@@ -591,7 +591,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
 
   resetDriver: async () => {
     // Invoked from the UI when resolveConnectStatus returns
-    // `kind: "driver_outdated"` — clears the "wedged NDIS state" that a full
+    // `kind: "driver_outdated"`, clears the "wedged NDIS state" that a full
     // reinstall won't fix (prior-generation WinpkFilter from another VPN
     // product being earlier in the service path, in-kernel filter state
     // left behind by a previous session, etc.). Much cheaper than asking
@@ -599,7 +599,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     //
     // `driverResetAttempted` is flipped to true in the failure branch so
     // the UI can stop offering the same button after a reset that didn't
-    // work — it's the UX guardrail against the exact 1.25.2 loop (user
+    // work, it's the UX guardrail against the exact 1.25.2 loop (user
     // clicks "fix it" → backend says ok → user tries again → same error)
     // that this PR is trying to close. Cleared on successful connect or
     // disconnect to give the next incident a fresh attempt.

@@ -36,7 +36,7 @@ export function MemoryCleaner() {
   }, [fetchSystemInfo]);
 
   // Load memory immediately, then poll for a live readout (faster while
-  // cleaning) — same cadence the boost page used.
+  // cleaning), same cadence the boost page used.
   useEffect(() => {
     void fetchSystemMemory();
     const intervalMs = isCleaning ? 250 : 1000;

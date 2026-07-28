@@ -28,7 +28,7 @@ describe("connect state helpers", () => {
     // returning true here so the install-driver CTA renders.
     expect(
       isDriverMissing(
-        "Split tunnel driver not available — the Windows Packet Filter driver lost its adapter handle and could not recover. Please reconnect, or reinstall the driver.",
+        "Split tunnel driver not available, the Windows Packet Filter driver lost its adapter handle and could not recover. Please reconnect, or reinstall the driver.",
       ),
     ).toBe(true);
   });

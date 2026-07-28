@@ -15,7 +15,7 @@ export interface SearchEntry {
   /** If set, selecting dispatches this window event instead of navigating. */
   event?: string;
   label: string;
-  /** Where it lives — shown as the row's sub-label. */
+  /** Where it lives, shown as the row's sub-label. */
   section: string;
   /** Space-joined aliases + real terms for matching. */
   keywords: string;
@@ -231,7 +231,7 @@ const OPTS: SearchEntry[] = OPTIMIZATIONS.map((def) => ({
   }`,
 }));
 
-// Actions that aren't a plain page — dispatch an event or deep-link to a control.
+// Actions that aren't a plain page, dispatch an event or deep-link to a control.
 const ACTIONS: SearchEntry[] = [
   {
     id: "action-language",
@@ -372,7 +372,7 @@ const SETTINGS_ROWS: SearchEntry[] = (
     },
     {
       anchor: "route_assist",
-      label: "Tunnel join traffic",
+      label: "Route Assist",
       keywords:
         // "route assist" kept as an alias: it was the old name, and users who
         // learned it from Discord or older builds should still find the toggle.

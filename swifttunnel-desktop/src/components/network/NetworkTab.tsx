@@ -343,12 +343,12 @@ export function NetworkTab() {
                 </MetricGrid>
                 <p className="mt-2.5 text-[11px] leading-relaxed text-text-muted">
                   {net.bufferbloatResult.bufferbloat_ms <= 5
-                    ? "Excellent — virtually no latency increase under load."
+                    ? "Excellent, virtually no latency increase under load."
                     : net.bufferbloatResult.bufferbloat_ms <= 15
-                      ? "Good — minimal latency increase, no impact on gaming."
+                      ? "Good, minimal latency increase, no impact on gaming."
                       : net.bufferbloatResult.bufferbloat_ms <= 50
-                        ? "Fair — noticeable latency increase during heavy use."
-                        : "Poor — significant latency spikes. Consider router queue management."}
+                        ? "Fair, noticeable latency increase during heavy use."
+                        : "Poor, significant latency spikes. Consider router queue management."}
                 </p>
               </ResultReveal>
             )

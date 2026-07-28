@@ -25,7 +25,7 @@ function persistCollapsed(value: boolean) {
   try {
     localStorage.setItem(COLLAPSE_KEY, value ? "1" : "0");
   } catch {
-    // localStorage unavailable — collapse state just won't persist.
+    // localStorage unavailable, collapse state just won't persist.
   }
 }
 
@@ -80,14 +80,14 @@ function NavButton({
   return (
     <button
       onClick={() => setTab(item.id)}
-      title={`${item.label} — Ctrl+${item.shortcut}`}
+      title={`${item.label}, Ctrl+${item.shortcut}`}
       className={`group flex w-full items-center rounded-[8px] text-left ${
         collapsed ? "justify-center px-0 py-[3px]" : "gap-2 px-1 py-[3px]"
       }`}
       aria-label={item.label}
       aria-current={active ? "page" : undefined}
     >
-      {/* Circular icon well — fills with accent when active, Medal-style. */}
+      {/* Circular icon well, fills with accent when active, Medal-style. */}
       <span
         className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-[background-color] duration-150 ${
           active ? "" : "group-hover:bg-[color:var(--color-bg-hover)]"
@@ -130,7 +130,7 @@ function NavButton({
           >
             {item.label}
           </span>
-          {/* Reveal on hover, not just on the active tab — you learn the key
+          {/* Reveal on hover, not just on the active tab, you learn the key
               for where you're going, not for where you already are. */}
           <kbd
             className={`flex h-[16px] min-w-[16px] items-center justify-center rounded-[3px] px-1 font-mono text-[9px] font-medium leading-none transition-opacity duration-100 ${
@@ -397,7 +397,7 @@ export function Sidebar() {
         {!collapsed && (
           <>
             <span
-              // The account name (email prefix) is an identifier — never
+              // The account name (email prefix) is an identifier, never
               // translate it. The "Not signed in" fallback still translates.
               data-no-translate={email ? "" : undefined}
               className="min-w-0 flex-1 truncate text-[11.5px] font-medium text-text-secondary"

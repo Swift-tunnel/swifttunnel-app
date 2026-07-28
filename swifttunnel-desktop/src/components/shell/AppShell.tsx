@@ -22,7 +22,7 @@ export function AppShell({ children }: AppShellProps) {
   }, [activeTab]);
 
   // Every sidebar item renders a digit badge, but nothing ever listened for the
-  // key — the app advertised shortcuts that did nothing. Ctrl/Cmd+<digit>
+  // key, the app advertised shortcuts that did nothing. Ctrl/Cmd+<digit>
   // matches the Ctrl+K palette convention.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

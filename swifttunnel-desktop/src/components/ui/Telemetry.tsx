@@ -6,7 +6,7 @@ import type { ReactNode } from "react";
    Every tab is assembled from these, so the app reads as one instrument
    rather than eight separately-styled dashboards. Monochrome by
    construction: `status`/`tone` are the only things that introduce color, and
-   only ever from real state — never decoration.
+   only ever from real state, never decoration.
    ────────────────────────────────────────────────────────────────────────── */
 
 export interface PanelProps {
@@ -19,7 +19,7 @@ export interface PanelProps {
   children?: ReactNode;
   /** Faint engineering grid across the panel face. */
   grid?: boolean;
-  /** Soft drifting light source behind the panel — for hero surfaces only. */
+  /** Soft drifting light source behind the panel, for hero surfaces only. */
   aurora?: boolean;
   /** HUD brackets on opposing corners. */
   corners?: boolean;
@@ -74,7 +74,7 @@ export function Panel({
       )}
       {grid && <div className="grid-layer" aria-hidden />}
       {/* The sweep translates past its own bounds, so it needs its own
-          clipping box — clipping the panel itself would eat the corner
+          clipping box, clipping the panel itself would eat the corner
           brackets, which sit at -1px. */}
       {live && (
         <div
@@ -172,7 +172,7 @@ export function Meter({ value, segments, tone, className }: MeterProps) {
   );
 }
 
-/** A recessed well of readouts divided by hairlines — the console's stat strip. */
+/** A recessed well of readouts divided by hairlines, the console's stat strip. */
 export function StatRail({
   items,
   className,

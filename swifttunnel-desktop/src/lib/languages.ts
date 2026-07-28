@@ -9,7 +9,7 @@ export interface Language {
 }
 
 // Codes are Google-translate compatible (note the quirks: zh-CN/zh-TW, Hebrew is
-// "iw", Filipino is "tl", Norwegian is "no"). English is the source — selecting
+// "iw", Filipino is "tl", Norwegian is "no"). English is the source, selecting
 // it restores the original strings with no API calls.
 export const LANGUAGES: Language[] = [
   { code: "en", name: "English", native: "English", flag: "🇬🇧" },

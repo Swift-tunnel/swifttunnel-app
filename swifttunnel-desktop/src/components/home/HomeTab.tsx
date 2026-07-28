@@ -76,7 +76,7 @@ function saveSkipped(ids: string[]) {
   }
 }
 
-// Once every setup step is done, the checklist is retired for good — keyed by
+// Once every setup step is done, the checklist is retired for good, keyed by
 // account so it stays gone across app updates but returns fresh for a new login.
 const DONE_KEY = "st.checklistDone";
 function isChecklistDone(email: string | null): boolean {
@@ -180,7 +180,7 @@ export function HomeTab() {
 
   // ── Roblox controls use a draft + explicit Apply (like the Optimize page),
   // so a "Restart & Apply" prompt shows before anything hits your live game.
-  // Failures surface as a toast — otherwise a failed Apply (e.g. Roblox not
+  // Failures surface as a toast, otherwise a failed Apply (e.g. Roblox not
   // installed yet) looks like the button silently did nothing. ──
   async function applyRobloxDraft(draft: RobloxSettingsConfig) {
     try {
@@ -194,7 +194,7 @@ export function HomeTab() {
         message: "Roblox settings applied",
       });
     } catch (e) {
-      // Plain language for the user, real detail to the log — a raw Rust error
+      // Plain language for the user, real detail to the log, a raw Rust error
       // string in a toast on the home screen helps nobody.
       reportError("Apply Roblox settings", e);
       useToastStore.getState().addToast({
@@ -212,7 +212,7 @@ export function HomeTab() {
       reportError("Restart Roblox", e);
       useToastStore.getState().addToast({
         type: "error",
-        message: "Settings applied, but Roblox couldn't restart — close and reopen it.",
+        message: "Settings applied, but Roblox couldn't restart, close and reopen it.",
       });
       throw e;
     }
@@ -318,7 +318,7 @@ export function HomeTab() {
       <HomeCommandCenter
         animate={intro}
         delay={0.1}
-        // Disconnected shows the saved region's flag, not a stray satellite —
+        // Disconnected shows the saved region's flag, not a stray satellite
         // it previews what "Reconnect to <region>" will actually do. The tile's
         // border already carries the live/idle distinction.
         flag={
@@ -367,7 +367,7 @@ export function HomeTab() {
       <div className="grid gap-3 lg:grid-cols-12 lg:items-start">
         {/* LEFT */}
         <div className="flex flex-col gap-3 lg:col-span-7">
-          {/* One recessed strip, not three floating cards — these are three
+          {/* One recessed strip, not three floating cards, these are three
               readings off the same machine, so they share a surface. */}
           <div className="grid grid-cols-3 divide-x divide-[color:var(--color-border-subtle)] overflow-hidden rounded-[var(--radius-card)] surface-card">
             <StatBox
@@ -616,7 +616,7 @@ function HomeCommandCenter({
         </div>
       </div>
 
-      {/* Deliberately NOT the Connect route path — Home gets a boost gauge and
+      {/* Deliberately NOT the Connect route path, Home gets a boost gauge and
           a subsystem status stack, so the two tabs don't show the same diagram. */}
       <div className="relative flex flex-wrap items-center gap-x-6 gap-y-5 px-5 py-5">
         <BoostGauge active={activeCount} total={OPTIMIZATIONS.length} live={live} />
@@ -950,7 +950,7 @@ function OptimizeChecklistCard({
             Recommended
           </div>
           <div className="truncate text-[10.5px] text-text-muted">
-            High-impact, safe tweaks — flip one on to apply it.
+            High-impact, safe tweaks, flip one on to apply it.
           </div>
         </div>
         <span className="shrink-0 text-[11.5px] font-semibold text-text-secondary">
@@ -1129,7 +1129,7 @@ function RobloxCard({
         />
         <ControlRow
           label="Enable FFlags"
-          desc="Ultraboost — curated FPS flags"
+          desc="Ultraboost, curated FPS flags"
           enabled={draft.ultraboost}
           onChange={(v) =>
             patch(
@@ -1463,7 +1463,7 @@ function NetworkStatusCard({
               : anyRunning
                 ? `Testing… ${doneCount}/3`
                 : failed
-                  ? "Couldn't reach the test servers — tap retry."
+                  ? "Couldn't reach the test servers, tap retry."
                   : "One grade for your gaming connection."}
           </div>
         </div>

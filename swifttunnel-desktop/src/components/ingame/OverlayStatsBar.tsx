@@ -30,12 +30,12 @@ interface MonitorInfo {
 
 /**
  * The stats-overlay window root. The window is sized to the BAR itself (not
- * fullscreen) — this is load-bearing: a fullscreen window that ever becomes
+ * fullscreen), this is load-bearing: a fullscreen window that ever becomes
  * interactive captures every click on the desktop, and one stuck flag froze
  * the user's whole PC. A bar-sized window can't do that by construction.
  *
  * Dragging moves the WINDOW, driven entirely by polling the OS cursor +
- * left-button state (`boost_cursor_pos`) — never webview mouse events, which
+ * left-button state (`boost_cursor_pos`), never webview mouse events, which
  * are unreliable on a click-through window whose interactivity flips mid-drag.
  */
 export function OverlayStatsBar() {
@@ -80,7 +80,7 @@ export function OverlayStatsBar() {
   }, []);
 
   /** Place the window per config (custom spot or anchor preset). No-op while
-   *  dragging, and right after a drop until the saved position round-trips —
+   *  dragging, and right after a drop until the saved position round-trips
    *  otherwise a stale payload would snap the bar back to the old spot. */
   const applyConfiguredPosition = useCallback(() => {
     const p = payloadRef.current;
@@ -222,7 +222,7 @@ export function OverlayStatsBar() {
             prevDownRef.current = c.left_down;
           }
         } else {
-          // Not probing — require a fresh press after re-entry so a held game
+          // Not probing, require a fresh press after re-entry so a held game
           // click can't accidentally grab the bar.
           prevDownRef.current = true;
         }
@@ -257,7 +257,7 @@ export function OverlayStatsBar() {
   }, [setInteractive, moveWindow]);
 
   // Render snapshots from the main window. The bar stays MOUNTED regardless of
-  // payload.enabled (visibility is window show/hide only) — unmounting it
+  // payload.enabled (visibility is window show/hide only), unmounting it
   // mid-interaction is what used to kill drags and strand the window.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -298,7 +298,7 @@ export function OverlayStatsBar() {
     };
   }, [setInteractive, applyConfiguredPosition]);
 
-  // Escape: best-effort safety hatch — cancel a drag and force click-through.
+  // Escape: best-effort safety hatch, cancel a drag and force click-through.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;

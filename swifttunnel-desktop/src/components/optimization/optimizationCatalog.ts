@@ -6,9 +6,9 @@
 // faithful to the real registry/service edits so users can trust them.
 //
 // Tweaks are grouped by TIER (difficulty/trade-off), Hone-style:
-//   Beginner     — safe, reversible, no real downside.
-//   Intermediate — trade a little comfort/feature for more performance.
-//   Expert       — system-wide changes for users who know the trade-off.
+//   Beginner    , safe, reversible, no real downside.
+//   Intermediate, trade a little comfort/feature for more performance.
+//   Expert      , system-wide changes for users who know the trade-off.
 // `category` is shown as a small chip on each card.
 
 export type OptSafety = "safe" | "low" | "caution";
@@ -26,13 +26,13 @@ export const TIER_ORDER: OptTier[] = [
 ];
 
 export const TIER_DESCRIPTION: Record<OptTier, string> = {
-  Beginner: "Safe, fully reversible tweaks anyone can use — small, reliable gains.",
+  Beginner: "Safe, fully reversible tweaks anyone can use, small, reliable gains.",
   Intermediate:
     "Trade a little comfort or a feature you may not use for more performance.",
   Expert:
     "System-wide changes for users who know exactly what they're trading. All reversible.",
   Advanced:
-    "Experimental and risky — these can unlock serious performance but lower security or break features. Only if you understand the trade-off. Still fully reversible.",
+    "Experimental and risky, these can unlock serious performance but lower security or break features. Only if you understand the trade-off. Still fully reversible.",
 };
 
 /** Kept for any external references; tab now groups by tier. */
@@ -254,7 +254,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "windowed_games_optimizations_enable",
     name: "Optimizations for Windowed Games",
     description:
-      "Enables the Windows 11 low-latency present path for borderless/windowed games — lower input latency without true fullscreen.",
+      "Enables the Windows 11 low-latency present path for borderless/windowed games, lower input latency without true fullscreen.",
     tier: "Intermediate",
     category: "Performance",
     safety: "low",
@@ -268,7 +268,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "windows_ads_suggestions_disable",
     name: "Disable Windows Ads & Suggestions",
     description:
-      "Turns off Start Menu suggestions, lock-screen tips/ads, and silent app installs — Windows stops fetching that content in the background.",
+      "Turns off Start Menu suggestions, lock-screen tips/ads, and silent app installs, Windows stops fetching that content in the background.",
     tier: "Intermediate",
     category: "Privacy",
     safety: "low",
@@ -284,7 +284,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "search_web_suggestions_disable",
     name: "Disable Web Search in Start",
     description:
-      "Makes Start search local-only — no Bing web results or highlights, so it stops hitting the network and returns your apps/files faster.",
+      "Makes Start search local-only, no Bing web results or highlights, so it stops hitting the network and returns your apps/files faster.",
     tier: "Intermediate",
     category: "System",
     safety: "low",
@@ -523,7 +523,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "notifications_disable",
     name: "Disable Notifications",
     description:
-      "Turns off toast notifications system-wide for your user — no popups, sounds, or banners until reverted.",
+      "Turns off toast notifications system-wide for your user, no popups, sounds, or banners until reverted.",
     tier: "Expert",
     category: "System",
     safety: "caution",
@@ -547,7 +547,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "lock_screen_blur_disable",
     name: "Disable Sign-in Blur",
     description:
-      "Removes the acrylic blur behind the sign-in screen — lighter on weak GPUs at logon.",
+      "Removes the acrylic blur behind the sign-in screen, lighter on weak GPUs at logon.",
     tier: "Expert",
     category: "System",
     safety: "low",
@@ -563,7 +563,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "cpu_mitigations_disable",
     name: "Disable CPU Security Mitigations",
     description:
-      "Turns off Spectre/Meltdown and related CPU exploit mitigations, which cost real CPU performance. Significant security trade-off — reverts on toggle off.",
+      "Turns off Spectre/Meltdown and related CPU exploit mitigations, which cost real CPU performance. Significant security trade-off, reverts on toggle off.",
     tier: "Advanced",
     category: "Performance",
     safety: "caution",
@@ -578,7 +578,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "smartscreen_disable",
     name: "Disable Windows SmartScreen",
     description:
-      "Turns off the SmartScreen reputation check on app launches and downloads — no lookup overhead or prompts. Lowers protection; reverts on toggle off.",
+      "Turns off the SmartScreen reputation check on app launches and downloads, no lookup overhead or prompts. Lowers protection; reverts on toggle off.",
     tier: "Advanced",
     category: "Privacy",
     safety: "caution",
@@ -626,7 +626,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
       "Blocks the Windows key with a keyboard scancode map so it can't minimize or pull you out of a fullscreen game. Applies after a restart.",
     tier: "Intermediate",
     category: "Input",
-    // caution keeps this OUT of "Optimize all" — silently losing the Windows
+    // caution keeps this OUT of "Optimize all", silently losing the Windows
     // key (reboot to undo) must be an explicit choice.
     safety: "caution",
     requiresAdmin: true,
@@ -718,7 +718,7 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
     id: "su_ntfs_bookkeeping",
     name: "Reduce NTFS bookkeeping",
     description:
-      "Stops NTFS from updating last-access timestamps and creating legacy 8.3 short names — less disk overhead on every file operation.",
+      "Stops NTFS from updating last-access timestamps and creating legacy 8.3 short names, less disk overhead on every file operation.",
     category: "File System",
     requiresAdmin: true,
     requiresReboot: false,
@@ -765,7 +765,7 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
     id: "su_disable_auto_defrag",
     name: "Disable scheduled defragmentation",
     description:
-      "Turns off Windows' automatic disk defragmentation task — unnecessary on SSDs and avoids surprise disk churn.",
+      "Turns off Windows' automatic disk defragmentation task, unnecessary on SSDs and avoids surprise disk churn.",
     category: "Startup & Shutdown",
     requiresAdmin: true,
     requiresReboot: false,
@@ -802,7 +802,7 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
     id: "su_disable_autoplay",
     name: "Disable AutoPlay",
     description:
-      "Turns off AutoPlay for USB drives and discs — no surprise prompts and a smaller malware surface.",
+      "Turns off AutoPlay for USB drives and discs, no surprise prompts and a smaller malware surface.",
     category: "File System",
     requiresAdmin: false,
     requiresReboot: false,
@@ -884,7 +884,7 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
     id: "su_svc_remote_registry",
     name: "Disable Remote Registry",
     description:
-      "Stops the Remote Registry service — lets no one edit your registry over the network. Safe for home PCs.",
+      "Stops the Remote Registry service, lets no one edit your registry over the network. Safe for home PCs.",
     category: "Windows Services",
     requiresAdmin: true,
     requiresReboot: false,
@@ -906,7 +906,7 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
     id: "su_svc_webclient",
     name: "Disable WebClient (WebDAV)",
     description:
-      "Stops the WebClient service used for WebDAV network folders — rarely needed and a common attack vector.",
+      "Stops the WebClient service used for WebDAV network folders, rarely needed and a common attack vector.",
     category: "Windows Services",
     requiresAdmin: true,
     requiresReboot: false,

@@ -12,7 +12,7 @@ import { SwiftLogo } from "../common/SwiftLogo";
  * from feeling dead without ever claiming a fake percentage.
  */
 const TIPS: string[] = [
-  "SwiftTunnel only routes your game traffic — everything else stays on your ISP at full speed.",
+  "SwiftTunnel only routes your game traffic, everything else stays on your ISP at full speed.",
   "Every optimization is reversible. Turn it off and the previous Windows setting comes back.",
   "The in-game overlay shows FPS, CPU, RAM and ping. Bind it to a hotkey in the In-Game tab.",
   "Auto picks the lowest-latency relay for your Roblox server automatically.",
@@ -85,7 +85,7 @@ export function StartupScreen() {
           SwiftTunnel
         </span>
 
-        {/* Hairline progress shimmer — indeterminate, no fake percentage */}
+        {/* Hairline progress shimmer, indeterminate, no fake percentage */}
         <div className="mt-6 h-[3px] w-40 overflow-hidden rounded-full bg-bg-elevated">
           <div className="startup-progress h-full w-1/3 rounded-full bg-accent-primary" />
         </div>

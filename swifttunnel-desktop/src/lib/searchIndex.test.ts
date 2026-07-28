@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { SEARCH_ENTRIES, searchEntries } from "./searchIndex";
 
-/** Every component source, as raw text — used to prove anchors are real. */
+/** Every component source, as raw text, used to prove anchors are real. */
 const SOURCES = import.meta.glob<string>("../components/**/*.tsx", {
   eager: true,
   query: "?raw",

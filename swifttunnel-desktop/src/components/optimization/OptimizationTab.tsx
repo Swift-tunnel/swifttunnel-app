@@ -86,7 +86,7 @@ function changesTooltip(def: {
         </span>
       )}
       <span className="text-[10px] text-text-muted">
-        Reversible — turning this off restores the previous values.
+        Reversible, turning this off restores the previous values.
       </span>
     </div>
   );
@@ -173,7 +173,7 @@ function CardShell({
 }: {
   children: ReactNode;
   anchor?: string;
-  /** Applied tweak — lights the card's left rail so an active grid is
+  /** Applied tweak, lights the card's left rail so an active grid is
    *  scannable at a glance instead of hunting for toggle positions. */
   active?: boolean;
 }) {
@@ -550,7 +550,7 @@ function AutoRamCleanRow() {
       await showRamOverlay(4096);
       addToast({
         type: "info",
-        message: "Test overlay sent — check the top-right of your screen.",
+        message: "Test overlay sent, check the top-right of your screen.",
       });
     } catch (e) {
       addToast({
@@ -675,7 +675,7 @@ export function OptimizationTab() {
       </div>
 
       {/* Scoped to the active sub-tab ("N tweaks ready · Game Boost"), so it
-          belongs UNDER the switcher — above it, it read as a page header that
+          belongs UNDER the switcher, above it, it read as a page header that
           silently changed meaning when you switched sub-tabs. */}
       <OptimizeAllHeader view={view} />
 
@@ -719,7 +719,7 @@ function RocketIcon() {
   );
 }
 
-/** "Enable all" for a section — flips to "Disable all" once every item is on. */
+/** "Enable all" for a section, flips to "Disable all" once every item is on. */
 function BulkToggle({ items }: { items: { id: string; name: string }[] }) {
   const statuses = useOptimizationStore((s) => s.status);
   const activate = useOptimizationStore((s) => s.activate);
@@ -858,7 +858,7 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
     if (view === "speedup") {
       return SPEEDUP_OPTIMIZATIONS.filter((o) => statuses[o.id] !== "active");
     }
-    // Game Boost bulk-apply skips "caution" tweaks — those stay opt-in.
+    // Game Boost bulk-apply skips "caution" tweaks, those stay opt-in.
     return OPTIMIZATIONS.filter(
       (o) => o.safety !== "caution" && statuses[o.id] !== "active",
     );
@@ -932,7 +932,7 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
           </h2>
           <p className="mt-0.5 text-[11.5px] leading-snug text-text-muted">
             {view === "speedup" ? "Speed Up" : "Game Boost"} · one click applies
-            them all — every change is reversible.
+            them all, every change is reversible.
           </p>
         </div>
       </div>

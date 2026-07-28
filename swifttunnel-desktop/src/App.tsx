@@ -157,7 +157,7 @@ function App() {
           } catch {}
         }
       } finally {
-        // The main window (or its attempt) is up — retire the boot splash.
+        // The main window (or its attempt) is up, retire the boot splash.
         void closeSplash();
       }
     };
@@ -473,7 +473,7 @@ function App() {
         const msg = await authUpdateRequired();
         if (!cancelled && msg) setUpdateRequiredMsg(msg);
       } catch {
-        // Command unavailable (older backend) — ignore.
+        // Command unavailable (older backend), ignore.
       }
     };
     const first = window.setTimeout(() => void check(), 1500);
@@ -540,9 +540,9 @@ function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [setTab, saveSettings]);
 
-  // Stay on the branded screen for the whole warm-up — both the network self-heal
+  // Stay on the branded screen for the whole warm-up, both the network self-heal
   // and the initial auth/settings/server pre-fetch (kicked off on mount, so it's
-  // already in flight here) — so the app only reveals once it's ready, instead of
+  // already in flight here), so the app only reveals once it's ready, instead of
   // flashing a second bare spinner. The bootstrap's own 8s safety net clears
   // isLoading if the backend is unreachable, so this can't hang forever.
   // Hold the launch screen until the server list has also resolved for logged-in
@@ -556,7 +556,7 @@ function App() {
     return <StartupScreen />;
   }
 
-  // Old-build lockout takes precedence over everything else — a walled-off
+  // Old-build lockout takes precedence over everything else, a walled-off
   // build can't usefully log in or connect, so send the user straight to update.
   if (updateRequiredMsg) {
     return <UpdateRequiredScreen message={updateRequiredMsg} />;

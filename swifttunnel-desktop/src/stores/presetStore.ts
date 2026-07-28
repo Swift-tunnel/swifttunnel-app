@@ -140,7 +140,7 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
       });
       await useSettingsStore.getState().save();
 
-      // 2) Optimization catalog items — apply each known id, aggregate.
+      // 2) Optimization catalog items, apply each known id, aggregate.
       const activate = useOptimizationStore.getState().activate;
       const targets = preset.optimizations
         .map((oid) => CATALOG_BY_ID.get(oid))
@@ -157,13 +157,13 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
 
       persistActive(id);
       set({ activeId: id });
-      // Roblox reads its settings files at launch — changes applied while the
+      // Roblox reads its settings files at launch, changes applied while the
       // client is open only take effect after a restart.
       const robloxOpen = useBoostStore.getState().robloxRunning;
       addToast({
         type: "success",
         message: `Switched to "${preset.name}"${
-          ok ? ` — ${ok} optimization${ok === 1 ? "" : "s"} on` : ""
+          ok ? `, ${ok} optimization${ok === 1 ? "" : "s"} on` : ""
         }.${reboot ? " Restart your PC to finish some." : ""}${
           robloxOpen ? " Restart Roblox to apply its settings." : ""
         }`,

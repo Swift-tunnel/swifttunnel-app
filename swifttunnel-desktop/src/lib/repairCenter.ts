@@ -161,7 +161,7 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
   },
   {
     id: "route_assist",
-    label: "Tunnel join traffic",
+    label: "Route Assist",
     description: "Checks Roblox API/browser routing state without changing it.",
     actionLabel: "Check",
     systemChanging: false,
@@ -205,7 +205,7 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
     id: "translations",
     label: "Translations",
     description:
-      "Clears the saved translation cache and re-translates the app in your language — fixes garbled, mixed-language, or stuck-in-English text.",
+      "Clears the saved translation cache and re-translates the app in your language, fixes garbled, mixed-language, or stuck-in-English text.",
     actionLabel: "Repair",
     systemChanging: false,
   },
@@ -213,7 +213,7 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
     id: "overlay_layout",
     label: "Overlay position",
     description:
-      "Brings the in-game overlay back on screen by resetting its position and size — for when it was dragged off-screen or a monitor was unplugged.",
+      "Brings the in-game overlay back on screen by resetting its position and size, for when it was dragged off-screen or a monitor was unplugged.",
     actionLabel: "Repair",
     systemChanging: false,
   },
@@ -221,7 +221,7 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
     id: "roblox_reset",
     label: "Reset Roblox settings",
     description:
-      "Clears every SwiftTunnel change to the Roblox client — Ultraboost and custom FFlags, FPS unlock, window size and graphics — restoring your original client settings.",
+      "Clears every SwiftTunnel change to the Roblox client, Ultraboost and custom FFlags, FPS unlock, window size and graphics, restoring your original client settings.",
     actionLabel: "Repair",
     systemChanging: true,
   },
@@ -392,7 +392,7 @@ export async function runRepairIssue(
  * On-demand full driver reinstall. Deliberately NOT part of `REPAIR_ISSUES`:
  * Repair-all must never force-reinstall a healthy driver on every click. This
  * is the explicit "reinstall the driver" support action for when the driver
- * *reports* healthy but misbehaves — and when it can't finish, the report
+ * *reports* healthy but misbehaves, and when it can't finish, the report
  * says exactly why (not elevated, reboot pending, installer error).
  */
 export const DRIVER_REINSTALL_ISSUE: RepairIssueDefinition = {
@@ -442,13 +442,13 @@ export async function runDriverReinstall(
       };
     }
 
-    // A pending Windows driver change blocks a clean reinstall — surface that
+    // A pending Windows driver change blocks a clean reinstall, surface that
     // instead of stacking another install on top of it.
     if (before && (before.reboot_required || before.recommended_action === "reboot")) {
       return {
         status: "needs_reboot",
         summary:
-          "Windows has a pending driver change — reboot before reinstalling.",
+          "Windows has a pending driver change, reboot before reinstalling.",
         nextStep: "Restart Windows, then run the driver reinstall again.",
         changed: false,
         reversible: false,
@@ -472,7 +472,7 @@ export async function runDriverReinstall(
       summary: after.ready
         ? "Driver fully reinstalled and verified."
         : after.reboot_required
-          ? "Driver reinstalled — Windows needs a reboot to finish."
+          ? "Driver reinstalled, Windows needs a reboot to finish."
           : "Driver reinstall could not complete.",
       nextStep: after.ready
         ? "Try connecting again."
@@ -695,7 +695,7 @@ async function repairDriver(deps: RepairCenterDeps): Promise<RepairReport> {
     );
   }
 
-  // Already healthy — don't reinstall/rebind for nothing. Repair-all runs this
+  // Already healthy, don't reinstall/rebind for nothing. Repair-all runs this
   // on every click; an unconditional reinstall would report changed=true and
   // force the post-repair app restart even on perfectly healthy machines.
   if (before.ready) {
@@ -1016,23 +1016,23 @@ async function checkRouteAssist(
         ? "enabled"
         : "disabled";
   const routeAssistNextStep = fullBypassActive
-    ? "Full Country Ban already relays Roblox routing. Tunnel join traffic does not need to be enabled separately."
+    ? "Full Country Ban already relays Roblox routing. Route Assist does not need to be enabled separately."
     : partialBypassActive
       ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
       : routeAssistEffectivelyEnabled
-        ? "Tunnel join traffic is enabled. Copy this result for support if browser login/API routing still fails."
-        : "Tunnel join traffic is disabled. Enable it only when Roblox browser login or API routing needs relay help.";
+        ? "Route Assist is enabled. Copy this result for support if browser login/API routing still fails."
+        : "Route Assist is disabled. Enable it only when Roblox browser login or API routing needs relay help.";
 
   return {
     status: "checked",
-    summary: "Tunnel join traffic state checked.",
+    summary: "Route Assist state checked.",
     nextStep: routeAssistNextStep,
     changed: false,
     reversible: false,
     ranAt: deps.now(),
     entries: [
       {
-        label: "Tunnel join traffic",
+        label: "Route Assist",
         value: routeAssistValue,
         tone:
           routeAssistEffectivelyEnabled || fullBypassActive
@@ -1214,7 +1214,7 @@ async function checkInstaller(deps: RepairCenterDeps): Promise<RepairReport> {
 }
 
 // Both repairs below only touch app-local state (localStorage / settings.json),
-// never the system — so they always report changed:false, which keeps the
+// never the system, so they always report changed:false, which keeps the
 // Repair-all flow from forcing a pointless app restart + UAC prompt.
 
 async function repairTranslations(deps: RepairCenterDeps): Promise<RepairReport> {
@@ -1309,7 +1309,7 @@ async function repairResetRoblox(
   settings: AppSettings,
 ): Promise<RepairReport> {
   // Only reset when SwiftTunnel actually has Roblox changes applied. Without
-  // this guard, "Repair" would wipe nothing yet still report changed=true —
+  // this guard, "Repair" would wipe nothing yet still report changed=true
   // forcing the app-restart loop on every click and confusing users.
   const rs = settings.config.roblox_settings;
   const hasChanges =
@@ -1335,7 +1335,7 @@ async function repairResetRoblox(
   return {
     status: "fixed",
     summary:
-      "Roblox settings reset — Ultraboost/custom FFlags, FPS unlock, and window tweaks cleared.",
+      "Roblox settings reset, Ultraboost/custom FFlags, FPS unlock, and window tweaks cleared.",
     nextStep:
       "Reopen Roblox, then re-enable any optimizations you want from the Games tab.",
     changed: true,

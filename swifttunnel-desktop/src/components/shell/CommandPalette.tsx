@@ -119,7 +119,7 @@ export function CommandPalette() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onInputKey}
-            placeholder="Search anything — unlock fps, overlay, no wifi, region…"
+            placeholder="Search anything, unlock fps, overlay, no wifi, region…"
             className="flex-1 bg-transparent text-[13.5px] text-text-primary outline-none placeholder:text-text-dimmed"
           />
           <kbd

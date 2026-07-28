@@ -81,7 +81,7 @@ export function PresetsPanel({
           </div>
           <p className="max-w-[300px] text-[11.5px] leading-relaxed text-text-muted">
             Save your current setup as a preset, or import a config someone
-            shared — then switch between them anytime.
+            shared, then switch between them anytime.
           </p>
           <div className="mt-1 flex gap-2">
             <Button variant="primary" size="sm" onClick={onCreate}>
@@ -250,7 +250,7 @@ function PresetShare({ preset }: { preset: SwiftTunnelPreset }) {
     } catch {
       addToast({
         type: "error",
-        message: "Couldn't copy automatically — select the config and copy it.",
+        message: "Couldn't copy automatically, select the config and copy it.",
       });
     }
   }
@@ -316,7 +316,7 @@ function PresetShare({ preset }: { preset: SwiftTunnelPreset }) {
         )}
       </div>
       <p className="text-[11px] text-text-muted">
-        Share the config or the .txt — it's just settings (no account or region
+        Share the config or the .txt, it's just settings (no account or region
         data), so it's safe to send. Anyone can import it to get this exact setup.
       </p>
     </div>
@@ -364,7 +364,7 @@ function CreateDialog({ open, onClose }: { open: boolean; onClose: () => void })
       open={open}
       onClose={onClose}
       title="Create a preset"
-      description="Save your current setup — switch back to it anytime, or share it."
+      description="Save your current setup, switch back to it anytime, or share it."
       maxWidth={540}
     >
       {!created ? (

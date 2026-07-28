@@ -255,7 +255,7 @@ export interface NetworkRepairResponse {
  * "My internet is broken after SwiftTunnel" recovery. Resets stale WinpkFilter
  * adapter modes (the total-blackout leftover from a crashed session), removes
  * leftover IPv6 blocks / offload changes / WFP filters / hosts entries, and
- * flushes DNS. Runs unconditionally — the stuck-tunnel failure is invisible
+ * flushes DNS. Runs unconditionally, the stuck-tunnel failure is invisible
  * to VPN state. The backend refuses while a session is active.
  */
 export const systemRepairNetwork = () =>
@@ -264,7 +264,7 @@ export const systemRepairNetwork = () =>
 /**
  * Restart the NDISRD kernel service without reinstalling the driver.
  *
- * Intended as an escalation for the "wedged NDIS state" case — driver files
+ * Intended as an escalation for the "wedged NDIS state" case, driver files
  * are in place, service reports running, but bind IOCTLs fail. Cheaper than
  * reinstall, and much cheaper than a full OS reboot. Runs a self-test after
  * restart so a failed reset still surfaces a useful error instead of the UI

@@ -90,7 +90,7 @@ export async function primaryMonitor() {
 /**
  * Required by OverlayStatsBar. Missing this export used to fail the whole ESM
  * module graph (main.tsx imports OverlayStatsBar eagerly), which blanked the
- * page in browser-preview mode — `npm run dev` rendered nothing at all.
+ * page in browser-preview mode, `npm run dev` rendered nothing at all.
  */
 export async function currentMonitor() {
   return mockMonitor;

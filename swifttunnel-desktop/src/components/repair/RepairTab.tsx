@@ -101,7 +101,7 @@ export function RepairTab() {
   const addToast = useToastStore((s) => s.addToast);
 
   // Load the saved result synchronously (not in an effect) so its text is in
-  // the DOM on first render — the translation pass runs on tab switch and would
+  // the DOM on first render, the translation pass runs on tab switch and would
   // otherwise miss late-mounted content, flashing English on every revisit.
   const [lastRun, setLastRun] = useState<RepairRun | null>(() => loadRepairRun());
   const [running, setRunning] = useState(false);
@@ -147,18 +147,18 @@ export function RepairTab() {
       saveRepairRun(run);
       setLastRun(run);
 
-      // Nothing was actually changed — don't force a pointless restart + UAC.
+      // Nothing was actually changed, don't force a pointless restart + UAC.
       if (!items.some((i) => i.changed)) {
         addToast({
           type: "success",
-          message: "Everything looks healthy — nothing needed repair.",
+          message: "Everything looks healthy, nothing needed repair.",
         });
         return;
       }
 
       addToast({
         type: "success",
-        message: "Repairs complete — restarting SwiftTunnel…",
+        message: "Repairs complete, restarting SwiftTunnel…",
       });
       setRestarting(true);
       // Let the toast land, then relaunch elevated (Windows shows the admin
@@ -168,7 +168,7 @@ export function RepairTab() {
           setRestarting(false);
           addToast({
             type: "error",
-            message: `Couldn't restart automatically — reopen SwiftTunnel to finish. (${formatErrorMessage(
+            message: `Couldn't restart automatically, reopen SwiftTunnel to finish. (${formatErrorMessage(
               error,
             )})`,
           });
@@ -192,7 +192,7 @@ export function RepairTab() {
       if (report.status === "fixed") {
         addToast({
           type: "success",
-          message: "Driver reinstalled — restarting SwiftTunnel…",
+          message: "Driver reinstalled, restarting SwiftTunnel…",
         });
         setRestarting(true);
         window.setTimeout(() => {
@@ -200,7 +200,7 @@ export function RepairTab() {
             setRestarting(false);
             addToast({
               type: "error",
-              message: `Couldn't restart automatically — reopen SwiftTunnel to finish. (${formatErrorMessage(
+              message: `Couldn't restart automatically, reopen SwiftTunnel to finish. (${formatErrorMessage(
                 error,
               )})`,
             });
@@ -214,7 +214,7 @@ export function RepairTab() {
       } else if (report.status === "failed") {
         addToast({
           type: "error",
-          message: "Driver reinstall could not complete — details below.",
+          message: "Driver reinstall could not complete, details below.",
         });
       }
     } finally {
@@ -261,7 +261,7 @@ export function RepairTab() {
       await systemCopyLogToClipboard();
       addToast({
         type: "success",
-        message: "Log copied — paste it into Discord for support.",
+        message: "Log copied, paste it into Discord for support.",
       });
     } catch (error) {
       addToast({
@@ -330,7 +330,7 @@ export function RepairTab() {
           </div>
         </div>
 
-        {/* Console rail — what the last repair actually did, without opening
+        {/* Console rail, what the last repair actually did, without opening
             the log. */}
         <StatRail
           className="mt-5"
@@ -533,7 +533,7 @@ export function RepairTab() {
             </h3>
             <p className="mt-1 max-w-[520px] text-[12px] leading-snug text-text-muted">
               If SwiftTunnel still isn&apos;t working after a repair, our team
-              can help directly on Discord — copy your log first so we can see
+              can help directly on Discord, copy your log first so we can see
               what happened.
             </p>
           </div>
@@ -600,7 +600,7 @@ function summarize(run: RepairRun): string {
   if (reboot) parts.push(`${reboot} need reboot`);
   if (failed) parts.push(`${failed} failed`);
   return `Ran ${run.items.length} repairs${
-    parts.length ? ` — ${parts.join(", ")}` : ""
+    parts.length ? `, ${parts.join(", ")}` : ""
   }.`;
 }
 
@@ -611,7 +611,7 @@ function formatRunForSupport(run: RepairRun): string {
     `Last run: ${new Date(run.ranAt).toLocaleString()}`,
     "",
     ...run.items.map(
-      (i) => `- ${i.label}: ${statusLabel(i.status)} — ${i.summary}`,
+      (i) => `- ${i.label}: ${statusLabel(i.status)}, ${i.summary}`,
     ),
   ].join("\n");
 }
@@ -634,7 +634,7 @@ function WrenchIcon() {
   );
 }
 
-// Monochrome status palette — no green, matches the app's white-accent theme.
+// Monochrome status palette, no green, matches the app's white-accent theme.
 function statusColor(status: RepairStatus): string {
   switch (status) {
     case "healthy":

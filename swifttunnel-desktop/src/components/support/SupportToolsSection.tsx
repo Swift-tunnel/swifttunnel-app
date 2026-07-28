@@ -49,7 +49,7 @@ export function SupportToolsSection() {
       setCopyLogPath(response.file_path);
       addToast({
         type: "success",
-        message: "Log file copied — paste it into Discord or email.",
+        message: "Log file copied, paste it into Discord or email.",
       });
     } catch (error) {
       setCopyLogError(String(error));

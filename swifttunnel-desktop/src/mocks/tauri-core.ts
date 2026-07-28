@@ -480,7 +480,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
         label: "Adapter packet filter modes",
         status: "fixed",
         detail:
-          "1 adapter(s) were stuck with packet filter flags set (this blocks all traffic) — reset and verified on all 2 adapter(s).",
+          "1 adapter(s) were stuck with packet filter flags set (this blocks all traffic), reset and verified on all 2 adapter(s).",
       },
       {
         id: "tunnel_marker",

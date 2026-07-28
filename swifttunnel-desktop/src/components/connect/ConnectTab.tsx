@@ -421,7 +421,7 @@ export function ConnectTab() {
             (isConnected ? connectedRegion : selectedRegion)?.country_code ??
             null
           }
-          /* Same source as the Latency stat below — the two must never
+          /* Same source as the Latency stat below, the two must never
              disagree, and the region's cached latency is a real measurement
              even when we're disconnected. */
           ping={heroLatency}
@@ -768,13 +768,13 @@ function RouteAssistPanel({
               className="text-[12.5px] font-semibold text-text-primary"
               style={{ letterSpacing: "-0.005em" }}
             >
-              Tunnel join traffic
+              Route Assist
             </h3>
             <Tooltip
               content={
                 partialBypassActive
                   ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
-                  : "Sends Roblox's connection setup — matchmaking, login and API calls — through the relay as well, instead of only your gameplay. Roblox then sees the relay's location when placing you, and login works on networks that block it. Leave off if you only want lower ping. For blocked countries, use the Bypass toggles in Optimize instead."
+                  : "Routes Roblox login and matchmaking through the relay, not just gameplay. For blocked countries use the Bypass toggles in Optimize."
               }
             >
               <span className="inline-flex">
@@ -785,14 +785,14 @@ function RouteAssistPanel({
           <p className="mt-0.5 truncate text-[11px] leading-snug text-text-muted">
             {partialBypassActive
               ? "Disabled while Partial Bypass is active."
-              : "Route Roblox's login and matchmaking through the relay too."}
+              : "Relays Roblox login and matchmaking too."}
           </p>
         </div>
       </div>
       <Toggle
         enabled={enabled}
         disabled={disabled}
-        ariaLabel="Tunnel join traffic"
+        ariaLabel="Route Assist"
         onChange={onChange}
       />
     </section>
@@ -1073,7 +1073,7 @@ function RegionRow({
         <span className="flex-1" />
       </button>
 
-      {/* Fixed-width latency slot — always same position */}
+      {/* Fixed-width latency slot, always same position */}
       <div className="flex w-[76px] shrink-0 items-center justify-end gap-2">
         {latency !== null ? (
           <>

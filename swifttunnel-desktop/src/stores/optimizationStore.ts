@@ -19,7 +19,7 @@ export interface OptOutcome {
   requiresReboot: boolean;
 }
 
-/** silent: no per-item toasts/notifications — bulk callers summarize instead. */
+/** silent: no per-item toasts/notifications, bulk callers summarize instead. */
 type OptOptions = { silent?: boolean };
 
 interface OptimizationStore {
@@ -62,7 +62,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => ({
       // must NOT pretend it succeeded.
       if (!res || typeof res.requires_reboot !== "boolean") {
         throw new Error(
-          "Optimization backend unavailable — fully restart SwiftTunnel and try again.",
+          "Optimization backend unavailable, fully restart SwiftTunnel and try again.",
         );
       }
 
@@ -110,7 +110,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => ({
       const res = await optimizationRevert(def.id);
       if (!res || typeof res.requires_reboot !== "boolean") {
         throw new Error(
-          "Optimization backend unavailable — fully restart SwiftTunnel and try again.",
+          "Optimization backend unavailable, fully restart SwiftTunnel and try again.",
         );
       }
 

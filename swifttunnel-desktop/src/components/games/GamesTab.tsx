@@ -20,7 +20,7 @@ function bundledArt(id: string): string | undefined {
 }
 
 /** Games surfaced in the library. `backgroundUrl` is fetched art (Steam CDN for
- *  Steam titles, brand CDN otherwise — same approach as the games catalog).
+ *  Steam titles, brand CDN otherwise, same approach as the games catalog).
  *  Built to take more entries without layout changes. */
 const GAMES: {
   id: string;
@@ -75,7 +75,7 @@ function GameCard({
       whileHover={{ y: -2 }}
       transition={{ duration: 0.15, ease: "easeOut" }}
       /* Only a running game glows, and only because that's real state. Idle
-         cards stay plain — if every card glows, nothing reads as live. */
+         cards stay plain, if every card glows, nothing reads as live. */
       className={`flex flex-col overflow-hidden rounded-[var(--radius-card)] surface-card ${
         running ? "neon-edge-live" : ""
       }`}

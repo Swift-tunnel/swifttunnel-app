@@ -60,7 +60,7 @@ export const NAV_SECTIONS: NavSection[] = [
       {
         id: "ingame",
         label: "In-Game",
-        description: "On-screen overlay — FPS, CPU, RAM, network",
+        description: "On-screen overlay, FPS, CPU, RAM, network",
         shortcut: "7",
         icon: "M3 5h18a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z M8 21h8 M12 17v4 M6 9h5 M6 12h3",
       },

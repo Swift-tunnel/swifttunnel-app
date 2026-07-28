@@ -46,7 +46,7 @@ export function findRegionForVpnRegion(
  * Return a valid region id for a possibly-stale saved `selected`, or `null` when
  * it is already valid and canonical (nothing to change).
  *
- * Keeps a user's saved region usable across a server-list change — e.g. a full
+ * Keeps a user's saved region usable across a server-list change, e.g. a full
  * relay-fleet swap. A legacy/suffixed id that still maps to a region (via
  * {@link findRegionForVpnRegion}, which prefix-matches "singapore-03" ->
  * "singapore") is normalized to that region's canonical id; a region that no

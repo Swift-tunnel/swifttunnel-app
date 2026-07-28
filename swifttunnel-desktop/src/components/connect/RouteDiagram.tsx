@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { countryFlag, getLatencyColor } from "../../lib/utils";
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Game route diagram — lives inside the connect deck, under the status row.
+   Game route diagram, lives inside the connect deck, under the status row.
 
    Shows the path traffic actually takes: you → relay → game. Three nodes and
    one number, because that is all we genuinely measure. The relay is
@@ -102,7 +102,7 @@ export function RouteDiagram({
 
       <p className="mt-3 text-[10.5px] leading-snug text-text-dimmed">
         The {ping !== null ? `${ping} ms` : "relay"} figure is your ping to the
-        relay, not the final in-game ping — SwiftTunnel forwards packets without
+        relay, not the final in-game ping, SwiftTunnel forwards packets without
         resolving intermediate hops.
       </p>
     </div>

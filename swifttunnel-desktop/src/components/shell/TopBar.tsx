@@ -9,7 +9,7 @@ import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
 import { navItemFor } from "./nav";
 
-/** `2h 14m` / `47m` / `<1m` — compact enough for a top-bar pill. */
+/** `2h 14m` / `47m` / `<1m`, compact enough for a top-bar pill. */
 function formatFreeTier(seconds: number): string {
   if (seconds < 60) return "<1m";
   const hours = Math.floor(seconds / 3600);
@@ -124,7 +124,7 @@ export function TopBar() {
           </p>
         </div>
 
-        {/* Game-status chip — Medal's "Waiting For Game": solid gamepad, no
+        {/* Game-status chip, Medal's "Waiting For Game": solid gamepad, no
             border, subtle inset pill. */}
         <div
           className="hidden items-center gap-2 rounded-[9px] px-3 py-1.5 sm:flex"
@@ -157,7 +157,7 @@ export function TopBar() {
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
-        {/* Search — opens the command palette (same Ctrl+K target). */}
+        {/* Search, opens the command palette (same Ctrl+K target). */}
         <button
           title="Search (Ctrl+K)"
           aria-label="Search"
@@ -224,10 +224,10 @@ export function TopBar() {
         )}
         <StatusChip state={vpnState} />
 
-        {/* Language — translate the whole UI to any language (Medal-style). */}
+        {/* Language, translate the whole UI to any language (Medal-style). */}
         <LanguageSelector />
 
-        {/* Profile avatar — moved from the sidebar to the top-right (Medal). */}
+        {/* Profile avatar, moved from the sidebar to the top-right (Medal). */}
         <button
           onClick={() => setTab("settings")}
           title={email ?? "Account"}
@@ -243,7 +243,7 @@ export function TopBar() {
           {initial}
         </button>
 
-        {/* Window controls — custom titlebar (window is frameless, Medal-style). */}
+        {/* Window controls, custom titlebar (window is frameless, Medal-style). */}
         <div
           className="-mr-5 ml-1 flex items-stretch"
           style={{ height: "var(--spacing-topbar)" }}

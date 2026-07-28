@@ -185,7 +185,7 @@ describe("repair center logic", () => {
             id: "adapter_modes",
             label: "Adapter packet filter modes",
             status: "fixed",
-            detail: "1 adapter(s) were stuck — reset and verified.",
+            detail: "1 adapter(s) were stuck, reset and verified.",
           },
         ],
       }),
@@ -714,7 +714,7 @@ describe("repair center logic", () => {
     });
 
     expect(report.status).toBe("fixed");
-    // App-local repair — changed must stay false so Repair-all doesn't
+    // App-local repair, changed must stay false so Repair-all doesn't
     // trigger the restart + UAC flow for a cache clear.
     expect(report.changed).toBe(false);
     expect(report.entries).toContainEqual(

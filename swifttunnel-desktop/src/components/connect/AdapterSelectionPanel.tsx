@@ -279,7 +279,7 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
               const status = adapterStatusLabel(adapter);
               return (
                 <option key={adapter.guid} value={adapter.guid}>
-                  {tags ? `${status} — ${label} (${tags})` : `${status} — ${label}`}
+                  {tags ? `${status}, ${label} (${tags})` : `${status}, ${label}`}
                 </option>
               );
             })}

@@ -7,7 +7,7 @@ const DOWNLOAD_URL = "https://swifttunnel.net";
 
 /**
  * Blocking gate shown when the server has locked this build out (old-build
- * lockout — see the `X-SwiftTunnel-Version` gate on the web). Mirrors the
+ * lockout, see the `X-SwiftTunnel-Version` gate on the web). Mirrors the
  * BannedScreen pattern: it replaces the whole app until the user updates.
  *
  * "Update now" drives the existing Tauri updater (download + install +
@@ -30,7 +30,7 @@ export function UpdateRequiredScreen({ message }: { message: string }) {
           ? `Installing update… ${progress}%`
           : "Downloading the latest version…"
         : status === "error"
-          ? (error ?? "Automatic update failed — please download manually.")
+          ? (error ?? "Automatic update failed, please download manually.")
           : status === "up_to_date"
             ? "Couldn't update automatically. Download the latest version from the website."
             : null;
