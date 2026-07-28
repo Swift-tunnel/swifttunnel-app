@@ -97,7 +97,7 @@ export function RouteDiagram({
             inventing a number to fill the gap. */}
         <Leg value={null} tone={tone} dashed />
 
-        <Endpoint label={gameName} icon={<TargetIcon />} tile />
+        <Endpoint label={gameName} icon={<RobloxIcon />} tile />
       </div>
 
       <p className="mt-3 text-[10.5px] leading-snug text-text-dimmed">
@@ -266,20 +266,18 @@ function UserIcon() {
   );
 }
 
-function TargetIcon() {
+/** Roblox mark: a tilted square with a tilted square cut out of it.
+ *  Drawn with fillRule="evenodd" so the inner square punches a hole rather
+ *  than sitting on top, which keeps it correct on any background. Uses
+ *  currentColor so it inherits the node's connected/idle tint. */
+function RobloxIcon() {
   return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.9"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <circle cx="12" cy="12" r="9" />
-      <circle cx="12" cy="12" r="4" />
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M4.92 1.6 1.6 15.02 19.08 22.4 22.4 8.98 4.92 1.6Zm4.4 7.55 5.86 2.48-1.24 5.03-5.86-2.48 1.24-5.03Z"
+      />
     </svg>
   );
 }
