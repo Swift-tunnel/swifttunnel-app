@@ -193,6 +193,13 @@ pub struct RelayTicketResponse {
     pub key_id: String,
     #[serde(default)]
     pub connection_policy: Option<RelayConnectionPolicy>,
+    /// Free-tier time budget in seconds, refreshed on every ticket (~5 min).
+    /// `None` means no limit applies — either the backend has it switched off,
+    /// or it predates the feature and omits the fields entirely.
+    #[serde(default)]
+    pub limit_seconds: Option<i64>,
+    #[serde(default)]
+    pub remaining_seconds: Option<i64>,
 }
 
 impl RelayTicketResponse {

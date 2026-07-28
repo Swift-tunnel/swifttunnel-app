@@ -9,11 +9,29 @@ import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
 import { navItemFor } from "./nav";
 
+/** `2h 14m` / `47m` / `<1m` — compact enough for a top-bar pill. */
+function formatFreeTier(seconds: number): string {
+  if (seconds < 60) return "<1m";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+/** Escalates as the budget runs down, so it stops being decorative. */
+function freeTierColor(seconds: number): string {
+  if (seconds <= 600) return "var(--color-danger, #f87171)";
+  if (seconds <= 1800) return "var(--color-warning, #fbbf24)";
+  return "var(--color-text-secondary, #a1a1aa)";
+}
+
 export function TopBar() {
   const activeTab = useSettingsStore((s) => s.activeTab);
   const setTab = useSettingsStore((s) => s.setTab);
   const vpnState = useVpnStore((s) => s.state);
   const ping = useVpnStore((s) => s.ping);
+  const freeTierRemaining = useVpnStore((s) => s.freeTierRemaining);
+  const fetchFreeTier = useVpnStore((s) => s.fetchFreeTier);
+  const tickFreeTier = useVpnStore((s) => s.tickFreeTier);
   const robloxRunning = useBoostStore((s) => s.robloxRunning);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
   const email = useAuthStore((s) => s.email);
@@ -30,6 +48,19 @@ export function TopBar() {
     const id = window.setInterval(() => void fetchMetrics(), 4000);
     return () => window.clearInterval(id);
   }, [fetchMetrics]);
+
+  // Free-tier budget. The authoritative number only changes when a relay
+  // ticket is refreshed (~5 min), so resync on a slow interval and tick the
+  // display down locally in between rather than polling every second.
+  useEffect(() => {
+    void fetchFreeTier();
+    const sync = window.setInterval(() => void fetchFreeTier(), 60_000);
+    const tick = window.setInterval(() => tickFreeTier(), 1000);
+    return () => {
+      window.clearInterval(sync);
+      window.clearInterval(tick);
+    };
+  }, [fetchFreeTier, tickFreeTier]);
 
   useEffect(() => {
     const appWindow = getCurrentWindow();
@@ -150,6 +181,27 @@ export function TopBar() {
             <path d="m21 21-4.3-4.3" />
           </svg>
         </button>
+
+        {freeTierRemaining !== null && (
+          <div
+            className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
+            title={`${formatFreeTier(freeTierRemaining)} of free SwiftTunnel time left. This limit is temporary and will be removed soon.`}
+            style={{
+              backgroundColor: "var(--color-bg-base)",
+              border: `1px solid ${freeTierColor(freeTierRemaining)}33`,
+            }}
+          >
+            <span
+              className="lcd-readout text-[11px] font-medium leading-none"
+              style={{ color: freeTierColor(freeTierRemaining) }}
+            >
+              {formatFreeTier(freeTierRemaining)}
+            </span>
+            <span className="text-[9.5px] leading-none text-text-dimmed">
+              free
+            </span>
+          </div>
+        )}
 
         {isConnected && ping !== null && (
           <div

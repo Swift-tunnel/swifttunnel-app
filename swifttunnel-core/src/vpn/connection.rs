@@ -22,7 +22,7 @@ use crate::settings::GameProcessPerformanceSettings;
 use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, watch};
 
@@ -80,6 +80,31 @@ const CONNECT_FAIL_REGION_UNAVAILABLE: &str = "ST_CONNECT_REGION_UNAVAILABLE";
 /// advertised by `/api/vpn/servers`; reaching this constant means the server
 /// list was empty or malformed, which `setup_split_tunnel` logs as a warning.
 const FALLBACK_RELAY_PORT: u16 = 51821;
+
+/// Latest free-tier budget reported by the backend, in seconds. `-1` means
+/// "no limit known" — either the backend has the limit switched off, or it
+/// predates the feature and omits the fields.
+///
+/// Refreshed every time a relay ticket is fetched (~5 min while connected).
+/// The UI ticks its own countdown between refreshes and resyncs from here.
+static FREE_TIER_REMAINING_SECS: AtomicI64 = AtomicI64::new(-1);
+static FREE_TIER_LIMIT_SECS: AtomicI64 = AtomicI64::new(-1);
+
+/// Record the budget carried on a freshly fetched ticket.
+fn record_free_tier_quota(ticket: &crate::auth::types::RelayTicketResponse) {
+    FREE_TIER_REMAINING_SECS.store(ticket.remaining_seconds.unwrap_or(-1), Ordering::Relaxed);
+    FREE_TIER_LIMIT_SECS.store(ticket.limit_seconds.unwrap_or(-1), Ordering::Relaxed);
+}
+
+/// `(remaining_seconds, limit_seconds)`, each `None` when no limit applies.
+pub fn free_tier_quota() -> (Option<i64>, Option<i64>) {
+    let remaining = FREE_TIER_REMAINING_SECS.load(Ordering::Relaxed);
+    let limit = FREE_TIER_LIMIT_SECS.load(Ordering::Relaxed);
+    (
+        if remaining < 0 { None } else { Some(remaining) },
+        if limit <= 0 { None } else { Some(limit) },
+    )
+}
 
 static HANDSHAKE_TIMEOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
 static CANDIDATE_EXHAUSTED_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -845,7 +870,10 @@ async fn authenticate_switch_target(
         .get_relay_ticket(&access_token, server_region, &session_id_hex)
         .await
     {
-        Ok(ticket) => ticket,
+        Ok(ticket) => {
+            record_free_tier_quota(&ticket);
+            ticket
+        }
         Err(e) => {
             if relay_ticket_ban_reason(&e).is_some() {
                 return SwitchAuthOutcome::Rejected(
@@ -1602,7 +1630,10 @@ impl VpnConnection {
                     .get_relay_ticket(access_token, candidate_region, &session_id_hex)
                     .await
                 {
-                    Ok(ticket) => ticket,
+                    Ok(ticket) => {
+                        record_free_tier_quota(&ticket);
+                        ticket
+                    }
                     Err(e) => {
                         if let Some(reason) = relay_ticket_ban_reason(&e) {
                             log::warn!(

@@ -14,6 +14,7 @@ import {
   vpnDisconnect,
   vpnGetThroughput,
   vpnGetPing,
+  vpnGetFreeTier,
   vpnGetDiagnostics,
   systemCheckDriver,
   systemRepairDriver,
@@ -422,6 +423,11 @@ interface VpnStore {
   // Ping (real-time ICMP to relay)
   ping: number | null;
 
+  // Temporary free-tier allowance. Both null when no limit applies — either
+  // the backend has it switched off, or it predates the feature.
+  freeTierRemaining: number | null;
+  freeTierLimit: number | null;
+
   // Session timer
   connectedAt: number | null;
 
@@ -443,6 +449,8 @@ interface VpnStore {
   disconnect: () => Promise<void>;
   fetchThroughput: () => Promise<void>;
   fetchPing: () => Promise<void>;
+  fetchFreeTier: () => Promise<void>;
+  tickFreeTier: () => void;
   fetchDiagnostics: () => Promise<void>;
   handleStateEvent: (event: VpnStateEvent) => void;
   handleThroughputEvent: (event: ThroughputEvent) => void;
@@ -465,6 +473,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   packetsTunneled: 0,
   packetsBypassed: 0,
   ping: null,
+  freeTierRemaining: null,
+  freeTierLimit: null,
   connectedAt: null,
   diagnostics: null,
   bindingPreflight: null,
@@ -987,6 +997,29 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         dedupeKey: "vpn-fetch-throughput",
       });
     }
+  },
+
+  fetchFreeTier: async () => {
+    try {
+      const quota = await vpnGetFreeTier();
+      set({
+        freeTierRemaining: quota.remaining_seconds,
+        freeTierLimit: quota.limit_seconds,
+      });
+    } catch (error) {
+      reportError("Failed to fetch free tier quota", error, {
+        dedupeKey: "vpn-fetch-free-tier",
+      });
+    }
+  },
+
+  // Local 1s countdown between ticket refreshes (~5 min apart). The
+  // authoritative value comes from fetchFreeTier; this only stops the display
+  // sitting frozen on the same number for minutes at a time.
+  tickFreeTier: () => {
+    const { state, freeTierRemaining } = get();
+    if (state !== "connected" || freeTierRemaining === null) return;
+    set({ freeTierRemaining: Math.max(0, freeTierRemaining - 1) });
   },
 
   fetchPing: async () => {

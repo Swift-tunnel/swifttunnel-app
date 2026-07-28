@@ -723,6 +723,28 @@ pub async fn vpn_get_ping(state: State<'_, AppState>) -> Result<Option<u32>, Str
 }
 
 #[derive(Serialize)]
+pub struct FreeTierQuota {
+    /// Seconds of free relay time left, or `None` when no limit applies.
+    pub remaining_seconds: Option<i64>,
+    /// Total allowance the remaining figure counts down from.
+    pub limit_seconds: Option<i64>,
+}
+
+/// Latest free-tier budget reported by the backend.
+///
+/// Cheap: reads two atomics refreshed whenever a relay ticket is fetched
+/// (~5 min while connected). The UI ticks its own countdown in between and
+/// resyncs from this, so polling it often is pointless.
+#[tauri::command]
+pub async fn vpn_get_free_tier() -> Result<FreeTierQuota, String> {
+    let (remaining_seconds, limit_seconds) = swifttunnel_core::vpn::connection::free_tier_quota();
+    Ok(FreeTierQuota {
+        remaining_seconds,
+        limit_seconds,
+    })
+}
+
+#[derive(Serialize)]
 pub struct ThroughputResponse {
     pub bytes_up: u64,
     pub bytes_down: u64,

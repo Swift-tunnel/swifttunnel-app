@@ -83,6 +83,15 @@ export const vpnGetThroughput = () =>
 export const vpnGetPing = () =>
   invoke<number | null>("vpn_get_ping");
 
+export interface FreeTierQuota {
+  /** Seconds of free relay time left, or null when no limit applies. */
+  remaining_seconds: number | null;
+  limit_seconds: number | null;
+}
+
+export const vpnGetFreeTier = () =>
+  invoke<FreeTierQuota>("vpn_get_free_tier");
+
 export const vpnGetDiagnostics = () =>
   invoke<DiagnosticsResponse | null>("vpn_get_diagnostics");
 
