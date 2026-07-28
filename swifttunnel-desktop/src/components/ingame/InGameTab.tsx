@@ -87,14 +87,12 @@ export function InGameTab() {
         grid
         aurora
         corners
-        live={ov.enabled}
-        status={ov.enabled ? "connected" : null}
         anchorId="overlay_enabled"
         eyebrow="In-Game Overlay"
         title={
           <span className="flex items-center gap-2">
             <span className="display-hero">
-              {ov.enabled ? "Overlay armed" : "Overlay off"}
+              {ov.enabled ? "Overlay enabled" : "Overlay off"}
             </span>
             <Chip size="xs" tone="accent">
               BETA
@@ -142,7 +140,12 @@ export function InGameTab() {
           anchorId="overlay_preview"
           eyebrow="Overlay preview"
         >
-          <div className="instrument-well flex min-h-[52px] items-center justify-center px-3 py-4">
+          {/* The bar is as wide as the metric set the user picked, so at 7+
+              metrics it outgrows the panel. Scroll it inside the well instead
+              of letting it bleed past the panel edge. justify-start once it
+              overflows, otherwise centring pushes the leading metric out of
+              reach on the left. */}
+          <div className="instrument-well flex min-h-[52px] items-center justify-center overflow-x-auto px-3 py-4 [&>*]:shrink-0">
             <OverlayBar
               metrics={ov.metrics}
               values={OVERLAY_SAMPLE_VALUES}
