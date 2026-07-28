@@ -93,17 +93,24 @@ export function RouteDiagram({
           }
         />
 
-        {/* Relay → game is not measured; the connector says so rather than
-            inventing a number to fill the gap. */}
-        <Leg value={null} tone={tone} dashed />
+        {/* Relay → game carries no honest latency figure, so when the tunnel is
+            live this leg shows the traffic flowing through it instead. Falls
+            back to a plain dashed rule when disconnected, where there is
+            nothing being boosted. */}
+        <Leg
+          value={null}
+          tone={tone}
+          dashed={!connected}
+          boosted={connected}
+          label="Boosted"
+        />
 
         <Endpoint label={gameName} icon={<RobloxIcon />} tile />
       </div>
 
       <p className="mt-3 text-[10.5px] leading-snug text-text-dimmed">
         The {ping !== null ? `${ping} ms` : "relay"} figure is your ping to the
-        relay, not the final in-game ping, SwiftTunnel forwards packets without
-        resolving intermediate hops.
+        relay, not your final in-game ping.
       </p>
     </div>
   );
@@ -210,30 +217,55 @@ function NodeCard({
   );
 }
 
-/** A leg of the route, with its latency chip sitting on the line. */
+/** A leg of the route, with its chip sitting on the line.
+ *
+ *  `boosted` draws a live green flow instead of a latency figure. The
+ *  relay→game hop has no honest number to show (Roblox drops ICMP, and the
+ *  relay is packet-NAT so there is no hop to attribute time to), but the
+ *  traffic genuinely is being relayed, so the line says that rather than
+ *  sitting blank or claiming a measurement. */
 function Leg({
   value,
   tone,
   dashed,
+  boosted,
+  label,
 }: {
   value: string | null;
   tone: string;
   dashed?: boolean;
+  boosted?: boolean;
+  label?: string;
 }) {
   return (
     <div className="relative flex min-w-[84px] flex-1 items-center justify-center">
       <div
-        className="absolute inset-x-0"
+        className={`absolute inset-x-0 ${boosted ? "route-leg-boosted" : ""}`}
         style={
-          dashed
-            ? { borderTop: "1px dashed var(--color-border-default)" }
-            : {
-                height: 1,
-                background:
-                  "linear-gradient(90deg, transparent, var(--color-border-strong) 22%, var(--color-border-strong) 78%, transparent)",
-              }
+          boosted
+            ? { height: 2, borderRadius: 2 }
+            : dashed
+              ? { borderTop: "1px dashed var(--color-border-default)" }
+              : {
+                  height: 1,
+                  background:
+                    "linear-gradient(90deg, transparent, var(--color-border-strong) 22%, var(--color-border-strong) 78%, transparent)",
+                }
         }
       />
+      {boosted && label && (
+        <span
+          className="lcd-readout relative rounded-[6px] px-2 py-1 text-[9.5px] font-bold uppercase leading-none tracking-[0.12em]"
+          style={{
+            backgroundColor: "var(--color-bg-elevated)",
+            border: "1px solid var(--color-status-connected)",
+            color: "var(--color-status-connected)",
+            boxShadow: "0 0 12px -4px var(--color-status-connected-glow)",
+          }}
+        >
+          {label}
+        </span>
+      )}
       {/* No chip on an unmeasured leg. A "not measured" pill drew the eye to
           the one thing we cannot report and made the route look broken; the
           dashed line already says the leg is unquantified. */}

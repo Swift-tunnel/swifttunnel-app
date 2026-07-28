@@ -437,6 +437,33 @@ body {
   100% { transform: translateX(200%); }
 }
 
+/* Route-diagram boosted leg: a highlight travelling along the line, so the
+   relay→game hop reads as traffic actively flowing rather than a static rule.
+   Directional on purpose — a plain opacity pulse reads as "loading". */
+@keyframes route-flow {
+  0% { background-position: -140% 0; }
+  100% { background-position: 240% 0; }
+}
+
+.route-leg-boosted {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--color-status-connected) 22%, transparent) 0%,
+    var(--color-status-connected-glow) 45%,
+    color-mix(in srgb, var(--color-status-connected) 22%, transparent) 100%
+  );
+  background-size: 55% 100%;
+  background-repeat: no-repeat;
+  animation: route-flow 2.1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .route-leg-boosted {
+    animation: none;
+    background-size: 100% 100%;
+  }
+}
+
 @keyframes status-breath {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.6; transform: scale(0.85); }
