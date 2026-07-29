@@ -607,7 +607,16 @@ export function ConnectTab() {
                   settings.selected_region === r.id
                 }
                 lastUsed={settings.last_connected_region === r.id}
-                latency={getLatency(r.id)}
+                // The region we are actually on reports its live in-tunnel RTT
+                // rather than the periodic batch probe. The two are measured
+                // differently and refresh on different schedules, so leaving
+                // the probe here put a stale number next to the live one and
+                // made the same relay look like two different pings.
+                latency={
+                  isConnected && settings.selected_region === r.id && ping !== null
+                    ? ping
+                    : getLatency(r.id)
+                }
                 disabled={isConnected || isTransitioning}
                 onSelect={() => selectRegion(r.id)}
                 forcedServer={settings.forced_servers[r.id]}

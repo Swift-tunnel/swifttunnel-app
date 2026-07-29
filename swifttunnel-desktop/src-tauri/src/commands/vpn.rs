@@ -672,6 +672,28 @@ pub async fn vpn_disconnect(state: State<'_, AppState>) -> Result<(), String> {
     disconnect_and_persist(&state).await
 }
 
+/// Attempts `try_lock` a few times with a short yield between tries.
+///
+/// A read-only UI poll must not block behind the packet path, so a plain
+/// `.lock().await` is out. But a single `try_lock` gives up on contention that
+/// lasts microseconds, which under live traffic is most of the time. Bounded
+/// retries keep the non-blocking guarantee while making a successful read the
+/// normal outcome instead of a coin flip.
+async fn try_lock_briefly<T>(
+    handle: &tokio::sync::Mutex<T>,
+) -> Option<tokio::sync::MutexGuard<'_, T>> {
+    const ATTEMPTS: usize = 5;
+    for attempt in 0..ATTEMPTS {
+        if let Ok(guard) = handle.try_lock() {
+            return Some(guard);
+        }
+        if attempt + 1 < ATTEMPTS {
+            tokio::task::yield_now().await;
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn vpn_get_ping(state: State<'_, AppState>) -> Result<Option<u32>, String> {
     // Read both the relay ping snapshot and the current relay address from
@@ -679,8 +701,15 @@ pub async fn vpn_get_ping(state: State<'_, AppState>) -> Result<Option<u32>, Str
     // the outer vpn_connection mutex while connect/disconnect is in flight.
     let driver = state.split_tunnel_handle.read().clone();
     let (relay_ping, relay_addr) = match driver {
-        Some(handle) => match handle.try_lock() {
-            Ok(driver) => {
+        // try_lock, not lock: this must never block the UI behind the packet
+        // path. But a single failed attempt is far too eager — the lock is
+        // routinely held for microseconds while traffic flows, and giving up
+        // discarded the relay address too, so the whole command returned None
+        // and the reading blanked to an em dash mid-session. Retry briefly;
+        // this still cannot stall, and in practice the first or second attempt
+        // wins.
+        Some(handle) => match try_lock_briefly(&handle).await {
+            Some(driver) => {
                 let snapshot = driver
                     .get_relay_context()
                     .map(|relay| relay.ping_snapshot());
@@ -696,7 +725,7 @@ pub async fn vpn_get_ping(state: State<'_, AppState>) -> Result<Option<u32>, Str
                 let relay_addr = driver.current_relay_addr();
                 (relay_ping, relay_addr)
             }
-            Err(_) => (None, None),
+            None => (None, None),
         },
         None => (None, None),
     };

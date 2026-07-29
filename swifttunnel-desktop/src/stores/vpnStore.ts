@@ -1025,7 +1025,14 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   fetchPing: async () => {
     try {
       const ms = await vpnGetPing();
-      set({ ping: ms });
+      // null means "no sample this tick", not "no ping". The backend returns
+      // it whenever the split-tunnel driver lock happens to be busy, which is
+      // routine while packets are flowing, and writing it through made the
+      // reading flicker to an em dash mid-session. Disconnecting clears the
+      // value explicitly, so holding the last good one cannot go stale.
+      if (ms !== null && ms !== undefined) {
+        set({ ping: ms });
+      }
     } catch (error) {
       reportError("Failed to fetch VPN ping", error, {
         dedupeKey: "vpn-fetch-ping",
