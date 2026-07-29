@@ -836,9 +836,8 @@ fn install_winpkfilter_driver_from_msi(
 
             // Pure Win32 elevation (UAC prompt for msiexec) — no PowerShell
             // wrapper process, and the installer window stays hidden.
-            let code =
-                swifttunnel_core::utils::run_elevated_and_wait("msiexec.exe", &args, true)
-                    .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
+            let code = swifttunnel_core::utils::run_elevated_and_wait("msiexec.exe", &args, true)
+                .map_err(|e| format!("Failed to invoke elevated installer: {}", e))?;
 
             Ok((code, String::new()))
         }
@@ -1929,8 +1928,7 @@ pub async fn system_reinstall_driver(
                     true, // force: uninstall + clean install even if present
                 ) {
                     Ok(()) => {
-                        let health =
-                            swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+                        let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
                         let preflight = swifttunnel_core::vpn::preflight_binding_for_connect(
                             binding_preference.clone(),
                         );
@@ -1940,14 +1938,12 @@ pub async fn system_reinstall_driver(
                     }
                     Err(e) => {
                         log::warn!("Bundled driver package reinstall failed: {}", e);
-                        reinstall_errors
-                            .push(format!("bundled package reinstall failed: {}", e));
+                        reinstall_errors.push(format!("bundled package reinstall failed: {}", e));
                     }
                 }
             } else {
-                reinstall_errors.push(
-                    "not elevated; using the elevated installer instead".to_string(),
-                );
+                reinstall_errors
+                    .push("not elevated; using the elevated installer instead".to_string());
             }
 
             match install_winpkfilter_driver_from_msi(
@@ -1959,9 +1955,8 @@ pub async fn system_reinstall_driver(
             ) {
                 Ok(()) => {
                     let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
-                    let preflight = swifttunnel_core::vpn::preflight_binding_for_connect(
-                        binding_preference,
-                    );
+                    let preflight =
+                        swifttunnel_core::vpn::preflight_binding_for_connect(binding_preference);
                     Ok(driver_repair_response_after_binding_preflight(
                         health, preflight,
                     ))

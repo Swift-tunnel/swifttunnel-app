@@ -9,7 +9,8 @@ use std::path::Path;
 use tauri_winrt_notification::{Duration, IconCrop, Sound, Toast};
 
 /// SwiftTunnel's App User Model ID for Windows notifications.
-/// Only works when the app is installed with a matching Start menu shortcut.
+/// Registered on first use by `ensure_aumid_registered`, so it needs no
+/// installer support and behaves the same in a dev run.
 const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.GameBooster";
 
 #[cfg(windows)]
@@ -35,8 +36,8 @@ enum NotificationIcon {
 /// own registration.
 #[cfg(windows)]
 fn ensure_aumid_registered() -> bool {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let path = format!(r"Software\Classes\AppUserModelId\{SWIFTTUNNEL_AUMID}");

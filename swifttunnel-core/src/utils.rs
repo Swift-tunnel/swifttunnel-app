@@ -568,15 +568,11 @@ pub fn relaunch_elevated_with_args() -> std::io::Result<()> {
 /// window. `hide_window` controls the elevated child's own window (use `true`
 /// for console tools like msiexec; `false` when relaunching the GUI app).
 #[cfg(windows)]
-pub fn run_elevated_and_wait(
-    exe: &str,
-    params: &str,
-    hide_window: bool,
-) -> std::io::Result<i32> {
+pub fn run_elevated_and_wait(exe: &str, params: &str, hide_window: bool) -> std::io::Result<i32> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
     use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
     use windows::core::PCWSTR;

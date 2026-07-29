@@ -705,14 +705,12 @@ pub(crate) fn is_refresh_token_permanently_invalid(body: &str) -> bool {
 /// message so the app can prompt an update instead of a raw API error.
 fn update_required_error(status: reqwest::StatusCode, body: &str) -> Option<AuthError> {
     let parsed: Option<ApiErrorResponse> = serde_json::from_str(body).ok();
-    let code_matches =
-        parsed.as_ref().and_then(|p| p.code.as_deref()) == Some("update_required");
+    let code_matches = parsed.as_ref().and_then(|p| p.code.as_deref()) == Some("update_required");
     if status.as_u16() != 426 && !code_matches {
         return None;
     }
     let message = parsed.and_then(|p| p.error).unwrap_or_else(|| {
-        "This version of SwiftTunnel is no longer supported. Please update to continue."
-            .to_string()
+        "This version of SwiftTunnel is no longer supported. Please update to continue.".to_string()
     });
     // Latch it so the app can show a forced-update gate even if this particular
     // request's error is otherwise swallowed upstream.
@@ -744,8 +742,7 @@ fn free_tier_limit_error(status: reqwest::StatusCode, body: &str) -> Option<Auth
     }
     Some(AuthError::FreeTierLimitReached(
         parsed.message.unwrap_or_else(|| {
-            "You've used your free SwiftTunnel time for now. This limit is temporary."
-                .to_string()
+            "You've used your free SwiftTunnel time for now. This limit is temporary.".to_string()
         }),
     ))
 }
@@ -843,11 +840,13 @@ mod tests {
     fn free_tier_limit_ignores_the_ip_rate_limiter() {
         // The same route answers 429 for per-IP flooding; that one *is* worth
         // retrying, so it must not be mistaken for a spent allowance.
-        assert!(free_tier_limit_error(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            r#"{"error":"rate_limited"}"#,
-        )
-        .is_none());
+        assert!(
+            free_tier_limit_error(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":"rate_limited"}"#,
+            )
+            .is_none()
+        );
     }
 
     #[test]

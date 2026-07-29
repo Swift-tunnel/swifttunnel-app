@@ -22,8 +22,7 @@ pub const ROBLOX_PROCESS_NAMES: &[&str] = &[
 /// Deliberately excludes the launcher/bootstrapper (which lingers while the app
 /// idles on the website), Studio, and installers, so the UI can tell "in a game"
 /// apart from "the Roblox app is merely open in the background".
-pub const ROBLOX_PLAYER_PROCESS_NAMES: &[&str] =
-    &["robloxplayerbeta.exe", "robloxplayer.exe"];
+pub const ROBLOX_PLAYER_PROCESS_NAMES: &[&str] = &["robloxplayerbeta.exe", "robloxplayer.exe"];
 
 /// Third-party Roblox bootstrappers ("strappers").
 ///

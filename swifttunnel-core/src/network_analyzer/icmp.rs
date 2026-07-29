@@ -23,7 +23,7 @@ pub async fn ping_ms(target: &str, timeout_ms: u32) -> Option<u32> {
 
 fn ping_blocking(addr: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
     use windows::Win32::NetworkManagement::IpHelper::{
-        IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, ICMP_ECHO_REPLY,
+        ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
     };
 
     // IP_STATUS success code (IP_SUCCESS) for ICMP_ECHO_REPLY.Status.
@@ -34,8 +34,7 @@ fn ping_blocking(addr: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
 
     // Per IcmpSendEcho docs the reply buffer must hold at least one
     // ICMP_ECHO_REPLY plus the echoed payload plus 8 spare bytes.
-    let mut reply_buf =
-        vec![0u8; std::mem::size_of::<ICMP_ECHO_REPLY>() + PAYLOAD.len() + 8];
+    let mut reply_buf = vec![0u8; std::mem::size_of::<ICMP_ECHO_REPLY>() + PAYLOAD.len() + 8];
     // IPAddr is a u32 laid out in network byte order.
     let dest = u32::from_le_bytes(addr.octets());
 
