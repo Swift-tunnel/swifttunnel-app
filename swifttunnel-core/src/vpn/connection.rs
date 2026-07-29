@@ -374,6 +374,16 @@ fn relay_ticket_ban_reason(error: &AuthError) -> Option<String> {
     }
 }
 
+/// The quota is per account, not per relay, so a 429 here means every remaining
+/// candidate would 429 too. Callers use this to stop the candidate loop instead
+/// of walking the whole fleet before failing.
+fn relay_ticket_quota_message(error: &AuthError) -> Option<String> {
+    match error {
+        AuthError::FreeTierLimitReached(message) => Some(message.clone()),
+        _ => None,
+    }
+}
+
 fn pick_lowest_latency_server<'a>(
     candidates: impl Iterator<Item = &'a (String, SocketAddr, Option<u32>)>,
 ) -> Option<&'a (String, SocketAddr, Option<u32>)> {
@@ -878,6 +888,13 @@ async fn authenticate_switch_target(
             if relay_ticket_ban_reason(&e).is_some() {
                 return SwitchAuthOutcome::Rejected(
                     "relay ticket rejected: account banned".to_string(),
+                );
+            }
+            if relay_ticket_quota_message(&e).is_some() {
+                // Not retryable: the allowance is per account, so no amount of
+                // waiting or switching relays gets a ticket back.
+                return SwitchAuthOutcome::Rejected(
+                    "relay ticket rejected: free tier allowance spent".to_string(),
                 );
             }
             return SwitchAuthOutcome::Retryable(format!("relay ticket fetch failed: {}", e));
@@ -1641,6 +1658,11 @@ impl VpnConnection {
                             );
                             let _ = driver.close();
                             return Err(VpnError::UserBanned(reason));
+                        }
+                        if let Some(message) = relay_ticket_quota_message(&e) {
+                            log::warn!("V3: Relay ticket rejected - free tier allowance spent");
+                            let _ = driver.close();
+                            return Err(VpnError::FreeTierLimitReached(message));
                         }
                         log::warn!(
                             "V3: Relay ticket unavailable for '{}' ({})",
@@ -2764,9 +2786,51 @@ impl VpnConnection {
         log::info!("Disconnecting VPN");
         self.set_state(ConnectionState::Disconnecting).await;
         self.cleanup().await;
+        self.release_free_tier_quota().await;
         self.set_state(ConnectionState::Disconnected).await;
         log::info!("VPN disconnected");
         Ok(())
+    }
+
+    /// Tell the API the session is over so the free-tier counter is settled
+    /// against time actually spent connected.
+    ///
+    /// The server can otherwise only settle a session when the next ticket is
+    /// requested, and at that point a 30-second session looks identical to a
+    /// full ticket window: it sees a long gap and charges the whole TTL. A few
+    /// short sessions would eat a large slice of the daily allowance for time
+    /// the user never had.
+    ///
+    /// Best effort on purpose. This runs on the way out, so a failure is logged
+    /// and swallowed — the cost is the old over-charge, never a disconnect that
+    /// appears to fail. A hard kill skips it entirely and falls back to the
+    /// same old behaviour.
+    async fn release_free_tier_quota(&self) {
+        let Some(auth_manager) = self.auth_manager.as_ref() else {
+            return;
+        };
+
+        let token = {
+            let auth = auth_manager.lock().await;
+            auth.get_access_token().await.ok()
+        };
+        let Some(token) = token else {
+            return;
+        };
+
+        match crate::auth::http_client::AuthClient::new()
+            .release_relay_quota(&token)
+            .await
+        {
+            Ok(()) => {
+                // The budget the UI is showing is now stale in the user's
+                // favour; the next ticket refreshes it.
+                log::debug!("Free-tier session released");
+            }
+            Err(e) => {
+                log::warn!("Free-tier release failed (usage may be over-counted): {e}");
+            }
+        }
     }
 
     async fn cleanup(&mut self) {

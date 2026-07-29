@@ -243,6 +243,12 @@ pub enum AuthError {
     /// is the user-facing "please update" message from the API.
     #[error("{0}")]
     UpdateRequired(String),
+
+    /// The account has spent its free-tier allowance. The string is the
+    /// user-facing message from the API, which owns the wording (it names the
+    /// current hour limit and says the cap is temporary).
+    #[error("{0}")]
+    FreeTierLimitReached(String),
 }
 
 #[cfg(test)]

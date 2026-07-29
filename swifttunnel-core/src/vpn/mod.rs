@@ -100,6 +100,11 @@ pub enum VpnError {
     #[error("Account banned{0}")]
     UserBanned(String),
 
+    /// Free-tier allowance spent. Carries the API's own wording so the hour
+    /// limit only has to be changed server-side.
+    #[error("{0}")]
+    FreeTierLimitReached(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -38,6 +38,10 @@ struct ApiErrorResponse {
     banned_reason: Option<String>,
     #[serde(default)]
     error: Option<String>,
+    /// Human-readable text. Routes that put a machine code in `error` carry the
+    /// sentence for the user here instead.
+    #[serde(default)]
+    message: Option<String>,
 }
 
 const API_BASE_URL: &str = "https://www.swifttunnel.net";
@@ -415,6 +419,43 @@ impl AuthClient {
         Ok(data)
     }
 
+    /// Tell the API this session is over so the free-tier counter is settled
+    /// against time actually spent connected.
+    ///
+    /// Without this the server can only settle a session when the *next* ticket
+    /// is requested, and at that point it cannot tell a 30-second session from
+    /// a full ticket window — it sees a long gap and charges the whole TTL. A
+    /// few short sessions would burn a large slice of the daily allowance for
+    /// time the user never had.
+    ///
+    /// Best effort by design: the caller is already disconnecting, so a failure
+    /// here is logged and swallowed rather than shown. The cost of a missed
+    /// release is the old over-charge, never a broken disconnect.
+    pub async fn release_relay_quota(&self, access_token: &str) -> Result<(), AuthError> {
+        let url = format!("{}/api/vpn/relay-release", API_BASE_URL);
+
+        let response = self
+            .send_with_network_fallback("relay release", |client| {
+                self.add_common_headers(client.post(&url))
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .header("Content-Type", "application/json")
+                    .json(&json!({}))
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AuthError::ApiError(format!(
+                "Relay release failed: {} - {}",
+                status, body
+            )));
+        }
+
+        debug!("Relay quota released for the finished session");
+        Ok(())
+    }
+
     /// Fetch a short-lived relay auth ticket for a specific session/server pair.
     pub async fn get_relay_ticket(
         &self,
@@ -449,6 +490,9 @@ impl AuthClient {
                 return Err(error);
             }
             if let Some(error) = user_banned_error_from_body(&body) {
+                return Err(error);
+            }
+            if let Some(error) = free_tier_limit_error(status, &body) {
                 return Err(error);
             }
             return Err(AuthError::ApiError(format!(
@@ -687,6 +731,25 @@ fn user_banned_error_from_body(body: &str) -> Option<AuthError> {
     )))
 }
 
+/// Detect the free-tier quota rejection. `/api/vpn/relay-ticket` answers 429
+/// with `{"error":"free_tier_limit_reached","message":"..."}` — note the code
+/// lands in `error`, not `code`, unlike the ban and update responses.
+fn free_tier_limit_error(status: reqwest::StatusCode, body: &str) -> Option<AuthError> {
+    if status.as_u16() != 429 {
+        return None;
+    }
+    let parsed: ApiErrorResponse = serde_json::from_str(body).ok()?;
+    if parsed.error.as_deref() != Some("free_tier_limit_reached") {
+        return None;
+    }
+    Some(AuthError::FreeTierLimitReached(
+        parsed.message.unwrap_or_else(|| {
+            "You've used your free SwiftTunnel time for now. This limit is temporary."
+                .to_string()
+        }),
+    ))
+}
+
 fn ban_reason_suffix(reason: Option<String>) -> String {
     reason
         .map(|value| value.trim().to_string())
@@ -760,6 +823,31 @@ mod tests {
         let payload = client.exchange_oauth_payload("exchange", "state");
 
         assert!(payload.get("device_hwid").is_none());
+    }
+
+    #[test]
+    fn free_tier_limit_detected_and_message_passed_through() {
+        let err = free_tier_limit_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"free_tier_limit_reached","message":"You've used your 3 hours of free SwiftTunnel time.","limit_seconds":10800,"remaining_seconds":0,"temporary":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(err, AuthError::FreeTierLimitReached(_)));
+        assert_eq!(
+            err.to_string(),
+            "You've used your 3 hours of free SwiftTunnel time."
+        );
+    }
+
+    #[test]
+    fn free_tier_limit_ignores_the_ip_rate_limiter() {
+        // The same route answers 429 for per-IP flooding; that one *is* worth
+        // retrying, so it must not be mistaken for a spent allowance.
+        assert!(free_tier_limit_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"rate_limited"}"#,
+        )
+        .is_none());
     }
 
     #[test]

@@ -116,6 +116,10 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             }
         }
 
+        // The API writes this one: it names the current limit and says the cap
+        // is temporary, so pass it through rather than restating it here.
+        VpnError::FreeTierLimitReached(message) => message.clone(),
+
         // Split tunnel generic
         VpnError::SplitTunnel(_) => {
             "SwiftTunnel's network filter ran into a problem.\n\nOpen the Repair tab and run a repair, then reconnect.".to_string()
@@ -213,6 +217,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::InvalidConfig(_) => "Invalid config",
         VpnError::NotAuthenticated => "Not authenticated",
         VpnError::UserBanned(_) => "Account banned",
+        VpnError::FreeTierLimitReached(_) => "Free time used up",
         VpnError::SplitTunnel(_) => "Split tunnel error",
         VpnError::Io(_) => "System error",
     }
