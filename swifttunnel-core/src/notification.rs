@@ -19,30 +19,66 @@ enum NotificationIcon {
     Swifty,
 }
 
-/// Check if our custom AUMID is registered (Start menu shortcut exists)
+/// Register our AUMID so Windows knows what to call us on a toast.
+///
+/// Windows attributes a toast to whatever `DisplayName` is registered for the
+/// notifying AUMID. This previously relied on the presence of a Start menu
+/// shortcut and, finding none, fell back to PowerShell's AUMID — so every
+/// connect and disconnect popped up branded "Windows PowerShell". Worse, the
+/// shortcut was never a reliable signal either: the NSIS installer does not
+/// stamp `System.AppUserModel.ID` onto it, so even a properly installed copy
+/// was announcing itself with a AUMID Windows had no name for.
+///
+/// Writing the key ourselves fixes both, and works identically for a dev run
+/// and an installed build. It is a per-user key under HKCU describing this
+/// application's own notification identity — no elevation, nothing outside our
+/// own registration.
 #[cfg(windows)]
-fn is_aumid_registered() -> bool {
-    // Check for Start menu shortcut that registers our AUMID
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        let shortcut =
-            Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs\SwiftTunnel.lnk");
-        if shortcut.exists() {
-            return true;
+fn ensure_aumid_registered() -> bool {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let path = format!(r"Software\Classes\AppUserModelId\{SWIFTTUNNEL_AUMID}");
+
+    let key = match hkcu.create_subkey_with_flags(&path, KEY_WRITE) {
+        Ok((key, _)) => key,
+        Err(e) => {
+            log::warn!("Could not register notification identity: {e}");
+            return false;
+        }
+    };
+
+    if let Err(e) = key.set_value("DisplayName", &"SwiftTunnel") {
+        log::warn!("Could not set notification DisplayName: {e}");
+        return false;
+    }
+
+    // Optional: the small logo beside the app name in the toast and in
+    // Settings > Notifications. A missing icon is not worth failing over.
+    if let Some(icon) = get_icon_path(NotificationIcon::App) {
+        if let Some(icon) = icon.to_str() {
+            let _ = key.set_value("IconUri", &icon);
         }
     }
-    // Also check Program Files install marker
-    Path::new(r"C:\Program Files\SwiftTunnel\swifttunnel.exe").exists()
+
+    true
 }
 
-/// Get the best AUMID for toast notifications.
-/// Falls back to PowerShell's AUMID when our app isn't properly installed,
-/// which ensures notifications actually appear (at the cost of showing
-/// "Windows PowerShell" as the source instead of "SwiftTunnel").
+/// The AUMID to notify under, registering it on first use.
+///
+/// Registration is attempted once per process: it is idempotent, but it touches
+/// the registry, and this runs on every connect and disconnect.
 #[cfg(windows)]
 fn get_aumid() -> &'static str {
-    if is_aumid_registered() {
+    use std::sync::OnceLock;
+    static REGISTERED: OnceLock<bool> = OnceLock::new();
+
+    if *REGISTERED.get_or_init(ensure_aumid_registered) {
         SWIFTTUNNEL_AUMID
     } else {
+        // Registration failed (locked-down profile, roaming policy). Showing
+        // the toast under the wrong name still beats showing none at all.
         Toast::POWERSHELL_APP_ID
     }
 }
