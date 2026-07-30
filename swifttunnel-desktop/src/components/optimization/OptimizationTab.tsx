@@ -8,6 +8,7 @@ import { useDeepLinkStore } from "../../stores/deepLinkStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
+import { notify } from "../../lib/notifications";
 import {
   nextPowerPlanForSwiftTunnelToggle,
   previousNonSwiftTunnelPowerPlan,
@@ -45,6 +46,20 @@ function summarizeBulk(
     type: failed > 0 ? "warning" : "success",
     message: parts.join(" · "),
   });
+
+  // Toasts disappear on their own, and in a bulk run the restart notice is one
+  // clause inside a summary that is mostly about something else. Applying a
+  // single tweak already raises an OS notification for this; a batch is if
+  // anything easier to miss, so raise one here too. Otherwise the tweak sits
+  // half-applied and looks like it simply did not work.
+  if (reboot > 0) {
+    void notify(
+      "Restart required",
+      `Restart your PC to finish applying ${reboot} ${
+        reboot === 1 ? "change" : "changes"
+      }.`,
+    );
+  }
 }
 
 /** Small category chip shown on each card. */

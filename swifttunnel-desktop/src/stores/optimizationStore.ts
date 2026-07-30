@@ -122,6 +122,14 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => ({
         });
 
         if (res.requires_reboot) {
+          // Toast as well as the OS notification, matching the apply path. A
+          // revert only half-takes-effect the same way an apply does, so
+          // someone who turned a tweak off and saw nothing change would
+          // reasonably conclude the revert had failed.
+          useToastStore.getState().addToast({
+            type: "warning",
+            message: `Restart your PC to finish reverting ${def.name}.`,
+          });
           void notify(
             "Restart required",
             `Restart your PC to finish reverting ${def.name}.`,
