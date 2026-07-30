@@ -1114,6 +1114,43 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// Reduce a service ImagePath to a comparable form.
+    ///
+    /// The Service Control Manager reports a kernel driver's path in NT
+    /// namespace form, and the registry may hold it relative to the Windows
+    /// directory, so all three of these describe the same healthy file:
+    ///
+    ///   \??\C:\Windows\System32\drivers\ndisrd.sys
+    ///   C:\Windows\System32\drivers\ndisrd.sys
+    ///   System32\drivers\ndisrd.sys
+    ///
+    /// Comparing those as raw strings reports a mismatch every time, which is
+    /// what drove the repeated service rewrites that wedged NDISRD.
+    fn normalize_service_binary_path(raw: &str) -> String {
+        let mut path = raw.trim().trim_matches('"').to_string();
+
+        // NT namespace prefix, and the \SystemRoot\ alias the SCM also uses.
+        for prefix in ["\\??\\", "\\\\?\\"] {
+            if let Some(stripped) = path.strip_prefix(prefix) {
+                path = stripped.to_string();
+            }
+        }
+        let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+        for prefix in ["\\SystemRoot\\", "%SystemRoot%\\"] {
+            if let Some(stripped) = path.strip_prefix(prefix) {
+                path = format!("{}\\{}", windows_dir.trim_end_matches('\\'), stripped);
+            }
+        }
+
+        // A bare relative path in the registry is relative to the Windows dir.
+        let looks_absolute = path.chars().nth(1) == Some(':') || path.starts_with('\\');
+        if !looks_absolute && !path.is_empty() {
+            path = format!("{}\\{}", windows_dir.trim_end_matches('\\'), path);
+        }
+
+        path.replace('/', "\\").to_ascii_lowercase()
+    }
+
     /// Check the service's binary path and update it if it points to the wrong location.
     ///
     /// This handles the case where a previous install left a stale service entry pointing
@@ -1152,7 +1189,22 @@ impl SplitTunnelDriver {
         let current_path_str = current_path_raw.to_string().unwrap_or_default();
         let expected_str = expected_path.to_string_lossy();
 
-        if current_path_str.eq_ignore_ascii_case(&expected_str) {
+        // Compare normalized, NOT raw. Windows stores a driver's ImagePath in NT
+        // namespace form, so a perfectly healthy NDISRD reads back as
+        // `\??\C:\Windows\System32\drivers\ndisrd.sys` (or the registry-relative
+        // `System32\drivers\ndisrd.sys`), which never string-matches the plain
+        // Win32 path we expect.
+        //
+        // Comparing raw meant every check decided the service was broken and
+        // rewrote its config. One user's log shows that firing 113 times, and
+        // hammering ChangeServiceConfigW on a driver service is how it ends up
+        // "marked for deletion" — after which the driver cannot load at all and
+        // the machine loses networking until the service is rebuilt. That user
+        // could not reach the internet after boot, or run any other VPN, until
+        // they ran SwiftTunnel's repair.
+        if Self::normalize_service_binary_path(&current_path_str)
+            == Self::normalize_service_binary_path(&expected_str)
+        {
             return;
         }
 
@@ -2012,6 +2064,55 @@ impl Drop for SplitTunnelDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact pair from the report that led here. The service was healthy;
+    /// only the comparison was wrong, and every check rewrote the service
+    /// config until Windows marked it for deletion and the driver stopped
+    /// loading, taking the machine's networking with it.
+    #[test]
+    fn nt_namespace_driver_path_is_not_a_mismatch() {
+        let from_scm = r"\??\C:\Windows\System32\drivers\ndisrd.sys";
+        let expected = r"C:\Windows\System32\drivers\ndisrd.sys";
+        assert_eq!(
+            SplitTunnelDriver::normalize_service_binary_path(from_scm),
+            SplitTunnelDriver::normalize_service_binary_path(expected),
+        );
+    }
+
+    #[test]
+    fn service_path_normalization_handles_the_other_windows_forms() {
+        let expected = SplitTunnelDriver::normalize_service_binary_path(
+            r"C:\Windows\System32\drivers\ndisrd.sys",
+        );
+
+        for equivalent in [
+            r"\??\C:\Windows\System32\drivers\ndisrd.sys",
+            r"\\?\C:\Windows\System32\drivers\ndisrd.sys",
+            "\"C:\\Windows\\System32\\drivers\\ndisrd.sys\"",
+            r"C:\Windows\System32\Drivers\NDISRD.SYS",
+            r"C:/Windows/System32/drivers/ndisrd.sys",
+        ] {
+            assert_eq!(
+                SplitTunnelDriver::normalize_service_binary_path(equivalent),
+                expected,
+                "should match: {equivalent}"
+            );
+        }
+    }
+
+    #[test]
+    fn service_path_normalization_still_detects_a_real_mismatch() {
+        // A genuinely stale entry pointing somewhere else must still be fixed,
+        // which is what this check exists for.
+        assert_ne!(
+            SplitTunnelDriver::normalize_service_binary_path(
+                r"\??\C:\Program Files\Old\ndisrd.sys"
+            ),
+            SplitTunnelDriver::normalize_service_binary_path(
+                r"C:\Windows\System32\drivers\ndisrd.sys"
+            ),
+        );
+    }
 
     #[test]
     fn test_game_preset_names() {
