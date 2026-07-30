@@ -495,6 +495,15 @@ impl AuthClient {
             if let Some(error) = free_tier_limit_error(status, &body) {
                 return Err(error);
             }
+            // A 401 here means the API rejected our access token, which is a
+            // dead session and nothing the user can fix by retrying. It used to
+            // fall through to a generic ApiError, so the app reported "not
+            // authorized" and left them signed in, unable to connect, with no
+            // hint that signing out and back in was the fix. Report it as an
+            // invalid session so the caller can end it for them.
+            if status.as_u16() == 401 {
+                return Err(AuthError::RefreshTokenInvalid);
+            }
             return Err(AuthError::ApiError(format!(
                 "Relay ticket fetch failed: {} - {}",
                 status, body
@@ -820,6 +829,18 @@ mod tests {
         let payload = client.exchange_oauth_payload("exchange", "state");
 
         assert!(payload.get("device_hwid").is_none());
+    }
+
+    #[test]
+    fn ticket_401_is_a_dead_session_not_a_generic_api_error() {
+        // The distinction matters: a generic ApiError left the user signed in
+        // and unable to connect, with "not authorized" and no hint that signing
+        // out and back in was the fix. RefreshTokenInvalid ends the session for
+        // them.
+        let body = r#"{"error":"Unauthorized"}"#;
+        assert!(update_required_error(reqwest::StatusCode::UNAUTHORIZED, body).is_none());
+        assert!(user_banned_error_from_body(body).is_none());
+        assert!(free_tier_limit_error(reqwest::StatusCode::UNAUTHORIZED, body).is_none());
     }
 
     #[test]

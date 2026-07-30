@@ -116,6 +116,10 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             }
         }
 
+        VpnError::SessionExpired => {
+            "Your session has expired.\n\nPlease sign in again to continue.".to_string()
+        }
+
         // The API writes this one: it names the current limit and says the cap
         // is temporary, so pass it through rather than restating it here.
         VpnError::FreeTierLimitReached(message) => message.clone(),
@@ -218,6 +222,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::NotAuthenticated => "Not authenticated",
         VpnError::UserBanned(_) => "Account banned",
         VpnError::FreeTierLimitReached(_) => "Free time used up",
+        VpnError::SessionExpired => "Session expired",
         VpnError::SplitTunnel(_) => "Split tunnel error",
         VpnError::Io(_) => "System error",
     }

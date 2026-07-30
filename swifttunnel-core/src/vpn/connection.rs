@@ -421,6 +421,16 @@ fn relay_ticket_ban_reason(error: &AuthError) -> Option<String> {
     }
 }
 
+/// The API rejected our session, so every relay will refuse a ticket too. Like
+/// the quota case this stops the candidate loop, but unlike it the app must also
+/// end the session: retrying is useless until the user signs in again.
+fn relay_ticket_session_dead(error: &AuthError) -> bool {
+    matches!(
+        error,
+        AuthError::RefreshTokenInvalid | AuthError::NotAuthenticated
+    )
+}
+
 /// The quota is per account, not per relay, so a 429 here means every remaining
 /// candidate would 429 too. Callers use this to stop the candidate loop instead
 /// of walking the whole fleet before failing.
@@ -975,6 +985,11 @@ async fn authenticate_switch_target(
             if relay_ticket_ban_reason(&e).is_some() {
                 return SwitchAuthOutcome::Rejected(
                     "relay ticket rejected: account banned".to_string(),
+                );
+            }
+            if relay_ticket_session_dead(&e) {
+                return SwitchAuthOutcome::Rejected(
+                    "relay ticket rejected: session expired".to_string(),
                 );
             }
             if relay_ticket_quota_message(&e).is_some() {
@@ -1746,6 +1761,11 @@ impl VpnConnection {
                             );
                             let _ = driver.close();
                             return Err(VpnError::UserBanned(reason));
+                        }
+                        if relay_ticket_session_dead(&e) {
+                            log::warn!("V3: Relay ticket rejected - session expired");
+                            let _ = driver.close();
+                            return Err(VpnError::SessionExpired);
                         }
                         if let Some(message) = relay_ticket_quota_message(&e) {
                             log::warn!("V3: Relay ticket rejected - free tier allowance spent");

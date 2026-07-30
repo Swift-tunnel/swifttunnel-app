@@ -105,6 +105,12 @@ pub enum VpnError {
     #[error("{0}")]
     FreeTierLimitReached(String),
 
+    /// The API rejected the stored session, so no relay will issue a ticket.
+    /// Distinct from a generic connection failure because retrying cannot help:
+    /// the app has to end the session and let the user sign in again.
+    #[error("Session expired, please sign in again")]
+    SessionExpired,
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

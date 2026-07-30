@@ -319,10 +319,43 @@ async fn mark_and_emit_ban_cleanup(app: &AppHandle, state: &AppState, reason: &s
     emit_ban_cleanup(app, state).await;
 }
 
+/// Sign the user out when their session is the thing that failed.
+///
+/// A dead session surfaced as "not authorized" on every connect attempt while
+/// leaving the user apparently signed in, so the only way out was to log out and
+/// back in — which nobody guesses. Ending the session puts them on the sign-in
+/// screen, where the fix is the obvious next action rather than a secret.
+///
+/// Only for errors that mean the session itself is finished. A network blip or a
+/// server-side fault must not throw someone out of the app.
+async fn sign_out_if_session_dead(app: &AppHandle, state: &AppState, error: &AuthError) {
+    if !matches!(
+        error,
+        AuthError::RefreshTokenInvalid | AuthError::NotAuthenticated
+    ) {
+        return;
+    }
+
+    log::warn!("Session rejected during connect; signing out so the user can sign back in");
+
+    {
+        let auth = state.auth_manager.lock().await;
+        if let Err(e) = auth.logout() {
+            log::warn!("Failed to clear the dead session: {}", e);
+        }
+    }
+
+    // Tells the UI to drop to the sign-in screen. Without this the app keeps
+    // rendering as signed in against a session that no longer exists.
+    crate::commands::auth::emit_auth_state(app, state).await;
+}
+
 async fn handle_connect_auth_error(app: &AppHandle, state: &AppState, error: AuthError) -> String {
     let message = error.to_string();
     if let AuthError::UserBanned(reason) = error {
         mark_and_emit_ban_cleanup(app, state, &reason).await;
+    } else {
+        sign_out_if_session_dead(app, state, &error).await;
     }
     message
 }
@@ -576,12 +609,16 @@ pub async fn vpn_connect(
     let country_ban_bypass_failure = vpn.take_country_ban_bypass_failure();
 
     let mut connect_ban_reason = None;
+    let mut connect_session_expired = false;
     let result = match connect_result {
         Ok(result) => result.map_err(|e| {
             if vpn_error_is_user_banned(&e) {
                 if let VpnError::UserBanned(reason) = &e {
                     connect_ban_reason = Some(reason.clone());
                 }
+            }
+            if matches!(e, VpnError::SessionExpired) {
+                connect_session_expired = true;
             }
             swifttunnel_core::vpn::user_friendly_error(&e)
         }),
@@ -638,6 +675,10 @@ pub async fn vpn_connect(
 
     if let Some(reason) = connect_ban_reason {
         mark_and_emit_ban_cleanup(&app, &state, &reason).await;
+    } else if connect_session_expired {
+        // Deliberately after the teardown above, so the tunnel is already down
+        // before the UI drops to the sign-in screen.
+        sign_out_if_session_dead(&app, &state, &AuthError::RefreshTokenInvalid).await;
     }
 
     let discord_region = if result.is_ok() {
