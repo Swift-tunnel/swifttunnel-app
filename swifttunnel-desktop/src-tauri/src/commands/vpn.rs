@@ -1202,6 +1202,9 @@ mod tests {
             phantun_port: None,
             relay_available: true,
             relay_port: Some(port),
+            active_users: None,
+            busy: false,
+            metered: false,
         }
     }
 
