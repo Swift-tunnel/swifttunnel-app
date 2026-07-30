@@ -96,6 +96,53 @@ fn record_free_tier_quota(ticket: &crate::auth::types::RelayTicketResponse) {
     FREE_TIER_LIMIT_SECS.store(ticket.limit_seconds.unwrap_or(-1), Ordering::Relaxed);
 }
 
+/// Whether the crowded-relay notice has already been shown for the relay we are
+/// currently on. Tickets refresh every few minutes for as long as someone stays
+/// connected, so without this the same warning would fire repeatedly through a
+/// whole session.
+static CROWDING_WARNED_FOR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Tell the user once when the relay they pinned is busy and a quieter one in
+/// the same city is available.
+///
+/// Only fires for a pinned server: automatic selection already prefers a
+/// quieter relay, so reaching this means the user chose this box explicitly and
+/// is the only one who can act on it.
+fn notify_if_relay_crowded(region: &str, ticket: &crate::auth::types::RelayTicketResponse) {
+    if !ticket.degraded {
+        // Recovered, or a different relay: allow a future warning to fire.
+        if let Ok(mut warned) = CROWDING_WARNED_FOR.lock() {
+            if warned.as_deref() == Some(region) {
+                *warned = None;
+            }
+        }
+        return;
+    }
+
+    match CROWDING_WARNED_FOR.lock() {
+        Ok(mut warned) => {
+            if warned.as_deref() == Some(region) {
+                return;
+            }
+            *warned = Some(region.to_string());
+        }
+        Err(_) => return,
+    }
+
+    let label = crate::discord_rpc::region_display_label(region);
+    let message = match ticket.suggested_region.as_deref() {
+        Some(alt) => format!(
+            "{} is busy right now. {} is quieter - switch for a better connection.",
+            label,
+            crate::discord_rpc::region_display_label(alt)
+        ),
+        None => format!("{} is busy right now, so your ping may be higher.", label),
+    };
+
+    log::info!("Relay {} reported crowded; notifying user", region);
+    crate::notification::show_notification("Server busy", &message);
+}
+
 /// `(remaining_seconds, limit_seconds)`, each `None` when no limit applies.
 pub fn free_tier_quota() -> (Option<i64>, Option<i64>) {
     let remaining = FREE_TIER_REMAINING_SECS.load(Ordering::Relaxed);
@@ -921,6 +968,7 @@ async fn authenticate_switch_target(
     {
         Ok(ticket) => {
             record_free_tier_quota(&ticket);
+            notify_if_relay_crowded(server_region, &ticket);
             ticket
         }
         Err(e) => {
@@ -1688,6 +1736,7 @@ impl VpnConnection {
                 {
                     Ok(ticket) => {
                         record_free_tier_quota(&ticket);
+                        notify_if_relay_crowded(candidate_region, &ticket);
                         ticket
                     }
                     Err(e) => {

@@ -200,6 +200,18 @@ pub struct RelayTicketResponse {
     pub limit_seconds: Option<i64>,
     #[serde(default)]
     pub remaining_seconds: Option<i64>,
+    /// The relay this ticket is for is past its comfortable occupancy. The
+    /// ticket is still valid — a busy relay beats a refused connection — but the
+    /// user is better off elsewhere.
+    ///
+    /// Only reachable when someone has pinned a specific server; automatic
+    /// selection already steers around load.
+    #[serde(default)]
+    pub degraded: bool,
+    /// A quieter relay in the same city, when one exists. `None` means nothing
+    /// is meaningfully better, so say nothing rather than nag.
+    #[serde(default)]
+    pub suggested_region: Option<String>,
 }
 
 impl RelayTicketResponse {
