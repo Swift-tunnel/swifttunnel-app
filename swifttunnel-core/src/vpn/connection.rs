@@ -384,11 +384,50 @@ fn relay_ticket_quota_message(error: &AuthError) -> Option<String> {
     }
 }
 
+/// Relays within this many ms of the fastest are treated as equivalent, so the
+/// choice between them can be made on occupancy instead.
+///
+/// Sized from the real fleet: same-city pairs measure 2-3ms apart (mumbai1 23
+/// vs mumbai2 25, sg1 41 vs sg2 43, tokyo1 115 vs tokyo2 118) and sit well
+/// inside the band, while different regions are 50ms+ apart and never get
+/// mistaken for one another. Nobody can feel 3ms; everybody feels a saturated
+/// box.
+const LATENCY_TIE_BAND_MS: u32 = 15;
+
+/// Pick a relay, preferring a quieter one among those that are equally fast.
+///
+/// This used to be `min_by_key(latency)` alone, which reliably crowds one box:
+/// the emptiest relay answers fastest, so every client picks it, and it only
+/// stops being attractive once it has already degraded. Latency is also sampled
+/// once at connect and never revisited, so whoever arrived while a box was
+/// empty rides it all the way down.
+///
+/// Outside the band latency still wins outright — occupancy never sends anyone
+/// to a slower region.
 fn pick_lowest_latency_server<'a>(
     candidates: impl Iterator<Item = &'a (String, SocketAddr, Option<u32>)>,
 ) -> Option<&'a (String, SocketAddr, Option<u32>)> {
-    candidates.min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
+    let all: Vec<&(String, SocketAddr, Option<u32>)> = candidates.collect();
+    let fastest = all.iter().filter_map(|(_, _, ms)| *ms).min()?;
+
+    all.into_iter()
+        .filter(|(_, _, ms)| ms.map_or(false, |v| v.saturating_sub(fastest) <= LATENCY_TIE_BAND_MS))
+        .min_by_key(|(region, _, latency_ms)| {
+            let load = crate::vpn::servers::relay_load(region);
+            // Unknown occupancy counts as full, never as empty: a relay that
+            // has stopped reporting must not become the preferred one.
+            let bucket = match load.and_then(|l| l.active_users) {
+                Some(users) => (users / RELAY_LOAD_BUCKET_USERS).min(4),
+                None => 4,
+            };
+            let metered = load.map_or(0, |l| u32::from(l.metered));
+            (bucket, metered, latency_ms.unwrap_or(u32::MAX))
+        })
 }
+
+/// Occupancy is compared in coarse steps so ordinary churn does not flip the
+/// choice between two relays on every reconnect.
+const RELAY_LOAD_BUCKET_USERS: u32 = 20;
 
 async fn wait_for_tunnel_process_connections(
     driver: &Arc<Mutex<SplitTunnelDriver>>,
@@ -3266,6 +3305,58 @@ mod tests {
 
         assert!(flags.api_tunneling);
         assert!(flags.udp_tunneling);
+    }
+
+    fn candidate(region: &str, latency_ms: u32) -> (String, SocketAddr, Option<u32>) {
+        (
+            region.to_string(),
+            "127.0.0.1:51820".parse().unwrap(),
+            Some(latency_ms),
+        )
+    }
+
+    #[test]
+    fn relay_choice_prefers_the_faster_region_outside_the_tie_band() {
+        // Occupancy must never send anyone to a slower region. 23ms vs 115ms is
+        // far outside the band, so latency decides regardless of load.
+        let candidates = vec![candidate("mumbai", 23), candidate("tokyo", 115)];
+        let picked = pick_lowest_latency_server(candidates.iter()).unwrap();
+        assert_eq!(picked.0, "mumbai");
+    }
+
+    #[test]
+    fn relay_choice_keeps_the_fastest_when_load_is_unknown() {
+        // No server list has been fetched in this test process, so every
+        // candidate has unknown occupancy. They all land in the same bucket and
+        // latency breaks the tie, which is exactly the old behaviour: the
+        // feature must not change anything until real data exists.
+        let candidates = vec![candidate("mumbai", 23), candidate("mumbai-02", 25)];
+        let picked = pick_lowest_latency_server(candidates.iter()).unwrap();
+        assert_eq!(picked.0, "mumbai");
+    }
+
+    #[test]
+    fn relay_choice_ignores_candidates_without_a_latency_sample() {
+        let candidates = vec![
+            (
+                "unmeasured".to_string(),
+                "127.0.0.1:51820".parse().unwrap(),
+                None,
+            ),
+            candidate("mumbai", 23),
+        ];
+        let picked = pick_lowest_latency_server(candidates.iter()).unwrap();
+        assert_eq!(picked.0, "mumbai");
+    }
+
+    #[test]
+    fn relay_choice_returns_none_when_nothing_was_measured() {
+        let candidates = vec![(
+            "unmeasured".to_string(),
+            "127.0.0.1:51820".parse().unwrap(),
+            None,
+        )];
+        assert!(pick_lowest_latency_server(candidates.iter()).is_none());
     }
 
     #[test]

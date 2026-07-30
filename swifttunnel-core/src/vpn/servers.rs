@@ -139,6 +139,22 @@ pub struct DynamicServerInfo {
     pub relay_available: bool,
     #[serde(default)]
     pub relay_port: Option<u16>,
+    /// Concurrent users the relay last reported, or `None` when it has not
+    /// checked in recently.
+    ///
+    /// `None` deliberately does not mean "empty": a relay that has gone quiet
+    /// must not look like the most attractive box in the fleet. Selection
+    /// treats unknown load as full.
+    #[serde(default)]
+    pub active_users: Option<u32>,
+    /// Past its comfortable concurrent-user mark. Still connectable, just no
+    /// longer preferred when something equally fast is quieter.
+    #[serde(default)]
+    pub busy: bool,
+    /// Egress is billed per gigabyte on this host. Only ever used to break a
+    /// tie between relays a player cannot tell apart.
+    #[serde(default)]
+    pub metered: bool,
 }
 
 fn default_relay_available() -> bool {
@@ -308,12 +324,62 @@ pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
         data.version
     );
 
+    record_relay_load(&data.servers);
+
     // Save to cache
     if let Err(e) = save_servers_to_cache(&data) {
         log::warn!("Failed to save server list to cache: {}", e);
     }
 
     Ok(data)
+}
+
+/// Live occupancy per relay, refreshed whenever the server list is fetched.
+///
+/// Kept beside the list rather than threaded through the candidate tuples,
+/// which are `(region, addr, latency)` and passed through a dozen call sites.
+/// Selection only needs to look a region up, so a small registry is far less
+/// invasive than widening that tuple everywhere.
+///
+/// Deliberately NOT populated from the on-disk cache: a cached list can be
+/// hours old, and stale occupancy is worse than none — it would confidently
+/// steer everyone toward whichever relay happened to be quiet last session.
+static RELAY_LOAD: std::sync::RwLock<Option<HashMap<String, RelayLoad>>> =
+    std::sync::RwLock::new(None);
+
+#[derive(Debug, Clone, Copy)]
+pub struct RelayLoad {
+    pub active_users: Option<u32>,
+    pub busy: bool,
+    pub metered: bool,
+}
+
+fn record_relay_load(servers: &[DynamicServerInfo]) {
+    let map: HashMap<String, RelayLoad> = servers
+        .iter()
+        .map(|s| {
+            (
+                s.region.clone(),
+                RelayLoad {
+                    active_users: s.active_users,
+                    busy: s.busy,
+                    metered: s.metered,
+                },
+            )
+        })
+        .collect();
+
+    if let Ok(mut guard) = RELAY_LOAD.write() {
+        *guard = Some(map);
+    }
+}
+
+/// Occupancy for a region, or `None` when the fleet has not been polled yet.
+pub fn relay_load(region: &str) -> Option<RelayLoad> {
+    RELAY_LOAD
+        .read()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|m| m.get(region).copied()))
 }
 
 /// Load server list from API or cache.
@@ -560,6 +626,9 @@ mod tests {
             phantun_port: None,
             relay_available: true,
             relay_port: Some(51820),
+            active_users: None,
+            busy: false,
+            metered: false,
         }
     }
 
