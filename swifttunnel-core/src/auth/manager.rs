@@ -12,6 +12,7 @@ use log::{debug, error, info, warn};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration as StdDuration;
 use url::form_urlencoded;
 
@@ -27,6 +28,22 @@ pub struct AuthManager {
     client: AuthClient,
     /// Active OAuth server (if awaiting callback)
     oauth_server: Arc<Mutex<Option<OAuthServer>>>,
+    /// Unix seconds until which refresh requests are suppressed after a 429.
+    ///
+    /// Handling the 429 once it arrives is not enough: `refresh_if_needed` is
+    /// called ahead of API work, so an expired token means every subsequent
+    /// call tries again and adds to the very throttle it is waiting on. This
+    /// stops the request being sent at all until the server's `Retry-After`
+    /// has passed.
+    refresh_blocked_until: Arc<AtomicU64>,
+}
+
+/// Unix timestamp in seconds, or 0 if the clock is before the epoch.
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl AuthManager {
@@ -92,6 +109,7 @@ impl AuthManager {
             storage,
             client,
             oauth_server: Arc::new(Mutex::new(None)),
+            refresh_blocked_until: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -322,6 +340,27 @@ impl AuthManager {
             return Ok(());
         }
 
+        // Still inside the window the server asked us to wait out. Sending now
+        // would only deepen the throttle, and a 429 says nothing about whether
+        // the session is still valid — so an unexpired token simply carries on.
+        let blocked_until = self.refresh_blocked_until.load(Ordering::Relaxed);
+        let now_secs = unix_now_secs();
+        if now_secs < blocked_until {
+            let wait = blocked_until - now_secs;
+            if !session.is_expired() {
+                debug!(
+                    "Refresh suppressed for {}s after a 429; token still valid",
+                    wait
+                );
+                return Ok(());
+            }
+            warn!(
+                "Refresh suppressed for {}s after a 429; token already expired",
+                wait
+            );
+            return Err(AuthError::RateLimited(wait));
+        }
+
         if session.is_expired() {
             info!("Token expired, attempting refresh...");
         } else {
@@ -340,6 +379,7 @@ impl AuthManager {
 
                     // Reset refresh failure count on success
                     self.storage.reset_refresh_failures();
+                    self.refresh_blocked_until.store(0, Ordering::Relaxed);
 
                     {
                         let mut state = self.state.lock();
@@ -366,6 +406,27 @@ impl AuthManager {
                     if matches!(e, AuthError::UserBanned(_)) {
                         self.storage.reset_refresh_failures();
                         return Err(e);
+                    }
+
+                    // Throttled. Back off for as long as the server asked and
+                    // stop here: no immediate retries, and crucially no failure
+                    // recorded. Counting these was what signed people out — five
+                    // throttled rounds tripped the consecutive-failure logout
+                    // even though the session was never in question.
+                    if let AuthError::RateLimited(retry_after) = e {
+                        warn!(
+                            "Token refresh rate limited; suppressing refreshes for {}s",
+                            retry_after
+                        );
+                        self.refresh_blocked_until
+                            .store(unix_now_secs() + retry_after, Ordering::Relaxed);
+                        self.storage.reset_refresh_failures();
+
+                        return if session.is_expired() {
+                            Err(AuthError::RateLimited(retry_after))
+                        } else {
+                            Ok(())
+                        };
                     }
 
                     warn!("Token refresh attempt {} failed: {}", attempt, e);

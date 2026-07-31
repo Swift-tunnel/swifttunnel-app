@@ -548,7 +548,10 @@ export function ConnectTab() {
           {hasRegions && !isConnected && (
             <button
               onClick={() => void refreshServers()}
-              className="inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+              // Nothing guarded this before, so holding down a click fired
+              // overlapping refreshes, each racing to overwrite the store.
+              disabled={serversLoading}
+              className="inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:pointer-events-none disabled:opacity-50"
             >
               <svg
                 width="11"

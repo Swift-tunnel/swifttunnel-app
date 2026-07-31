@@ -242,6 +242,9 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
+            // Read Retry-After before consuming the body: `text()` takes the
+            // response by value.
+            let retry_after = retry_after_seconds(&response);
             let body = response.text().await.unwrap_or_default();
             error!("Desktop token refresh failed: {} - {}", status, body);
 
@@ -250,6 +253,9 @@ impl AuthClient {
             }
             if is_refresh_token_permanently_invalid(&body) {
                 return Err(AuthError::RefreshTokenInvalid);
+            }
+            if status.as_u16() == 429 {
+                return Err(AuthError::RateLimited(retry_after));
             }
 
             return Err(AuthError::ApiError(format!(
@@ -738,6 +744,35 @@ fn user_banned_error_from_body(body: &str) -> Option<AuthError> {
     )))
 }
 
+/// Default wait when a 429 arrives with no usable `Retry-After`.
+const DEFAULT_RETRY_AFTER_SECONDS: u64 = 60;
+
+/// Longest we will honour from `Retry-After`. A hostile or misconfigured
+/// intermediary must not be able to park the client for hours.
+const MAX_RETRY_AFTER_SECONDS: u64 = 300;
+
+/// Seconds to wait before retrying, from the response's `Retry-After` header.
+///
+/// Only the delta-seconds form is handled — that is what
+/// `rateLimitResponse` in the web app sends. An HTTP-date value, which the spec
+/// also permits, falls back to the default rather than being misparsed as 0 and
+/// causing an immediate retry.
+fn retry_after_seconds(response: &reqwest::Response) -> u64 {
+    parse_retry_after(
+        response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
+fn parse_retry_after(raw: Option<&str>) -> u64 {
+    raw.and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_RETRY_AFTER_SECONDS)
+        .min(MAX_RETRY_AFTER_SECONDS)
+}
+
 /// Detect the free-tier quota rejection. `/api/vpn/relay-ticket` answers 429
 /// with `{"error":"free_tier_limit_reached","message":"..."}` — note the code
 /// lands in `error`, not `code`, unlike the ban and update responses.
@@ -809,6 +844,43 @@ mod tests {
         let body = r#"{"error":"user_banned appeared in a log line","code":"internal_error"}"#;
 
         assert!(user_banned_error_from_body(body).is_none());
+    }
+
+    #[test]
+    fn retry_after_uses_the_servers_delta_seconds() {
+        assert_eq!(parse_retry_after(Some("45")), 45);
+        assert_eq!(parse_retry_after(Some("  120 ")), 120);
+    }
+
+    #[test]
+    fn retry_after_falls_back_when_absent_or_unparseable() {
+        // An HTTP-date is legal per the spec but not something the web app
+        // sends. Parsing it as 0 would retry immediately into the throttle,
+        // which is the exact loop this whole change exists to stop.
+        assert_eq!(parse_retry_after(None), DEFAULT_RETRY_AFTER_SECONDS);
+        assert_eq!(
+            parse_retry_after(Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            DEFAULT_RETRY_AFTER_SECONDS
+        );
+        assert_eq!(parse_retry_after(Some("")), DEFAULT_RETRY_AFTER_SECONDS);
+        assert_eq!(parse_retry_after(Some("0")), DEFAULT_RETRY_AFTER_SECONDS);
+    }
+
+    #[test]
+    fn retry_after_is_capped_so_a_bad_value_cannot_park_the_client() {
+        assert_eq!(parse_retry_after(Some("999999")), MAX_RETRY_AFTER_SECONDS);
+    }
+
+    #[test]
+    fn rate_limited_is_distinct_from_a_generic_api_error() {
+        // The retry loop keys off this distinction: RateLimited must not count
+        // toward the consecutive-failure tally that forces a re-login.
+        let limited = AuthError::RateLimited(30);
+        assert!(matches!(limited, AuthError::RateLimited(_)));
+        assert!(!matches!(limited, AuthError::ApiError(_)));
+
+        let generic = AuthError::ApiError("Refresh failed: 500".to_string());
+        assert!(!matches!(generic, AuthError::RateLimited(_)));
     }
 
     #[test]

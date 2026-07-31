@@ -261,6 +261,16 @@ pub enum AuthError {
     /// current hour limit and says the cap is temporary).
     #[error("{0}")]
     FreeTierLimitReached(String),
+
+    /// The API answered 429. Distinct from `ApiError` because it must never be
+    /// retried straight away and must never count toward the consecutive
+    /// failure tally that forces a re-login: being throttled says nothing about
+    /// whether the session is still valid, and treating it as a normal
+    /// transient error is what signed users out during a throttling episode.
+    ///
+    /// Carries the server's `Retry-After` in seconds.
+    #[error("Rate limited by the API; retry in {0}s")]
+    RateLimited(u64),
 }
 
 #[cfg(test)]
