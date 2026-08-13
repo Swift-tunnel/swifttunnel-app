@@ -22,6 +22,27 @@ const Y_LERP_PER_FRAME = 0.08;
 const REFERENCE_FRAME_MS = 1000 / 60;
 const MIN_Y_MAX_BYTES = 8 * 1024;
 
+/**
+ * Frame budget while the app window does not have focus (~5fps).
+ *
+ * An occluded Tauri window is not "hidden" as far as the WebView is concerned,
+ * so rAF keeps firing at full rate behind a fullscreen game and this loop kept
+ * rebuilding SVG path strings 60 times a second for a chart nobody could see.
+ * Users found the workaround before the cause: switching to another tab
+ * unmounts this component, and the in-game stutter went away.
+ *
+ * Throttled rather than paused, because "not focused" also covers a second
+ * monitor where the graph is perfectly visible and freezing it would look
+ * broken. At 5fps the chart still moves and the per-frame cost drops ~12x.
+ */
+const UNFOCUSED_FRAME_BUDGET_MS = 200;
+
+/**
+ * Ceiling on the delta fed to the easing maths. Without it, resuming after the
+ * window was hidden for minutes hands the lerp an enormous dt.
+ */
+const MAX_FRAME_DELTA_MS = 1000;
+
 function formatRate(bytesPerSec: number): string {
   if (bytesPerSec < 1024) return `${Math.round(bytesPerSec)} B/s`;
   if (bytesPerSec < 1024 * 1024)
@@ -116,9 +137,26 @@ export function LiveGraph({
     }
     let raf = 0;
     let lastFrame = performance.now();
+    let lastPaint = 0;
 
     const renderFrame = (nowFrame: number) => {
-      const dt = Math.max(0.1, nowFrame - lastFrame);
+      raf = requestAnimationFrame(renderFrame);
+
+      // Skip the work, not the callback: an empty rAF tick costs nothing, while
+      // the path rebuild below is the expensive part that was competing with a
+      // fullscreen game for frames.
+      if (
+        !document.hasFocus() &&
+        nowFrame - lastPaint < UNFOCUSED_FRAME_BUDGET_MS
+      ) {
+        return;
+      }
+      lastPaint = nowFrame;
+
+      const dt = Math.min(
+        MAX_FRAME_DELTA_MS,
+        Math.max(0.1, nowFrame - lastFrame),
+      );
       lastFrame = nowFrame;
       const { smoothed, lastSampleT } = frameData.current;
 
@@ -175,8 +213,6 @@ export function LiveGraph({
           peakRef.current.textContent = peakText;
         }
       }
-
-      raf = requestAnimationFrame(renderFrame);
     };
 
     raf = requestAnimationFrame(renderFrame);

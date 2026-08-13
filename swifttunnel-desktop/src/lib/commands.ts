@@ -87,6 +87,12 @@ export interface FreeTierQuota {
   /** Seconds of free relay time left, or null when no limit applies. */
   remaining_seconds: number | null;
   limit_seconds: number | null;
+  /**
+   * Seconds of grace left once the allowance is spent, null otherwise. The
+   * backend keeps issuing leases through this window, so the session stays up
+   * and the client only warns.
+   */
+  grace_seconds: number | null;
 }
 
 export const vpnGetFreeTier = () =>

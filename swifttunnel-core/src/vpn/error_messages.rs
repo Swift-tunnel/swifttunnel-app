@@ -124,6 +124,10 @@ pub fn user_friendly_error(error: &VpnError) -> String {
         // is temporary, so pass it through rather than restating it here.
         VpnError::FreeTierLimitReached(message) => message.clone(),
 
+        // Also API-authored, and it names the minimum version — passing it
+        // through keeps the number correct without a client release.
+        VpnError::UpdateRequired(message) => message.clone(),
+
         // Split tunnel generic
         VpnError::SplitTunnel(_) => {
             "SwiftTunnel's network filter ran into a problem.\n\nOpen the Repair tab and run a repair, then reconnect.".to_string()
@@ -223,6 +227,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::UserBanned(_) => "Account banned",
         VpnError::FreeTierLimitReached(_) => "Free time used up",
         VpnError::SessionExpired => "Session expired",
+        VpnError::UpdateRequired(_) => "Update required",
         VpnError::SplitTunnel(_) => "Split tunnel error",
         VpnError::Io(_) => "System error",
     }

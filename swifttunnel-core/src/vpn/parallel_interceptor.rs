@@ -415,8 +415,7 @@ fn pwstr_to_string(ptr: windows::core::PWSTR) -> String {
 
 pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
     use windows::Win32::NetworkManagement::IpHelper::{
-        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211,
-        IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL, IP_ADAPTER_ADDRESSES_LH,
+        GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
     };
     use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
     use windows::Win32::Networking::WinSock::AF_UNSPEC;
@@ -467,20 +466,30 @@ pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
             let if_index = adapter.Anonymous1.Anonymous.IfIndex;
             let is_up = adapter.OperStatus == IfOperStatusUp;
 
-            let kind = match adapter.IfType {
-                IF_TYPE_IEEE80211 => "wifi",
-                IF_TYPE_ETHERNET_CSMACD => "ethernet",
-                IF_TYPE_PPP => "ppp",
-                IF_TYPE_SOFTWARE_LOOPBACK => "loopback",
-                IF_TYPE_TUNNEL => "tunnel",
-                _ => "other",
+            let friendly_name = pwstr_to_string(adapter.FriendlyName);
+            let description = pwstr_to_string(adapter.Description);
+
+            // Shares `adapter_kind_from_if_type` with the binding path rather than
+            // repeating the IfType map, so the picker and the selection validator
+            // cannot drift apart on what counts as a tunnel.
+            let if_type_kind = ParallelInterceptor::adapter_kind_from_if_type(adapter.IfType);
+            let kind = if if_type_kind != "loopback"
+                && (ParallelInterceptor::third_party_vpn_product(&friendly_name).is_some()
+                    || ParallelInterceptor::third_party_vpn_product(&description).is_some())
+            {
+                // A userspace WireGuard adapter (NordLynx and friends) has no tunnel
+                // IfType, so without this it lists as "other" and
+                // `manual_adapter_unusable_reason` lets the user bind to it.
+                "tunnel"
+            } else {
+                if_type_kind
             }
             .to_string();
 
             out.push(NetworkAdapterInfo {
                 guid,
-                friendly_name: pwstr_to_string(adapter.FriendlyName),
-                description: pwstr_to_string(adapter.Description),
+                friendly_name,
+                description,
                 if_index,
                 is_up,
                 is_default_route: default_route_if_index
@@ -2089,6 +2098,60 @@ impl ParallelInterceptor {
         }
     }
 
+    /// Product name of a known third-party VPN, if `label` names one of its adapters.
+    ///
+    /// Classification has to be by product name because IfType does not identify
+    /// these. A userspace WireGuard tunnel installs as an ordinary virtual
+    /// miniport, not `IF_TYPE_TUNNEL`, so `adapter_kind_from_if_type` calls it
+    /// "other" and it competes with real NICs for the binding.
+    ///
+    /// NordLynx is the case that reached support: NordVPN's WireGuard adapter is
+    /// named "NordLynx", which contains none of "nordvpn", "wireguard", "vpn",
+    /// "tunnel" or "virtual", so every check we had missed it. It owned the
+    /// default route, scored +1000 for that, and was offered as the RECOMMENDED
+    /// adapter -- one that manual selection would then refuse.
+    ///
+    /// `label` may be a friendly name or a device description; callers should try
+    /// both. Only brand strings live here, never bare "tunnel"/"wintun", so our
+    /// own adapter ("SwiftTunnel", description "Wintun Userspace Tunnel") can
+    /// never match.
+    fn third_party_vpn_product(label: &str) -> Option<&'static str> {
+        const PRODUCTS: &[(&str, &str)] = &[
+            ("nordlynx", "NordVPN"),
+            ("nordvpn", "NordVPN"),
+            ("expressvpn", "ExpressVPN"),
+            ("lightway", "ExpressVPN"),
+            ("surfshark", "Surfshark"),
+            ("proton", "Proton VPN"),
+            ("mullvad", "Mullvad"),
+            ("private internet", "Private Internet Access"),
+            ("cyberghost", "CyberGhost"),
+            ("windscribe", "Windscribe"),
+            ("tunnelbear", "TunnelBear"),
+            ("hotspot shield", "Hotspot Shield"),
+            ("hide.me", "hide.me"),
+            ("torguard", "TorGuard"),
+            ("ivpn", "IVPN"),
+            ("atlas vpn", "Atlas VPN"),
+            ("urban vpn", "Urban VPN"),
+            ("cloudflare warp", "Cloudflare WARP"),
+            ("radmin", "Radmin VPN"),
+            ("famatech", "Radmin VPN"),
+            ("hamachi", "Hamachi"),
+            ("zerotier", "ZeroTier"),
+            ("tailscale", "Tailscale"),
+            ("wireguard", "WireGuard"),
+            ("openvpn", "OpenVPN"),
+            ("tap-windows", "OpenVPN"),
+        ];
+
+        let label_lower = label.to_ascii_lowercase();
+        PRODUCTS
+            .iter()
+            .find(|(needle, _)| label_lower.contains(needle))
+            .map(|(_, product)| *product)
+    }
+
     fn get_adapter_details_for_if_index(if_index: u32) -> Option<(String, String, String)> {
         use windows::Win32::NetworkManagement::IpHelper::{
             GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
@@ -2614,6 +2677,11 @@ impl ParallelInterceptor {
         let mut vpn_adapter: Option<(usize, String)> = None;
         let mut physical_candidates: Vec<PhysicalCandidate> = Vec::new();
         let mut unknown_physical_candidates: Vec<PhysicalCandidate> = Vec::new();
+        // Set when a recognised third-party VPN owns the default route. Recorded
+        // here rather than read back off `physical_candidates` because a manual
+        // binding preference makes virtual adapters skip the candidate list
+        // entirely, and that is exactly the case where naming the culprit matters.
+        let mut route_owner_vpn_product: Option<&'static str> = None;
 
         for (idx, adapter) in adapters.iter().enumerate() {
             let internal_name = adapter.get_name();
@@ -2671,22 +2739,9 @@ impl ParallelInterceptor {
                 || friendly_lower.contains("loopback")
                 || friendly_lower.contains("isatap")
                 || friendly_lower.contains("teredo")
-                // Third-party VPN adapters
-                || friendly_lower.contains("radmin")      // Radmin VPN
-                || friendly_lower.contains("hamachi")     // LogMeIn Hamachi
-                || friendly_lower.contains("zerotier")    // ZeroTier
-                || friendly_lower.contains("tailscale")   // Tailscale
-                || friendly_lower.contains("wireguard")   // WireGuard (not ours)
-                || friendly_lower.contains("openvpn")     // OpenVPN
-                || friendly_lower.contains("tap-windows") // OpenVPN TAP
-                || friendly_lower.contains("nordvpn")     // NordVPN
-                || friendly_lower.contains("expressvpn")  // ExpressVPN
-                || friendly_lower.contains("surfshark")   // Surfshark
-                || friendly_lower.contains("proton")      // ProtonVPN
-                || friendly_lower.contains("mullvad")     // Mullvad
-                || friendly_lower.contains("private internet") // PIA
-                || friendly_lower.contains("cyberghost")  // CyberGhost
-                || friendly_lower.contains("famatech")    // Famatech (Radmin parent company)
+                // Third-party VPN adapters, matched by product name. See
+                // `third_party_vpn_product` for why IfType cannot do this.
+                || Self::third_party_vpn_product(&friendly_name).is_some()
                 // Generic virtual adapter detection (but NOT if friendly name is empty -
                 // that could be our VPN adapter where name lookup failed)
                 || (!friendly_lower.is_empty() && (
@@ -2730,6 +2785,34 @@ impl ParallelInterceptor {
                         },
                     )
                 });
+
+            // The brand check above only saw the friendly name, and it only fed the
+            // *fallback* kind -- when `get_adapter_details_for_if_index` succeeded,
+            // the IfType-derived kind won unconditionally. That is how a NordLynx
+            // adapter reached the picker labelled "other": the lookup succeeded, and
+            // a userspace WireGuard miniport reports no tunnel IfType.
+            //
+            // Re-check now that the device description is known, and let a brand
+            // match override the IfType kind. Everything downstream keys off
+            // `kind == "tunnel"` (bridge-sibling filtering, the recommendation, and
+            // `manual_adapter_unusable_reason` in the desktop crate), so this is the
+            // single place that has to be right.
+            let vpn_product = Self::third_party_vpn_product(&friendly_name)
+                .or_else(|| Self::third_party_vpn_product(&resolved_description));
+            let is_virtual = is_virtual || vpn_product.is_some();
+            let resolved_kind = if vpn_product.is_some() && resolved_kind != "loopback" {
+                "tunnel".to_string()
+            } else {
+                resolved_kind
+            };
+            if let Some(product) = vpn_product {
+                log::info!("    -> Third-party VPN adapter detected ({product})");
+                if adapter_if_index.is_some() && adapter_if_index == default_route_if_index {
+                    log::warn!("    -> {product} currently owns the default route");
+                    route_owner_vpn_product = Some(product);
+                }
+            }
+
             let has_default_route = strict_default_route
                 && adapter_if_index.is_some()
                 && default_route_if_index.is_some()
@@ -3061,7 +3144,15 @@ impl ParallelInterceptor {
             } else {
                 BindingStage::Unrecoverable.as_str().to_string()
             };
-            self.binding_reason = if route_owner_bridge_like {
+            self.binding_reason = if let Some(product) = route_owner_vpn_product {
+                // Naming the product is the whole fix for this case. The generic
+                // "could not prove which adapter owns the active route" told a user
+                // with NordVPN running nothing they could act on, so they reset the
+                // IP stack and Winsock catalog instead of just quitting NordVPN.
+                format!(
+                    "{product} is running and currently owns your internet connection, so SwiftTunnel cannot bind to your real network adapter. Quit {product} completely (disconnecting is not always enough), then connect SwiftTunnel."
+                )
+            } else if route_owner_bridge_like {
                 "SwiftTunnel found multiple possible underlay adapters behind a bridge or hypervisor. User confirmation is required.".to_string()
             } else {
                 format!(
@@ -3090,9 +3181,14 @@ impl ParallelInterceptor {
                     )
                 })
                 .collect();
+            // Never recommend an adapter that manual selection would then refuse.
+            // A VPN tunnel that owns the default route scores +1000 for that alone,
+            // which is how the picker came to mark NordLynx as RECOMMENDED while
+            // `manual_adapter_unusable_reason` rejected it as a tunnel.
             self.recommended_adapter_guid = self
                 .binding_candidates
                 .iter()
+                .filter(|candidate| candidate.kind != "tunnel" && candidate.kind != "loopback")
                 .max_by_key(|candidate| candidate.score)
                 .map(|candidate| candidate.guid.clone());
 
@@ -3100,6 +3196,13 @@ impl ParallelInterceptor {
                 .as_ref()
                 .map(|error| format!(" Default-route binding check failed first: {error}."))
                 .unwrap_or_default();
+            if let Some(product) = route_owner_vpn_product {
+                return Err(VpnError::SplitTunnel(format!(
+                    "{product} is running and owns your internet connection. Quit {product} completely, then connect SwiftTunnel. \
+                     (Default-route ifIndex {def} belongs to a {product} tunnel adapter.{binding_error})"
+                )));
+            }
+
             return Err(VpnError::SplitTunnel(format!(
                 "No NDIS adapter matched the default-route interface index {def}.{binding_error} Candidates: {}",
                 lines.join(", ")
@@ -9613,6 +9716,53 @@ mod tests {
                 "Wi-Fi",
                 "Intel Wireless AX210",
             )
+        );
+    }
+
+    /// The support ticket: NordVPN's adapter is called "NordLynx", which contains
+    /// neither "nordvpn" nor "vpn" nor "tunnel", so every substring check we had
+    /// missed it and the picker offered it as the physical adapter.
+    #[test]
+    fn test_third_party_vpn_product_matches_nordlynx() {
+        assert_eq!(
+            ParallelInterceptor::third_party_vpn_product("NordLynx"),
+            Some("NordVPN")
+        );
+        assert_eq!(
+            ParallelInterceptor::third_party_vpn_product("NordLynx Tunnel"),
+            Some("NordVPN")
+        );
+    }
+
+    #[test]
+    fn test_third_party_vpn_product_ignores_real_nics() {
+        for name in [
+            "Ethernet",
+            "Wi-Fi",
+            "Realtek PCIe GbE Family Controller",
+            "Intel(R) Wi-Fi 6 AX201 160MHz",
+            "WAN Network Interface (IP)",
+        ] {
+            assert_eq!(
+                ParallelInterceptor::third_party_vpn_product(name),
+                None,
+                "'{name}' must not be classified as a third-party VPN"
+            );
+        }
+    }
+
+    /// Our own adapter is Wintun-backed and its description reads
+    /// "Wintun Userspace Tunnel". The product list holds brand strings only, so it
+    /// can never swallow SwiftTunnel's own interface.
+    #[test]
+    fn test_third_party_vpn_product_ignores_our_own_adapter() {
+        assert_eq!(
+            ParallelInterceptor::third_party_vpn_product("SwiftTunnel"),
+            None
+        );
+        assert_eq!(
+            ParallelInterceptor::third_party_vpn_product("Wintun Userspace Tunnel"),
+            None
         );
     }
 

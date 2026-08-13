@@ -45,8 +45,12 @@ function getErrorMessage(error: unknown): string {
 const FULL_COUNTRY_BAN_ROBLOX_RUNNING_MESSAGE =
   "Close Roblox before connecting with Full Country Ban. Then connect SwiftTunnel and reopen Roblox so login and game traffic use the bypass.";
 
+// Points at Repair rather than at a reboot on purpose: "restart Windows" asks
+// the user to give up their session on a hunch, and most of these failures are
+// a wedged driver service that "Reinstall driver" clears in place. That action
+// tells them itself if a restart really is needed to finish.
 const WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE =
-  "Windows could not install SwiftTunnel's split-tunnel driver because Windows networking/driver services are not responding cleanly. Restart Windows once, then open SwiftTunnel and try again. If it still fails, contact support with the log file.";
+  "Windows could not install SwiftTunnel's split-tunnel driver because Windows networking/driver services are not responding cleanly. Open the Repair tab and run \"Reinstall driver\". If that does not fix it, contact support with the log file.";
 
 function isWindowsDriverInstallerFailureMessage(message: string): boolean {
   const haystack = message.toLowerCase();
@@ -427,6 +431,15 @@ interface VpnStore {
   // the backend has it switched off, or it predates the feature.
   freeTierRemaining: number | null;
   freeTierLimit: number | null;
+  /**
+   * Seconds of grace left after the allowance ran out, null when not in grace.
+   *
+   * Authoritative — it comes from the backend, which is still issuing relay
+   * leases for this window. The client must not hang up while it is set, or it
+   * would drop the user out of a match the server deliberately let them finish.
+   */
+  freeTierGraceRemaining: number | null;
+
 
   // Session timer
   connectedAt: number | null;
@@ -475,6 +488,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   ping: null,
   freeTierRemaining: null,
   freeTierLimit: null,
+  freeTierGraceRemaining: null,
   connectedAt: null,
   diagnostics: null,
   bindingPreflight: null,
@@ -1002,9 +1016,16 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   fetchFreeTier: async () => {
     try {
       const quota = await vpnGetFreeTier();
+      const incoming = quota.remaining_seconds;
+
+      // Successful lease refreshes update this authoritative snapshot. The
+      // one-second local tick only smooths the display between refreshes.
       set({
-        freeTierRemaining: quota.remaining_seconds,
+        freeTierRemaining: incoming,
         freeTierLimit: quota.limit_seconds,
+        // Always taken verbatim: grace is a backend decision about whether the
+        // relay lease is still being renewed. The local countdown has no say.
+        freeTierGraceRemaining: quota.grace_seconds,
       });
     } catch (error) {
       reportError("Failed to fetch free tier quota", error, {
@@ -1013,13 +1034,45 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   },
 
-  // Local 1s countdown between ticket refreshes (~5 min apart). The
-  // authoritative value comes from fetchFreeTier; this only stops the display
-  // sitting frozen on the same number for minutes at a time.
+  // Local 1s countdown between authoritative ticket refreshes, so the display
+  // keeps moving instead of freezing between them.
+  //
+  // Deliberately does NOT hang up when the allowance reaches zero. The backend
+  // grants a grace window past the limit and keeps renewing the relay lease
+  // through it; disconnecting here would end a session the server was still
+  // willing to carry, which is the difference between "warned before it ends"
+  // and "dropped mid-match".
   tickFreeTier: () => {
-    const { state, freeTierRemaining } = get();
-    if (state !== "connected" || freeTierRemaining === null) return;
-    set({ freeTierRemaining: Math.max(0, freeTierRemaining - 1) });
+    const { state, freeTierRemaining, freeTierGraceRemaining } = get();
+    if (state !== "connected") return;
+
+    // In grace: run the warning countdown down. The disconnect itself comes
+    // from the relay dropping an expired lease, not from here.
+    if (freeTierGraceRemaining !== null) {
+      if (freeTierGraceRemaining <= 0) return;
+      const nextGrace = freeTierGraceRemaining - 1;
+      set({ freeTierGraceRemaining: nextGrace });
+      if (nextGrace === 0) {
+        void notify(
+          "Free time used up",
+          "Your extra time is over and SwiftTunnel is disconnecting. Your free time refills within 24 hours of when you started.",
+        );
+      }
+      return;
+    }
+
+    if (freeTierRemaining === null || freeTierRemaining <= 0) return;
+    const next = Math.max(0, freeTierRemaining - 1);
+    set({ freeTierRemaining: next });
+
+    if (next === 0) {
+      // The next ticket refresh reports the grace window; until it lands the
+      // badge reads 0:00, which is honest — the allowance really is spent.
+      void notify(
+        "Time limit reached",
+        "You've used your free SwiftTunnel time. You have a few extra minutes before it disconnects.",
+      );
+    }
   },
 
   fetchPing: async () => {

@@ -193,13 +193,20 @@ pub struct RelayTicketResponse {
     pub key_id: String,
     #[serde(default)]
     pub connection_policy: Option<RelayConnectionPolicy>,
-    /// Free-tier time budget in seconds, refreshed on every ticket (~5 min).
+    /// Free-tier time budget in seconds, refreshed on every ticket (~2 min).
     /// `None` means no limit applies — either the backend has it switched off,
     /// or it predates the feature and omits the fields entirely.
     #[serde(default)]
     pub limit_seconds: Option<i64>,
     #[serde(default)]
     pub remaining_seconds: Option<i64>,
+    /// Seconds of grace left after the allowance ran out, or `None` when not in
+    /// grace. The backend keeps issuing leases through this window, so the
+    /// session is still live and the client must NOT hang up — it warns and
+    /// counts down instead. Hanging up at `remaining_seconds == 0` would throw
+    /// the user out of a match the server was deliberately letting them finish.
+    #[serde(default)]
+    pub grace_seconds: Option<i64>,
     /// The relay this ticket is for is past its comfortable occupancy. The
     /// ticket is still valid — a busy relay beats a refused connection — but the
     /// user is better off elsewhere.

@@ -111,6 +111,16 @@ pub enum VpnError {
     #[error("Session expired, please sign in again")]
     SessionExpired,
 
+    /// The build is below `MIN_CLIENT_VERSION`, so the ticket endpoint answers
+    /// 426 and no relay will ever authenticate this session.
+    ///
+    /// Must abort the connect. Treating it as just another failed candidate let
+    /// the client exhaust every relay, fall through to legacy mode and report
+    /// "Connected" while the relay silently dropped every packet — an old build
+    /// looked online to its user and to anyone they screen-shared with.
+    #[error("{0}")]
+    UpdateRequired(String),
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }

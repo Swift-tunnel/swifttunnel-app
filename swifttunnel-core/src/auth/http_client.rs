@@ -179,7 +179,7 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Sign in failed: {} - {}", status, body);
+            error!("Sign in failed: {} - {}", status, summarize_error_body(&body));
 
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
@@ -189,7 +189,7 @@ impl AuthClient {
             }
             return Err(AuthError::ApiError(format!(
                 "Sign in failed: {} - {}",
-                status, body
+                status, summarize_error_body(&body)
             )));
         }
 
@@ -246,7 +246,7 @@ impl AuthClient {
             // response by value.
             let retry_after = retry_after_seconds(&response);
             let body = response.text().await.unwrap_or_default();
-            error!("Desktop token refresh failed: {} - {}", status, body);
+            error!("Desktop token refresh failed: {} - {}", status, summarize_error_body(&body));
 
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
@@ -260,7 +260,7 @@ impl AuthClient {
 
             return Err(AuthError::ApiError(format!(
                 "Refresh failed: {} - {}",
-                status, body
+                status, summarize_error_body(&body)
             )));
         }
 
@@ -358,7 +358,7 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Refresh token failed: {} - {}", status, body);
+            error!("Refresh token failed: {} - {}", status, summarize_error_body(&body));
 
             // Detect permanently invalid refresh tokens (revoked, rotated, expired)
             if is_refresh_token_permanently_invalid(&body) {
@@ -367,7 +367,7 @@ impl AuthClient {
 
             return Err(AuthError::ApiError(format!(
                 "Refresh failed: {} - {}",
-                status, body
+                status, summarize_error_body(&body)
             )));
         }
 
@@ -403,7 +403,7 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Get VPN config failed: {} - {}", status, body);
+            error!("Get VPN config failed: {} - {}", status, summarize_error_body(&body));
             if let Some(error) = update_required_error(status, &body) {
                 return Err(error);
             }
@@ -412,7 +412,7 @@ impl AuthClient {
             }
             return Err(AuthError::ApiError(format!(
                 "Config fetch failed: {} - {}",
-                status, body
+                status, summarize_error_body(&body)
             )));
         }
 
@@ -444,6 +444,7 @@ impl AuthClient {
             .send_with_network_fallback("relay release", |client| {
                 self.add_common_headers(client.post(&url))
                     .header("Authorization", format!("Bearer {}", access_token))
+                    .header("X-SwiftTunnel-Relay-Lease", "1")
                     .header("Content-Type", "application/json")
                     .json(&json!({}))
             })
@@ -454,7 +455,7 @@ impl AuthClient {
             let body = response.text().await.unwrap_or_default();
             return Err(AuthError::ApiError(format!(
                 "Relay release failed: {} - {}",
-                status, body
+                status, summarize_error_body(&body)
             )));
         }
 
@@ -491,7 +492,7 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Relay ticket fetch failed: {} - {}", status, body);
+            error!("Relay ticket fetch failed: {} - {}", status, summarize_error_body(&body));
             if let Some(error) = update_required_error(status, &body) {
                 return Err(error);
             }
@@ -512,7 +513,7 @@ impl AuthClient {
             }
             return Err(AuthError::ApiError(format!(
                 "Relay ticket fetch failed: {} - {}",
-                status, body
+                status, summarize_error_body(&body)
             )));
         }
 
@@ -553,7 +554,7 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Exchange token failed: {} - {}", status, body);
+            error!("Exchange token failed: {} - {}", status, summarize_error_body(&body));
 
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
@@ -576,7 +577,7 @@ impl AuthClient {
 
             return Err(AuthError::ApiError(format!(
                 "Exchange failed: {} - {}",
-                status, body
+                status, summarize_error_body(&body)
             )));
         }
 
@@ -607,7 +608,7 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Fetch user profile failed: {} - {}", status, body);
+            error!("Fetch user profile failed: {} - {}", status, summarize_error_body(&body));
             if let Some(error) = update_required_error(status, &body) {
                 return Err(error);
             }
@@ -616,7 +617,7 @@ impl AuthClient {
             }
             return Err(AuthError::ApiError(format!(
                 "Profile fetch failed: {} - {}",
-                status, body
+                status, summarize_error_body(&body)
             )));
         }
 
@@ -659,7 +660,7 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Verify magic link failed: {} - {}", status, body);
+            error!("Verify magic link failed: {} - {}", status, summarize_error_body(&body));
 
             if body.contains("Token has expired")
                 || body.contains("token is expired")
@@ -713,6 +714,58 @@ pub(crate) fn is_refresh_token_permanently_invalid(body: &str) -> bool {
     body.contains("refresh_token_not_found")
         || body.contains("Invalid Refresh Token")
         || body.contains("refresh_token_already_used")
+}
+
+/// Condense an HTTP error body into something safe to put in front of a user.
+///
+/// These strings get interpolated into [`AuthError::ApiError`] and rendered
+/// verbatim in the app window, so a body that is not our JSON fills the whole
+/// screen with page source. That is exactly what users hit when
+/// `auth.swifttunnel.net` began answering with a Cloudflare "Error 1000" page:
+/// the entire HTML document was painted into the login error.
+///
+/// An HTML body is reduced to the one detail support can act on, the CDN Ray
+/// ID. Anything else keeps its text, whitespace-collapsed and truncated. Callers
+/// must still run their own `body.contains(...)` checks against the *raw* body
+/// first; this is only for display.
+fn summarize_error_body(body: &str) -> String {
+    const MAX_LEN: usize = 300;
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "empty response".to_string();
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if trimmed.starts_with('<') || lower.contains("<html") || lower.contains("<!doctype html") {
+        return match token_after(trimmed, "Ray ID: ") {
+            Some(ray) => format!(
+                "the server returned an HTML error page instead of JSON \
+                 (blocked or misrouted by a proxy, captive portal, or CDN; Ray ID {ray})"
+            ),
+            None => "the server returned an HTML error page instead of JSON \
+                     (blocked or misrouted by a proxy, captive portal, or CDN)"
+                .to_string(),
+        };
+    }
+
+    let collapsed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > MAX_LEN {
+        let head: String = collapsed.chars().take(MAX_LEN).collect();
+        format!("{head}…")
+    } else {
+        collapsed
+    }
+}
+
+/// First alphanumeric run following `needle`, if present.
+fn token_after(haystack: &str, needle: &str) -> Option<String> {
+    let start = haystack.find(needle)? + needle.len();
+    let token: String = haystack[start..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    (!token.is_empty()).then_some(token)
 }
 
 /// Detect a server "update required" (old-build lockout) response: HTTP 426, or
@@ -802,6 +855,49 @@ fn ban_reason_suffix(reason: Option<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Cloudflare Error 1000 page that `auth.swifttunnel.net` served when
+    /// its DNS record was proxied onto a Cloudflare-owned origin. Pasting this
+    /// into `AuthError::ApiError` filled the whole app window with page source.
+    #[test]
+    fn test_summarize_error_body_collapses_cloudflare_error_page() {
+        let body = r#"<!DOCTYPE html><html><head><script>window.foo=1</script></head>
+            <body><div id="cf-wrapper"><h1>Error <span>1000</span></h1>
+            <span>Ray ID: a28c07f94b76fde8 &bull;</span>
+            <h2>DNS points to prohibited IP</h2>
+            <p>You've requested a page on a website (auth.swifttunnel.net) that is on the
+            Cloudflare network.</p></div></body></html>"#;
+
+        let summary = summarize_error_body(body);
+        assert!(
+            summary.contains("HTML error page"),
+            "expected an explanation, got: {summary}"
+        );
+        assert!(
+            summary.contains("a28c07f94b76fde8"),
+            "Ray ID is the one detail support can act on, got: {summary}"
+        );
+        assert!(!summary.contains('<'), "markup leaked: {summary}");
+        assert!(summary.len() < 200, "summary too long: {}", summary.len());
+    }
+
+    #[test]
+    fn test_summarize_error_body_keeps_json_intact() {
+        let body = r#"{"code":400,"error_code":"invalid_credentials","msg":"Invalid login credentials"}"#;
+        assert_eq!(summarize_error_body(body), body);
+    }
+
+    #[test]
+    fn test_summarize_error_body_truncates_long_text() {
+        let summary = summarize_error_body(&"x".repeat(5000));
+        assert!(summary.chars().count() <= 301, "not truncated: {summary}");
+        assert!(summary.ends_with('…'));
+    }
+
+    #[test]
+    fn test_summarize_error_body_handles_empty() {
+        assert_eq!(summarize_error_body("   "), "empty response");
+    }
 
     #[test]
     fn test_detects_refresh_token_not_found() {

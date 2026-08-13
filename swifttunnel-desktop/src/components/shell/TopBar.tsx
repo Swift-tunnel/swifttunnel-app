@@ -30,6 +30,7 @@ export function TopBar() {
   const vpnState = useVpnStore((s) => s.state);
   const ping = useVpnStore((s) => s.ping);
   const freeTierRemaining = useVpnStore((s) => s.freeTierRemaining);
+  const freeTierGraceRemaining = useVpnStore((s) => s.freeTierGraceRemaining);
   const fetchFreeTier = useVpnStore((s) => s.fetchFreeTier);
   const tickFreeTier = useVpnStore((s) => s.tickFreeTier);
   const robloxRunning = useBoostStore((s) => s.robloxRunning);
@@ -50,7 +51,7 @@ export function TopBar() {
   }, [fetchMetrics]);
 
   // Free-tier budget. The authoritative number only changes when a relay
-  // ticket is refreshed (~5 min), so resync on a slow interval and tick the
+  // ticket is refreshed (~2 min), so resync on a slow interval and tick the
   // display down locally in between rather than polling every second.
   useEffect(() => {
     void fetchFreeTier();
@@ -182,7 +183,29 @@ export function TopBar() {
           </svg>
         </button>
 
-        {freeTierRemaining !== null && (
+        {/* Grace takes over the readout once the allowance is spent, so the
+            badge counts down to the disconnect rather than sitting on 0:00
+            with no hint the session is about to end. */}
+        {freeTierGraceRemaining !== null ? (
+          <div
+            className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
+            title={`Free time used up. SwiftTunnel disconnects in ${formatFreeTier(freeTierGraceRemaining)}.`}
+            style={{
+              backgroundColor: "var(--color-bg-base)",
+              border: "1px solid var(--color-status-error-soft-20)",
+            }}
+          >
+            <span
+              className="lcd-readout text-[11px] font-medium leading-none"
+              style={{ color: "var(--color-status-error)" }}
+            >
+              {formatFreeTier(freeTierGraceRemaining)}
+            </span>
+            <span className="text-[9.5px] leading-none text-text-dimmed">
+              extra
+            </span>
+          </div>
+        ) : freeTierRemaining !== null ? (
           <div
             className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
             title={`${formatFreeTier(freeTierRemaining)} of free SwiftTunnel time left. This limit is temporary and will be removed soon.`}
@@ -201,7 +224,7 @@ export function TopBar() {
               free
             </span>
           </div>
-        )}
+        ) : null}
 
         {isConnected && ping !== null && (
           <div

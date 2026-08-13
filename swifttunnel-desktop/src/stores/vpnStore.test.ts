@@ -7,6 +7,7 @@ const {
   vpnDisconnect,
   vpnGetThroughput,
   vpnGetPing,
+  vpnGetFreeTier,
   vpnGetDiagnostics,
   systemCheckDriver,
   systemInstallDriver,
@@ -24,6 +25,7 @@ const {
   vpnDisconnect: vi.fn(),
   vpnGetThroughput: vi.fn(),
   vpnGetPing: vi.fn(),
+  vpnGetFreeTier: vi.fn(),
   vpnGetDiagnostics: vi.fn(),
   systemCheckDriver: vi.fn(),
   systemInstallDriver: vi.fn(),
@@ -47,6 +49,7 @@ vi.mock("../lib/commands", () => ({
   vpnDisconnect,
   vpnGetThroughput,
   vpnGetPing,
+  vpnGetFreeTier,
   vpnGetDiagnostics,
   systemCheckDriver,
   systemInstallDriver,
@@ -103,6 +106,7 @@ describe("stores/vpnStore", () => {
     vpnDisconnect.mockReset();
     vpnGetThroughput.mockReset();
     vpnGetPing.mockReset();
+    vpnGetFreeTier.mockReset();
     vpnGetDiagnostics.mockReset();
     systemCheckDriver.mockReset();
     systemInstallDriver.mockReset();
@@ -1077,5 +1081,143 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().driverSetupError).toContain(
       "Reset driver service failed: Administrator privileges required to restart the driver service.",
     );
+  });
+
+  // Enforcement is relay-side: the backend stops renewing the lease and the
+  // relay drops the session. The client's job is to warn, not to hang up —
+  // the backend grants a grace window past the allowance and keeps the lease
+  // alive through it, so a client that disconnected at zero would cut a session
+  // the server was deliberately still carrying.
+  describe("free tier enforcement", () => {
+    async function connectedWithRemaining(remaining: number) {
+      const useVpnStore = await loadStore();
+      useVpnStore.setState({
+        state: "connected",
+        freeTierRemaining: remaining,
+        freeTierGraceRemaining: null,
+      });
+      return useVpnStore;
+    }
+
+    it("warns at zero but leaves the session to the relay", async () => {
+      const useVpnStore = await connectedWithRemaining(1);
+
+      useVpnStore.getState().tickFreeTier();
+
+      expect(useVpnStore.getState().freeTierRemaining).toBe(0);
+      expect(notify).toHaveBeenCalledWith(
+        "Time limit reached",
+        expect.stringContaining("extra minutes"),
+      );
+      expect(vpnDisconnect).not.toHaveBeenCalled();
+    });
+
+    it("does not re-warn on every tick once the allowance is spent", async () => {
+      const useVpnStore = await connectedWithRemaining(1);
+
+      useVpnStore.getState().tickFreeTier();
+      useVpnStore.getState().tickFreeTier();
+      useVpnStore.getState().tickFreeTier();
+
+      expect(notify).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the backend-granted grace down and warns as it ends", async () => {
+      const useVpnStore = await loadStore();
+      useVpnStore.setState({
+        state: "connected",
+        freeTierRemaining: 0,
+        freeTierGraceRemaining: 2,
+      });
+
+      useVpnStore.getState().tickFreeTier();
+      expect(useVpnStore.getState().freeTierGraceRemaining).toBe(1);
+      expect(notify).not.toHaveBeenCalled();
+
+      useVpnStore.getState().tickFreeTier();
+      expect(useVpnStore.getState().freeTierGraceRemaining).toBe(0);
+      expect(notify).toHaveBeenCalledWith(
+        "Free time used up",
+        expect.stringContaining("disconnecting"),
+      );
+      // Still not the client's call — the relay drops the expired lease.
+      expect(vpnDisconnect).not.toHaveBeenCalled();
+    });
+
+    it("ignores ticks while not connected", async () => {
+      const useVpnStore = await loadStore();
+      useVpnStore.setState({
+        state: "disconnected",
+        freeTierRemaining: 1,
+      });
+
+      useVpnStore.getState().tickFreeTier();
+
+      expect(useVpnStore.getState().freeTierRemaining).toBe(1);
+      expect(notify).not.toHaveBeenCalled();
+    });
+
+    // The backend value is frozen at the moment the last ticket was issued, so
+    // a minute-by-minute resync used to reset the local countdown to the
+    // connect-time number. A user reported "1h 54m free" while the session
+    // timer read 4:46:57.
+    it("accepts the latest server-authoritative lease snapshot", async () => {
+      vpnGetFreeTier.mockResolvedValue({
+        remaining_seconds: 6840, // connect-time snapshot
+        limit_seconds: 10800,
+      });
+
+      const useVpnStore = await loadStore();
+      useVpnStore.setState({ state: "connected", freeTierRemaining: 120 });
+
+      await useVpnStore.getState().fetchFreeTier();
+
+      expect(useVpnStore.getState().freeTierRemaining).toBe(6840);
+      expect(useVpnStore.getState().freeTierLimit).toBe(10800);
+    });
+
+    it("accepts a lower backend value, which means usage we had not counted", async () => {
+      // Same account connected on a second machine spends the shared allowance.
+      vpnGetFreeTier.mockResolvedValue({
+        remaining_seconds: 45,
+        limit_seconds: 10800,
+      });
+
+      const useVpnStore = await loadStore();
+      useVpnStore.setState({ state: "connected", freeTierRemaining: 600 });
+
+      await useVpnStore.getState().fetchFreeTier();
+
+      expect(useVpnStore.getState().freeTierRemaining).toBe(45);
+    });
+
+    it("takes the backend value verbatim when not connected", async () => {
+      // Between sessions there is no local countdown worth preserving, and the
+      // window may well have refilled.
+      vpnGetFreeTier.mockResolvedValue({
+        remaining_seconds: 10800,
+        limit_seconds: 10800,
+      });
+
+      const useVpnStore = await loadStore();
+      useVpnStore.setState({ state: "disconnected", freeTierRemaining: 30 });
+
+      await useVpnStore.getState().fetchFreeTier();
+
+      expect(useVpnStore.getState().freeTierRemaining).toBe(10800);
+    });
+
+    it("leaves an unlimited account alone", async () => {
+      // freeTierRemaining is null when the backend has no limit configured.
+      const useVpnStore = await loadStore();
+      useVpnStore.setState({
+        state: "connected",
+        freeTierRemaining: null,
+      });
+
+      useVpnStore.getState().tickFreeTier();
+
+      expect(vpnDisconnect).not.toHaveBeenCalled();
+    });
   });
 });

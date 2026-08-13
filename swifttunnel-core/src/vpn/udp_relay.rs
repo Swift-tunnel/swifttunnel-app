@@ -578,6 +578,9 @@ pub struct UdpRelay {
     /// address. Mid-session authentication polls this because the inbound
     /// thread owns socket reads once the session is running.
     last_auth_ack: parking_lot::Mutex<Option<(SocketAddr, RelayAuthAckStatus)>>,
+    /// Serializes live-session authentication so a lease refresh cannot race
+    /// an auto-route relay switch over the shared pending-auth slot.
+    auth_handshake_lock: tokio::sync::Mutex<()>,
     /// Latest Roblox DNS resolve response (request_id + host→IPs) recorded by the
     /// inbound receiver thread; polled by `resolve_roblox_hosts` during connect.
     last_resolve_response:
@@ -991,6 +994,7 @@ impl UdpRelay {
             switch_time: ArcSwap::from_pointee(None),
             pending_auth_addr: ArcSwap::from_pointee(None),
             last_auth_ack: parking_lot::Mutex::new(None),
+            auth_handshake_lock: tokio::sync::Mutex::new(()),
             last_resolve_response: parking_lot::Mutex::new(None),
             session_id,
             stop_flag,
@@ -1441,6 +1445,7 @@ impl UdpRelay {
         token: &str,
         target: SocketAddr,
     ) -> Result<Option<RelayAuthAckStatus>> {
+        let _auth_guard = self.auth_handshake_lock.lock().await;
         *self.last_auth_ack.lock() = None;
         self.pending_auth_addr.store(Arc::new(Some(target)));
 

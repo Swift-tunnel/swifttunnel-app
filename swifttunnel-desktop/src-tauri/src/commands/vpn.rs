@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::events::{
     COUNTRY_BAN_BYPASS_UNAVAILABLE, SERVER_LIST_UPDATED, VPN_STATE_CHANGED, VpnStateEvent,
@@ -398,6 +398,24 @@ pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), Strin
     result
 }
 
+async fn cleanup_terminal_vpn_error(state: &AppState) {
+    let mut vpn = state.vpn_connection.lock().await;
+    if !vpn.take_terminal_cleanup_request() {
+        return;
+    }
+
+    vpn.cleanup_after_terminal_error().await;
+    *state.split_tunnel_handle.write() = None;
+    *state.throughput_stats.write() = None;
+    drop(vpn);
+
+    state.discord_manager.lock().set_idle();
+
+    if let Err(e) = persist_session_settings(state, None) {
+        log::warn!("Failed to persist terminal VPN cleanup: {}", e);
+    }
+}
+
 fn vpn_state_event(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnStateEvent {
     let response = map_vpn_state(conn_state);
     VpnStateEvent {
@@ -429,7 +447,15 @@ pub(crate) fn spawn_vpn_state_bridge(
         // actual transitions.
         loop {
             let conn_state = rx.borrow_and_update().clone();
+            let terminal_error = matches!(
+                &conn_state,
+                swifttunnel_core::vpn::ConnectionState::Error(_)
+            );
             let _ = app.emit(VPN_STATE_CHANGED, vpn_state_event(conn_state));
+            if terminal_error {
+                let state = app.state::<AppState>();
+                cleanup_terminal_vpn_error(state.inner()).await;
+            }
             if rx.changed().await.is_err() {
                 // Sender dropped — the VpnConnection is gone, which only
                 // happens during app teardown. Stop the bridge cleanly.
@@ -798,12 +824,16 @@ pub struct FreeTierQuota {
     pub remaining_seconds: Option<i64>,
     /// Total allowance the remaining figure counts down from.
     pub limit_seconds: Option<i64>,
+    /// Seconds of grace left once the allowance is spent, `None` otherwise.
+    /// While this is set the backend is still issuing leases, so the client
+    /// warns and keeps the session up rather than hanging up at zero.
+    pub grace_seconds: Option<i64>,
 }
 
 /// Latest free-tier budget reported by the backend.
 ///
 /// Cheap: reads two atomics refreshed whenever a relay ticket is fetched
-/// (~5 min while connected). The UI ticks its own countdown in between and
+/// (~2 min while connected). The UI ticks its own countdown in between and
 /// resyncs from this, so polling it often is pointless.
 #[tauri::command]
 pub async fn vpn_get_free_tier() -> Result<FreeTierQuota, String> {
@@ -811,6 +841,7 @@ pub async fn vpn_get_free_tier() -> Result<FreeTierQuota, String> {
     Ok(FreeTierQuota {
         remaining_seconds,
         limit_seconds,
+        grace_seconds: swifttunnel_core::vpn::connection::free_tier_grace_seconds(),
     })
 }
 

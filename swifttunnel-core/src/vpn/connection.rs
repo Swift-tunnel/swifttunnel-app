@@ -65,6 +65,10 @@ const ETW_CONNECTION_READY_POLL_MS: u64 = 5;
 /// before teardown. Real dead relays still fail, but short NAT/ISP return-path
 /// stalls get a chance to recover instead of kicking users mid-game.
 const RELAY_DEAD_GRACE_SECS: u64 = 20;
+/// Authenticated relay leases last five minutes. Refresh comfortably before
+/// expiry while leaving enough room for a transient API failure and retry.
+const RELAY_LEASE_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
+const RELAY_LEASE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// Number of ICMP samples to collect per relay candidate when probing.
 const AUTO_ROUTING_PING_SAMPLES: usize = 5;
 const CONNECT_FAIL_HANDSHAKE_TIMEOUT: &str = "ST_CONNECT_HANDSHAKE_TIMEOUT";
@@ -85,15 +89,21 @@ const FALLBACK_RELAY_PORT: u16 = 51821;
 /// "no limit known" — either the backend has the limit switched off, or it
 /// predates the feature and omits the fields.
 ///
-/// Refreshed every time a relay ticket is fetched (~5 min while connected).
+/// Refreshed every time a relay ticket is fetched (~2 min while connected).
 /// The UI ticks its own countdown between refreshes and resyncs from here.
 static FREE_TIER_REMAINING_SECS: AtomicI64 = AtomicI64::new(-1);
 static FREE_TIER_LIMIT_SECS: AtomicI64 = AtomicI64::new(-1);
+
+/// Grace left after the allowance ran out, `-1` when not in grace. The backend
+/// is still issuing leases during this window, so the client must keep the
+/// session up and only warn.
+static FREE_TIER_GRACE_SECS: AtomicI64 = AtomicI64::new(-1);
 
 /// Record the budget carried on a freshly fetched ticket.
 fn record_free_tier_quota(ticket: &crate::auth::types::RelayTicketResponse) {
     FREE_TIER_REMAINING_SECS.store(ticket.remaining_seconds.unwrap_or(-1), Ordering::Relaxed);
     FREE_TIER_LIMIT_SECS.store(ticket.limit_seconds.unwrap_or(-1), Ordering::Relaxed);
+    FREE_TIER_GRACE_SECS.store(ticket.grace_seconds.unwrap_or(-1), Ordering::Relaxed);
 }
 
 /// Whether the crowded-relay notice has already been shown for the relay we are
@@ -151,6 +161,12 @@ pub fn free_tier_quota() -> (Option<i64>, Option<i64>) {
         if remaining < 0 { None } else { Some(remaining) },
         if limit <= 0 { None } else { Some(limit) },
     )
+}
+
+/// Grace seconds left, or `None` when the allowance has not run out.
+pub fn free_tier_grace_seconds() -> Option<i64> {
+    let grace = FREE_TIER_GRACE_SECS.load(Ordering::Relaxed);
+    if grace < 0 { None } else { Some(grace) }
 }
 
 static HANDSHAKE_TIMEOUT_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -434,11 +450,41 @@ fn relay_ticket_session_dead(error: &AuthError) -> bool {
 /// The quota is per account, not per relay, so a 429 here means every remaining
 /// candidate would 429 too. Callers use this to stop the candidate loop instead
 /// of walking the whole fleet before failing.
+/// The API refused because this build is too old (426 `update_required`).
+///
+/// Every relay will refuse too, so the connect must abort here. Without this
+/// the error fell through to the generic "candidate unavailable" path, which
+/// records `auth_required: false` — leaving the legacy-fallback selector with
+/// no evidence that authentication was mandatory, so it happily connected.
+fn relay_ticket_update_required_message(error: &AuthError) -> Option<String> {
+    match error {
+        AuthError::UpdateRequired(message) => Some(message.clone()),
+        _ => None,
+    }
+}
+
 fn relay_ticket_quota_message(error: &AuthError) -> Option<String> {
     match error {
         AuthError::FreeTierLimitReached(message) => Some(message.clone()),
         _ => None,
     }
+}
+
+fn terminal_relay_lease_error_message(error: &AuthError) -> Option<String> {
+    if let Some(message) = relay_ticket_quota_message(error) {
+        return Some(message);
+    }
+
+    if let Some(message) = relay_ticket_update_required_message(error) {
+        return Some(message);
+    }
+
+    if let Some(reason) = relay_ticket_ban_reason(error) {
+        return Some(format!("Your SwiftTunnel account is blocked: {reason}"));
+    }
+
+    relay_ticket_session_dead(error)
+        .then(|| "Your SwiftTunnel session expired. Sign in again.".to_string())
 }
 
 /// Relays within this many ms of the fastest are treated as equivalent, so the
@@ -999,6 +1045,13 @@ async fn authenticate_switch_target(
                     "relay ticket rejected: free tier allowance spent".to_string(),
                 );
             }
+            if relay_ticket_update_required_message(&e).is_some() {
+                // Every relay refuses an out-of-date build, so switching is
+                // pointless — Rejected, not Retryable.
+                return SwitchAuthOutcome::Rejected(
+                    "relay ticket rejected: build below MIN_CLIENT_VERSION".to_string(),
+                );
+            }
             return SwitchAuthOutcome::Retryable(format!("relay ticket fetch failed: {}", e));
         }
     };
@@ -1095,6 +1148,11 @@ pub struct VpnConnection {
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     /// Background task that performs async auto-routing IP lookups.
     auto_lookup_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Periodically renews the authenticated relay lease while connected.
+    relay_lease_refresh_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Set by the lease refresh task when a terminal auth or quota failure
+    /// requires the owning desktop task to tear down the session.
+    terminal_cleanup_requested: Arc<AtomicBool>,
     /// Auth manager used by the auto-routing task to fetch relay tickets for
     /// mid-session relay switches. Without it, auto-routing will not switch
     /// relays (an unauthenticated switch would be dropped by auth-required
@@ -1120,6 +1178,8 @@ impl VpnConnection {
             etw_watcher: None,
             auto_router: None,
             auto_lookup_handle: None,
+            relay_lease_refresh_handle: None,
+            terminal_cleanup_requested: Arc::new(AtomicBool::new(false)),
             auth_manager: None,
             process_performance_manager: None,
             bootstrap_dns_repair_applied: false,
@@ -1314,6 +1374,12 @@ impl VpnConnection {
             }
             matches!(*state, ConnectionState::Error(_))
         };
+
+        // A new connection attempt owns a fresh cleanup lifecycle. Any
+        // terminal request left by the previous lease task is reconciled by
+        // the Error cleanup below and must not tear down the new session.
+        self.terminal_cleanup_requested
+            .store(false, Ordering::SeqCst);
 
         // If the prior state was Error, the monitor task's recovery flow
         // already closed the driver + ran best-effort Arc-shared cleanup, but
@@ -1772,6 +1838,13 @@ impl VpnConnection {
                             let _ = driver.close();
                             return Err(VpnError::FreeTierLimitReached(message));
                         }
+                        if let Some(message) = relay_ticket_update_required_message(&e) {
+                            log::warn!(
+                                "V3: Relay ticket rejected - build below MIN_CLIENT_VERSION"
+                            );
+                            let _ = driver.close();
+                            return Err(VpnError::UpdateRequired(message));
+                        }
                         log::warn!(
                             "V3: Relay ticket unavailable for '{}' ({})",
                             candidate_region,
@@ -2001,6 +2074,7 @@ impl VpnConnection {
 
         let relay_for_lookup = Arc::clone(&relay);
         let relay_for_health = Arc::clone(&relay);
+        let relay_for_lease_refresh = Arc::clone(&relay);
         driver.set_relay_context(relay);
         log::info!("V3: UDP relay context set (auth mode: {})", relay_auth_mode);
         relay_for_lookup.set_ping_enabled(true);
@@ -2886,8 +2960,128 @@ impl VpnConnection {
             log::info!("V3: Process monitor stopped");
         });
 
+        if custom_relay_server.is_none() {
+            if let Some(auth_manager) = self.auth_manager.clone() {
+                let relay_for_refresh = relay_for_lease_refresh;
+                let router_for_refresh = self.auto_router.clone();
+                let fallback_region = selected_relay_region.clone();
+                let fallback_addr = relay_addr;
+                let session_id = relay_for_refresh.session_id_hex();
+                let state_for_refresh = Arc::clone(&self.state);
+                let terminal_cleanup_requested = Arc::clone(&self.terminal_cleanup_requested);
+
+                self.relay_lease_refresh_handle = Some(tokio::spawn(async move {
+                    let mut delay = RELAY_LEASE_REFRESH_INTERVAL;
+                    loop {
+                        tokio::time::sleep(delay).await;
+
+                        let (region, addr) = router_for_refresh
+                            .as_ref()
+                            .and_then(|router| router.current_relay())
+                            .unwrap_or_else(|| (fallback_region.clone(), fallback_addr));
+
+                        let access_token = {
+                            let manager = auth_manager.lock().await;
+                            match manager.get_access_token().await {
+                                Ok(token) => token,
+                                Err(error) => {
+                                    if let Some(message) =
+                                        terminal_relay_lease_error_message(&error)
+                                    {
+                                        log::warn!(
+                                            "Relay lease ended because the session is no longer authorized: {error}"
+                                        );
+                                        terminal_cleanup_requested.store(true, Ordering::SeqCst);
+                                        relay_for_refresh.stop();
+                                        let _ = state_for_refresh
+                                            .send_replace(ConnectionState::Error(message));
+                                        break;
+                                    }
+                                    log::warn!(
+                                        "Relay lease refresh could not obtain access token: {error}"
+                                    );
+                                    delay = RELAY_LEASE_RETRY_INTERVAL;
+                                    continue;
+                                }
+                            }
+                        };
+
+                        let client = AuthClient::new();
+
+                        match client
+                            .get_relay_ticket(&access_token, &region, &session_id)
+                            .await
+                        {
+                            Ok(ticket) => {
+                                record_free_tier_quota(&ticket);
+                                match relay_for_refresh
+                                    .authenticate_addr_with_ticket(&ticket.token, addr)
+                                    .await
+                                {
+                                    Ok(Some(status)) if status.is_authenticated() => {
+                                        log::debug!("Renewed relay lease for {region} at {addr}");
+                                        delay = RELAY_LEASE_REFRESH_INTERVAL;
+                                    }
+                                    Ok(Some(status)) => {
+                                        log::warn!(
+                                            "Relay lease renewal was rejected by {addr}: {}",
+                                            status.as_str()
+                                        );
+                                        delay = RELAY_LEASE_RETRY_INTERVAL;
+                                    }
+                                    Ok(None) => {
+                                        log::warn!("Relay lease renewal timed out for {addr}");
+                                        delay = RELAY_LEASE_RETRY_INTERVAL;
+                                    }
+                                    Err(error) => {
+                                        log::warn!(
+                                            "Relay lease re-authentication failed for {addr}: {error}"
+                                        );
+                                        delay = RELAY_LEASE_RETRY_INTERVAL;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(message) = terminal_relay_lease_error_message(&error) {
+                                    log::warn!(
+                                        "Relay lease ended because the server rejected the session: {error}"
+                                    );
+                                    terminal_cleanup_requested.store(true, Ordering::SeqCst);
+                                    relay_for_refresh.stop();
+                                    let _ = state_for_refresh
+                                        .send_replace(ConnectionState::Error(message));
+                                    break;
+                                }
+                                log::warn!("Relay lease refresh failed for {region}: {error}");
+                                delay = RELAY_LEASE_RETRY_INTERVAL;
+                            }
+                        }
+                    }
+                }));
+            } else {
+                log::warn!("Relay lease refresh unavailable because no auth manager is attached");
+            }
+        }
+
         log::info!("V3 split tunnel configured - game traffic relayed via UDP");
         Ok((running, relay_auth_mode, selected_relay_region, relay_addr))
+    }
+
+    /// Consume a terminal cleanup request raised by the relay lease task.
+    ///
+    /// The owning desktop task must perform cleanup because the lease task is
+    /// itself stored in `relay_lease_refresh_handle`; cleaning up from inside
+    /// that task would try to abort and await itself.
+    pub fn take_terminal_cleanup_request(&self) -> bool {
+        self.terminal_cleanup_requested
+            .swap(false, Ordering::SeqCst)
+    }
+
+    /// Tear down local session resources after a terminal lease failure while
+    /// preserving the Error state already published to the UI.
+    pub async fn cleanup_after_terminal_error(&mut self) {
+        self.cleanup().await;
+        self.release_free_tier_quota().await;
     }
 
     pub async fn disconnect(&mut self) -> VpnResult<()> {
@@ -2944,6 +3138,11 @@ impl VpnConnection {
     async fn cleanup(&mut self) {
         // Stop process monitor
         self.process_monitor_stop.store(true, Ordering::SeqCst);
+
+        if let Some(handle) = self.relay_lease_refresh_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
 
         // Stop ETW watcher (cleans up ETW session)
         if let Some(mut watcher) = self.etw_watcher.take() {
