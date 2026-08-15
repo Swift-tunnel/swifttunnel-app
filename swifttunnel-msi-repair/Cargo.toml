@@ -1,0 +1,17 @@
+[package]
+name = "swifttunnel-msi-repair"
+version = "0.1.0"
+edition = "2021"
+description = "Clears an orphaned SwiftTunnel MSI registration so an upgrade or uninstall can proceed"
+
+[dependencies]
+windows-registry = "0.5"
+
+[[bin]]
+name = "swifttunnel-msi-repair"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

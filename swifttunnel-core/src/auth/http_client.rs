@@ -179,7 +179,11 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Sign in failed: {} - {}", status, summarize_error_body(&body));
+            error!(
+                "Sign in failed: {} - {}",
+                status,
+                summarize_error_body(&body)
+            );
 
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
@@ -189,7 +193,8 @@ impl AuthClient {
             }
             return Err(AuthError::ApiError(format!(
                 "Sign in failed: {} - {}",
-                status, summarize_error_body(&body)
+                status,
+                summarize_error_body(&body)
             )));
         }
 
@@ -246,7 +251,11 @@ impl AuthClient {
             // response by value.
             let retry_after = retry_after_seconds(&response);
             let body = response.text().await.unwrap_or_default();
-            error!("Desktop token refresh failed: {} - {}", status, summarize_error_body(&body));
+            error!(
+                "Desktop token refresh failed: {} - {}",
+                status,
+                summarize_error_body(&body)
+            );
 
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
@@ -260,7 +269,8 @@ impl AuthClient {
 
             return Err(AuthError::ApiError(format!(
                 "Refresh failed: {} - {}",
-                status, summarize_error_body(&body)
+                status,
+                summarize_error_body(&body)
             )));
         }
 
@@ -358,7 +368,11 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Refresh token failed: {} - {}", status, summarize_error_body(&body));
+            error!(
+                "Refresh token failed: {} - {}",
+                status,
+                summarize_error_body(&body)
+            );
 
             // Detect permanently invalid refresh tokens (revoked, rotated, expired)
             if is_refresh_token_permanently_invalid(&body) {
@@ -367,7 +381,8 @@ impl AuthClient {
 
             return Err(AuthError::ApiError(format!(
                 "Refresh failed: {} - {}",
-                status, summarize_error_body(&body)
+                status,
+                summarize_error_body(&body)
             )));
         }
 
@@ -403,7 +418,11 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Get VPN config failed: {} - {}", status, summarize_error_body(&body));
+            error!(
+                "Get VPN config failed: {} - {}",
+                status,
+                summarize_error_body(&body)
+            );
             if let Some(error) = update_required_error(status, &body) {
                 return Err(error);
             }
@@ -412,7 +431,8 @@ impl AuthClient {
             }
             return Err(AuthError::ApiError(format!(
                 "Config fetch failed: {} - {}",
-                status, summarize_error_body(&body)
+                status,
+                summarize_error_body(&body)
             )));
         }
 
@@ -455,7 +475,8 @@ impl AuthClient {
             let body = response.text().await.unwrap_or_default();
             return Err(AuthError::ApiError(format!(
                 "Relay release failed: {} - {}",
-                status, summarize_error_body(&body)
+                status,
+                summarize_error_body(&body)
             )));
         }
 
@@ -492,7 +513,11 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Relay ticket fetch failed: {} - {}", status, summarize_error_body(&body));
+            error!(
+                "Relay ticket fetch failed: {} - {}",
+                status,
+                summarize_error_body(&body)
+            );
             if let Some(error) = update_required_error(status, &body) {
                 return Err(error);
             }
@@ -513,7 +538,8 @@ impl AuthClient {
             }
             return Err(AuthError::ApiError(format!(
                 "Relay ticket fetch failed: {} - {}",
-                status, summarize_error_body(&body)
+                status,
+                summarize_error_body(&body)
             )));
         }
 
@@ -554,7 +580,11 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Exchange token failed: {} - {}", status, summarize_error_body(&body));
+            error!(
+                "Exchange token failed: {} - {}",
+                status,
+                summarize_error_body(&body)
+            );
 
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
@@ -577,7 +607,8 @@ impl AuthClient {
 
             return Err(AuthError::ApiError(format!(
                 "Exchange failed: {} - {}",
-                status, summarize_error_body(&body)
+                status,
+                summarize_error_body(&body)
             )));
         }
 
@@ -608,7 +639,11 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Fetch user profile failed: {} - {}", status, summarize_error_body(&body));
+            error!(
+                "Fetch user profile failed: {} - {}",
+                status,
+                summarize_error_body(&body)
+            );
             if let Some(error) = update_required_error(status, &body) {
                 return Err(error);
             }
@@ -617,7 +652,8 @@ impl AuthClient {
             }
             return Err(AuthError::ApiError(format!(
                 "Profile fetch failed: {} - {}",
-                status, summarize_error_body(&body)
+                status,
+                summarize_error_body(&body)
             )));
         }
 
@@ -660,7 +696,11 @@ impl AuthClient {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            error!("Verify magic link failed: {} - {}", status, summarize_error_body(&body));
+            error!(
+                "Verify magic link failed: {} - {}",
+                status,
+                summarize_error_body(&body)
+            );
 
             if body.contains("Token has expired")
                 || body.contains("token is expired")
@@ -883,7 +923,8 @@ mod tests {
 
     #[test]
     fn test_summarize_error_body_keeps_json_intact() {
-        let body = r#"{"code":400,"error_code":"invalid_credentials","msg":"Invalid login credentials"}"#;
+        let body =
+            r#"{"code":400,"error_code":"invalid_credentials","msg":"Invalid login credentials"}"#;
         assert_eq!(summarize_error_body(body), body);
     }
 

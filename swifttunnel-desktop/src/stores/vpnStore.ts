@@ -510,6 +510,20 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           return {};
         }
 
+        // Keep the session clock honest about what the backend reports.
+        //
+        // `connectedAt` used to be written only by the connect action and
+        // cleared only by the disconnect action, so any drop the user did not
+        // click through — lease expiry, a network change, the backend tearing
+        // the tunnel down — left the old timestamp in place and the Connect
+        // tab kept counting. That is how a session read 31h when no relay in
+        // the fleet had held a session longer than about 7h, and why the
+        // number disagreed with the recorded usage.
+        const nowConnected = resp.state === "connected";
+        const connectedAt = nowConnected
+          ? (current.connectedAt ?? Date.now())
+          : null;
+
         return {
           state: resp.state,
           region: resp.region,
@@ -518,6 +532,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           splitTunnelActive: resp.split_tunnel_active,
           tunneledProcesses: resp.tunneled_processes,
           error: resp.error,
+          connectedAt,
         };
       });
     } catch (e) {

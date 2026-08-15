@@ -1220,4 +1220,52 @@ describe("stores/vpnStore", () => {
       expect(vpnDisconnect).not.toHaveBeenCalled();
     });
   });
+
+  describe("session clock", () => {
+    // A user reported a 31h session while no relay in the fleet had held a
+    // session longer than ~7h, and the recorded usage disagreed too. The clock
+    // was only ever reset by the disconnect action, so a drop the user did not
+    // click through left it running across the outage.
+    it('clears connectedAt when the backend reports the tunnel is no longer up', async () => {
+      const useVpnStore = await loadStore();
+      const startedLongAgo = Date.now() - 31 * 60 * 60 * 1000;
+      useVpnStore.setState({ state: 'connected', connectedAt: startedLongAgo });
+
+      vpnGetState.mockResolvedValue({
+        state: "disconnected" as const,
+        region: null,
+        server_endpoint: null,
+        assigned_ip: null,
+        relay_auth_mode: "ticket",
+        split_tunnel_active: false,
+        tunneled_processes: [],
+        error: null,
+      });
+      await useVpnStore.getState().fetchState();
+
+      expect(useVpnStore.getState().connectedAt).toBeNull();
+    });
+
+    it('keeps counting from the original connect while the tunnel stays up', async () => {
+      const useVpnStore = await loadStore();
+      const startedAt = Date.now() - 5 * 60 * 1000;
+      useVpnStore.setState({ state: 'connected', connectedAt: startedAt });
+
+      vpnGetState.mockResolvedValue(connectedState('singapore'));
+      await useVpnStore.getState().fetchState();
+
+      // Must not restart on every poll, or the timer would sit near zero.
+      expect(useVpnStore.getState().connectedAt).toBe(startedAt);
+    });
+
+    it('starts the clock when it finds a tunnel already connected', async () => {
+      const useVpnStore = await loadStore();
+      useVpnStore.setState({ state: 'disconnected', connectedAt: null });
+
+      vpnGetState.mockResolvedValue(connectedState('singapore'));
+      await useVpnStore.getState().fetchState();
+
+      expect(useVpnStore.getState().connectedAt).not.toBeNull();
+    });
+  });
 });
