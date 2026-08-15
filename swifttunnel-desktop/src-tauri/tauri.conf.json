@@ -90,10 +90,12 @@
     "windows": {
       "wix": {
         "fragmentPaths": [
-          "wix/nsis-migration.wxs"
+          "wix/nsis-migration.wxs",
+          "wix/msi-repair.wxs"
         ],
         "componentGroupRefs": [
-          "NsisMigration"
+          "NsisMigration",
+          "MsiRepair"
         ]
       }
     },

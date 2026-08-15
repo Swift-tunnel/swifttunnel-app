@@ -643,6 +643,24 @@ jobs:
           [System.IO.File]::WriteAllText($confPath, ($config | ConvertTo-Json -Depth 32), $utf8NoBom)
           Write-Host "::notice::Authenticode signCommand injected - Tauri will sign SwiftTunnel.exe and the MSI installer"
 
+      # build.rs embeds this binary into the MSI and runs it before Windows
+      # tries to remove the previous version, so an upgrade on a machine whose
+      # cached package is gone repairs itself instead of stopping on "the
+      # feature you are trying to use is on a network resource that is
+      # unavailable". Both architectures are built here because build.rs looks
+      # for the binary under the target triple it is packaging, and it fails
+      # the build rather than quietly producing an installer without it.
+      - name: Build MSI repair binary
+        shell: pwsh
+        run: |
+          cargo build -p swifttunnel-msi-repair --release --target x86_64-pc-windows-msvc
+          cargo build -p swifttunnel-msi-repair --release --target aarch64-pc-windows-msvc
+          foreach ($t in @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
+            $exe = "target/$t/release/swifttunnel-msi-repair.exe"
+            if (-not (Test-Path $exe)) { throw "MSI repair binary missing for $t" }
+            Write-Host "::notice::Built $exe ($((Get-Item $exe).Length) bytes)"
+          }
+
       - name: Build and publish x64 release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:

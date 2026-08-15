@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Clears an orphaned SwiftTunnel MSI registration before Windows tries to
+  remove the previous version.
+
+  The failure this exists for: a major upgrade uninstalls the old version
+  first, and Windows needs the *original* .msi to do it. When the cached copy
+  under C:\Windows\Installer is gone (PC cleanup tools, a tidied Downloads
+  folder, or the updater's %TEMP% directory that Windows wipes itself), the
+  install stops on "The feature you are trying to use is on a network resource
+  that is unavailable" and asks the user for a file they no longer have. The
+  machine is then stuck: it cannot upgrade, and it cannot uninstall either.
+
+  Nothing shipped *inside* the new version can fix this, because the break
+  happens before any of its code runs. It has to be handled here.
+
+  Scheduling: RemoveExistingProducts is sequenced at 1501, directly after
+  InstallInitialize at 1500, so there is no sequence number free between them
+  and a deferred action cannot be placed in that gap. This runs immediate and
+  early instead, before InstallValidate, which is well ahead of the removal.
+  A per-machine install is elevated by then, which the registry writes need.
+
+  Return="ignore" is deliberate. A machine that is *not* broken must install
+  exactly as before, and a repair that fails must never be the reason an
+  install fails. The binary itself is also a no-op when the cached package is
+  present, so the healthy path is left completely alone.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!--
+      Embedded in the MSI's Binary table rather than installed as a file: it
+      must run before InstallFiles has put anything on disk.
+
+      This file is a template. build.rs substitutes the placeholder for the
+      absolute path of the compiled binary and writes wix/msi-repair.wxs, which
+      is what tauri.conf.json points at. Edit the .in file, never the generated
+      one.
+
+      Two dead ends worth not repeating. A relative path compiles and then
+      fails at link: candle records the path as written, and light resolves it
+      from a different working directory, so it dies with "The system cannot
+      find the file". And $(env.…) works when candle is run by hand but not
+      under `tauri build`, because Tauri does not pass the environment through
+      to the candle process it spawns.
+    -->
+    <Binary Id="SwiftTunnelMsiRepairBin" SourceFile="@SWIFTTUNNEL_MSI_REPAIR_EXE@" />
+
+    <CustomAction Id="ClearOrphanedSwiftTunnelRegistration"
+                  BinaryKey="SwiftTunnelMsiRepairBin"
+                  ExeCommand=""
+                  Execute="immediate"
+                  Return="ignore" />
+
+    <!-- Fragments are only linked in when something references them, so this
+         marker component is what pulls the custom action and its sequencing
+         into the package via componentGroupRefs in tauri.conf.json. -->
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="MsiRepairMarker" Guid="C4F8A1D6-3B7E-4A29-9E5C-8D1F2A6B4C39">
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\SwiftTunnel\Migration"
+                       Name="MsiRepairInstalled"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="MsiRepair">
+      <ComponentRef Id="MsiRepairMarker" />
+    </ComponentGroup>
+
+    <InstallExecuteSequence>
+      <!--
+        WIX_UPGRADE_DETECTED is set only when an older SwiftTunnel is already
+        registered, which is the sole situation this can help with. Gating on
+        it keeps the binary from being extracted and run on a clean first
+        install, where there is nothing to repair.
+
+        That is deliberate restraint rather than tidiness: the installers ship
+        unsigned, so every unsigned executable msiexec unpacks into %TEMP% and
+        runs elevated is another chance for Defender to take an interest. This
+        one also edits the registry, which heuristics weigh heavily. Running it
+        only on upgrades roughly halves how often it is seen at all.
+
+        NOT REMOVE keeps it off uninstalls and repairs, where the registration
+        is supposed to still be there.
+      -->
+      <Custom Action="ClearOrphanedSwiftTunnelRegistration" Before="InstallValidate">
+        NOT Installed AND NOT REMOVE AND WIX_UPGRADE_DETECTED
+      </Custom>
+    </InstallExecuteSequence>
+  </Fragment>
+</Wix>
