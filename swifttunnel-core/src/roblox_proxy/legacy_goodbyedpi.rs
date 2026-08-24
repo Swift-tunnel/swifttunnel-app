@@ -13,10 +13,10 @@ const GOODBYEDPI_EXE_NAME: &str = "goodbyedpi.exe";
 pub fn cleanup_for_uninstall() -> Result<(), String> {
     let mut errors = Vec::new();
 
-    if cfg!(windows) {
-        if let Err(e) = stop_managed_goodbyedpi_processes() {
-            errors.push(e);
-        }
+    if cfg!(windows)
+        && let Err(e) = stop_managed_goodbyedpi_processes()
+    {
+        errors.push(e);
     }
 
     if let Err(e) = remove_goodbyedpi_data_dir() {

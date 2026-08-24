@@ -196,13 +196,13 @@ pub fn write_tso_marker(adapter_name: &str) {
 
 /// Delete TSO marker file
 pub fn delete_tso_marker() {
-    if let Some(marker_path) = get_marker_path() {
-        if marker_path.exists() {
-            if let Err(e) = fs::remove_file(&marker_path) {
-                log::warn!("Failed to delete TSO marker file: {}", e);
-            } else {
-                log::debug!("TSO marker file deleted");
-            }
+    if let Some(marker_path) = get_marker_path()
+        && marker_path.exists()
+    {
+        if let Err(e) = fs::remove_file(&marker_path) {
+            log::warn!("Failed to delete TSO marker file: {}", e);
+        } else {
+            log::debug!("TSO marker file deleted");
         }
     }
 }
@@ -215,10 +215,10 @@ pub fn read_tso_marker() -> Option<TsoMarker> {
     }
 
     let raw = fs::read(&marker_path).ok()?;
-    if let Ok(marker) = serde_json::from_slice::<TsoMarker>(&raw) {
-        if !marker.adapter_name.trim().is_empty() {
-            return Some(marker);
-        }
+    if let Ok(marker) = serde_json::from_slice::<TsoMarker>(&raw)
+        && !marker.adapter_name.trim().is_empty()
+    {
+        return Some(marker);
     }
 
     let adapter_name = String::from_utf8_lossy(&raw).trim().to_string();

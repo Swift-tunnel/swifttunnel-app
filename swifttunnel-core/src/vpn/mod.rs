@@ -19,6 +19,7 @@
 //! - servers.rs: Server list and latency measurement
 
 pub mod auto_routing;
+pub mod bypass_diag;
 pub mod connection;
 pub(crate) mod diskless_passthrough;
 pub mod error_messages;

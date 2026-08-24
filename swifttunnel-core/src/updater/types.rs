@@ -59,9 +59,10 @@ pub struct UpdateInfo {
 }
 
 /// User-selected update channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum UpdateChannel {
     Live,
+    #[default]
     Stable,
 }
 
@@ -81,12 +82,6 @@ impl fmt::Display for UpdateChannel {
             UpdateChannel::Live => write!(f, "Live"),
             UpdateChannel::Stable => write!(f, "Stable"),
         }
-    }
-}
-
-impl Default for UpdateChannel {
-    fn default() -> Self {
-        Self::Stable
     }
 }
 

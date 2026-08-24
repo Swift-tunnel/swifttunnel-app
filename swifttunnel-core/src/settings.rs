@@ -185,32 +185,44 @@ pub struct AppSettings {
     /// Runs the scoped GoodbyeDPI helper for Roblox hostnames AND relays the
     /// Roblox control plane, launch-critical settings hosts, and gameplay UDP —
     /// the censor may block Roblox's IP ranges wholesale, so nothing is
-    /// trusted to the direct path. Off by default. Mutually exclusive with
-    /// `enable_partial_country_ban`.
+    /// trusted to the direct path. Off by default.
     #[serde(default)]
     pub enable_country_ban: bool,
-    /// Bypass a PARTIAL country block (only specific games banned, e.g.
-    /// Vietnam's TSB/JJS bans).
+
+    /// Throttle background polling while the window is not focused.
     ///
-    /// Relays the Roblox web/search/join control path so banned games appear
-    /// and launch; gameplay UDP and bulk asset/CDN traffic stay DIRECT for the
-    /// player's real ping and normal asset loading. No GoodbyeDPI. Off by
-    /// default. Mutually exclusive with `enable_country_ban`.
-    #[serde(default)]
-    pub enable_partial_country_ban: bool,
+    /// The UI lives in a WebView2 process, and while connected the Connect
+    /// tab polls throughput, state and ping several times a second. None of
+    /// that is being read once the player alt-tabs into a game, but it keeps
+    /// costing IPC round trips and re-renders that compete with the game for
+    /// CPU. Users have reported exactly this as SwiftTunnel making the game
+    /// stutter, and traced it to the Edge WebView process.
+    ///
+    /// On by default. Exposed as a setting because anyone watching the graph
+    /// on a second monitor genuinely wants the fast rate.
+    #[serde(default = "default_idle_when_unfocused")]
+    pub idle_when_unfocused: bool,
+
+    /// Draw the live throughput graph on the Connect tab.
+    ///
+    /// The graph is the most expensive thing in the UI: a canvas redrawn on
+    /// a requestAnimationFrame loop, fed by a throughput sample every 500ms.
+    /// That is fine while someone is looking at it, and pure cost for anyone
+    /// who keeps the window open on a second monitor while playing, where it
+    /// competes with the game for GPU and CPU.
+    ///
+    /// On by default. Turning it off stops both the redraw and the sampling.
+    #[serde(default = "default_show_live_graph")]
+    pub show_live_graph: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AdapterBindingMode {
     SmartAuto,
+    #[default]
     Manual,
-}
-
-impl Default for AdapterBindingMode {
-    fn default() -> Self {
-        Self::Manual
-    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -230,6 +242,14 @@ fn default_discord_rpc() -> bool {
 
 fn default_auto_routing() -> bool {
     false // Off by default (public option in Connect tab)
+}
+
+fn default_show_live_graph() -> bool {
+    true
+}
+
+fn default_idle_when_unfocused() -> bool {
+    true
 }
 
 fn default_minimize_to_tray() -> bool {
@@ -290,7 +310,8 @@ impl Default for AppSettings {
             game_process_performance: GameProcessPerformanceSettings::default(),
             enable_api_tunneling: false,
             enable_country_ban: false,
-            enable_partial_country_ban: false,
+            idle_when_unfocused: default_idle_when_unfocused(),
+            show_live_graph: default_show_live_graph(),
         }
     }
 }
@@ -314,20 +335,11 @@ impl AppSettings {
         // Older releases serialized false as the default even though the app has
         // no user-facing toggle. Keep app-close safe for shared/cafe PCs.
         self.minimize_to_tray = true;
-        // The two bypass modes route gameplay UDP opposite ways; if both are
-        // somehow set (hand-edited file, downgrade/upgrade), full wins - a
-        // fully-blocked user with direct UDP can't play at all, while a
-        // partially-blocked user on the relay merely has higher ping.
-        if self.enable_country_ban && self.enable_partial_country_ban {
-            self.enable_partial_country_ban = false;
-        }
-        // Partial bypass already routes the Roblox join/control path and must
-        // keep gameplay UDP direct. Persisting Route Assist alongside it makes
-        // the UI/support reports look contradictory even though the backend lets
-        // Partial win, so normalize the saved state too.
-        if self.enable_partial_country_ban {
-            self.enable_api_tunneling = false;
-        }
+        // Partial Bypass was removed. A saved `enable_partial_country_ban`
+        // is ignored as an unknown field, so upgrading users simply lose the
+        // mode rather than hitting a parse error. Both normalisation rules
+        // that lived here existed only to reconcile it against the other two
+        // modes, so they went with it.
     }
 }
 
@@ -408,10 +420,10 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
     };
 
     // Create directory if it doesn't exist
-    if !dir.exists() {
-        if let Err(e) = fs::create_dir_all(&dir) {
-            return Err(format!("Failed to create settings directory: {}", e));
-        }
+    if !dir.exists()
+        && let Err(e) = fs::create_dir_all(&dir)
+    {
+        return Err(format!("Failed to create settings directory: {}", e));
     }
 
     let path = dir.join(SETTINGS_FILE);
@@ -488,15 +500,18 @@ mod tests {
 
     #[test]
     fn test_settings_roundtrip() {
-        let mut settings = AppSettings::default();
-        settings.theme = "light".to_string();
-        settings.optimizations_active = true;
-        settings.selected_region = "tokyo".to_string();
-        settings.selected_server = "tokyo-02".to_string();
-        settings.update_channel = UpdateChannel::Live;
-        settings.preferred_physical_adapter_guid =
-            Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string());
-        settings.adapter_binding_mode = AdapterBindingMode::Manual;
+        let mut settings = AppSettings {
+            theme: "light".to_string(),
+            optimizations_active: true,
+            selected_region: "tokyo".to_string(),
+            selected_server: "tokyo-02".to_string(),
+            update_channel: UpdateChannel::Live,
+            preferred_physical_adapter_guid: Some(
+                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+            ),
+            adapter_binding_mode: AdapterBindingMode::Manual,
+            ..Default::default()
+        };
         settings
             .game_process_performance
             .high_performance_gpu_binding = true;
@@ -527,9 +542,12 @@ mod tests {
 
     #[test]
     fn test_settings_sanitize_normalizes_preferred_physical_adapter_guid() {
-        let mut settings = AppSettings::default();
-        settings.preferred_physical_adapter_guid =
-            Some("  {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}  ".to_string());
+        let mut settings = AppSettings {
+            preferred_physical_adapter_guid: Some(
+                "  {AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}  ".to_string(),
+            ),
+            ..Default::default()
+        };
         settings.sanitize_in_place();
         assert_eq!(
             settings.preferred_physical_adapter_guid.as_deref(),
@@ -614,8 +632,10 @@ mod tests {
 
     #[test]
     fn test_settings_sanitize_migrates_legacy_minimize_to_tray_false() {
-        let mut settings = AppSettings::default();
-        settings.minimize_to_tray = false;
+        let mut settings = AppSettings {
+            minimize_to_tray: false,
+            ..Default::default()
+        };
 
         settings.sanitize_in_place();
 
@@ -641,8 +661,10 @@ mod tests {
 
     #[test]
     fn test_settings_whitelisted_regions_roundtrip() {
-        let mut settings = AppSettings::default();
-        settings.whitelisted_regions = vec!["Singapore".to_string(), "US East".to_string()];
+        let settings = AppSettings {
+            whitelisted_regions: vec!["Singapore".to_string(), "US East".to_string()],
+            ..Default::default()
+        };
 
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
@@ -662,49 +684,37 @@ mod tests {
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!loaded.enable_api_tunneling);
         assert!(!loaded.enable_country_ban);
-        assert!(!loaded.enable_partial_country_ban);
     }
 
     #[test]
     fn test_settings_api_tunneling_roundtrip() {
-        let mut settings = AppSettings::default();
-        settings.enable_api_tunneling = true;
-        settings.enable_country_ban = true;
-        settings.enable_partial_country_ban = true;
+        let settings = AppSettings {
+            enable_api_tunneling: true,
+            enable_country_ban: true,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&settings).unwrap();
         let loaded: AppSettings = serde_json::from_str(&json).unwrap();
         assert!(loaded.enable_api_tunneling);
         assert!(loaded.enable_country_ban);
-        assert!(loaded.enable_partial_country_ban);
     }
 
     #[test]
-    fn test_sanitize_full_bypass_wins_over_partial() {
-        let mut settings = AppSettings::default();
-        settings.enable_country_ban = true;
-        settings.enable_partial_country_ban = true;
-        settings.sanitize_in_place();
-        assert!(settings.enable_country_ban);
-        assert!(!settings.enable_partial_country_ban);
+    fn ignores_a_saved_partial_bypass_flag() {
+        // Partial Bypass was removed. Anyone upgrading still has
+        // `enable_partial_country_ban` in their settings.json, and the parse
+        // must survive it rather than throwing the whole file away.
+        let json = r#"{
+            "theme": "dark",
+            "config": {},
+            "optimizations_active": false,
+            "enable_country_ban": true,
+            "enable_partial_country_ban": true
+        }"#;
 
-        // Partial alone is untouched.
-        let mut settings = AppSettings::default();
-        settings.enable_partial_country_ban = true;
-        settings.sanitize_in_place();
-        assert!(!settings.enable_country_ban);
-        assert!(settings.enable_partial_country_ban);
-    }
+        let loaded: AppSettings = serde_json::from_str(json).unwrap();
 
-    #[test]
-    fn test_sanitize_partial_bypass_disables_route_assist() {
-        let mut settings = AppSettings::default();
-        settings.enable_api_tunneling = true;
-        settings.enable_partial_country_ban = true;
-
-        settings.sanitize_in_place();
-
-        assert!(!settings.enable_api_tunneling);
-        assert!(settings.enable_partial_country_ban);
+        assert!(loaded.enable_country_ban, "the surviving mode is preserved");
     }
 
     #[test]

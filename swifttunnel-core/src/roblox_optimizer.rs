@@ -86,7 +86,7 @@ impl RobloxOptimizer {
     }
 
     /// Find the GlobalBasicSettings XML file
-    fn find_settings_file(roblox_dir: &PathBuf) -> PathBuf {
+    fn find_settings_file(roblox_dir: &Path) -> PathBuf {
         // Prefer any discovered GlobalBasicSettings_*.xml file and pick the highest index.
         let mut latest_indexed: Option<(u32, PathBuf)> = None;
         if let Ok(entries) = fs::read_dir(roblox_dir) {
@@ -178,7 +178,7 @@ impl RobloxOptimizer {
     }
 
     /// Get the path to the settings file
-    pub fn get_settings_path(&self) -> &PathBuf {
+    pub fn get_settings_path(&self) -> &Path {
         &self.settings_path
     }
 
@@ -275,12 +275,13 @@ impl RobloxOptimizer {
 
     /// Remove read-only attribute from a file (Windows only)
     #[cfg(windows)]
+    #[allow(dead_code)]
     fn remove_readonly(&self) -> Result<()> {
         Self::remove_readonly_path(&self.settings_path)
     }
 
     #[cfg(windows)]
-    fn remove_readonly_path(path: &PathBuf) -> Result<()> {
+    fn remove_readonly_path(path: &Path) -> Result<()> {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
 
@@ -302,12 +303,14 @@ impl RobloxOptimizer {
 
     /// Set read-only attribute on a file (Windows only)
     #[cfg(windows)]
+    #[allow(dead_code)]
     fn set_readonly(&self) -> Result<()> {
         Self::set_readonly_path(&self.settings_path)
     }
 
     #[cfg(windows)]
-    fn set_readonly_path(path: &PathBuf) -> Result<()> {
+    #[allow(dead_code)]
+    fn set_readonly_path(path: &Path) -> Result<()> {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
 
@@ -329,12 +332,13 @@ impl RobloxOptimizer {
 
     /// Check if file is read-only (Windows only)
     #[cfg(windows)]
+    #[allow(dead_code)]
     fn is_readonly(&self) -> bool {
         Self::is_readonly_path(&self.settings_path)
     }
 
     #[cfg(windows)]
-    fn is_readonly_path(path: &PathBuf) -> bool {
+    fn is_readonly_path(path: &Path) -> bool {
         if let Ok(metadata) = fs::metadata(path) {
             // FILE_ATTRIBUTE_READONLY = 0x1
             (metadata.file_attributes() & 0x1) != 0
@@ -349,7 +353,7 @@ impl RobloxOptimizer {
     }
 
     #[cfg(not(windows))]
-    fn remove_readonly_path(path: &PathBuf) -> Result<()> {
+    fn remove_readonly_path(path: &Path) -> Result<()> {
         // On non-Windows, use permissions
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(path)?.permissions();
@@ -364,7 +368,7 @@ impl RobloxOptimizer {
     }
 
     #[cfg(not(windows))]
-    fn set_readonly_path(path: &PathBuf) -> Result<()> {
+    fn set_readonly_path(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(path)?.permissions();
         perms.set_mode(0o444); // r--r--r--
@@ -378,7 +382,7 @@ impl RobloxOptimizer {
     }
 
     #[cfg(not(windows))]
-    fn is_readonly_path(path: &PathBuf) -> bool {
+    fn is_readonly_path(path: &Path) -> bool {
         if let Ok(metadata) = fs::metadata(path) {
             metadata.permissions().readonly()
         } else {
@@ -389,6 +393,52 @@ impl RobloxOptimizer {
     /// Apply Roblox-specific optimizations.
     /// Returns a list of non-fatal warnings (e.g. FFlag failures) on success.
     /// Only returns `Err` when the XML settings step fails hard.
+    /// Rewrite only the launch window size, after Roblox has exited.
+    ///
+    /// Roblox saves its own window geometry into GlobalBasicSettings on the way
+    /// out, which overwrites whatever we set. That is why users report the
+    /// window resolution option "not working": it is applied, then clobbered,
+    /// so the next launch uses Roblox's number rather than theirs. A machine
+    /// under test had StartScreenSize at 1938x1038, a size nothing in this app
+    /// would ever write.
+    ///
+    /// Writing when Roblox *starts* would be too late, since it has already
+    /// read the file by then. Writing once it has closed means our value is the
+    /// one sitting there for the next launch.
+    ///
+    /// Deliberately narrow: touching only StartScreenSize and Fullscreen, not
+    /// FFlags or graphics quality, so a background re-apply can never surprise
+    /// someone by changing settings they did not ask about.
+    pub fn reapply_window_size(&self, config: &RobloxSettingsConfig) -> Result<()> {
+        let settings_path = self.resolve_settings_path();
+        if !settings_path.exists() {
+            return Ok(());
+        }
+
+        if Self::is_readonly_path(&settings_path) {
+            Self::remove_readonly_path(&settings_path)?;
+        }
+
+        let content = fs::read_to_string(&settings_path)?;
+        let (width, height) =
+            Self::sanitize_window_dimensions(config.window_width, config.window_height);
+
+        let updated =
+            self.set_xml_vector2_value(&content, "StartScreenSize", width as i32, height as i32);
+        let updated = self.set_xml_bool_value(&updated, "Fullscreen", config.window_fullscreen);
+
+        if updated == content {
+            return Ok(());
+        }
+
+        fs::write(&settings_path, &updated)?;
+        info!(
+            "Restored Roblox launch window to {}x{} after it closed (fullscreen: {})",
+            width, height, config.window_fullscreen
+        );
+        Ok(())
+    }
+
     pub fn apply_optimizations(&self, config: &RobloxSettingsConfig) -> Result<Vec<String>> {
         info!("Applying Roblox optimizations via GlobalBasicSettings");
         let settings_path = self.resolve_settings_path();
@@ -724,8 +774,11 @@ impl RobloxOptimizer {
     // NVIDIA Profile Inspector integration used by Ultraboost. This is
     // deliberately gated to machines that actually report an NVIDIA GPU.
     const NPI_EXE_NAME: &'static str = "nvidiaProfileInspector.exe";
+    #[allow(dead_code)]
     const NPI_RELEASE_TAG: &'static str = "v3.0.1.12";
+    #[allow(dead_code)]
     const NPI_RELEASE_ZIP_URL: &'static str = "https://github.com/Orbmu2k/nvidiaProfileInspector/releases/download/v3.0.1.12/nvidiaProfileInspector.zip";
+    #[allow(dead_code)]
     const NPI_RELEASE_ZIP_SHA256: &'static str =
         "494065af4ac3e9ce672c95e51e6b8a5301c208b6fed777ee6bbfe755081ba308";
     const NPI_EXE_SHA256: &'static str =
@@ -1299,6 +1352,7 @@ impl RobloxOptimizer {
         }
     }
 
+    #[allow(dead_code)]
     fn escape_powershell_single_quoted(value: &str) -> String {
         value.replace('\'', "''")
     }
@@ -1387,7 +1441,7 @@ impl RobloxOptimizer {
     /// Separated from apply_optimizations so FFlags can run independently.
     fn apply_xml_settings(
         &self,
-        settings_path: &PathBuf,
+        settings_path: &Path,
         config: &RobloxSettingsConfig,
     ) -> Result<()> {
         // Backup current settings first
@@ -1573,11 +1627,12 @@ impl RobloxOptimizer {
     }
 
     /// Backup current Roblox settings
+    #[allow(dead_code)]
     fn backup_settings(&self) -> Result<()> {
         self.backup_settings_for(&self.settings_path)
     }
 
-    fn backup_settings_for(&self, settings_path: &PathBuf) -> Result<()> {
+    fn backup_settings_for(&self, settings_path: &Path) -> Result<()> {
         if settings_path.exists() {
             info!("Creating backup of Roblox settings");
             fs::copy(settings_path, &self.backup_path)?;
@@ -1656,10 +1711,10 @@ impl RobloxOptimizer {
         };
         for client_settings in paths {
             let settings_path = client_settings.join("ClientAppSettings.json");
-            if let Ok(settings) = Self::read_client_app_settings(&settings_path) {
-                if settings.contains_key(*probe_key) {
-                    return true;
-                }
+            if let Ok(settings) = Self::read_client_app_settings(&settings_path)
+                && settings.contains_key(*probe_key)
+            {
+                return true;
             }
         }
         false
@@ -1681,13 +1736,13 @@ impl RobloxOptimizer {
         }
 
         // FPS unlock lives in GlobalBasicSettings `FramerateCap` (<= 60 = gone).
-        if config.unlock_fps {
-            if let Ok(current) = self.read_current_settings() {
-                if current.fps_cap <= 60 {
-                    effective.unlock_fps = false;
-                } else {
-                    effective.target_fps = current.fps_cap;
-                }
+        if config.unlock_fps
+            && let Ok(current) = self.read_current_settings()
+        {
+            if current.fps_cap <= 60 {
+                effective.unlock_fps = false;
+            } else {
+                effective.target_fps = current.fps_cap;
             }
         }
 
@@ -2015,7 +2070,7 @@ impl RobloxOptimizer {
         Self::find_roblox_version_folder_in(&PathBuf::from(local_app_data))
     }
 
-    fn find_roblox_version_folder_in(local_app_data: &PathBuf) -> Option<PathBuf> {
+    fn find_roblox_version_folder_in(local_app_data: &Path) -> Option<PathBuf> {
         Self::find_roblox_version_folders_in(local_app_data)
             .into_iter()
             .next()
@@ -2028,7 +2083,7 @@ impl RobloxOptimizer {
         Self::find_roblox_version_folders_in(&PathBuf::from(local_app_data))
     }
 
-    fn find_roblox_version_folders_in(local_app_data: &PathBuf) -> Vec<PathBuf> {
+    fn find_roblox_version_folders_in(local_app_data: &Path) -> Vec<PathBuf> {
         let versions_dir = local_app_data.join("Roblox").join("Versions");
 
         if !versions_dir.exists() {
@@ -2044,15 +2099,14 @@ impl RobloxOptimizer {
                     let Some(name) = path.file_name().map(|value| value.to_string_lossy()) else {
                         continue;
                     };
-                    if name.starts_with("version-") {
-                        if path.join("RobloxPlayerBeta.exe").exists() {
-                            if let Ok(metadata) = entry.metadata() {
-                                let modified = metadata
-                                    .modified()
-                                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                                versions.push((path, modified));
-                            }
-                        }
+                    if name.starts_with("version-")
+                        && path.join("RobloxPlayerBeta.exe").exists()
+                        && let Ok(metadata) = entry.metadata()
+                    {
+                        let modified = metadata
+                            .modified()
+                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                        versions.push((path, modified));
                     }
                 }
             }
@@ -2063,6 +2117,7 @@ impl RobloxOptimizer {
     }
 
     /// Get the ClientSettings folder path (creates it if needed).
+    #[allow(dead_code)]
     fn get_client_settings_path() -> Result<Option<PathBuf>> {
         let version_folder = match Self::find_roblox_version_folder() {
             Some(path) => path,
@@ -2079,8 +2134,9 @@ impl RobloxOptimizer {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn get_client_settings_path_for_local_app_data(
-        local_app_data: &PathBuf,
+        local_app_data: &Path,
     ) -> Result<Option<PathBuf>> {
         let version_folder = match Self::find_roblox_version_folder_in(local_app_data) {
             Some(path) => path,
@@ -2089,7 +2145,8 @@ impl RobloxOptimizer {
         Self::get_client_settings_path_for_version(&version_folder)
     }
 
-    fn get_client_settings_path_for_version(version_folder: &PathBuf) -> Result<Option<PathBuf>> {
+    #[allow(dead_code)]
+    fn get_client_settings_path_for_version(version_folder: &Path) -> Result<Option<PathBuf>> {
         Self::get_client_settings_path_for_version_checked(version_folder, true)
     }
 
@@ -2125,7 +2182,7 @@ impl RobloxOptimizer {
     }
 
     fn get_client_settings_paths_for_local_app_data(
-        local_app_data: &PathBuf,
+        local_app_data: &Path,
         create_missing: bool,
     ) -> Result<Vec<PathBuf>> {
         let version_folders = Self::find_roblox_version_folders_in(local_app_data);
@@ -2152,7 +2209,7 @@ impl RobloxOptimizer {
     }
 
     fn get_client_settings_path_for_version_checked(
-        version_folder: &PathBuf,
+        version_folder: &Path,
         create_missing: bool,
     ) -> Result<Option<PathBuf>> {
         let client_settings = version_folder.join("ClientSettings");
@@ -2174,7 +2231,7 @@ impl RobloxOptimizer {
     }
 
     fn get_bootstrapper_client_settings_paths_for_local_app_data(
-        local_app_data: &PathBuf,
+        local_app_data: &Path,
         create_missing: bool,
     ) -> Vec<PathBuf> {
         let mut paths = Vec::new();
@@ -2230,7 +2287,7 @@ impl RobloxOptimizer {
 
     fn get_bootstrapper_client_settings_path_checked(
         project_name: &str,
-        client_settings: &PathBuf,
+        client_settings: &Path,
         create_missing: bool,
     ) -> Result<Option<PathBuf>> {
         if !client_settings.exists() {
@@ -2249,7 +2306,7 @@ impl RobloxOptimizer {
             ));
         }
 
-        Ok(Some(client_settings.clone()))
+        Ok(Some(client_settings.to_path_buf()))
     }
 
     fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -2292,7 +2349,7 @@ impl RobloxOptimizer {
     fn apply_client_fflags_for_local_app_data(
         &self,
         config: &RobloxSettingsConfig,
-        local_app_data: &PathBuf,
+        local_app_data: &Path,
     ) -> Result<FFlagApplyOutcome> {
         let custom_fflags_requested = !Self::parse_custom_fflags(config)?.is_empty();
         let should_write_fflags = config.ultraboost || custom_fflags_requested;
@@ -2376,7 +2433,7 @@ impl RobloxOptimizer {
     fn apply_client_fflags_in_path(
         &self,
         config: &RobloxSettingsConfig,
-        client_settings: &PathBuf,
+        client_settings: &Path,
     ) -> Result<FFlagApplyOutcome> {
         if !client_settings.is_dir() {
             return Err(anyhow::anyhow!(
@@ -2438,7 +2495,7 @@ impl RobloxOptimizer {
     }
 
     fn read_client_app_settings(
-        settings_path: &PathBuf,
+        settings_path: &Path,
     ) -> Result<HashMap<String, serde_json::Value>> {
         if !settings_path.exists() {
             return Ok(HashMap::new());
@@ -2563,7 +2620,7 @@ impl RobloxOptimizer {
     }
 
     #[cfg(test)]
-    fn remove_all_fflags_for_local_app_data(&self, local_app_data: &PathBuf) -> Result<()> {
+    fn remove_all_fflags_for_local_app_data(&self, local_app_data: &Path) -> Result<()> {
         let client_settings_paths =
             Self::get_client_settings_paths_for_local_app_data(local_app_data, false)?;
         self.remove_all_fflags_in_paths(client_settings_paths)
@@ -2758,6 +2815,81 @@ mod tests {
         let result = opt.set_xml_vector2_value(xml, "StartScreenSize", 1280, 720);
         assert!(
             result.contains(r#"<Vector2 name="StartScreenSize"><X>1280</X><Y>720</Y></Vector2>"#)
+        );
+    }
+
+    #[test]
+    fn reapply_window_size_overwrites_what_roblox_saved() {
+        // The reported bug: the Boost tab sets a size, Roblox writes its own
+        // window geometry back on exit, and the next launch uses Roblox's
+        // number. A real machine was found sitting at 1938x1038, which nothing
+        // in this app would ever write.
+        let dir = std::env::temp_dir().join(format!("st-reapply-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("GlobalBasicSettings_13.xml");
+        fs::write(
+            &path,
+            r#"<roblox><Vector2 name="StartScreenSize"><X>1938</X><Y>1038</Y></Vector2></roblox>"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(path.clone());
+        let config = RobloxSettingsConfig {
+            window_width: 1280,
+            window_height: 720,
+            ..Default::default()
+        };
+
+        opt.reapply_window_size(&config).unwrap();
+
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(r#"<Vector2 name="StartScreenSize"><X>1280</X><Y>720</Y></Vector2>"#),
+            "the configured size should replace whatever Roblox saved, got: {after}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reapply_window_size_is_silent_when_nothing_changed() {
+        // Runs on every Roblox exit, so it must not rewrite a file that already
+        // holds the right value and churn the disk for no reason.
+        let dir = std::env::temp_dir().join(format!("st-reapply-noop-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("GlobalBasicSettings_13.xml");
+        let opt = optimizer_with_path(path.clone());
+        let config = RobloxSettingsConfig {
+            window_width: 1280,
+            window_height: 720,
+            window_fullscreen: false,
+            ..Default::default()
+        };
+
+        fs::write(
+            &path,
+            r#"<roblox><Vector2 name="StartScreenSize"><X>1280</X><Y>720</Y></Vector2><bool name="Fullscreen">false</bool></roblox>"#,
+        )
+        .unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+
+        opt.reapply_window_size(&config).unwrap();
+
+        assert_eq!(
+            fs::metadata(&path).unwrap().modified().unwrap(),
+            before,
+            "an unchanged file should not be rewritten"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reapply_window_size_does_nothing_without_a_settings_file() {
+        // Roblox not installed, or never run. Must not error on a background
+        // thread that fires after every Roblox exit.
+        let opt = optimizer_with_path(std::env::temp_dir().join("st-does-not-exist.xml"));
+        assert!(
+            opt.reapply_window_size(&RobloxSettingsConfig::default())
+                .is_ok()
         );
     }
 

@@ -58,7 +58,8 @@ fn network_connectivity_hint_fn() -> Option<GetNetworkConnectivityHintFn> {
             return None;
         }
 
-        let address = unsafe { GetProcAddress(module, b"GetNetworkConnectivityHint\0".as_ptr()) };
+        let address =
+            unsafe { GetProcAddress(module, c"GetNetworkConnectivityHint".as_ptr().cast::<u8>()) };
         if address.is_null() {
             return None;
         }
@@ -72,7 +73,11 @@ fn network_connectivity_hint_fn() -> Option<GetNetworkConnectivityHintFn> {
     })
 }
 
+// The NLM connectivity-hint values come from windows-rs, which generates them
+// in Windows own PascalCase. They resolve as constants rather than bindings, so
+// the match below does what it looks like; the naming is simply not ours.
 #[cfg(windows)]
+#[allow(non_upper_case_globals)]
 pub fn probe() -> LocalConnectivity {
     use windows::Win32::Networking::WinSock::{
         NL_NETWORK_CONNECTIVITY_HINT, NetworkConnectivityLevelHintConstrainedInternetAccess,

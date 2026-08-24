@@ -260,7 +260,7 @@ impl GraphicsQuality {
 }
 
 /// Network optimization settings
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
 pub struct NetworkConfig {
     pub enable_network_boost: bool,
     // Tier 1 (Safe) Network Boosts
@@ -271,18 +271,6 @@ pub struct NetworkConfig {
     /// Firewall Fix - Adds Windows Firewall allow rules for Roblox, flushes DNS, resets Winsock
     #[serde(default)]
     pub firewall_fix: bool,
-}
-
-impl Default for NetworkConfig {
-    fn default() -> Self {
-        Self {
-            enable_network_boost: false,
-            // Tier 1 network boosts are opt-in by default.
-            disable_nagle: false,
-            disable_network_throttling: false,
-            firewall_fix: false, // Off by default, one-click fix for Roblox launch crashes
-        }
-    }
 }
 
 impl NetworkConfig {
@@ -361,7 +349,7 @@ pub struct RestorePointInfo {
 }
 
 /// Application state
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AppState {
     pub config: Config,
     pub metrics: PerformanceMetrics,
@@ -370,20 +358,6 @@ pub struct AppState {
     pub last_error: Option<String>,
     pub restore_point: Option<RestorePointInfo>,
     pub timer_resolution_active: bool, // Track if 1ms timer is active (needs cleanup)
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            config: Config::default(),
-            metrics: PerformanceMetrics::default(),
-            optimizations_active: false,
-            backup_created: false,
-            last_error: None,
-            restore_point: None,
-            timer_resolution_active: false,
-        }
-    }
 }
 
 /// Result type for operations
@@ -589,6 +563,11 @@ pub mod tier_info {
     pub const TIER_1_DESC: &str = "These optimizations have no side effects and are fully reversible. They use standard Windows APIs and registry settings that are commonly used by gaming software. All changes revert when SwiftTunnel closes or when you disable the boost.";
 }
 
+// These tests assert on compile-time constants on purpose: they are guards
+// that fail the build if someone edits a constant that other code depends on.
+// Clippy flags constant assertions as pointless, which is exactly backwards
+// for an invariant test.
+#[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
     use super::*;

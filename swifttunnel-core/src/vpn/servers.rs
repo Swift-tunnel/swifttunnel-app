@@ -442,15 +442,13 @@ pub async fn load_server_list() -> Result<
     // No cache, try API
     log::info!("No cache found, fetching from API");
     match fetch_server_list().await {
-        Ok(data) => {
-            return Ok((data.servers, data.regions, ServerListSource::Api));
-        }
+        Ok(data) => Ok((data.servers, data.regions, ServerListSource::Api)),
         Err(e) => {
             log::error!("Failed to fetch server list from API: {}", e);
-            return Err(format!(
+            Err(format!(
                 "Could not load server list: {}. Please check your internet connection.",
                 e
-            ));
+            ))
         }
     }
 }

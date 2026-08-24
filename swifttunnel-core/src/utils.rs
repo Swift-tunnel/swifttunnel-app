@@ -126,17 +126,17 @@ fn resolve_windows_command_path_with_root(
             .unwrap_or_else(|| PathBuf::from(program));
     }
 
-    if is_system32_program(program) {
-        if let Some(root) = system_root {
-            let exe_name = if program.ends_with(".exe") {
-                program.to_string()
-            } else {
-                format!("{program}.exe")
-            };
-            let candidate = root.join("System32").join(&exe_name);
-            if candidate.is_file() {
-                return candidate;
-            }
+    if is_system32_program(program)
+        && let Some(root) = system_root
+    {
+        let exe_name = if program.ends_with(".exe") {
+            program.to_string()
+        } else {
+            format!("{program}.exe")
+        };
+        let candidate = root.join("System32").join(&exe_name);
+        if candidate.is_file() {
+            return candidate;
         }
     }
 
@@ -604,8 +604,7 @@ pub fn run_elevated_and_wait(exe: &str, params: &str, hide_window: bool) -> std:
 
     let process = info.hProcess;
     if process.is_invalid() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             "Elevated process started but no handle was returned",
         ));
     }

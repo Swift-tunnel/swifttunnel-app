@@ -27,6 +27,18 @@ const DNS_REPAIR_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 /// so it is worth a few more seconds at connect time — but only one pass, so a
 /// broken resolver can never loop or stall the connect indefinitely.
 const DIRECT_ONLY_RETRY_TOTAL_TIMEOUT: Duration = Duration::from_secs(8);
+/// A resolver that answered this session, elected once by `elect_resolver`.
+///
+/// Without this every domain walks DNS_REPAIR_RESOLVERS from the top. Under a
+/// block that null-routes the first entries, each of the ~50 bootstrap domains
+/// burns the full per-request timeout against each dead resolver before
+/// reaching a working one, and the total budget expires first — leaving few or
+/// no pins. A user in a blocked country independently reported 9.9.9.9 being
+/// "completely stable unlike 1.1.1.1 and Google DNS", which is exactly this
+/// shape. Electing once costs a single probe instead of repeating the stall
+/// per domain.
+static ELECTED_RESOLVER: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
 const DNS_REPAIR_RESOLVERS: &[&str] = &[
     // IP literals avoid depending on the user's broken local DNS to find
     // the DNS-over-HTTPS resolver itself.
@@ -53,6 +65,11 @@ const DNS_REPAIR_RESOLVERS: &[&str] = &[
 // share one edge with gamejoin.
 const MAX_PINNED_IPS_PER_DOMAIN: usize = 6;
 
+/// Domain used to decide whether a resolver is usable. Chosen because Roblox
+/// cannot launch without it, so a resolver that cannot answer for it is no use
+/// here regardless of what else it can resolve.
+const RESOLVER_PROBE_DOMAIN: &str = "clientsettings.roblox.com";
+
 /// Per-IP TCP reachability probe timeout. Short so a dead edge is skipped fast;
 /// the whole repair still runs under `DNS_REPAIR_TOTAL_TIMEOUT`.
 const REACHABILITY_PROBE_TIMEOUT: Duration = Duration::from_millis(1200);
@@ -74,6 +91,9 @@ fn last_applied_overrides() -> &'static RwLock<Vec<HostOverride>> {
 /// settings hosts (country-ban bypass). Runtime SNI learning must not undo
 /// that routing decision.
 static COUNTRY_BAN_BYPASS_ROUTING: AtomicBool = AtomicBool::new(false);
+
+/// Set once GoodbyeDPI reports a working evasion mode for this session.
+static DPI_EVASION_CONFIRMED: AtomicBool = AtomicBool::new(false);
 
 // Launch-critical + sign-in-critical hosts that must stay DIRECT under Route
 // Assist and are important enough to PIN back into the Windows
@@ -178,6 +198,12 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     "assetdelivery.roblox.com",
     "thumbnails.roblox.com",
     "presence.roblox.com",
+    // Voice chat eligibility and session setup. Roblox hides the in-game mic
+    // outright when it decides voice is unavailable, so an unresolvable host
+    // here costs the whole feature rather than degrading it. Resolves onto the
+    // same 128.116.0.0/17 edge as apis.roblox.com, so it inherits that routing
+    // rather than introducing a new path.
+    "voice.roblox.com",
     "friends.roblox.com",
     "chat.roblox.com",
     "chatsite.roblox.com",
@@ -281,16 +307,12 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
     // Route Assist keeps heavy asset/CDN hosts, launch-critical settings hosts,
     // and Roblox UI/social/chat/avatar APIs DIRECT for fast textures and
     // reliable in-game menus; only the region/join control plane relays. The
-    // packet router treats Partial Bypass differently by relaying Roblox
-    // web/join/asset TCP while keeping gameplay UDP direct.
     // FULL bypass relays everything.
     //
     // In the Route Assist allocator path, only relayed control-plane hosts are
     // written to hosts. Direct hosts still contribute to the direct-only IP set,
     // but they use the user's normal DNS path so stale SwiftTunnel pins cannot
-    // break Roblox app startup/home loading. Partial Bypass uses this DNS repair
-    // path too, but the packet router relays Roblox TCP assets/control while
-    // keeping gameplay UDP direct.
+    // break Roblox app startup/home loading.
     let (overrides, active_ips, direct_only_ips) = if country_ban_bypass {
         let (active, direct_only) = country_ban_split_ips_from_overrides(&resolved);
         (resolved, active, direct_only)
@@ -342,7 +364,7 @@ pub async fn apply_relay_resolved_overrides(
         .unwrap_or_default();
     let mut seen: HashSet<(String, Ipv4Addr)> = HashSet::new();
     let mut merged: Vec<HostOverride> = Vec::with_capacity(existing.len() + new_entries.len());
-    for entry in existing.into_iter().chain(new_entries.into_iter()) {
+    for entry in existing.into_iter().chain(new_entries) {
         if seen.insert((entry.domain.to_ascii_lowercase(), entry.ip)) {
             merged.push(entry);
         }
@@ -379,6 +401,18 @@ pub fn is_active_bootstrap_ip(ip: Ipv4Addr) -> bool {
         .unwrap_or(false)
 }
 
+/// How many relayed pins are in effect.
+///
+/// Reported once at the start of a bypass session: zero pins means DoH
+/// resolution was blocked, which changes how the rest of the diagnostics should
+/// be read.
+pub fn active_bootstrap_ip_count() -> usize {
+    active_bootstrap_ips()
+        .read()
+        .map(|ips| ips.len())
+        .unwrap_or(0)
+}
+
 pub fn is_direct_only_bootstrap_ip(ip: Ipv4Addr) -> bool {
     direct_only_bootstrap_ips()
         .read()
@@ -388,6 +422,21 @@ pub fn is_direct_only_bootstrap_ip(ip: Ipv4Addr) -> bool {
 
 pub fn is_country_ban_bypass_routing_active() -> bool {
     COUNTRY_BAN_BYPASS_ROUTING.load(Ordering::Relaxed)
+}
+
+/// Record whether GoodbyeDPI confirmed a working evasion mode.
+///
+/// Only meaningful while country-ban bypass is active. Cleared with the rest of
+/// the bootstrap state on disconnect, so a session that fails to confirm never
+/// inherits a previous session's answer.
+pub fn set_dpi_evasion_confirmed(confirmed: bool) {
+    DPI_EVASION_CONFIRMED.store(confirmed, Ordering::Relaxed);
+}
+
+/// True when DPI evasion is known to be working, which is what lets Roblox web
+/// and asset traffic reach the platform directly instead of over the relay.
+pub fn is_dpi_evasion_confirmed() -> bool {
+    DPI_EVASION_CONFIRMED.load(Ordering::Relaxed)
 }
 
 /// Record that `ip` serves a host that should stay DIRECT under Route Assist —
@@ -443,6 +492,10 @@ async fn resolve_bootstrap_overrides() -> Result<Vec<HostOverride>, String> {
 
     let mut overrides = Vec::new();
     let mut failures = Vec::new();
+
+    // Decide which resolver to trust before fanning out. One probe here saves
+    // every domain below from stalling against a censored resolver first.
+    let _ = elect_resolver(&client).await;
 
     drain_domain_lookups(
         spawn_domain_lookups(&client, ROBLOX_BOOTSTRAP_DOMAINS.iter().copied()),
@@ -591,6 +644,55 @@ async fn resolve_reachable_domain_ips(
     Ok(reachable)
 }
 
+/// Pick a resolver that actually answers, once per process.
+///
+/// Races all of them against a domain that must exist for the bypass to work
+/// at all, so a censored resolver loses to a working one instead of stalling
+/// every later lookup. Racing rather than reordering keeps this correct in
+/// every country: the entry that is fastest in Egypt is not the one that is
+/// fastest elsewhere.
+async fn elect_resolver(client: &reqwest::Client) -> Option<&'static str> {
+    if let Some(resolver) = ELECTED_RESOLVER.get() {
+        return Some(resolver);
+    }
+
+    let mut probes: FuturesUnordered<_> = DNS_REPAIR_RESOLVERS
+        .iter()
+        .map(|resolver| {
+            let client = client.clone();
+            async move {
+                let url = build_doh_url(resolver, RESOLVER_PROBE_DOMAIN);
+                let ok = match client
+                    .get(&url)
+                    .header("accept", "application/dns-json")
+                    .send()
+                    .await
+                {
+                    Ok(response) if response.status().is_success() => match response.text().await {
+                        Ok(body) => parse_usable_a_records(&body)
+                            .map(|ips| !ips.is_empty())
+                            .unwrap_or(false),
+                        Err(_) => false,
+                    },
+                    _ => false,
+                };
+                (*resolver, ok)
+            }
+        })
+        .collect();
+
+    while let Some((resolver, ok)) = probes.next().await {
+        if ok {
+            let elected = ELECTED_RESOLVER.get_or_init(|| resolver);
+            info!("DNS repair electing resolver {elected}");
+            return Some(elected);
+        }
+    }
+
+    warn!("No DNS repair resolver answered; falling back to trying each in turn");
+    None
+}
+
 /// Resolve a domain to up to `MAX_PINNED_IPS_PER_DOMAIN` usable public IPv4s via
 /// DNS-over-HTTPS. Returns the first resolver's usable answers (deduped, capped).
 async fn resolve_domain_ips(
@@ -599,7 +701,17 @@ async fn resolve_domain_ips(
 ) -> Result<Vec<Ipv4Addr>, String> {
     let mut failures = Vec::new();
 
-    for resolver in DNS_REPAIR_RESOLVERS {
+    // Elected first, then the full list as a fallback. The elected one is
+    // skipped on the second pass rather than retried.
+    let elected = ELECTED_RESOLVER.get().copied();
+    let order = elected.into_iter().chain(
+        DNS_REPAIR_RESOLVERS
+            .iter()
+            .copied()
+            .filter(|r| Some(*r) != elected),
+    );
+
+    for resolver in order {
         let url = build_doh_url(resolver, domain);
         let response = match client
             .get(&url)
@@ -922,8 +1034,7 @@ fn allocate_route_assist_pins(
 /// whole platform is blocked (e.g. Egypt), and there the asset CDN is blocked
 /// too: keeping assets "direct" meant they simply never loaded, so games died
 /// seconds after join ("plays for 20s", "assets don't load"). Route Assist is
-/// still the bandwidth-conscious split. Partial Bypass relays Roblox TCP
-/// assets/control while keeping gameplay UDP direct.
+/// still the bandwidth-conscious split.
 fn country_ban_split_ips_from_overrides(
     overrides: &[HostOverride],
 ) -> (HashSet<Ipv4Addr>, HashSet<Ipv4Addr>) {
@@ -983,6 +1094,7 @@ fn is_route_assist_direct_domain(domain: &str) -> bool {
 
 fn clear_bootstrap_ip_sets() {
     COUNTRY_BAN_BYPASS_ROUTING.store(false, Ordering::Relaxed);
+    DPI_EVASION_CONFIRMED.store(false, Ordering::Relaxed);
     match active_bootstrap_ips().write() {
         Ok(mut active) => active.clear(),
         Err(e) => warn!("Failed to clear Roblox bootstrap route IPs: {e}"),
@@ -1264,7 +1376,10 @@ mod tests {
 
     #[test]
     fn domain_list_stays_allowlisted_and_exact() {
-        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 70);
+        // Deliberately a fixed count: this list is a DNS bypass allowlist, so
+        // growth should be a decision rather than a drive-by. 71 since
+        // voice.roblox.com was added.
+        assert_eq!(ROBLOX_BOOTSTRAP_DOMAINS.len(), 71);
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"roblox.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"rbxcdn.com"));
         assert!(!ROBLOX_BOOTSTRAP_DOMAINS.contains(&"arkoselabs.com"));
@@ -2020,6 +2135,72 @@ mod tests {
 
         clear_active_bootstrap_ips_for_test();
         assert!(!is_direct_only_bootstrap_ip(bootstrap_ip));
+    }
+
+    /// The resolver order is the whole point of the election, so pin it down.
+    ///
+    /// Reproduces what `resolve_domain_ips` builds, because the ordering is the
+    /// behaviour that matters and it is otherwise only observable by watching a
+    /// censored network stall.
+    fn resolver_order(elected: Option<&'static str>) -> Vec<&'static str> {
+        elected
+            .into_iter()
+            .chain(
+                DNS_REPAIR_RESOLVERS
+                    .iter()
+                    .copied()
+                    .filter(|r| Some(*r) != elected),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn elected_resolver_is_tried_first_and_not_repeated() {
+        // Quad9 sits third in the static list. A user behind a national block
+        // reported it as the only stable resolver there, so once elected it
+        // must come first for every domain instead of queueing behind two that
+        // will time out.
+        let quad9 = "https://9.9.9.9:5053/dns-query";
+        let order = resolver_order(Some(quad9));
+
+        assert_eq!(order[0], quad9, "elected resolver leads");
+        assert_eq!(
+            order.iter().filter(|r| **r == quad9).count(),
+            1,
+            "elected resolver is not tried twice"
+        );
+        assert_eq!(
+            order.len(),
+            DNS_REPAIR_RESOLVERS.len(),
+            "the others stay available as fallbacks"
+        );
+    }
+
+    #[test]
+    fn without_an_election_the_static_order_is_unchanged() {
+        // If every resolver failed the probe, behaviour must fall back to what
+        // it was before rather than dropping resolvers.
+        assert_eq!(resolver_order(None), DNS_REPAIR_RESOLVERS.to_vec());
+    }
+
+    #[test]
+    fn voice_chat_host_is_covered() {
+        // Roblox removes the in-game mic entirely when it decides voice is
+        // unavailable, so this host failing costs the feature rather than
+        // degrading it. It was missing for a long time: no voice hostname
+        // appeared anywhere in the codebase.
+        assert!(
+            ROBLOX_BOOTSTRAP_DOMAINS.contains(&"voice.roblox.com"),
+            "voice must be pinned and, since the GoodbyeDPI hostlist is built \
+             from this list, must also get DPI evasion"
+        );
+    }
+
+    #[test]
+    fn resolver_probe_domain_is_one_the_bypass_actually_needs() {
+        // Probing a host Roblox does not require would elect a resolver that
+        // cannot answer for the ones that matter.
+        assert!(ROBLOX_BOOTSTRAP_DOMAINS.contains(&RESOLVER_PROBE_DOMAIN));
     }
 
     #[test]

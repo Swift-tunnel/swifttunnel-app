@@ -255,15 +255,14 @@ fn build_binding_preflight_with_repair(
         preflight_binding(binding_preference.clone()).map_err(|e| e.to_string())?
     };
 
-    if let Some(preference) = binding_preference {
-        if preference.source == BindingPreferenceSource::RememberedAuto
-            && !preflight.cached_override_used
-            && preflight.recommended_guid.as_deref() != Some(preference.guid.as_str())
-        {
-            settings
-                .network_binding_overrides
-                .remove(&preference.network_signature.unwrap_or_default());
-        }
+    if let Some(preference) = binding_preference
+        && preference.source == BindingPreferenceSource::RememberedAuto
+        && !preflight.cached_override_used
+        && preflight.recommended_guid.as_deref() != Some(preference.guid.as_str())
+    {
+        settings
+            .network_binding_overrides
+            .remove(&preference.network_signature.unwrap_or_default());
     }
 
     Ok(preflight)
@@ -552,7 +551,6 @@ pub async fn vpn_connect(
         game_process_performance,
         enable_api_tunneling,
         enable_country_ban,
-        enable_partial_country_ban,
     ) = (
         if settings_snapshot.custom_relay_server.is_empty() {
             None
@@ -565,7 +563,6 @@ pub async fn vpn_connect(
         settings_snapshot.game_process_performance,
         settings_snapshot.enable_api_tunneling,
         settings_snapshot.enable_country_ban,
-        settings_snapshot.enable_partial_country_ban,
     );
     if custom_relay.is_some() && auto_routing {
         log::info!("Auto-routing disabled for this session because custom_relay_server is set");
@@ -627,7 +624,6 @@ pub async fn vpn_connect(
             game_process_performance,
             enable_api_tunneling,
             enable_country_ban,
-            enable_partial_country_ban,
         ),
     )
     .await;
@@ -638,10 +634,10 @@ pub async fn vpn_connect(
     let mut connect_session_expired = false;
     let result = match connect_result {
         Ok(result) => result.map_err(|e| {
-            if vpn_error_is_user_banned(&e) {
-                if let VpnError::UserBanned(reason) = &e {
-                    connect_ban_reason = Some(reason.clone());
-                }
+            if vpn_error_is_user_banned(&e)
+                && let VpnError::UserBanned(reason) = &e
+            {
+                connect_ban_reason = Some(reason.clone());
             }
             if matches!(e, VpnError::SessionExpired) {
                 connect_session_expired = true;
@@ -670,11 +666,11 @@ pub async fn vpn_connect(
         }
     };
 
-    if result.is_ok() {
-        if let Some(reason) = country_ban_bypass_failure {
-            log::warn!("Country ban bypass unavailable after connect: {reason}");
-            let _ = app.emit(COUNTRY_BAN_BYPASS_UNAVAILABLE, ());
-        }
+    if result.is_ok()
+        && let Some(reason) = country_ban_bypass_failure
+    {
+        log::warn!("Country ban bypass unavailable after connect: {reason}");
+        let _ = app.emit(COUNTRY_BAN_BYPASS_UNAVAILABLE, ());
     }
 
     if result.is_ok() {
@@ -723,10 +719,10 @@ pub async fn vpn_connect(
         }
     }
 
-    if result.is_ok() {
-        if let Err(e) = persist_session_settings(&state, Some(&connect_region)) {
-            log::warn!("Failed to persist connected session settings: {}", e);
-        }
+    if result.is_ok()
+        && let Err(e) = persist_session_settings(&state, Some(&connect_region))
+    {
+        log::warn!("Failed to persist connected session settings: {}", e);
     }
 
     // No manual emit here — `spawn_vpn_state_bridge` forwards every
@@ -1085,10 +1081,10 @@ fn select_best_server_in_region(
         {
             continue;
         }
-        if let Some(latency) = sl.get_latency(server_id) {
-            if best.as_ref().is_none_or(|(_, best_ms)| latency < *best_ms) {
-                best = Some((server_id.clone(), latency));
-            }
+        if let Some(latency) = sl.get_latency(server_id)
+            && best.as_ref().is_none_or(|(_, best_ms)| latency < *best_ms)
+        {
+            best = Some((server_id.clone(), latency));
         }
     }
     best.map(|(id, _)| id).or_else(|| {
@@ -1158,12 +1154,11 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
     let mut tasks = tokio::task::JoinSet::new();
     let mut measured: Vec<(String, Option<u32>)> = Vec::with_capacity(probes.len());
     for (server_id, ip, port) in probes {
-        if tasks.len() >= LATENCY_PROBE_CONCURRENCY {
-            if let Some(result) = tasks.join_next().await {
-                if let Ok((server_id, latency)) = result {
-                    measured.push((server_id, latency));
-                }
-            }
+        if tasks.len() >= LATENCY_PROBE_CONCURRENCY
+            && let Some(result) = tasks.join_next().await
+            && let Ok((server_id, latency)) = result
+        {
+            measured.push((server_id, latency));
         }
         tasks.spawn(async move {
             let _ = port; // V3 relays don't echo unauthenticated probes — ICMP is the only signal we have.
@@ -1330,8 +1325,10 @@ mod tests {
 
     #[test]
     fn apply_disconnected_session_settings_clears_resume_flag() {
-        let mut settings = swifttunnel_core::settings::AppSettings::default();
-        settings.resume_vpn_on_startup = true;
+        let mut settings = swifttunnel_core::settings::AppSettings {
+            resume_vpn_on_startup: true,
+            ..Default::default()
+        };
         apply_disconnected_session_settings(&mut settings);
         assert!(!settings.resume_vpn_on_startup);
     }

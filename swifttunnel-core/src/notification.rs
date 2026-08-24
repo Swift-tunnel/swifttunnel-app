@@ -57,10 +57,10 @@ fn ensure_aumid_registered() -> bool {
 
     // Optional: the small logo beside the app name in the toast and in
     // Settings > Notifications. A missing icon is not worth failing over.
-    if let Some(icon) = get_icon_path(NotificationIcon::App) {
-        if let Some(icon) = icon.to_str() {
-            let _ = key.set_value("IconUri", &icon);
-        }
+    if let Some(icon) = get_icon_path(NotificationIcon::App)
+        && let Some(icon) = icon.to_str()
+    {
+        let _ = key.set_value("IconUri", &icon);
     }
 
     true
@@ -106,23 +106,23 @@ fn get_icon_path(icon: NotificationIcon) -> Option<std::path::PathBuf> {
     }
 
     // Try relative to executable (for development)
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let dev_path = exe_dir.join(filename);
-            if dev_path.exists() {
-                return Some(dev_path);
-            }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        let dev_path = exe_dir.join(filename);
+        if dev_path.exists() {
+            return Some(dev_path);
+        }
 
-            let resource_path = exe_dir.join("resources").join(filename);
-            if resource_path.exists() {
-                return Some(resource_path);
-            }
+        let resource_path = exe_dir.join("resources").join(filename);
+        if resource_path.exists() {
+            return Some(resource_path);
+        }
 
-            // Also try assets folder.
-            let assets_path = exe_dir.join("assets").join(filename);
-            if assets_path.exists() {
-                return Some(assets_path);
-            }
+        // Also try assets folder.
+        let assets_path = exe_dir.join("assets").join(filename);
+        if assets_path.exists() {
+            return Some(assets_path);
         }
     }
 

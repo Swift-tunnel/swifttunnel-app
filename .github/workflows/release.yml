@@ -693,6 +693,41 @@ jobs:
           updaterJsonPreferNsis: false
           args: --target x86_64-pc-windows-msvc
 
+      # The download the website hands out. It wraps the MSI and, before
+      # msiexec starts, clears an orphaned registration left behind when the
+      # cached package under C:\Windows\Installer has gone. Without that an
+      # upgrade on such a machine dies on "the feature you are trying to use is
+      # on a network resource that is unavailable" and cannot be completed at
+      # all: not by upgrading, not by uninstalling first.
+      #
+      # It has to be a launcher rather than something inside the MSI. An
+      # immediate custom action runs impersonating an unelevated user and
+      # cannot write HKLM; a deferred one runs as SYSTEM but cannot be
+      # sequenced ahead of RemoveExistingProducts, and moving that later makes
+      # the old product's uninstall delete the new install's files. All three
+      # were tried against a genuinely broken machine before settling here.
+      - name: Build website setup launcher (x64)
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "target/x86_64-pc-windows-msvc/release/bundle/msi" -Filter "*_x64_en-US.msi" |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msi) { throw "no x64 MSI found to wrap" }
+          Write-Host "::notice::wrapping $($msi.Name) ($($msi.Length) bytes)"
+          $env:SWIFTTUNNEL_SETUP_MSI = $msi.FullName
+          cargo build -p swifttunnel-setup --release --target x86_64-pc-windows-msvc
+          $exe = "target/x86_64-pc-windows-msvc/release/SwiftTunnel-Setup.exe"
+          if (-not (Test-Path $exe)) { throw "setup launcher was not produced" }
+          # Must be at least as large as the MSI it carries, or the payload did
+          # not make it in and the download would install nothing.
+          if ((Get-Item $exe).Length -lt $msi.Length) { throw "setup launcher is smaller than its payload" }
+          $named = "SwiftTunnel-Setup-$($env:RELEASE_VERSION).exe"
+          Copy-Item $exe $named
+          gh release upload "$env:GITHUB_REF_NAME" $named --clobber
+          Write-Host "::notice::uploaded $named"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+
       - name: Build and publish ARM64 release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:

@@ -261,14 +261,14 @@ pub fn run_testbench_harness(raw_args: &[String]) -> i32 {
 
     println!("{json}");
 
-    if let Some(path) = &cli.report_path {
-        if let Err(err) = write_report(path, &json) {
-            eprintln!(
-                "Failed to write harness report to {}: {err}",
-                path.display()
-            );
-            return 1;
-        }
+    if let Some(path) = &cli.report_path
+        && let Err(err) = write_report(path, &json)
+    {
+        eprintln!(
+            "Failed to write harness report to {}: {err}",
+            path.display()
+        );
+        return 1;
     }
 
     if report.success { 0 } else { 1 }
@@ -469,7 +469,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
         game_process_performance,
         enable_api_tunneling,
         enable_country_ban,
-        enable_partial_country_ban,
     ) = {
         let mut settings = state.settings.lock();
         apply_adapter_override(&mut settings, cli);
@@ -500,7 +499,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
             snapshot.game_process_performance,
             cli.enable_api_tunneling || snapshot.enable_api_tunneling,
             cli.enable_country_ban || snapshot.enable_country_ban,
-            snapshot.enable_partial_country_ban,
         )
     };
 
@@ -533,7 +531,6 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
             game_process_performance,
             enable_api_tunneling,
             enable_country_ban,
-            enable_partial_country_ban,
         )
         .await
         .map_err(|err| swifttunnel_core::vpn::user_friendly_error(&err))?;

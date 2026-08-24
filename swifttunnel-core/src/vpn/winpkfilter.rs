@@ -149,10 +149,10 @@ pub fn detect_native_arch() -> WinpkFilterMsiArch {
     }
 
     // Fallback: PROCESSOR_ARCHITECTURE env var.
-    if let Ok(arch) = std::env::var("PROCESSOR_ARCHITECTURE") {
-        if arch.eq_ignore_ascii_case("ARM64") {
-            return WinpkFilterMsiArch::Arm64;
-        }
+    if let Ok(arch) = std::env::var("PROCESSOR_ARCHITECTURE")
+        && arch.eq_ignore_ascii_case("ARM64")
+    {
+        return WinpkFilterMsiArch::Arm64;
     }
 
     WinpkFilterMsiArch::X64

@@ -1,7 +1,7 @@
 //! Authentication manager - handles login/logout and token management
 
 use super::http_client::{AuthClient, UserProfileResponse};
-use super::oauth_server::{DEFAULT_OAUTH_PORT, OAuthServer, OAuthServerResult};
+use super::oauth_server::OAuthServer;
 use super::storage::SecureStorage;
 use super::types::{
     AuthError, AuthSession, AuthState, OAuthPendingState, SupabaseAuthResponse, SupabaseUser,

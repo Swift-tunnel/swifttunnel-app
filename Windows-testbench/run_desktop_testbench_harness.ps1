@@ -18,7 +18,10 @@ Set-Location (Join-Path $PSScriptRoot "..")
 
 Ensure-WinpkFilterBinding -AdapterGuid $AdapterGuid | Out-Null
 
-cargo build -p swifttunnel-desktop --release --bin desktop_testbench_harness
+# Built from its own crate, not from the Tauri package. Tauri's WiX bundler
+# installs every bin target of the package it bundles, which is how this
+# harness ended up in C:\Program Files\SwiftTunnel on every user's machine.
+cargo build -p swifttunnel-testbench --release
 
 $argsList = @()
 if ($Region) { $argsList += @("--region", $Region) }

@@ -755,14 +755,29 @@ body {
     radial-gradient(46% 60% at 22% 40%, rgba(255, 255, 255, 0.11), transparent 70%),
     radial-gradient(40% 55% at 74% 30%, rgba(255, 255, 255, 0.07), transparent 72%);
   filter: blur(14px);
+  /* Promote to its own layer so the blur is rasterised once and the drift
+     below is a texture move rather than a repaint. */
+  will-change: transform;
   animation: aurora-drift 18s ease-in-out infinite alternate;
 }
+/* Translate only, deliberately.
+ *
+ * This used to end on `scale(1.08)`. Scaling changes the rasterisation scale
+ * of the layer, so the compositor had to re-rasterise AND re-apply a 14px
+ * blur over a 320px-tall element every single frame, for the whole time the
+ * app was open. That one keyframe was the largest single contributor to the
+ * GPU process sitting at ~33% of a CPU core while idle.
+ *
+ * A translate is handled entirely on the compositor against the cached
+ * texture, so the same drift is close to free. The 8% zoom it replaces was
+ * imperceptible on an 18s ease-in-out background wash.
+ */
 @keyframes aurora-drift {
   0% {
-    transform: translate3d(-3%, 0, 0) scale(1);
+    transform: translate3d(-3%, 0, 0);
   }
   100% {
-    transform: translate3d(4%, 3%, 0) scale(1.08);
+    transform: translate3d(4%, 3%, 0);
   }
 }
 .aurora-live {
@@ -840,6 +855,24 @@ body {
     transparent 60%
   );
   animation: instrument-sweep 3.6s ease-in-out infinite;
+}
+
+/* — Motion stops while the window is not in front. —
+ *
+ * Every `infinite` animation above keeps the compositor producing frames for
+ * as long as the app is open. WebView2 does not throttle that in the
+ * background, and measurably does not stop it when the window is minimised:
+ * the GPU process still sat at ~32% of a core with nothing on screen. That is
+ * a third of a CPU core taken from whatever game is running, to animate a
+ * window nobody can see.
+ *
+ * Paused rather than removed, so positions are kept and restoring the window
+ * resumes mid-drift instead of snapping. See lib/animationIdle.ts.
+ */
+html.app-idle *,
+html.app-idle *::before,
+html.app-idle *::after {
+  animation-play-state: paused !important;
 }
 
 @media (prefers-reduced-motion: reduce) {

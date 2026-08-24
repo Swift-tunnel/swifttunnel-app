@@ -34,6 +34,64 @@ pub fn close_splash(app: tauri::AppHandle) {
     }
 }
 
+/// Create an overlay window on first use.
+///
+/// Both overlay windows used to be declared in `tauri.conf.json`, which means
+/// Tauri built them during startup for everybody. Each one costs its own
+/// WebView2 renderer process — about 60MB apiece, measured — and neither is
+/// visible until something asks for it. The in-game stats bar in particular is
+/// off by default (`overlay.enabled: false`), so the common case was paying
+/// ~120MB for two windows that never appeared.
+///
+/// Creating them on demand instead is why this exists. It is idempotent: the
+/// callers invoke it on every relevant tick and it returns immediately once the
+/// window is there.
+///
+/// The property list below has to stay in step with how these windows used to
+/// be declared. `visible(false)` matters most: the windows manage their own
+/// visibility once they exist, and showing one here would flash it on screen.
+#[tauri::command]
+pub fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
+    use tauri::Manager;
+
+    // Whitelisted, because `label` reaches WebviewWindowBuilder and the
+    // frontend should not be able to conjure arbitrary windows.
+    let (title, width, height) = match label.as_str() {
+        "overlay" => ("SwiftTunnel Overlay", 340.0, 132.0),
+        "overlay-stats" => ("SwiftTunnel In-Game Overlay", 600.0, 200.0),
+        other => return Err(format!("unknown overlay window: {other}")),
+    };
+
+    if app.get_webview_window(&label).is_some() {
+        return Ok(());
+    }
+
+    let window =
+        tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+            .title(title)
+            .inner_size(width, height)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .resizable(false)
+            .focused(false)
+            .shadow(false)
+            .visible(false)
+            .build()
+            .map_err(|e| format!("failed to create {label}: {e}"))?;
+
+    // Same treatment the startup path used to apply: a normal topmost window
+    // activates when clicked, which knocks Roblox out of the foreground and
+    // makes the overlay's foreground-gated visibility flicker off mid-drag.
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        swifttunnel_core::performance_monitor::set_window_no_activate(hwnd.0 as isize);
+    }
+
+    Ok(())
+}
+
 #[cfg(windows)]
 fn program_data_swifttunnel_dir() -> PathBuf {
     let program_data =
@@ -184,6 +242,7 @@ fn should_try_inf_fallback(exit_code: i32, stderr: &str) -> bool {
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn unique_extract_dir() -> PathBuf {
     let suffix = random_hex(16).unwrap_or_else(|_| {
         SystemTime::now()
@@ -649,6 +708,7 @@ fn stage_winpkfilter_msi(
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn default_driver_install_log_path() -> PathBuf {
     program_data_swifttunnel_dir()
         .join("driver-work")
@@ -685,6 +745,7 @@ fn build_msiexec_install_args(
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 const STARTUP_REPAIR_RELAUNCHED_ENV: &str = "SWIFTTUNNEL_STARTUP_REPAIR_RELAUNCHED";
 #[cfg(windows)]
 const WAIT_RELAUNCH_ARG: &str = "--wait-relaunch";
@@ -1177,6 +1238,7 @@ pub struct WindowsFirewallRepairResponse {
 }
 
 impl WindowsFirewallRepairResponse {
+    #[allow(dead_code)]
     fn unsupported() -> Self {
         Self {
             supported: false,
@@ -3425,12 +3487,10 @@ pub async fn system_restore_startup_registration(
             } else {
                 match hkcu.open_subkey_with_flags(RUN_KEY_PATH, KEY_SET_VALUE) {
                     Ok(run_key) => {
-                        if let Err(e) = run_key.delete_value(RUN_VALUE_NAME) {
-                            if e.kind() != ErrorKind::NotFound {
-                                return Err(format!(
-                                    "Failed to remove startup registry value: {e}"
-                                ));
-                            }
+                        if let Err(e) = run_key.delete_value(RUN_VALUE_NAME)
+                            && e.kind() != ErrorKind::NotFound
+                        {
+                            return Err(format!("Failed to remove startup registry value: {e}"));
                         }
                     }
                     Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -3462,6 +3522,7 @@ pub fn system_open_url(url: String) -> Result<(), String> {
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn startup_repair_relaunch_already_attempted() -> bool {
     std::env::var_os(STARTUP_REPAIR_RELAUNCHED_ENV).is_some()
         || std::env::args().any(|arg| arg == STARTUP_REPAIR_RELAUNCHED_ARG)
@@ -3485,6 +3546,7 @@ async fn launch_restart_helper(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) async fn system_relaunch_after_startup_repair(
     app: tauri::AppHandle,
 ) -> Result<(), String> {

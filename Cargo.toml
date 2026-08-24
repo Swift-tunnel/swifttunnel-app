@@ -1,5 +1,5 @@
 [workspace]
-members = ["swifttunnel-core", "swifttunnel-desktop/src-tauri", "swifttunnel-msi-repair"]
+members = ["swifttunnel-core", "swifttunnel-desktop/src-tauri", "swifttunnel-msi-repair", "swifttunnel-setup", "swifttunnel-testbench"]
 resolver = "2"
 
 [profile.release]
@@ -20,6 +20,14 @@ strip = "symbols"
 # process before cleanup, leaving WFP filters, wintun, and split-tunnel
 # driver state dirty on the user's machine.
 panic = "unwind"
+
+# The MSI repair tool is downloaded on its own by users whose install is
+# already broken, so its size matters more than its speed. This used to sit in
+# swifttunnel-msi-repair/Cargo.toml, where Cargo ignores profiles on non-root
+# packages, so it never actually applied. lto and strip come from the release
+# profile above; only opt-level needs overriding per package.
+[profile.release.package.swifttunnel-msi-repair]
+opt-level = "z"
 
 # Faster builds for proc-macro/build-script crates without penalizing runtime
 [profile.release.build-override]

@@ -167,8 +167,10 @@ mod tests {
 
     #[test]
     fn banned_cleanup_settings_disable_power_plan_resume() {
-        let mut settings = AppSettings::default();
-        settings.resume_vpn_on_startup = true;
+        let mut settings = AppSettings {
+            resume_vpn_on_startup: true,
+            ..Default::default()
+        };
         settings.config.system_optimization.power_plan = PowerPlan::SwiftTunnel;
         settings.config.system_optimization.previous_power_plan = Some(PowerPlan::Balanced);
 

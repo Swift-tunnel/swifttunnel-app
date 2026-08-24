@@ -29,13 +29,13 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+use windows::Win32::Foundation::ERROR_SUCCESS;
 use windows::Win32::System::Diagnostics::Etw::{
     CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
     EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_FLAG_PROCESS, EVENT_TRACE_LOGFILEW,
     EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2, OpenTraceW,
-    PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, PROCESSTRACE_HANDLE,
-    ProcessTrace, StartTraceW, TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
+    PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, ProcessTrace, StartTraceW,
+    TRACE_LEVEL_INFORMATION, WNODE_FLAG_TRACED_GUID,
 };
 use windows::core::{GUID, PCWSTR, PWSTR};
 
@@ -200,6 +200,7 @@ impl Drop for ProcessWatcher {
 }
 
 /// Run the ETW session (called from background thread)
+#[allow(clippy::field_reassign_with_default)]
 fn run_etw_session(
     sender: Sender<ProcessStartEvent>,
     stop_flag: Arc<AtomicBool>,
@@ -266,7 +267,7 @@ fn run_etw_session(
 
         if result != ERROR_SUCCESS {
             // Clean up session
-            ControlTraceW(
+            let _ = ControlTraceW(
                 session_handle,
                 PCWSTR::null(),
                 properties,
@@ -286,6 +287,9 @@ fn run_etw_session(
         let context_ptr = Box::into_raw(context);
 
         // Open trace for processing
+        // EVENT_TRACE_LOGFILEW carries anonymous unions, which a struct
+        // literal cannot initialise field by field. The stepwise form is the
+        // only one that compiles here.
         let mut logfile = EVENT_TRACE_LOGFILEW::default();
         logfile.LoggerName = PWSTR(session_name_wide.as_ptr() as *mut u16);
         logfile.Anonymous1.ProcessTraceMode =
@@ -297,7 +301,7 @@ fn run_etw_session(
         if trace_handle.Value == u64::MAX {
             // Clean up
             let _ = Box::from_raw(context_ptr);
-            ControlTraceW(
+            let _ = ControlTraceW(
                 session_handle,
                 PCWSTR::null(),
                 properties,
@@ -313,11 +317,11 @@ fn run_etw_session(
         let result = ProcessTrace(&handles, None, None);
 
         // Clean up
-        CloseTrace(trace_handle);
+        let _ = CloseTrace(trace_handle);
         let _ = Box::from_raw(context_ptr);
 
         // Stop the session
-        ControlTraceW(
+        let _ = ControlTraceW(
             session_handle,
             PCWSTR::null(),
             properties,
@@ -378,45 +382,47 @@ struct CallbackContext {
 
 /// ETW event callback - called for each event
 unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD) {
-    if event_record.is_null() {
-        return;
-    }
+    unsafe {
+        if event_record.is_null() {
+            return;
+        }
 
-    let record = &*event_record;
-    let context = record.UserContext as *mut CallbackContext;
-    if context.is_null() {
-        return;
-    }
-    let ctx = &*context;
+        let record = &*event_record;
+        let context = record.UserContext as *mut CallbackContext;
+        if context.is_null() {
+            return;
+        }
+        let ctx = &*context;
 
-    // Check stop flag
-    if ctx.stop_flag.load(Ordering::Relaxed) {
-        return;
-    }
+        // Check stop flag
+        if ctx.stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
 
-    // Only process start events from our provider
-    if record.EventHeader.ProviderId != KERNEL_PROCESS_GUID {
-        return;
-    }
-    if record.EventHeader.EventDescriptor.Id != EVENT_ID_PROCESS_START {
-        return;
-    }
+        // Only process start events from our provider
+        if record.EventHeader.ProviderId != KERNEL_PROCESS_GUID {
+            return;
+        }
+        if record.EventHeader.EventDescriptor.Id != EVENT_ID_PROCESS_START {
+            return;
+        }
 
-    // Parse the event data
-    if let Some(event) = parse_process_start_event(record) {
-        // Check if this process is in our watch list
-        let name_lower = event.name.to_lowercase();
-        let watch_list = ctx.watch_list.read();
-        let should_notify = should_watch_process(&name_lower, &watch_list);
+        // Parse the event data
+        if let Some(event) = parse_process_start_event(record) {
+            // Check if this process is in our watch list
+            let name_lower = event.name.to_lowercase();
+            let watch_list = ctx.watch_list.read();
+            let should_notify = should_watch_process(&name_lower, &watch_list);
 
-        if should_notify {
-            log::info!(
-                "ETW detected watched process: {} (PID: {}, Parent: {})",
-                event.name,
-                event.pid,
-                event.parent_pid
-            );
-            let _ = ctx.sender.try_send(event);
+            if should_notify {
+                log::info!(
+                    "ETW detected watched process: {} (PID: {}, Parent: {})",
+                    event.name,
+                    event.pid,
+                    event.parent_pid
+                );
+                let _ = ctx.sender.try_send(event);
+            }
         }
     }
 }
@@ -427,88 +433,90 @@ fn should_watch_process(process_name_lower: &str, watch_list: &HashSet<String>) 
 
 /// Parse process start event from EVENT_RECORD
 unsafe fn parse_process_start_event(record: &EVENT_RECORD) -> Option<ProcessStartEvent> {
-    let pid = record.EventHeader.ProcessId;
+    unsafe {
+        let _pid = record.EventHeader.ProcessId;
 
-    // The UserData contains the event-specific data
-    // For process start events, the structure varies by Windows version
-    // We need to carefully parse it
+        // The UserData contains the event-specific data
+        // For process start events, the structure varies by Windows version
+        // We need to carefully parse it
 
-    let user_data = record.UserData;
-    let user_data_len = record.UserDataLength as usize;
+        let user_data = record.UserData;
+        let user_data_len = record.UserDataLength as usize;
 
-    if user_data.is_null() || user_data_len < 16 {
-        return None;
-    }
-
-    let data = std::slice::from_raw_parts(user_data as *const u8, user_data_len);
-
-    // Try to extract process information
-    // The layout for ProcessStart event (Version 4, Windows 10+):
-    // Offset 0: UniqueProcessKey (8 bytes, pointer)
-    // Offset 8: ProcessId (4 bytes)
-    // Offset 12: ParentId (4 bytes)
-    // Offset 16: SessionId (4 bytes)
-    // Offset 20: ExitStatus (4 bytes)
-    // Offset 24: DirectoryTableBase (8 bytes)
-    // Offset 32: Flags (4 bytes)
-    // Offset 36: UserSID (variable, starts with SID length)
-    // After SID: ImageFileName (null-terminated ANSI string)
-
-    if data.len() < 36 {
-        return None;
-    }
-
-    // Read ProcessId and ParentId from the event data
-    let event_pid = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-    let parent_pid = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-
-    // Find the image filename - it's an ANSI string after the variable-length SID
-    // Skip to offset 36 and then skip the SID
-    let mut offset = 36usize;
-
-    // SID structure: first byte is revision, second is sub-authority count
-    // Total SID size = 8 + (4 * sub_authority_count)
-    // Bounds check: ensure we can read at least offset + 1 for sub_auth_count
-    if offset + 1 < data.len() {
-        let sub_auth_count = data[offset + 1] as usize;
-        let sid_size = 8 + (4 * sub_auth_count);
-        offset += sid_size;
-    }
-
-    // Now we should be at the ImageFileName (ANSI null-terminated)
-    let mut name = String::new();
-    if offset < data.len() {
-        // Read ANSI string until null terminator
-        for &byte in &data[offset..] {
-            if byte == 0 {
-                break;
-            }
-            name.push(byte as char);
+        if user_data.is_null() || user_data_len < 16 {
+            return None;
         }
+
+        let data = std::slice::from_raw_parts(user_data as *const u8, user_data_len);
+
+        // Try to extract process information
+        // The layout for ProcessStart event (Version 4, Windows 10+):
+        // Offset 0: UniqueProcessKey (8 bytes, pointer)
+        // Offset 8: ProcessId (4 bytes)
+        // Offset 12: ParentId (4 bytes)
+        // Offset 16: SessionId (4 bytes)
+        // Offset 20: ExitStatus (4 bytes)
+        // Offset 24: DirectoryTableBase (8 bytes)
+        // Offset 32: Flags (4 bytes)
+        // Offset 36: UserSID (variable, starts with SID length)
+        // After SID: ImageFileName (null-terminated ANSI string)
+
+        if data.len() < 36 {
+            return None;
+        }
+
+        // Read ProcessId and ParentId from the event data
+        let event_pid = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let parent_pid = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
+
+        // Find the image filename - it's an ANSI string after the variable-length SID
+        // Skip to offset 36 and then skip the SID
+        let mut offset = 36usize;
+
+        // SID structure: first byte is revision, second is sub-authority count
+        // Total SID size = 8 + (4 * sub_authority_count)
+        // Bounds check: ensure we can read at least offset + 1 for sub_auth_count
+        if offset + 1 < data.len() {
+            let sub_auth_count = data[offset + 1] as usize;
+            let sid_size = 8 + (4 * sub_auth_count);
+            offset += sid_size;
+        }
+
+        // Now we should be at the ImageFileName (ANSI null-terminated)
+        let mut name = String::new();
+        if offset < data.len() {
+            // Read ANSI string until null terminator
+            for &byte in &data[offset..] {
+                if byte == 0 {
+                    break;
+                }
+                name.push(byte as char);
+            }
+        }
+
+        // Try to get the full image path from the OS (more reliable than event data).
+        // This must remain a full NT path because the WFP blocker converts it to a DOS path.
+        let image_path = get_process_image_path_by_pid(event_pid).unwrap_or_default();
+
+        // If we couldn't get the name from event data, extract from full path
+        if name.is_empty() {
+            name = image_path
+                .rsplit('\\')
+                .next()
+                .unwrap_or("unknown")
+                .to_string();
+        }
+
+        // Extract just the filename from path if the event data gave us a full path
+        let short_name = name.rsplit('\\').next().unwrap_or(&name).to_string();
+
+        Some(ProcessStartEvent {
+            pid: event_pid,
+            name: short_name,
+            image_path,
+            parent_pid,
+        })
     }
-
-    // Try to get the full image path from the OS (more reliable than event data).
-    // This must remain a full NT path because the WFP blocker converts it to a DOS path.
-    let image_path = get_process_image_path_by_pid(event_pid).unwrap_or_default();
-
-    // If we couldn't get the name from event data, extract from full path
-    if name.is_empty() {
-        name = image_path
-            .rsplit('\\')
-            .next()
-            .unwrap_or("unknown")
-            .to_string();
-    }
-
-    // Extract just the filename from path if the event data gave us a full path
-    let short_name = name.rsplit('\\').next().unwrap_or(&name).to_string();
-
-    Some(ProcessStartEvent {
-        pid: event_pid,
-        name: short_name,
-        image_path,
-        parent_pid,
-    })
 }
 
 /// One-shot scan of currently running processes at watcher startup. Emits synthetic

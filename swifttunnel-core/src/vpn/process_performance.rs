@@ -283,27 +283,27 @@ impl GameProcessPerformanceManager {
                 }
             }
 
-            if state.affinity_applied {
-                if let Some(original_mask) = state.affinity_original {
-                    unsafe {
-                        if let Err(e) = windows::Win32::System::Threading::SetProcessAffinityMask(
-                            handle,
-                            original_mask,
-                        ) {
-                            log::warn!(
-                                "Process tuning: failed to restore affinity for '{}' (PID {}): {}",
-                                state.process_name,
-                                pid,
-                                e
-                            );
-                        } else {
-                            log::info!(
-                                "Process tuning: restored affinity for '{}' (PID {}) on {}",
-                                state.process_name,
-                                pid,
-                                reason
-                            );
-                        }
+            if state.affinity_applied
+                && let Some(original_mask) = state.affinity_original
+            {
+                unsafe {
+                    if let Err(e) = windows::Win32::System::Threading::SetProcessAffinityMask(
+                        handle,
+                        original_mask,
+                    ) {
+                        log::warn!(
+                            "Process tuning: failed to restore affinity for '{}' (PID {}): {}",
+                            state.process_name,
+                            pid,
+                            e
+                        );
+                    } else {
+                        log::info!(
+                            "Process tuning: restored affinity for '{}' (PID {}) on {}",
+                            state.process_name,
+                            pid,
+                            reason
+                        );
                     }
                 }
             }
@@ -626,10 +626,10 @@ pub(crate) fn select_cpu_set_ids(
         candidates = cpu_sets.iter().collect();
     }
 
-    if prefer_performance_cores {
-        if let Some(best_efficiency) = candidates.iter().map(|set| set.efficiency_class).min() {
-            candidates.retain(|set| set.efficiency_class == best_efficiency);
-        }
+    if prefer_performance_cores
+        && let Some(best_efficiency) = candidates.iter().map(|set| set.efficiency_class).min()
+    {
+        candidates.retain(|set| set.efficiency_class == best_efficiency);
     }
 
     if unbind_cpu0 {
@@ -763,23 +763,28 @@ fn restore_gpu_preference(value_name: &str, previous_value: &Option<String>) -> 
 }
 
 #[cfg(windows)]
+type GetSystemCpuSetInformationFn = unsafe extern "system" fn(
+    *mut std::ffi::c_void,
+    u32,
+    *mut u32,
+    windows::Win32::Foundation::HANDLE,
+    u32,
+) -> i32;
+
+#[cfg(windows)]
+type GetProcessDefaultCpuSetsFn =
+    unsafe extern "system" fn(windows::Win32::Foundation::HANDLE, *mut u32, u32, *mut u32) -> i32;
+
+#[cfg(windows)]
+type SetProcessDefaultCpuSetsFn =
+    unsafe extern "system" fn(windows::Win32::Foundation::HANDLE, *const u32, u32) -> i32;
+
+#[cfg(windows)]
 #[derive(Clone, Copy)]
 struct CpuSetApi {
-    get_system_cpu_set_information: unsafe extern "system" fn(
-        *mut std::ffi::c_void,
-        u32,
-        *mut u32,
-        windows::Win32::Foundation::HANDLE,
-        u32,
-    ) -> i32,
-    get_process_default_cpu_sets: unsafe extern "system" fn(
-        windows::Win32::Foundation::HANDLE,
-        *mut u32,
-        u32,
-        *mut u32,
-    ) -> i32,
-    set_process_default_cpu_sets:
-        unsafe extern "system" fn(windows::Win32::Foundation::HANDLE, *const u32, u32) -> i32,
+    get_system_cpu_set_information: GetSystemCpuSetInformationFn,
+    get_process_default_cpu_sets: GetProcessDefaultCpuSetsFn,
+    set_process_default_cpu_sets: SetProcessDefaultCpuSetsFn,
 }
 
 #[cfg(windows)]
@@ -802,9 +807,18 @@ fn load_cpu_set_api() -> Option<CpuSetApi> {
 
     let api = unsafe {
         CpuSetApi {
-            get_system_cpu_set_information: std::mem::transmute(get_system),
-            get_process_default_cpu_sets: std::mem::transmute(get_process),
-            set_process_default_cpu_sets: std::mem::transmute(set_process),
+            get_system_cpu_set_information: std::mem::transmute::<
+                *const std::ffi::c_void,
+                GetSystemCpuSetInformationFn,
+            >(get_system),
+            get_process_default_cpu_sets: std::mem::transmute::<
+                *const std::ffi::c_void,
+                GetProcessDefaultCpuSetsFn,
+            >(get_process),
+            set_process_default_cpu_sets: std::mem::transmute::<
+                *const std::ffi::c_void,
+                SetProcessDefaultCpuSetsFn,
+            >(set_process),
         }
     };
 
@@ -892,20 +906,21 @@ fn parse_cpu_set_buffer(buffer: &[u8]) -> Vec<CpuSetDescriptor> {
         let info_type = read_u32_le(buffer, offset + 4).unwrap_or(u32::MAX);
 
         // For CpuSet records, parse only the fields we need from documented offsets.
-        if info_type == CPU_SET_INFO_TYPE && size >= 24 {
-            if let Some(id) = read_u32_le(buffer, offset + 8) {
-                let logical_processor_index = buffer[offset + 14];
-                let efficiency_class = buffer[offset + 18];
-                let all_flags = buffer[offset + 19];
-                let parked = (all_flags & 0x01) != 0;
+        if info_type == CPU_SET_INFO_TYPE
+            && size >= 24
+            && let Some(id) = read_u32_le(buffer, offset + 8)
+        {
+            let logical_processor_index = buffer[offset + 14];
+            let efficiency_class = buffer[offset + 18];
+            let all_flags = buffer[offset + 19];
+            let parked = (all_flags & 0x01) != 0;
 
-                output.push(CpuSetDescriptor {
-                    id,
-                    logical_processor_index,
-                    efficiency_class,
-                    parked,
-                });
-            }
+            output.push(CpuSetDescriptor {
+                id,
+                logical_processor_index,
+                efficiency_class,
+                parked,
+            });
         }
 
         offset += size;

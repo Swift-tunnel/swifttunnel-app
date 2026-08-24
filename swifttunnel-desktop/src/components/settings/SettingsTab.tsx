@@ -67,7 +67,6 @@ export function SettingsTab() {
         return "Not resolved";
     }
   })();
-  const routeAssistDisabledByPartial = settings.enable_partial_country_ban;
 
   function set(partial: Partial<AppSettings>, options?: { toast?: boolean }) {
     update(partial);
@@ -233,6 +232,28 @@ export function SettingsTab() {
           />
         </Row>
         <Row
+          label="Go easy while you play"
+          anchorId="idle_when_unfocused"
+          desc="Slow background updates when the window is not in front, so SwiftTunnel does not compete with your game"
+        >
+          <Toggle
+            enabled={settings.idle_when_unfocused}
+            ariaLabel="Go easy while you play"
+            onChange={(v) => set({ idle_when_unfocused: v })}
+          />
+        </Row>
+        <Row
+          label="Live connection graph"
+          anchorId="show_live_graph"
+          desc="Turn off to reduce lag. The graph redraws constantly, which costs FPS if you keep SwiftTunnel open while playing"
+        >
+          <Toggle
+            enabled={settings.show_live_graph}
+            ariaLabel="Live connection graph"
+            onChange={(v) => set({ show_live_graph: v })}
+          />
+        </Row>
+        <Row
           label="Auto-reconnect tunnel"
           anchorId="auto_reconnect"
           desc="Reconnect after restart if last session was connected"
@@ -261,18 +282,10 @@ export function SettingsTab() {
         <Row
           label="Route Assist"
           anchorId="route_assist"
-          desc={
-            routeAssistDisabledByPartial
-              ? "Disabled while Partial Bypass is active"
-              : "Relays Roblox login and matchmaking too"
-          }
+          desc="Join game servers in your relay's region"
           tooltip={
             <Tooltip
-              content={
-                routeAssistDisabledByPartial
-                  ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
-                  : "Routes Roblox login and matchmaking through the relay, not just gameplay. For blocked countries use the Bypass toggles in Optimize."
-              }
+              content="Join game servers in your relay's region"
             >
               <span className="inline-flex">
                 <InfoIcon />
@@ -281,10 +294,7 @@ export function SettingsTab() {
           }
         >
           <Toggle
-            enabled={
-              settings.enable_api_tunneling && !routeAssistDisabledByPartial
-            }
-            disabled={routeAssistDisabledByPartial}
+            enabled={settings.enable_api_tunneling}
             ariaLabel="Route Assist"
             onChange={(v) => set({ enable_api_tunneling: v })}
           />

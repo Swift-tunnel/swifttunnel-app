@@ -290,6 +290,7 @@ fn supervise_etw_session(shared: Arc<FpsShared>) {
 }
 
 /// Run one real-time ETW session, blocking in `ProcessTrace` until stopped.
+#[allow(clippy::field_reassign_with_default)]
 fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
     stop_existing_session();
 
@@ -343,7 +344,7 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
             None,
         );
         if result != ERROR_SUCCESS {
-            ControlTraceW(
+            let _ = ControlTraceW(
                 session_handle,
                 PCWSTR::null(),
                 properties,
@@ -356,6 +357,9 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
         // it after ProcessTrace returns.
         let context_ptr = Box::into_raw(Box::new(shared.clone()));
 
+        // EVENT_TRACE_LOGFILEW carries anonymous unions, which a struct
+        // literal cannot initialise field by field. The stepwise form is the
+        // only one that compiles here.
         let mut logfile = EVENT_TRACE_LOGFILEW::default();
         logfile.LoggerName = PWSTR(session_name_wide.as_ptr() as *mut u16);
         logfile.Anonymous1.ProcessTraceMode =
@@ -366,7 +370,7 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
         let trace_handle = OpenTraceW(&mut logfile);
         if trace_handle.Value == u64::MAX {
             drop(Box::from_raw(context_ptr));
-            ControlTraceW(
+            let _ = ControlTraceW(
                 session_handle,
                 PCWSTR::null(),
                 properties,
@@ -380,9 +384,9 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
         let handles = [trace_handle];
         let result = ProcessTrace(&handles, None, None);
 
-        CloseTrace(trace_handle);
+        let _ = CloseTrace(trace_handle);
         drop(Box::from_raw(context_ptr));
-        ControlTraceW(
+        let _ = ControlTraceW(
             session_handle,
             PCWSTR::null(),
             properties,
@@ -417,7 +421,7 @@ fn stop_existing_session() {
             name_dest,
             session_name_wide.len(),
         );
-        ControlTraceW(
+        let _ = ControlTraceW(
             CONTROLTRACE_HANDLE::default(),
             PCWSTR(session_name_wide.as_ptr()),
             properties,
@@ -430,31 +434,33 @@ fn stop_existing_session() {
 /// handful of atomic ops since it fires for every present from every process
 /// system-wide.
 unsafe extern "system" fn present_event_callback(event_record: *mut EVENT_RECORD) {
-    if event_record.is_null() {
-        return;
-    }
-    let record = &*event_record;
-    let ctx = record.UserContext as *const Arc<FpsShared>;
-    if ctx.is_null() {
-        return;
-    }
-    let shared = &*ctx;
+    unsafe {
+        if event_record.is_null() {
+            return;
+        }
+        let record = &*event_record;
+        let ctx = record.UserContext as *const Arc<FpsShared>;
+        if ctx.is_null() {
+            return;
+        }
+        let shared = &*ctx;
 
-    if shared.stop_flag.load(Ordering::Relaxed) {
-        return;
+        if shared.stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        if record.EventHeader.ProviderId != DXGI_PROVIDER_GUID {
+            return;
+        }
+        let descriptor = record.EventHeader.EventDescriptor;
+        if !DXGI_PRESENT_TASKS.contains(&descriptor.Task) || descriptor.Opcode != ETW_OPCODE_START {
+            return;
+        }
+        let target = shared.target_pid.load(Ordering::Acquire);
+        if target == 0 || record.EventHeader.ProcessId != target {
+            return;
+        }
+        shared.present_count.fetch_add(1, Ordering::Release);
     }
-    if record.EventHeader.ProviderId != DXGI_PROVIDER_GUID {
-        return;
-    }
-    let descriptor = record.EventHeader.EventDescriptor;
-    if !DXGI_PRESENT_TASKS.contains(&descriptor.Task) || descriptor.Opcode != ETW_OPCODE_START {
-        return;
-    }
-    let target = shared.target_pid.load(Ordering::Acquire);
-    if target == 0 || record.EventHeader.ProcessId != target {
-        return;
-    }
-    shared.present_count.fetch_add(1, Ordering::Release);
 }
 
 #[cfg(test)]

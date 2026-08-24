@@ -411,7 +411,7 @@ pub fn has_ipv6_binding_native(if_index: u32) -> Option<bool> {
         // and creating a reference through it is UB per the Rust Reference
         // even though `HeapAlloc` happens to return 16-byte-aligned blocks on
         // x64 Windows today. Miri flags the `Vec<u8>` form.
-        let u64_elems = (size as usize + 7) / 8;
+        let u64_elems = (size as usize).div_ceil(8);
         let mut buffer: Vec<u64> = vec![0u64; u64_elems];
         let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
 
@@ -496,13 +496,13 @@ fn write_marker(marker: &Ipv6Marker) {
 
 /// Delete IPv6 marker file
 pub fn delete_ipv6_marker() {
-    if let Some(marker_path) = get_marker_path() {
-        if marker_path.exists() {
-            if let Err(e) = fs::remove_file(&marker_path) {
-                log::warn!("Failed to delete IPv6 marker file: {}", e);
-            } else {
-                log::debug!("IPv6 marker file deleted");
-            }
+    if let Some(marker_path) = get_marker_path()
+        && marker_path.exists()
+    {
+        if let Err(e) = fs::remove_file(&marker_path) {
+            log::warn!("Failed to delete IPv6 marker file: {}", e);
+        } else {
+            log::debug!("IPv6 marker file deleted");
         }
     }
 }
@@ -515,10 +515,10 @@ pub fn read_ipv6_marker() -> Option<Ipv6Marker> {
     }
 
     let raw = fs::read(&marker_path).ok()?;
-    if let Ok(marker) = serde_json::from_slice::<Ipv6Marker>(&raw) {
-        if !marker.adapter_name.trim().is_empty() {
-            return Some(marker);
-        }
+    if let Ok(marker) = serde_json::from_slice::<Ipv6Marker>(&raw)
+        && !marker.adapter_name.trim().is_empty()
+    {
+        return Some(marker);
     }
 
     let adapter_name = String::from_utf8_lossy(&raw).trim().to_string();
@@ -1125,7 +1125,7 @@ mod tests {
                 return;
             }
 
-            let u64_elems = (size as usize + 7) / 8;
+            let u64_elems = (size as usize).div_ceil(8);
             let mut buffer: Vec<u64> = vec![0u64; u64_elems];
             let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
             let rc = GetAdaptersAddresses(

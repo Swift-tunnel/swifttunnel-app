@@ -1,3 +1,10 @@
+//! Shared helpers for the testbench binaries.
+//!
+//! Each bin that includes this module uses a different subset of it, so from
+//! any single one of them most of the file looks unused. The allow is about
+//! that, not about the helpers being obsolete.
+#![allow(dead_code)]
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
@@ -650,7 +657,6 @@ pub async fn connect_vpn(
         settings.game_process_performance,
         resolve_enable_api_tunneling(opts, settings),
         resolve_enable_country_ban(opts, settings),
-        settings.enable_partial_country_ban,
     )
     .await
     .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))

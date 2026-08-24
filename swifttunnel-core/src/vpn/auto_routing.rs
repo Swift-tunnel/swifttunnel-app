@@ -362,24 +362,24 @@ impl AutoRouter {
         let now = Instant::now();
         match self.game_traffic.try_read() {
             Some(traffic) => {
-                if let Some(last) = traffic.get(&ip) {
-                    if now.duration_since(*last) < GAME_TRAFFIC_UPDATE_GRANULARITY {
-                        return;
-                    }
+                if let Some(last) = traffic.get(&ip)
+                    && now.duration_since(*last) < GAME_TRAFFIC_UPDATE_GRANULARITY
+                {
+                    return;
                 }
             }
             None => return,
         }
 
         if let Some(mut traffic) = self.game_traffic.try_write() {
-            if traffic.len() >= MAX_TRACKED_GAME_TRAFFIC_IPS && !traffic.contains_key(&ip) {
-                if let Some(stalest) = traffic
+            if traffic.len() >= MAX_TRACKED_GAME_TRAFFIC_IPS
+                && !traffic.contains_key(&ip)
+                && let Some(stalest) = traffic
                     .iter()
                     .min_by_key(|(_, last)| **last)
                     .map(|(ip, _)| *ip)
-                {
-                    traffic.remove(&stalest);
-                }
+            {
+                traffic.remove(&stalest);
             }
             traffic.insert(ip, now);
         }

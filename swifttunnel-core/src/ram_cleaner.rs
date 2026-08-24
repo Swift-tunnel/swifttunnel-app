@@ -115,7 +115,7 @@ fn select_trim_candidates(
         })
         .collect();
 
-    candidates.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.memory_bytes));
     candidates.truncate(MAX_TRIM_PROCESSES);
     candidates
 }
@@ -275,8 +275,10 @@ mod windows_impl {
 
     pub(super) fn get_system_memory_snapshot() -> Result<SystemMemorySnapshot> {
         unsafe {
-            let mut status = MEMORYSTATUSEX::default();
-            status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+            let mut status = MEMORYSTATUSEX {
+                dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+                ..Default::default()
+            };
 
             GlobalMemoryStatusEx(&mut status)?;
 
@@ -533,10 +535,10 @@ mod windows_impl {
         on_progress("flushing_modified", snap, trimmed_count, None, None);
 
         let modified_flush = flush_modified_list();
-        if !modified_flush.success {
-            if let Some(reason) = modified_flush.skipped_reason.clone() {
-                warnings.push(format!("Modified flush: {}", reason));
-            }
+        if !modified_flush.success
+            && let Some(reason) = modified_flush.skipped_reason.clone()
+        {
+            warnings.push(format!("Modified flush: {}", reason));
         }
 
         // Phase 3: Purge standby list (reclaims all standby pages including newly flushed)
@@ -544,10 +546,10 @@ mod windows_impl {
         on_progress("standby_purge", pre_standby, trimmed_count, None, None);
 
         let standby_purge = purge_standby_list();
-        if !standby_purge.success {
-            if let Some(reason) = standby_purge.skipped_reason.clone() {
-                warnings.push(format!("Standby purge: {}", reason));
-            }
+        if !standby_purge.success
+            && let Some(reason) = standby_purge.skipped_reason.clone()
+        {
+            warnings.push(format!("Standby purge: {}", reason));
         }
 
         let after = snapshot_or_warn(&mut warnings);

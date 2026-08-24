@@ -139,12 +139,6 @@ const BOOST_SETTINGS: { anchor: string; label: string; keywords: string }[] = [
       "country ban full bypass egypt blocked platform banned unblock roblox",
   },
   {
-    anchor: "partial_ban",
-    label: "Bypass Partial Ban",
-    keywords:
-      "partial ban bypass vietnam blocked games matchmaking join unblock",
-  },
-  {
     anchor: "high_priority",
     label: "High Priority Mode",
     keywords: "high priority process cpu fps boost priority",
@@ -376,7 +370,7 @@ const SETTINGS_ROWS: SearchEntry[] = (
       keywords:
         // "route assist" kept as an alias: it was the old name, and users who
         // learned it from Discord or older builds should still find the toggle.
-        "tunnel join traffic route assist roblox matchmaking login api connection setup placement region relay tcp",
+        "route assist region placement server region join matchmaking gamejoin teleport singapore relay tunnel join traffic",
     },
     {
       anchor: "auto_update",

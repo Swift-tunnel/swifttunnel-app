@@ -77,6 +77,8 @@ interface LiveGraphProps {
   height?: number;
   lineColor?: string;
   fillColor?: string;
+  /** Switch the graph off from its own header. */
+  onDisable?: () => void;
 }
 
 export function LiveGraph({
@@ -84,6 +86,7 @@ export function LiveGraph({
   height = 160,
   lineColor = "var(--color-text-primary)",
   fillColor = "#ffffff",
+  onDisable,
 }: LiveGraphProps) {
   const W = 480;
   const H = height;
@@ -284,9 +287,22 @@ export function LiveGraph({
             Throughput · Live
           </span>
         </div>
-        <span className="font-mono text-[13px] font-semibold text-text-primary">
-          {formatRate(currentRate)}
-        </span>
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-[13px] font-semibold text-text-primary">
+            {formatRate(currentRate)}
+          </span>
+          {onDisable && (
+            <button
+              type="button"
+              onClick={onDisable}
+              title="Hide the connection graph"
+              aria-label="Hide the connection graph"
+              className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted transition-colors hover:text-text-primary"
+            >
+              Hide
+            </button>
+          )}
+        </div>
       </div>
 
       <svg

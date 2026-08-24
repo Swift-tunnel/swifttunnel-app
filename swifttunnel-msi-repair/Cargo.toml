@@ -7,11 +7,11 @@ description = "Clears an orphaned SwiftTunnel MSI registration so an upgrade or 
 [dependencies]
 windows-registry = "0.5"
 
+[lib]
+name = "swifttunnel_msi_repair"
+path = "src/lib.rs"
+
 [[bin]]
 name = "swifttunnel-msi-repair"
 path = "src/main.rs"
 
-[profile.release]
-opt-level = "z"
-lto = true
-strip = true

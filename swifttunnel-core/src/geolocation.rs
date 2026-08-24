@@ -49,9 +49,11 @@ fn get_semaphore() -> &'static Semaphore {
 /// backend request (and counts toward hosting limits), so this trims real load.
 const REGION_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 const REGION_CACHE_MAX_ENTRIES: usize = 4096;
-static REGION_CACHE: std::sync::OnceLock<
-    Arc<Mutex<HashMap<Ipv4Addr, (GameServerRegionLookup, std::time::Instant)>>>,
-> = std::sync::OnceLock::new();
+/// Cached region lookups keyed by game-server IP, with the time each was
+/// resolved so entries can age out.
+type RegionCache = Arc<Mutex<HashMap<Ipv4Addr, (GameServerRegionLookup, std::time::Instant)>>>;
+
+static REGION_CACHE: std::sync::OnceLock<RegionCache> = std::sync::OnceLock::new();
 
 fn get_region_cache() -> Arc<Mutex<HashMap<Ipv4Addr, (GameServerRegionLookup, std::time::Instant)>>>
 {
@@ -80,6 +82,7 @@ struct GameServerRegionLocation {
     city: Option<String>,
     region: Option<String>,
     country: Option<String>,
+    #[allow(dead_code)]
     loc: Option<String>,
 }
 
@@ -130,6 +133,7 @@ pub async fn get_ip_location(ip: Ipv4Addr) -> Option<String> {
 }
 
 /// Format location from IpInfo response
+#[allow(dead_code)]
 fn format_location(info: &IpInfoResponse) -> Option<String> {
     let city = info.city.as_ref()?;
     let country = info.country.as_ref()?;
@@ -386,10 +390,10 @@ fn us_region_from_ipinfo(city: &str, info: &IpInfoResponse) -> RobloxRegion {
     }
 
     // Tier 3: US state/region name matching
-    if let Some(state) = info.region.as_deref() {
-        if let Some(region) = us_region_from_state(state) {
-            return region;
-        }
+    if let Some(state) = info.region.as_deref()
+        && let Some(region) = us_region_from_state(state)
+    {
+        return region;
     }
 
     // Tier 4: Default to UsEast (majority of Roblox US servers are East Coast)
@@ -593,10 +597,10 @@ pub async fn lookup_game_server_region(ip: Ipv4Addr) -> GameServerRegionLookup {
     {
         let cache = get_region_cache();
         let guard = cache.lock();
-        if let Some((cached, at)) = guard.get(&ip) {
-            if at.elapsed() < REGION_CACHE_TTL {
-                return cached.clone();
-            }
+        if let Some((cached, at)) = guard.get(&ip)
+            && at.elapsed() < REGION_CACHE_TTL
+        {
+            return cached.clone();
         }
     }
 

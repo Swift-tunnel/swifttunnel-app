@@ -555,6 +555,81 @@ pub async fn updater_check_channel(
     })
 }
 
+/// Where downloaded installers are kept so Windows can always find them again.
+///
+/// ProgramData rather than %TEMP%: Windows stores the directory msiexec ran
+/// from as the product's installation source and consults it whenever the
+/// product is upgraded or removed. A temp directory is gone by then, which is
+/// what strands machines on "the feature you are trying to use is on a network
+/// resource that is unavailable".
+fn installer_cache_dir() -> Result<std::path::PathBuf, String> {
+    let base = std::env::var("ProgramData").map_err(|_| "ProgramData is not set".to_string())?;
+    let dir = std::path::Path::new(&base)
+        .join("SwiftTunnel")
+        .join("installers");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Write the verified package to the installer cache and return its path.
+///
+/// Older installers are pruned, but the newest few are deliberately kept: the
+/// source Windows wants is the one the *currently installed* version came from,
+/// not the one being installed now, so keeping only the newest would recreate
+/// the bug on the following upgrade.
+fn stage_installer(version: &str, package: &[u8]) -> Result<std::path::PathBuf, String> {
+    const KEEP: usize = 3;
+
+    let dir = installer_cache_dir()?;
+    let path = dir.join(format!("SwiftTunnel-{version}.msi"));
+    std::fs::write(&path, package)
+        .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut msis: Vec<_> = entries
+            .flatten()
+            .filter(|e| {
+                e.path().extension().and_then(|x| x.to_str()) == Some("msi") && e.path() != path
+            })
+            .collect();
+        msis.sort_by_key(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+        while msis.len() >= KEEP {
+            let victim = msis.remove(0);
+            let _ = std::fs::remove_file(victim.path());
+        }
+    }
+
+    Ok(path)
+}
+
+/// Run msiexec against a staged installer.
+///
+/// Mirrors what tauri-plugin-updater passes, so the install behaves exactly as
+/// it did before: /passive for a progress bar only, /promptrestart, and
+/// AUTOLAUNCHAPP so the app comes back up afterwards. The app already runs
+/// elevated, so the child process inherits that and no extra prompt appears.
+fn launch_msi_installer(installer: &std::path::Path) -> Result<(), String> {
+    let msiexec = std::env::var("SYSTEMROOT")
+        .map(|root| format!(r"{root}\System32\msiexec.exe"))
+        .unwrap_or_else(|_| "msiexec.exe".to_string());
+
+    std::process::Command::new(msiexec)
+        .arg("/i")
+        .arg(installer)
+        .arg("/passive")
+        .arg("/promptrestart")
+        .arg("AUTOLAUNCHAPP=True")
+        .spawn()
+        .map_err(|e| format!("Failed to start the installer: {e}"))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn updater_install_channel(
     app: AppHandle,
@@ -597,8 +672,8 @@ pub async fn updater_install_channel(
     let app_for_progress = app.clone();
     let downloaded_for_progress = Arc::clone(&downloaded);
 
-    update
-        .download_and_install(
+    let package = update
+        .download(
             move |chunk_len, total| {
                 let so_far = downloaded_for_progress.fetch_add(chunk_len as u64, Ordering::Relaxed)
                     + chunk_len as u64;
@@ -613,7 +688,18 @@ pub async fn updater_install_channel(
             || {},
         )
         .await
-        .map_err(|e| format!("Failed to download/install update: {}", e))?;
+        .map_err(|e| format!("Failed to download update: {}", e))?;
+
+    // Install from a directory that survives, not the temp folder the plugin
+    // would otherwise use. Windows records the path msiexec ran from as the
+    // product's installation source, and it wipes %TEMP%. The next upgrade
+    // then cannot find the package it needs to remove the old version and
+    // dies on "the feature you are trying to use is on a network resource
+    // that is unavailable", leaving the machine unable to upgrade or
+    // uninstall. download() above performed the same signature verification
+    // the plugin does, so nothing about trust changes here.
+    let installer_path = stage_installer(&update.version, &package)?;
+    launch_msi_installer(&installer_path)?;
 
     // Emit `done` only after signature verification + install actually
     // succeeded — the `on_download_finish` callback fires before the await

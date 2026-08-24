@@ -10,6 +10,7 @@ import {
 } from "../../lib/utils";
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
+import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { RouteDiagram } from "./RouteDiagram";
 import {
   isConnectActionBusy,
@@ -62,6 +63,7 @@ export function ConnectTab() {
   const fetchState = useVpnStore((s) => s.fetchState);
 
   const settings = useSettingsStore((s) => s.settings);
+  const showLiveGraph = settings.show_live_graph;
   const update = useSettingsStore((s) => s.update);
   const save = useSettingsStore((s) => s.save);
 
@@ -122,7 +124,10 @@ export function ConnectTab() {
   }, [save]);
 
   useEffect(() => {
-    if (!isConnected) {
+    // No graph means nothing consumes these samples, so skip the whole loop:
+    // a throughput IPC call every 500ms plus a state update that re-renders
+    // the tab. This is what the setting is actually for.
+    if (!isConnected || !showLiveGraph) {
       setDataHistory([]);
       prevBytesRef.current = null;
       return;
@@ -155,32 +160,32 @@ export function ConnectTab() {
       prevBytesRef.current = { up: bytesUp, down: bytesDown, t: now };
     };
     void sample();
+    // Sampled through a plain interval because the closure owns per-tick
+    // state (prevBytesRef). Deliberately not focus-aware: the graph is most
+    // useful for the period you were playing, which is exactly when the window
+    // is not in front.
     const id = setInterval(() => void sample(), SAMPLE_INTERVAL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);
       prevBytesRef.current = null;
     };
-  }, [isConnected, fetchThroughput]);
+  }, [isConnected, showLiveGraph, fetchThroughput]);
 
-  useEffect(() => {
-    if (!isConnected && !isTransitioning) return;
-    const id = setInterval(() => void fetchState(), 2000);
-    return () => clearInterval(id);
-  }, [isConnected, isTransitioning, fetchState]);
+  useFocusAwareInterval(() => void fetchState(), 2000, {
+    enabled: isConnected || isTransitioning,
+  });
 
   useEffect(() => {
     void fetchLatencies();
-    const id = setInterval(() => void fetchLatencies(), 15000);
-    return () => clearInterval(id);
   }, [fetchLatencies]);
+  useFocusAwareInterval(() => void fetchLatencies(), 15000, { idleMs: 60_000 });
 
   useEffect(() => {
     if (!isConnected) return;
     void fetchPing();
-    const id = setInterval(() => void fetchPing(), 3000);
-    return () => clearInterval(id);
   }, [isConnected, fetchPing]);
+  useFocusAwareInterval(() => void fetchPing(), 3000, { enabled: isConnected });
 
   useEffect(() => {
     if (connectedAt === null) {
@@ -214,11 +219,6 @@ export function ConnectTab() {
   }
 
   function setRouteAssist(enabled: boolean) {
-    if (enabled && settings.enable_partial_country_ban) {
-      update({ enable_api_tunneling: false });
-      saveDebounced();
-      return;
-    }
     update({ enable_api_tunneling: enabled });
     saveDebounced();
   }
@@ -465,13 +465,8 @@ export function ConnectTab() {
       <AdapterSelectionPanel disabled={isConnected || isTransitioning} />
 
       <RouteAssistPanel
-        enabled={
-          settings.enable_api_tunneling && !settings.enable_partial_country_ban
-        }
-        disabled={
-          isConnected || isTransitioning || settings.enable_partial_country_ban
-        }
-        partialBypassActive={settings.enable_partial_country_ban}
+        enabled={settings.enable_api_tunneling}
+        disabled={isConnected || isTransitioning}
         onChange={setRouteAssist}
       />
 
@@ -483,7 +478,29 @@ export function ConnectTab() {
           transition={{ duration: 0.2 }}
           className="flex flex-col gap-2.5"
         >
-          <LiveGraph samples={dataHistory} />
+          {showLiveGraph ? (
+            <LiveGraph
+              samples={dataHistory}
+              onDisable={() => {
+                update({ show_live_graph: false });
+                saveDebounced();
+              }}
+            />
+          ) : (
+            // Hiding the graph must not be a one-way door. Without this the
+            // only way back was the Settings tab, which is a poor place to
+            // look for something you turned off here.
+            <button
+              type="button"
+              onClick={() => {
+                update({ show_live_graph: true });
+                saveDebounced();
+              }}
+              className="flex items-center justify-center gap-2 rounded-[var(--radius-card)] surface-card px-4 py-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted transition-colors hover:text-text-primary"
+            >
+              Show connection graph
+            </button>
+          )}
 
           <div className="grid grid-cols-4 overflow-hidden rounded-[var(--radius-card)] surface-card">
             <MetricCell label="Upload" value={formatBytes(bytesUp)} mono divider />
@@ -734,12 +751,10 @@ function IconTile({
 function RouteAssistPanel({
   enabled,
   disabled,
-  partialBypassActive,
   onChange,
 }: {
   enabled: boolean;
   disabled: boolean;
-  partialBypassActive: boolean;
   onChange: (enabled: boolean) => void;
 }) {
   return (
@@ -783,11 +798,7 @@ function RouteAssistPanel({
               Route Assist
             </h3>
             <Tooltip
-              content={
-                partialBypassActive
-                  ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
-                  : "Routes Roblox login and matchmaking through the relay, not just gameplay. For blocked countries use the Bypass toggles in Optimize."
-              }
+              content="Join game servers in your relay's region"
             >
               <span className="inline-flex">
                 <InfoIcon />
@@ -795,9 +806,7 @@ function RouteAssistPanel({
             </Tooltip>
           </div>
           <p className="mt-0.5 truncate text-[11px] leading-snug text-text-muted">
-            {partialBypassActive
-              ? "Disabled while Partial Bypass is active."
-              : "Relays Roblox login and matchmaking too."}
+            Join game servers in your relay's region.
           </p>
         </div>
       </div>

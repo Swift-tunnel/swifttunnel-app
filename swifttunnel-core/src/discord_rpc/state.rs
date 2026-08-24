@@ -4,9 +4,10 @@ use std::borrow::Cow;
 use std::time::Instant;
 
 /// Current state for Discord Rich Presence display
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum DiscordState {
     /// App is open but VPN is disconnected
+    #[default]
     Idle,
     /// VPN is connecting to a region
     Connecting { region: String },
@@ -22,12 +23,6 @@ pub enum DiscordState {
         region: String,
         connected_at: Instant,
     },
-}
-
-impl Default for DiscordState {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 /// Activity message to send to Discord RPC thread

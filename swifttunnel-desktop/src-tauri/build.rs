@@ -356,73 +356,6 @@ fn powershell_single_quoted(value: &str) -> String {
     value.replace('\'', "''")
 }
 
-/// Write `wix/msi-repair.wxs` from its template with the repair binary's
-/// absolute path substituted in.
-///
-/// The WiX `Binary` element needs an absolute path. candle records the path
-/// exactly as written and light then resolves it from a different working
-/// directory, so a relative one compiles and fails at link. `$(env.…)` is not
-/// an option either: it resolves when candle is run by hand but not under
-/// `tauri build`, which does not pass the environment to the candle process it
-/// spawns. Generating the fragment is what is left.
-fn generate_msi_repair_fragment() {
-    let wix_dir = std::path::Path::new("wix");
-    let template = wix_dir.join("msi-repair.wxs.in");
-    println!("cargo:rerun-if-changed={}", template.display());
-
-    let target = std::env::var("TARGET").expect("TARGET is always set for build scripts");
-    // src-tauri -> swifttunnel-desktop -> workspace root
-    let workspace_target = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("target");
-
-    // A `--target`ed build nests under the triple; a plain one does not.
-    let candidates = [
-        workspace_target
-            .join(&target)
-            .join("release")
-            .join("swifttunnel-msi-repair.exe"),
-        workspace_target
-            .join("release")
-            .join("swifttunnel-msi-repair.exe"),
-    ];
-
-    let exe = candidates
-        .iter()
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| {
-            panic!(
-                "The MSI repair binary is missing; looked for {}. Build it first with \
-                 `cargo build -p swifttunnel-msi-repair --release --target {}`. Without it the \
-                 installer cannot clear an orphaned registration, and upgrades on machines whose \
-                 cached package is gone fail with \"the feature you are trying to use is on a \
-                 network resource that is unavailable\".",
-                candidates
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(" or "),
-                target
-            )
-        });
-
-    let absolute = std::fs::canonicalize(exe)
-        .unwrap_or_else(|err| panic!("Could not resolve {}: {err}", exe.display()));
-    // canonicalize hands back a \\?\ prefixed path on Windows, which WiX does
-    // not accept in SourceFile.
-    let absolute = absolute.display().to_string();
-    let absolute = absolute.strip_prefix(r"\\?\").unwrap_or(&absolute);
-
-    let rendered = std::fs::read_to_string(&template)
-        .unwrap_or_else(|err| panic!("Could not read {}: {err}", template.display()))
-        .replace("@SWIFTTUNNEL_MSI_REPAIR_EXE@", absolute);
-
-    let generated = wix_dir.join("msi-repair.wxs");
-    std::fs::write(&generated, rendered)
-        .unwrap_or_else(|err| panic!("Could not write {}: {err}", generated.display()));
-}
-
 fn main() {
     // Only enforce the MSI payload check for Windows release builds.
     // CARGO_CFG_TARGET_OS gates out macOS/Linux hosts; PROFILE gates out
@@ -434,7 +367,6 @@ fn main() {
         check_bundled_driver_msis();
         check_bundled_nvidia_profile_inspector();
         check_bundled_goodbyedpi_helper();
-        generate_msi_repair_fragment();
     }
 
     let attrs = tauri_build::Attributes::new()

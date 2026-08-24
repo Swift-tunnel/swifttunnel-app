@@ -151,9 +151,6 @@ export function BoostTab() {
     useState<GameProcessPerformanceSettings>(savedGPP);
   const savedCountryBan = settings.enable_country_ban;
   const [draftCountryBan, setDraftCountryBan] = useState(savedCountryBan);
-  const savedPartialBan = settings.enable_partial_country_ban;
-  const [draftPartialBan, setDraftPartialBan] = useState(savedPartialBan);
-  const savedRouteAssist = settings.enable_api_tunneling;
   const [fullBanDialogOpen, setFullBanDialogOpen] = useState(false);
   const [fullBanChecking, setFullBanChecking] = useState(false);
   const [fullBanClosing, setFullBanClosing] = useState(false);
@@ -166,19 +163,12 @@ export function BoostTab() {
     setDraftCountryBan(savedCountryBan);
   }, [savedCountryBan]);
 
-  useEffect(() => {
-    setDraftPartialBan(savedPartialBan);
-  }, [savedPartialBan]);
-
-  // The two bypass modes route gameplay UDP opposite ways - only one at a time.
   const chooseFullBan = (v: boolean) => {
     if (robloxControlsLocked) return;
     setDraftCountryBan(v);
-    if (v) setDraftPartialBan(false);
   };
   const enableFullBanDraft = useCallback(() => {
     setDraftCountryBan(true);
-    setDraftPartialBan(false);
   }, []);
   const requestFullBan = useCallback(
     async (v: boolean) => {
@@ -243,12 +233,6 @@ export function BoostTab() {
       setFullBanClosing(false);
     }
   }, [addToast, boost, enableFullBanDraft]);
-  const choosePartialBan = (v: boolean) => {
-    if (robloxControlsLocked) return;
-    setDraftPartialBan(v);
-    if (v) setDraftCountryBan(false);
-  };
-
   useEffect(() => {
     let canceled = false;
     void boost.syncEffectiveConfig().then((appliedConfig) => {
@@ -271,12 +255,7 @@ export function BoostTab() {
 
   const hasConfigChanges = !configsEqual(draft, savedConfig);
   const hasGPPChanges = JSON.stringify(draftGPP) !== JSON.stringify(savedGPP);
-  const partialBypassWillDisableRouteAssist =
-    draftPartialBan && savedRouteAssist;
-  const hasCountryBanChange =
-    draftCountryBan !== savedCountryBan ||
-    draftPartialBan !== savedPartialBan ||
-    partialBypassWillDisableRouteAssist;
+  const hasCountryBanChange = draftCountryBan !== savedCountryBan;
   const hasChanges = hasConfigChanges || hasGPPChanges || hasCountryBanChange;
   const hasRobloxChanges = robloxSettingsChanged(draft, savedConfig);
   const [isRestarting, setIsRestarting] = useState(false);
@@ -337,8 +316,6 @@ export function BoostTab() {
         config: appliedConfig,
         game_process_performance: draftGPP,
         enable_country_ban: draftCountryBan,
-        enable_partial_country_ban: draftPartialBan,
-        enable_api_tunneling: draftPartialBan ? false : savedRouteAssist,
       });
       setDraft(appliedConfig);
       await saveSettings();
@@ -355,8 +332,6 @@ export function BoostTab() {
     draft,
     draftGPP,
     draftCountryBan,
-    draftPartialBan,
-    savedRouteAssist,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -379,8 +354,6 @@ export function BoostTab() {
         config: appliedConfig,
         game_process_performance: draftGPP,
         enable_country_ban: draftCountryBan,
-        enable_partial_country_ban: draftPartialBan,
-        enable_api_tunneling: draftPartialBan ? false : savedRouteAssist,
       });
       setDraft(appliedConfig);
       await saveSettings();
@@ -392,8 +365,6 @@ export function BoostTab() {
     draft,
     draftGPP,
     draftCountryBan,
-    draftPartialBan,
-    savedRouteAssist,
     hasConfigChanges,
     saveSettings,
     updateSettings,
@@ -407,8 +378,7 @@ export function BoostTab() {
     setDraft(savedConfig);
     setDraftGPP(savedGPP);
     setDraftCountryBan(savedCountryBan);
-    setDraftPartialBan(savedPartialBan);
-  }, [savedConfig, savedGPP, savedCountryBan, savedPartialBan]);
+  }, [savedConfig, savedGPP, savedCountryBan]);
 
   function selectProfile(id: OptimizationProfile) {
     setDraft(getPresetConfig(id, draft));
@@ -490,9 +460,7 @@ export function BoostTab() {
     draft.roblox_settings.custom_fflags_enabled,
     draft.roblox_settings.window_fullscreen,
   ].filter(Boolean).length;
-  const countryBanCount = [draftCountryBan, draftPartialBan].filter(
-    Boolean,
-  ).length;
+  const countryBanCount = draftCountryBan ? 1 : 0;
   const schedCount = [
     draftGPP.high_performance_gpu_binding,
     draftGPP.prefer_performance_cores,
@@ -644,23 +612,14 @@ export function BoostTab() {
       </Section>
 
       {/* ── System + Network side-by-side ── */}
-      <Section title="Country Ban" tag={`${countryBanCount} / 2 on`}>
+      <Section title="Country Ban" tag={`${countryBanCount} / 1 on`}>
         <SettingRow
           title="Bypass Country Ban"
           anchorId="country_ban"
           desc="Use when the whole Roblox platform is blocked"
-          tooltip="Full bypass: DPI evasion plus relaying all Roblox traffic through the selected SwiftTunnel relay. Turns off Partial Ban."
+          tooltip="Full bypass: DPI evasion plus relaying all Roblox traffic through the selected SwiftTunnel relay."
           enabled={draftCountryBan}
           onChange={(v) => void requestFullBan(v)}
-          disabled={robloxControlsLocked}
-        />
-        <SettingRow
-          title="Bypass Partial Ban"
-          anchorId="partial_ban"
-          desc="Use when only specific Roblox games are blocked"
-          tooltip="Relays the Roblox discovery and join path while gameplay stays direct. Turns off Country Ban."
-          enabled={draftPartialBan}
-          onChange={choosePartialBan}
           disabled={robloxControlsLocked}
         />
       </Section>

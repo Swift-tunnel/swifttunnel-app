@@ -1,6 +1,6 @@
 [package]
 name = "swifttunnel-desktop"
-version = "3.0.5"
+version = "3.0.6"
 default-run = "swifttunnel-desktop"
 edition = "2024"
 authors = ["SwiftTunnel <support@swifttunnel.net>"]
@@ -51,3 +51,18 @@ windows = { version = "0.62", features = [
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+# This package must contain exactly one binary.
+#
+# Tauri's WiX bundler installs every bin target of the package it bundles, so
+# the testbench harness that used to live in `src/bin/` was being shipped to
+# users as C:\Program Files\SwiftTunnel\desktop_testbench_harness.exe. Cargo's
+# `required-features` is no defence: the bundler takes the target list from
+# cargo metadata and ignores it, so gating the binary just made bundling fail
+# on a file that was no longer built.
+#
+# The harness now lives in the `swifttunnel-testbench` crate, which depends on
+# this one as a library. Do not add a `[[bin]]` or a `src/bin/` entry here.
+[[bin]]
+name = "swifttunnel-desktop"
+path = "src/main.rs"

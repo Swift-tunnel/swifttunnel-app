@@ -1,0 +1,26 @@
+[package]
+name = "swifttunnel-testbench"
+version = "0.1.0"
+edition = "2024"
+authors = ["SwiftTunnel <support@swifttunnel.net>"]
+description = "Windows testbench harness for the SwiftTunnel desktop app"
+publish = false
+
+# Deliberately its own crate rather than a `[[bin]]` in the Tauri package.
+#
+# Tauri's WiX bundler enumerates every bin target of the package it is
+# bundling and installs each one, so `src/bin/desktop_testbench_harness.rs`
+# was being shipped to users as C:\Program Files\SwiftTunnel\
+# desktop_testbench_harness.exe. Cargo's `required-features` does not help:
+# the bundler reads the target list from cargo metadata and ignores it, so
+# gating the binary only made bundling fail on a missing file.
+#
+# Keeping the harness in a separate crate is the only arrangement where the
+# bundler cannot see it at all.
+
+[[bin]]
+name = "desktop_testbench_harness"
+path = "src/main.rs"
+
+[dependencies]
+swifttunnel-desktop = { path = "../swifttunnel-desktop/src-tauri" }

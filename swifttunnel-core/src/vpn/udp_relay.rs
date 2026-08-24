@@ -96,6 +96,15 @@ const READ_TIMEOUT: Duration = Duration::from_millis(50);
 /// This avoids per-packet heap allocations and eliminates multi-threaded contention
 /// on Winsock send calls from per-CPU packet workers (reduces p99 jitter).
 const OUTBOUND_FRAME_MAX: usize = SESSION_ID_LEN + RELAY_PATH_MTU_UPPER_BOUND;
+
+/// Largest inner packet that may still be sent when it does not fit the relay
+/// path un-fragmented. Bounded by the outbound pool frame, so an oversized
+/// packet can never split into more pieces than one local MTU worth of data.
+const FRAGMENTABLE_INNER_MAX: usize = OUTBOUND_FRAME_MAX - SESSION_ID_LEN;
+
+/// A relay resolve answer: the request id it replies to, plus each host and the
+/// IPv4 addresses the relay resolved it to.
+type ResolveResponse = (u16, Vec<(String, Vec<std::net::Ipv4Addr>)>);
 const OUTBOUND_POOL_SLOTS: usize = 4096;
 const OUTBOUND_QUEUE_CAP: usize = 4096;
 /// Maximum time a data packet may sit in the relay sender queue.
@@ -437,12 +446,22 @@ impl OutboundPool {
         let _ = self.free_tx.send(idx);
     }
 
+    /// # Safety
+    ///
+    /// `idx` must be a slot the caller currently owns: obtained from
+    /// [`Self::try_acquire`] and not yet handed back to [`Self::release`].
+    /// The free list gives each index to exactly one caller at a time, which
+    /// is what makes producing `&mut` from `&self` sound here.
+    #[allow(clippy::mut_from_ref)]
     unsafe fn buffer_mut(&self, idx: usize) -> &mut [u8; OUTBOUND_FRAME_MAX] {
-        &mut *self.buffers[idx].get()
+        unsafe { &mut *self.buffers[idx].get() }
     }
 
+    /// # Safety
+    ///
+    /// Same slot-ownership requirement as [`Self::buffer_mut`].
     unsafe fn buffer(&self, idx: usize) -> &[u8; OUTBOUND_FRAME_MAX] {
-        &*self.buffers[idx].get()
+        unsafe { &*self.buffers[idx].get() }
     }
 }
 
@@ -529,7 +548,7 @@ impl PingMetrics {
 
         let mut p50_rtt_ms: Option<u32> = None;
         let mut p99_rtt_ms: Option<u32> = None;
-        let mut sample_count = 0usize;
+        let sample_count;
 
         {
             let samples = self.samples.lock();
@@ -583,8 +602,7 @@ pub struct UdpRelay {
     auth_handshake_lock: tokio::sync::Mutex<()>,
     /// Latest Roblox DNS resolve response (request_id + host→IPs) recorded by the
     /// inbound receiver thread; polled by `resolve_roblox_hosts` during connect.
-    last_resolve_response:
-        parking_lot::Mutex<Option<(u16, Vec<(String, Vec<std::net::Ipv4Addr>)>)>>,
+    last_resolve_response: parking_lot::Mutex<Option<ResolveResponse>>,
     /// Unique session ID for this connection
     session_id: [u8; SESSION_ID_LEN],
     /// Stop flag
@@ -595,6 +613,9 @@ pub struct UdpRelay {
     packets_received: AtomicU64,
     /// Inner packets dropped because encapsulation would exceed path MTU.
     oversize_drops: AtomicU64,
+    /// Packets sent knowing the wire form will fragment. Tracked apart from
+    /// drops: these were delivered, just not in one piece.
+    fragmented_sends: AtomicU64,
     /// Outbound frames dropped due to send queue pressure.
     outbound_drops: AtomicU64,
     /// Outbound data frames dropped because they sat in the sender queue too long.
@@ -647,10 +668,7 @@ pub struct UdpRelay {
 /// Parse a 0xA7 resolve response body: `[request_id_be_u16][answer_count:1]
 /// [(host_len:1, host_utf8, ip_count:1, (ipv4_be:4)*)]*`. Returns the request id
 /// and the resolved host→IPv4 answers. `None` on a malformed frame.
-fn parse_resolve_response(
-    frame: &[u8],
-    len: usize,
-) -> Option<(u16, Vec<(String, Vec<std::net::Ipv4Addr>)>)> {
+fn parse_resolve_response(frame: &[u8], len: usize) -> Option<ResolveResponse> {
     let header = SESSION_ID_LEN + 1; // session id + frame type byte
     if len < header + 3 {
         return None;
@@ -703,7 +721,7 @@ impl UdpRelay {
         Self::new_with_path_context(relay_addr, RelayPathContext::default())
     }
 
-    pub fn new_with_path_context(
+    pub(crate) fn new_with_path_context(
         relay_addr: SocketAddr,
         path_context: RelayPathContext,
     ) -> Result<Self> {
@@ -1001,6 +1019,7 @@ impl UdpRelay {
             packets_sent: AtomicU64::new(0),
             packets_received: AtomicU64::new(0),
             oversize_drops: AtomicU64::new(0),
+            fragmented_sends: AtomicU64::new(0),
             outbound_drops: AtomicU64::new(0),
             stale_queue_drops,
             send_errors,
@@ -1484,21 +1503,21 @@ impl UdpRelay {
             };
             let attempt_deadline = (Instant::now() + attempt_timeout).min(deadline);
             loop {
-                if let Some((from, status)) = *self.last_auth_ack.lock() {
-                    if from == target {
-                        log::info!(
-                            "UDP Relay: Mid-session auth ack {} from {} (session {:016x})",
-                            status.as_str(),
-                            target,
-                            self.session_id_u64()
-                        );
-                        if status == RelayAuthAckStatus::Replay {
-                            saw_replay = true;
-                            *self.last_auth_ack.lock() = None;
-                            continue;
-                        }
-                        return Ok(Some(status));
+                if let Some((from, status)) = *self.last_auth_ack.lock()
+                    && from == target
+                {
+                    log::info!(
+                        "UDP Relay: Mid-session auth ack {} from {} (session {:016x})",
+                        status.as_str(),
+                        target,
+                        self.session_id_u64()
+                    );
+                    if status == RelayAuthAckStatus::Replay {
+                        saw_replay = true;
+                        *self.last_auth_ack.lock() = None;
+                        continue;
                     }
+                    return Ok(Some(status));
                 }
                 if Instant::now() >= attempt_deadline {
                     break;
@@ -1555,21 +1574,55 @@ impl UdpRelay {
         let max_payload = self.max_inner_packet_len_for_addr(current_addr);
 
         if payload.len() > max_payload {
-            let dropped = self.oversize_drops.fetch_add(1, Ordering::Relaxed) + 1;
-            if dropped <= 5 || dropped.is_power_of_two() {
+            // Only packets too big for the pool frame are still dropped. Ones
+            // that merely overshoot the un-fragmented limit are sent anyway and
+            // allowed to fragment on the wire.
+            //
+            // The tunnel's session header is invisible to the application, so a
+            // client that has correctly discovered a 1500-byte path still emits
+            // packets sized for it. Those overshoot `max_payload` by up to
+            // SESSION_ID_LEN and used to be destroyed outright, which is total
+            // loss for the one packet size a well-behaved client is most likely
+            // to pick. Roblox's voice handshake sends full-size records and was
+            // the reliable casualty: gameplay rides smaller packets and kept
+            // working, so the symptom was a mic that never came up rather than
+            // anything that looked like a network fault.
+            //
+            // Fragments can be dropped by hostile middleboxes, but a fragment
+            // that might arrive strictly beats a packet that definitely will
+            // not. The relay needs no change either way: reassembly happens in
+            // its kernel before the socket ever sees the datagram.
+            if payload.len() > FRAGMENTABLE_INNER_MAX {
+                let dropped = self.oversize_drops.fetch_add(1, Ordering::Relaxed) + 1;
+                if dropped <= 5 || dropped.is_power_of_two() {
+                    let mtu = self.relay_path_mtu.load(Ordering::Relaxed);
+                    let overhead = mtu.saturating_sub(max_payload);
+                    log::warn!(
+                        "UDP Relay: Inner packet exceeds the tunnel frame ({} > {} bytes). \
+                        Dropping (relay path MTU {}, overhead {} bytes, relay {}).",
+                        payload.len(),
+                        FRAGMENTABLE_INNER_MAX,
+                        mtu,
+                        overhead,
+                        current_addr,
+                    );
+                }
+                return Ok(RelaySendOutcome::Oversize);
+            }
+
+            let fragmented = self.fragmented_sends.fetch_add(1, Ordering::Relaxed) + 1;
+            if fragmented <= 5 || fragmented.is_power_of_two() {
                 let mtu = self.relay_path_mtu.load(Ordering::Relaxed);
-                let overhead = mtu.saturating_sub(max_payload);
-                log::warn!(
-                    "UDP Relay: Inner packet too large for encapsulation ({} > {} bytes). \
-                    Dropping to avoid fragmentation (relay path MTU {}, overhead {} bytes, relay {}).",
+                log::debug!(
+                    "UDP Relay: Inner packet {} bytes exceeds the un-fragmented limit {}; \
+                    sending fragmented (relay path MTU {}, relay {}, {} total).",
                     payload.len(),
                     max_payload,
                     mtu,
-                    overhead,
                     current_addr,
+                    fragmented,
                 );
             }
-            return Ok(RelaySendOutcome::Oversize);
         }
 
         let total_len = SESSION_ID_LEN + payload.len();
@@ -1637,19 +1690,18 @@ impl UdpRelay {
                 // only deliver AUTH_ACK frames. Everything else from it is
                 // dropped: until the switch commits it is not a valid source
                 // of tunnel data.
-                if let Some(pending) = **self.pending_auth_addr.load() {
-                    if from == pending {
-                        if len >= SESSION_ID_LEN + 2
-                            && frame_buffer[..SESSION_ID_LEN] == self.session_id
-                            && frame_buffer[SESSION_ID_LEN] == AUTH_ACK_FRAME_TYPE
-                        {
-                            let status =
-                                RelayAuthAckStatus::from_u8(frame_buffer[SESSION_ID_LEN + 1])
-                                    .unwrap_or(RelayAuthAckStatus::BadFormat);
-                            *self.last_auth_ack.lock() = Some((from, status));
-                        }
-                        return Ok(None);
+                if let Some(pending) = **self.pending_auth_addr.load()
+                    && from == pending
+                {
+                    if len >= SESSION_ID_LEN + 2
+                        && frame_buffer[..SESSION_ID_LEN] == self.session_id
+                        && frame_buffer[SESSION_ID_LEN] == AUTH_ACK_FRAME_TYPE
+                    {
+                        let status = RelayAuthAckStatus::from_u8(frame_buffer[SESSION_ID_LEN + 1])
+                            .unwrap_or(RelayAuthAckStatus::BadFormat);
+                        *self.last_auth_ack.lock() = Some((from, status));
                     }
+                    return Ok(None);
                 }
 
                 // Verify it's from our relay server (current or previous during grace period)
@@ -2038,16 +2090,14 @@ impl UdpRelay {
                     self.session_id_u64()
                 );
             }
-        } else if silence >= RELAY_STALE_THRESHOLD {
-            if current == RelayHealthState::Healthy {
-                escalate_relay_health(&self.relay_health, RelayHealthState::Stale);
-                log::warn!(
-                    "UDP Relay: Health -> STALE ({}s since last inbound packet, {} unanswered keepalives, session {:016x})",
-                    silence.as_secs(),
-                    unanswered,
-                    self.session_id_u64()
-                );
-            }
+        } else if silence >= RELAY_STALE_THRESHOLD && current == RelayHealthState::Healthy {
+            escalate_relay_health(&self.relay_health, RelayHealthState::Stale);
+            log::warn!(
+                "UDP Relay: Health -> STALE ({}s since last inbound packet, {} unanswered keepalives, session {:016x})",
+                silence.as_secs(),
+                unanswered,
+                self.session_id_u64()
+            );
         }
 
         // Data-plane failure check: pongs may keep refreshing `last_receive_time`, so the
@@ -2094,11 +2144,12 @@ impl UdpRelay {
         self.stop_flag.store(true, Ordering::Release);
         let ping = self.ping.snapshot();
         log::info!(
-            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, outbound_drops: {}, stale_queue_drops: {}, send_errors: {}, send_unreachable_streak: {}, send_failure_streak: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, health: {}, ping: {}/{} {:.1}% loss)",
+            "UDP Relay: Stopped session {:016x} (sent: {}, recv: {}, oversize_drops: {}, fragmented_sends: {}, outbound_drops: {}, stale_queue_drops: {}, send_errors: {}, send_unreachable_streak: {}, send_failure_streak: {}, pppoe_clamp_active: {}, pppoe_clamp_events: {}, health: {}, ping: {}/{} {:.1}% loss)",
             self.session_id_u64(),
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
             self.oversize_drops.load(Ordering::Relaxed),
+            self.fragmented_sends.load(Ordering::Relaxed),
             self.outbound_drops.load(Ordering::Relaxed),
             self.stale_queue_drops.load(Ordering::Relaxed),
             self.send_errors.load(Ordering::Relaxed),
@@ -2167,10 +2218,10 @@ impl Drop for UdpRelay {
         self.stop();
 
         let handle = self.sender_handle.lock().take();
-        if let Some(handle) = handle {
-            if let Err(panic) = handle.join() {
-                log::error!("UDP Relay: sender thread panicked: {:?}", panic);
-            }
+        if let Some(handle) = handle
+            && let Err(panic) = handle.join()
+        {
+            log::error!("UDP Relay: sender thread panicked: {:?}", panic);
         }
     }
 }
@@ -2184,7 +2235,7 @@ fn getrandom(buf: &mut [u8]) {
 fn now_mono_ms() -> u64 {
     #[cfg(windows)]
     unsafe {
-        return windows::Win32::System::SystemInformation::GetTickCount64();
+        windows::Win32::System::SystemInformation::GetTickCount64()
     }
 
     #[cfg(not(windows))]
@@ -2256,6 +2307,7 @@ fn select_initial_relay_path_mtu_for_context(
 }
 
 #[inline]
+#[allow(dead_code)]
 fn select_initial_relay_path_mtu(detected_mtu: Option<usize>) -> (usize, bool) {
     let selection =
         select_initial_relay_path_mtu_for_context(detected_mtu, RelayPathContext::default());
@@ -2336,8 +2388,10 @@ fn detect_relay_path_mtu(relay_addr: SocketAddr) -> Option<usize> {
             return None;
         }
 
-        let mut row = MIB_IF_ROW2::default();
-        row.InterfaceIndex = if_index;
+        let mut row = MIB_IF_ROW2 {
+            InterfaceIndex: if_index,
+            ..Default::default()
+        };
         let rc = unsafe { GetIfEntry2(&mut row) };
         if rc.0 != 0 {
             return None;
@@ -2347,9 +2401,11 @@ fn detect_relay_path_mtu(relay_addr: SocketAddr) -> Option<usize> {
             SocketAddr::V4(_) => AF_INET,
             SocketAddr::V6(_) => AF_INET6,
         };
-        let mut ip_row = MIB_IPINTERFACE_ROW::default();
-        ip_row.InterfaceIndex = if_index;
-        ip_row.Family = family;
+        let mut ip_row = MIB_IPINTERFACE_ROW {
+            InterfaceIndex: if_index,
+            Family: family,
+            ..Default::default()
+        };
         let ip_layer_mtu = if unsafe { GetIpInterfaceEntry(&mut ip_row) }.0 == 0 && ip_row.NlMtu > 0
         {
             Some(ip_row.NlMtu as usize)
@@ -2359,7 +2415,7 @@ fn detect_relay_path_mtu(relay_addr: SocketAddr) -> Option<usize> {
 
         let detected_mtu =
             select_detected_relay_path_mtu(row.Mtu as usize, ip_layer_mtu, row.Type == IF_TYPE_PPP);
-        return Some(detected_mtu);
+        Some(detected_mtu)
     }
 
     #[cfg(not(windows))]
@@ -2819,14 +2875,31 @@ mod tests {
     }
 
     #[test]
-    fn test_forward_outbound_drops_oversize_payload() {
+    fn test_forward_outbound_fragments_payload_over_unfragmented_limit() {
         let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         relay.set_relay_path_mtu_for_test(1500);
         let max_payload = relay.max_inner_packet_len_for_addr("127.0.0.1:51821".parse().unwrap());
+        // A client that has correctly discovered a 1500-byte path emits packets
+        // this size; it cannot know the tunnel spends SESSION_ID_LEN of it.
         let payload = vec![0u8; max_payload + 1];
+        let outcome = relay.forward_outbound(&payload).unwrap();
+        assert_eq!(
+            outcome,
+            RelaySendOutcome::Enqueued(SESSION_ID_LEN + payload.len())
+        );
+        assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(relay.fragmented_sends.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_forward_outbound_drops_payload_beyond_tunnel_frame() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        relay.set_relay_path_mtu_for_test(1500);
+        let payload = vec![0u8; FRAGMENTABLE_INNER_MAX + 1];
         let outcome = relay.forward_outbound(&payload).unwrap();
         assert_eq!(outcome, RelaySendOutcome::Oversize);
         assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(relay.fragmented_sends.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -2852,10 +2925,16 @@ mod tests {
             1400 - (IPV4_HEADER_LEN + UDP_HEADER_LEN + SESSION_ID_LEN)
         );
 
+        // Still under the tunnel frame, so a lower path MTU means more
+        // fragments on the wire rather than a dropped packet.
         let payload = vec![0u8; max_payload + 1];
         let outcome = relay.forward_outbound(&payload).unwrap();
-        assert_eq!(outcome, RelaySendOutcome::Oversize);
-        assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            outcome,
+            RelaySendOutcome::Enqueued(SESSION_ID_LEN + payload.len())
+        );
+        assert_eq!(relay.oversize_drops.load(Ordering::Relaxed), 0);
+        assert_eq!(relay.fragmented_sends.load(Ordering::Relaxed), 1);
     }
 
     #[test]

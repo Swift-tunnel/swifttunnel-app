@@ -79,7 +79,7 @@ pub fn parse_client_hello_sni(payload: &[u8]) -> Option<&str> {
 /// Parse the server_name extension body: list_length(2), then entries of
 /// name_type(1) + name_length(2) + name. Only host_name (type 0) is used.
 fn parse_server_name_extension(ext: &[u8]) -> Option<&str> {
-    let list_len = u16::from_be_bytes([*ext.get(0)?, *ext.get(1)?]) as usize;
+    let list_len = u16::from_be_bytes([*ext.first()?, *ext.get(1)?]) as usize;
     let list_end = 2usize.checked_add(list_len)?.min(ext.len());
     let mut cursor = 2usize;
 

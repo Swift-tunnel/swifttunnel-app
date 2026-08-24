@@ -45,6 +45,7 @@ pub struct AppState {
     pub throughput_stats: Arc<RwLock<Option<ThroughputStats>>>,
     pub server_list: Arc<Mutex<DynamicServerList>>,
     /// Map of region_id -> (server_name, latency_ms)
+    #[allow(dead_code)]
     pub region_latencies: Arc<Mutex<HashMap<String, (String, u32)>>>,
     pub settings: Arc<Mutex<AppSettings>>,
     pub performance_monitor: Arc<Mutex<PerformanceMonitor>>,

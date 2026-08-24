@@ -198,6 +198,7 @@ impl NetworkBooster {
         }
     }
 
+    #[allow(dead_code)]
     fn parse_first_line(output: &[u8], error_message: &str) -> Result<String> {
         let value = String::from_utf8_lossy(output)
             .lines()
@@ -217,9 +218,10 @@ impl NetworkBooster {
     ///
     /// This avoids selecting an arbitrary "Up" adapter (e.g. virtual NIC) that is not
     /// actually carrying traffic to the internet.
+    #[allow(dead_code)]
     pub(crate) fn get_active_network_interface(&self) -> Result<String> {
         let output = hidden_command("powershell")
-            .args(&[
+            .args([
                 "-Command",
                 "$ErrorActionPreference = 'Stop'; \
                  $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' \
@@ -240,7 +242,7 @@ impl NetworkBooster {
 
     pub(crate) fn list_adapter_guids(&self) -> Vec<String> {
         match hidden_command("powershell")
-            .args(&[
+            .args([
                 "-Command",
                 "Get-NetAdapter | Select-Object -ExpandProperty InterfaceGuid",
             ])
@@ -288,10 +290,10 @@ impl NetworkBooster {
                 continue;
             }
 
-            if let Some(value_token) = line.split_whitespace().last() {
-                if let Some(parsed) = Self::parse_registry_dword(value_token) {
-                    return Some(parsed);
-                }
+            if let Some(value_token) = line.split_whitespace().last()
+                && let Some(parsed) = Self::parse_registry_dword(value_token)
+            {
+                return Some(parsed);
             }
         }
 
@@ -559,7 +561,7 @@ impl NetworkBooster {
 
         // Ping a common Roblox server
         let output = hidden_command("ping")
-            .args(&["-n", "4", "www.roblox.com"])
+            .args(["-n", "4", "www.roblox.com"])
             .output()?;
 
         let output_str = String::from_utf8_lossy(&output.stdout);
@@ -911,6 +913,7 @@ pub fn cleanup_all_system_state() -> Result<()> {
 ///
 /// The removed MTU optimizer used `store=persistent` which permanently changed
 /// WiFi adapter MTU values, causing Roblox connection timeouts on some drivers.
+#[allow(dead_code)]
 fn reset_mtu_all_adapters() {
     let adapters: Vec<String> = match hidden_command("powershell")
         .args([

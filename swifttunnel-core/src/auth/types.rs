@@ -4,9 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Authentication state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum AuthState {
     /// Not logged in
+    #[default]
     LoggedOut,
     /// Login in progress (email/password)
     LoggingIn,
@@ -27,12 +28,6 @@ pub struct OAuthPendingState {
     pub state: String,
     /// When the OAuth flow was started
     pub started_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl Default for AuthState {
-    fn default() -> Self {
-        AuthState::LoggedOut
-    }
 }
 
 /// Authenticated session with tokens
@@ -152,28 +147,20 @@ pub struct ExchangeTokenResponse {
 /// Relay connection policy delivered by relay ticket bootstrap endpoint.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RelayPreflightMode {
+    #[default]
     Legacy,
     Enforce,
 }
 
-impl Default for RelayPreflightMode {
-    fn default() -> Self {
-        Self::Legacy
-    }
-}
-
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RelayQueueFullMode {
+    #[default]
     Bypass,
     Drop,
-}
-
-impl Default for RelayQueueFullMode {
-    fn default() -> Self {
-        Self::Bypass
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]

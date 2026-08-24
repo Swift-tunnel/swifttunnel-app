@@ -13,12 +13,16 @@ use std::sync::OnceLock;
 /// Response from the user profile API
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct UserProfileResponse {
+    #[allow(dead_code)]
     pub id: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub full_name: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub username: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub is_admin: bool,
     #[serde(default)]
     pub is_tester: bool,
@@ -396,6 +400,7 @@ impl AuthClient {
     }
 
     /// Fetch VPN configuration for a region
+    #[allow(dead_code)]
     pub async fn get_vpn_config(
         &self,
         access_token: &str,

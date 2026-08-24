@@ -3,9 +3,15 @@
 This folder contains source-backed Windows testbench entrypoints for both the
 desktop app harness and the current `ndisapi` / `NDISRD` split tunnel stack.
 
-The previous precompiled binaries were tied to the removed
-`MullvadSplitTunnel` interface and are no longer valid for release gating.
-Build the maintained testbench binaries from source instead.
+Nothing here is precompiled. The wrapper scripts build from source and run out
+of `target/release`, so the binaries always match the working tree.
+
+Compiled binaries used to be committed to this folder, force-included past the
+repo's `*.exe` rule. They were already stale, tied to the removed
+`MullvadSplitTunnel` interface, and no script referenced them. In a public repo
+for an app that installs a network driver, an unverifiable executable is a
+reasonable thing for someone to be suspicious of, so build output stays out of
+git.
 
 The PowerShell wrappers also repair the WinpkFilter (`nt_ndisrd`) binding on
 the active/default-route adapter before running. This matters on some VMs where
@@ -16,7 +22,10 @@ so a disabled binding no longer yields a silent "connected but 0 packets" run.
 
 ## Binaries
 
-`cargo build -p swifttunnel-desktop --release --bin desktop_testbench_harness`
+The harness lives in its own crate so the installer bundler cannot pick it up
+and ship it to users:
+
+`cargo build -p swifttunnel-testbench --release`
 
 `cargo build -p swifttunnel-core --release --bin split_tunnel_test`
 

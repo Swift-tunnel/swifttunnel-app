@@ -4,7 +4,9 @@ use serde::Serialize;
 pub const VPN_STATE_CHANGED: &str = "vpn-state-changed";
 pub const AUTH_STATE_CHANGED: &str = "auth-state-changed";
 pub const SERVER_LIST_UPDATED: &str = "server-list-updated";
+#[allow(dead_code)]
 pub const THROUGHPUT_UPDATE: &str = "throughput-update";
+#[allow(dead_code)]
 pub const PERFORMANCE_METRICS_UPDATE: &str = "performance-metrics-update";
 pub const RAM_CLEAN_PROGRESS: &str = "ram-clean-progress";
 pub const COUNTRY_BAN_BYPASS_UNAVAILABLE: &str = "country-ban-bypass-unavailable";
@@ -44,6 +46,7 @@ pub struct AuthStateEvent {
 
 /// Throughput stats event payload
 #[derive(Clone, Serialize)]
+#[allow(dead_code)]
 pub struct ThroughputEvent {
     pub bytes_up: u64,
     pub bytes_down: u64,
@@ -53,6 +56,7 @@ pub struct ThroughputEvent {
 
 /// Performance metrics event payload
 #[derive(Clone, Serialize)]
+#[allow(dead_code)]
 pub struct PerformanceMetricsEvent {
     pub cpu_usage: f32,
     pub ram_usage: f64,

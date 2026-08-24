@@ -7,6 +7,7 @@ import {
   getCurrentWindow,
 } from "@tauri-apps/api/window";
 import { emitTo, listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 
 /** Payload emitted by the main window after an auto RAM clean. */
 interface RamOverlayPayload {
@@ -18,16 +19,21 @@ export const RAM_OVERLAY_EVENT = "ram-overlay-show";
 const VISIBLE_MS = 5500;
 
 /**
- * Show the overlay toast from the main window: reveal the (hidden) overlay
- * window and emit the freed amount to it. Throws a clear error if the overlay
- * window doesn't exist (e.g. SwiftTunnel wasn't fully restarted after the
- * config that adds it), so callers can surface that instead of failing silently.
+ * Show the overlay toast from the main window: build the overlay window if this
+ * is the first time it has been needed, reveal it, and emit the freed amount.
+ *
+ * The window is created on demand rather than at startup because it costs its
+ * own WebView2 renderer process (~60MB) and most sessions never free any RAM.
+ * `ensure_overlay_window` is idempotent, so the extra call on later toasts is
+ * just a cheap round trip.
  */
 export async function showRamOverlay(freedMb: number): Promise<void> {
+  await invoke("ensure_overlay_window", { label: "overlay" });
+
   const overlay = (await getAllWindows()).find((w) => w.label === "overlay");
   if (!overlay) {
     throw new Error(
-      "Overlay window not found, fully quit and reopen SwiftTunnel so the new overlay window loads.",
+      "Overlay window could not be created, fully quit and reopen SwiftTunnel.",
     );
   }
   await overlay.show();

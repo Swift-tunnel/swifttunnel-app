@@ -343,24 +343,23 @@ fn nt_to_dos_path(nt_path: &str) -> Option<String> {
 
         // Fallback: try to parse the volume number directly
         // This handles cases where QueryDosDevice might not return expected results
-        if let Some(rest) = nt_path.strip_prefix(r"\Device\HarddiskVolume") {
-            if let Some((num_str, path)) = rest.split_once('\\') {
-                if let Ok(vol_num) = num_str.parse::<u32>() {
-                    // Search for this volume number in our mapping
-                    for (device_path, drive_letter) in &drive_map {
-                        if device_path.contains(&format!("HarddiskVolume{}", vol_num)) {
-                            return Some(format!("{}:\\{}", drive_letter, path));
-                        }
-                    }
-                    // Don't guess C:\ — games on D:\ would silently get a
-                    // mismatched WFP block filter. The caller already handles
-                    // None by falling back to speculative tunneling.
-                    log::warn!(
-                        "nt_to_dos_path: Could not map volume {} to drive letter, returning None",
-                        vol_num
-                    );
+        if let Some(rest) = nt_path.strip_prefix(r"\Device\HarddiskVolume")
+            && let Some((num_str, path)) = rest.split_once('\\')
+            && let Ok(vol_num) = num_str.parse::<u32>()
+        {
+            // Search for this volume number in our mapping
+            for (device_path, drive_letter) in &drive_map {
+                if device_path.contains(&format!("HarddiskVolume{}", vol_num)) {
+                    return Some(format!("{}:\\{}", drive_letter, path));
                 }
             }
+            // Don't guess C:\ — games on D:\ would silently get a
+            // mismatched WFP block filter. The caller already handles
+            // None by falling back to speculative tunneling.
+            log::warn!(
+                "nt_to_dos_path: Could not map volume {} to drive letter, returning None",
+                vol_num
+            );
         }
 
         None
@@ -524,37 +523,37 @@ pub fn unblock_process_by_path(image_path: &str) -> Result<(), String> {
 
 /// Cleanup all WFP state
 pub fn cleanup() {
-    if let Ok(mut state_guard) = WFP_STATE.lock() {
-        if let Some(state) = state_guard.take() {
-            unsafe {
-                // Remove all active filters
-                for (path, filter_id) in state.active_filters {
-                    let result = FwpmFilterDeleteById0(state.engine_handle, filter_id);
-                    if result == 0 || result == FWP_E_FILTER_NOT_FOUND_CODE {
-                        log::debug!("Cleanup: removed block filter for '{}'", path);
-                    } else {
-                        log::warn!(
-                            "Cleanup: failed to remove block filter for '{}': 0x{:08x}",
-                            path,
-                            result
-                        );
-                    }
-                }
-
-                // Remove our sublayer
-                let sublayer_result =
-                    FwpmSubLayerDeleteByKey0(state.engine_handle, &SWIFTTUNNEL_SUBLAYER_GUID);
-                if sublayer_result != 0 && sublayer_result != FWP_E_SUBLAYER_NOT_FOUND_CODE {
+    if let Ok(mut state_guard) = WFP_STATE.lock()
+        && let Some(state) = state_guard.take()
+    {
+        unsafe {
+            // Remove all active filters
+            for (path, filter_id) in state.active_filters {
+                let result = FwpmFilterDeleteById0(state.engine_handle, filter_id);
+                if result == 0 || result == FWP_E_FILTER_NOT_FOUND_CODE {
+                    log::debug!("Cleanup: removed block filter for '{}'", path);
+                } else {
                     log::warn!(
-                        "Cleanup: failed to remove WFP sublayer: 0x{:08x}",
-                        sublayer_result
+                        "Cleanup: failed to remove block filter for '{}': 0x{:08x}",
+                        path,
+                        result
                     );
                 }
-
-                // Close engine
-                let _ = FwpmEngineClose0(state.engine_handle);
-                log::info!("WFP block filter engine closed");
             }
+
+            // Remove our sublayer
+            let sublayer_result =
+                FwpmSubLayerDeleteByKey0(state.engine_handle, &SWIFTTUNNEL_SUBLAYER_GUID);
+            if sublayer_result != 0 && sublayer_result != FWP_E_SUBLAYER_NOT_FOUND_CODE {
+                log::warn!(
+                    "Cleanup: failed to remove WFP sublayer: 0x{:08x}",
+                    sublayer_result
+                );
+            }
+
+            // Close engine
+            let _ = FwpmEngineClose0(state.engine_handle);
+            log::info!("WFP block filter engine closed");
         }
     }
 }

@@ -878,30 +878,30 @@ impl SystemOptimizer {
             }
         }
 
-        if config.disable_game_bar {
-            if let Err(e) = self.disable_game_bar() {
-                Self::record_failure(
-                    &mut applied_config,
-                    &mut warnings,
-                    SystemBoostToggle::GameBar,
-                    "Disable Game Bar",
-                    e,
-                    fallback_power_plan,
-                );
-            }
+        if config.disable_game_bar
+            && let Err(e) = self.disable_game_bar()
+        {
+            Self::record_failure(
+                &mut applied_config,
+                &mut warnings,
+                SystemBoostToggle::GameBar,
+                "Disable Game Bar",
+                e,
+                fallback_power_plan,
+            );
         }
 
-        if config.disable_fullscreen_optimization {
-            if let Err(e) = self.disable_fullscreen_optimizations() {
-                Self::record_failure(
-                    &mut applied_config,
-                    &mut warnings,
-                    SystemBoostToggle::FullscreenOptimization,
-                    "Disable fullscreen optimizations",
-                    e,
-                    fallback_power_plan,
-                );
-            }
+        if config.disable_fullscreen_optimization
+            && let Err(e) = self.disable_fullscreen_optimizations()
+        {
+            Self::record_failure(
+                &mut applied_config,
+                &mut warnings,
+                SystemBoostToggle::FullscreenOptimization,
+                "Disable fullscreen optimizations",
+                e,
+                fallback_power_plan,
+            );
         }
 
         if let Err(e) = self.set_power_plan(&config.power_plan) {
@@ -916,43 +916,43 @@ impl SystemOptimizer {
         }
 
         // Tier 1 (Safe) Boosts
-        if config.timer_resolution_1ms {
-            if let Err(e) = self.set_timer_resolution(true) {
-                Self::record_failure(
-                    &mut applied_config,
-                    &mut warnings,
-                    SystemBoostToggle::TimerResolution,
-                    "Set timer resolution",
-                    e,
-                    fallback_power_plan,
-                );
-            }
+        if config.timer_resolution_1ms
+            && let Err(e) = self.set_timer_resolution(true)
+        {
+            Self::record_failure(
+                &mut applied_config,
+                &mut warnings,
+                SystemBoostToggle::TimerResolution,
+                "Set timer resolution",
+                e,
+                fallback_power_plan,
+            );
         }
 
-        if config.mmcss_gaming_profile {
-            if let Err(e) = self.apply_mmcss_profile() {
-                Self::record_failure(
-                    &mut applied_config,
-                    &mut warnings,
-                    SystemBoostToggle::MmcssGamingProfile,
-                    "Apply MMCSS gaming profile",
-                    e,
-                    fallback_power_plan,
-                );
-            }
+        if config.mmcss_gaming_profile
+            && let Err(e) = self.apply_mmcss_profile()
+        {
+            Self::record_failure(
+                &mut applied_config,
+                &mut warnings,
+                SystemBoostToggle::MmcssGamingProfile,
+                "Apply MMCSS gaming profile",
+                e,
+                fallback_power_plan,
+            );
         }
 
-        if config.game_mode_enabled {
-            if let Err(e) = self.enable_game_mode() {
-                Self::record_failure(
-                    &mut applied_config,
-                    &mut warnings,
-                    SystemBoostToggle::GameMode,
-                    "Enable Game Mode",
-                    e,
-                    fallback_power_plan,
-                );
-            }
+        if config.game_mode_enabled
+            && let Err(e) = self.enable_game_mode()
+        {
+            Self::record_failure(
+                &mut applied_config,
+                &mut warnings,
+                SystemBoostToggle::GameMode,
+                "Enable Game Mode",
+                e,
+                fallback_power_plan,
+            );
         }
 
         SystemApplyOutcome {
@@ -1186,13 +1186,13 @@ impl SystemOptimizer {
 
         info!("Setting power plan to: {:?}", plan);
 
-        if matches!(plan, PowerPlan::SwiftTunnel) {
-            if let Err(e) = self.ensure_swifttunnel_power_plan() {
-                return Err(anyhow::anyhow!(
-                    "SwiftTunnel power plan import failed: {}",
-                    e
-                ));
-            }
+        if matches!(plan, PowerPlan::SwiftTunnel)
+            && let Err(e) = self.ensure_swifttunnel_power_plan()
+        {
+            return Err(anyhow::anyhow!(
+                "SwiftTunnel power plan import failed: {}",
+                e
+            ));
         }
 
         let output = hidden_command("powercfg")
@@ -1570,10 +1570,10 @@ impl SystemOptimizer {
         let mut restore_errors = Vec::new();
 
         // Restore timer resolution if active
-        if self.timer_resolution_active {
-            if let Err(e) = self.set_timer_resolution(false) {
-                restore_errors.push(format!("timer resolution: {}", e));
-            }
+        if self.timer_resolution_active
+            && let Err(e) = self.set_timer_resolution(false)
+        {
+            restore_errors.push(format!("timer resolution: {}", e));
         }
         // Safety net: clean up the global timer override snapshot even if
         // `timer_resolution_active` was already false (e.g., crash recovery).
@@ -1583,11 +1583,11 @@ impl SystemOptimizer {
 
         if let Some(priority) = self.original_priority.take() {
             unsafe {
-                if let Ok(handle) = OpenProcess(PROCESS_SET_INFORMATION, false, process_id) {
-                    if !handle.is_invalid() {
-                        let _ = SetPriorityClass(handle, PROCESS_CREATION_FLAGS(priority));
-                        let _ = CloseHandle(handle);
-                    }
+                if let Ok(handle) = OpenProcess(PROCESS_SET_INFORMATION, false, process_id)
+                    && !handle.is_invalid()
+                {
+                    let _ = SetPriorityClass(handle, PROCESS_CREATION_FLAGS(priority));
+                    let _ = CloseHandle(handle);
                 }
             }
         }
@@ -1617,10 +1617,10 @@ impl SystemOptimizer {
         }
 
         let mut original_power_plan_restored = false;
-        if let Some(snapshot) = self.original_power_plan_guid.take() {
-            if let Some(guid) = snapshot {
-                original_power_plan_restored = Self::set_active_power_plan_guid(&guid);
-            }
+        if let Some(snapshot) = self.original_power_plan_guid.take()
+            && let Some(guid) = snapshot
+        {
+            original_power_plan_restored = Self::set_active_power_plan_guid(&guid);
         }
 
         if self.swifttunnel_power_plan_imported {

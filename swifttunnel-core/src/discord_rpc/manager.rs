@@ -8,7 +8,7 @@ use super::state::{
     region_flag_key,
 };
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -117,11 +117,11 @@ impl DiscordManager {
                             }
                         }
                         DiscordActivity::SetActivity(state) => {
-                            if let Some(ref mut c) = client {
-                                if let Err(e) = Self::set_activity(c, &state) {
-                                    warn!("Failed to set Discord activity: {}", e);
-                                    client = None;
-                                }
+                            if let Some(ref mut c) = client
+                                && let Err(e) = Self::set_activity(c, &state)
+                            {
+                                warn!("Failed to set Discord activity: {}", e);
+                                client = None;
                             }
                         }
                     }
@@ -327,10 +327,10 @@ impl DiscordManager {
             let _ = self.tx.send(DiscordActivity::Clear);
         } else if enabled && !was_enabled {
             // Lazy-spawn the thread if it hasn't been started yet
-            if self.thread_handle.is_none() {
-                if let Some(rx) = self.pending_rx.take() {
-                    self.thread_handle = Some(Self::spawn_rpc_thread(rx));
-                }
+            if self.thread_handle.is_none()
+                && let Some(rx) = self.pending_rx.take()
+            {
+                self.thread_handle = Some(Self::spawn_rpc_thread(rx));
             }
             // Restore state when re-enabled
             if let Some(state) = self.current_state.clone() {

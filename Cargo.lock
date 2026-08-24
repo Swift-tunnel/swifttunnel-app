@@ -1006,6 +1006,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "embed-manifest"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94cdc65b1cf9e871453ce2f86f5aaec24ff2eaa36a1fa3e02e441dddc3613b99"
+
+[[package]]
 name = "embed-resource"
 version = "3.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4385,7 +4391,7 @@ dependencies = [
 
 [[package]]
 name = "swifttunnel-desktop"
-version = "3.0.5"
+version = "3.0.6"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4418,6 +4424,21 @@ name = "swifttunnel-msi-repair"
 version = "0.1.0"
 dependencies = [
  "windows-registry 0.5.3",
+]
+
+[[package]]
+name = "swifttunnel-setup"
+version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+ "swifttunnel-msi-repair",
+]
+
+[[package]]
+name = "swifttunnel-testbench"
+version = "0.1.0"
+dependencies = [
+ "swifttunnel-desktop",
 ]
 
 [[package]]

@@ -73,10 +73,10 @@ pub async fn run_bufferbloat_test(
             warn!("Bufferbloat: download load task join error: {}", e);
         }
     }
-    if let Err(e) = upload_handle.await {
-        if !e.is_cancelled() {
-            warn!("Bufferbloat: upload load task join error: {}", e);
-        }
+    if let Err(e) = upload_handle.await
+        && !e.is_cancelled()
+    {
+        warn!("Bufferbloat: upload load task join error: {}", e);
     }
 
     let loaded_latency = loaded_latency_res?;

@@ -121,10 +121,10 @@ static CROWDING_WARNED_FOR: std::sync::Mutex<Option<String>> = std::sync::Mutex:
 fn notify_if_relay_crowded(region: &str, ticket: &crate::auth::types::RelayTicketResponse) {
     if !ticket.degraded {
         // Recovered, or a different relay: allow a future warning to fire.
-        if let Ok(mut warned) = CROWDING_WARNED_FOR.lock() {
-            if warned.as_deref() == Some(region) {
-                *warned = None;
-            }
+        if let Ok(mut warned) = CROWDING_WARNED_FOR.lock()
+            && warned.as_deref() == Some(region)
+        {
+            *warned = None;
         }
         return;
     }
@@ -201,17 +201,14 @@ struct TunnelRoutingFlags {
 fn resolve_tunnel_routing_flags(
     route_assist_requested: bool,
     full_ban_bypass_requested: bool,
-    partial_ban_bypass_requested: bool,
 ) -> TunnelRoutingFlags {
-    let route_assist_requested = route_assist_requested && !partial_ban_bypass_requested;
-
     TunnelRoutingFlags {
-        api_tunneling: route_assist_requested
-            || full_ban_bypass_requested
-            || partial_ban_bypass_requested,
-        udp_tunneling: route_assist_requested
-            || full_ban_bypass_requested
-            || !partial_ban_bypass_requested,
+        api_tunneling: route_assist_requested || full_ban_bypass_requested,
+        // Unconditional since Partial Bypass was removed: it was the only mode
+        // that wanted Roblox TCP relayed while gameplay UDP stayed direct.
+        // Keeping the field rather than deleting it avoids churning ~30 call
+        // sites for a value that is now constant.
+        udp_tunneling: true,
     }
 }
 
@@ -495,6 +492,7 @@ fn terminal_relay_lease_error_message(error: &AuthError) -> Option<String> {
 /// inside the band, while different regions are 50ms+ apart and never get
 /// mistaken for one another. Nobody can feel 3ms; everybody feels a saturated
 /// box.
+#[allow(dead_code)]
 const LATENCY_TIE_BAND_MS: u32 = 15;
 
 /// Pick a relay, preferring a quieter one among those that are equally fast.
@@ -507,6 +505,7 @@ const LATENCY_TIE_BAND_MS: u32 = 15;
 ///
 /// Outside the band latency still wins outright — occupancy never sends anyone
 /// to a slower region.
+#[allow(dead_code)]
 fn pick_lowest_latency_server<'a>(
     candidates: impl Iterator<Item = &'a (String, SocketAddr, Option<u32>)>,
 ) -> Option<&'a (String, SocketAddr, Option<u32>)> {
@@ -514,7 +513,7 @@ fn pick_lowest_latency_server<'a>(
     let fastest = all.iter().filter_map(|(_, _, ms)| *ms).min()?;
 
     all.into_iter()
-        .filter(|(_, _, ms)| ms.map_or(false, |v| v.saturating_sub(fastest) <= LATENCY_TIE_BAND_MS))
+        .filter(|(_, _, ms)| ms.is_some_and(|v| v.saturating_sub(fastest) <= LATENCY_TIE_BAND_MS))
         .min_by_key(|(region, _, latency_ms)| {
             let load = crate::vpn::servers::relay_load(region);
             // Unknown occupancy counts as full, never as empty: a relay that
@@ -530,6 +529,7 @@ fn pick_lowest_latency_server<'a>(
 
 /// Occupancy is compared in coarse steps so ordinary churn does not flip the
 /// choice between two relays on every reconnect.
+#[allow(dead_code)]
 const RELAY_LOAD_BUCKET_USERS: u32 = 20;
 
 async fn wait_for_tunnel_process_connections(
@@ -799,6 +799,7 @@ async fn ranked_relay_candidates_for_region(
     candidates
 }
 
+#[allow(dead_code)]
 fn sort_candidates_by_latency(candidates: &mut [(String, SocketAddr, Option<u32>)]) {
     candidates.sort_by(|a, b| {
         let a_latency = a.2.unwrap_or(u32::MAX);
@@ -811,6 +812,7 @@ fn sort_candidates_by_latency(candidates: &mut [(String, SocketAddr, Option<u32>
     });
 }
 
+#[allow(dead_code)]
 fn resolved_forced_server(
     forced_for_region: Option<&str>,
     relay_candidates: &[(String, SocketAddr, Option<u32>)],
@@ -844,6 +846,7 @@ async fn ordered_relay_candidates_for_region(
         .collect()
 }
 
+#[allow(dead_code)]
 pub(crate) fn resolve_relay_server_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
@@ -865,6 +868,7 @@ fn average_probe_latency(samples: &[u32]) -> Option<u32> {
     Some((total / samples.len() as u64) as u32)
 }
 
+#[allow(dead_code)]
 fn resolve_relay_server_from_candidates(
     candidates: &[RankedRelayCandidate],
 ) -> Option<(String, SocketAddr)> {
@@ -1068,8 +1072,9 @@ async fn authenticate_switch_target(
 }
 
 /// VPN connection state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ConnectionState {
+    #[default]
     Disconnected,
     FetchingConfig,
     ConfiguringSplitTunnel,
@@ -1121,12 +1126,6 @@ impl ConnectionState {
             ConnectionState::Disconnecting => "Disconnecting...",
             ConnectionState::Error(_) => "Error",
         }
-    }
-}
-
-impl Default for ConnectionState {
-    fn default() -> Self {
-        ConnectionState::Disconnected
     }
 }
 
@@ -1273,10 +1272,10 @@ impl VpnConnection {
 
     /// Clear detected game servers (call on disconnect)
     pub fn clear_detected_game_servers(&self) {
-        if let Some(st) = self.split_tunnel.as_ref() {
-            if let Ok(driver) = st.try_lock() {
-                driver.clear_detected_game_servers();
-            }
+        if let Some(st) = self.split_tunnel.as_ref()
+            && let Ok(driver) = st.try_lock()
+        {
+            driver.clear_detected_game_servers();
         }
     }
 
@@ -1307,6 +1306,7 @@ impl VpnConnection {
     /// * `access_token` - Bearer token used to fetch relay auth ticket
     /// * `region` - Server region to connect to
     /// * `tunnel_apps` - Apps that SHOULD use VPN (games). Everything else bypasses.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         &mut self,
         access_token: &str,
@@ -1321,18 +1321,10 @@ impl VpnConnection {
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
         enable_country_ban: bool,
-        enable_partial_country_ban: bool,
     ) -> VpnResult<()> {
-        // Both bypass modes need the relay for Roblox TCP traffic. They differ
-        // on gameplay UDP: full bypass (whole platform blocked) relays it;
-        // partial bypass (specific games blocked, e.g. Vietnam) keeps UDP and
-        // bulk assets direct so the player keeps real ping and avoids relay
-        // asset throttling.
-        let routing_flags = resolve_tunnel_routing_flags(
-            enable_api_tunneling,
-            enable_country_ban,
-            enable_partial_country_ban,
-        );
+        // Full bypass (whole platform blocked) relays Roblox TCP and gameplay
+        // UDP alike, because nothing can be trusted to the direct path.
+        let routing_flags = resolve_tunnel_routing_flags(enable_api_tunneling, enable_country_ban);
         let enable_api_tunneling = routing_flags.api_tunneling;
         let enable_udp_tunneling = routing_flags.udp_tunneling;
 
@@ -1477,6 +1469,29 @@ impl VpnConnection {
         self.set_state(ConnectionState::ConfiguringSplitTunnel)
             .await;
 
+        // Routing diagnostics for every tunnel session.
+        //
+        // Which destinations went direct, and why, is invisible in the existing
+        // logs: they only fire on the relay path. That is where the
+        // website-not-loading and missing-image reports die, and it is also the
+        // only way to see which endpoints Roblox voice uses when the in-game
+        // mic disappears — which happens with no bypass enabled at all, so
+        // gating this on the bypass modes hid exactly the session we needed.
+        {
+            use crate::vpn::bypass_diag::{BypassMode, begin_session};
+            let mode = if enable_country_ban {
+                BypassMode::FullCountryBan
+            } else if enable_api_tunneling {
+                BypassMode::RouteAssist
+            } else {
+                BypassMode::Plain
+            };
+            begin_session(
+                mode,
+                crate::roblox_proxy::hosts::active_bootstrap_ip_count(),
+            );
+        }
+
         if enable_api_tunneling && !tunnel_apps.is_empty() {
             match crate::roblox_proxy::hosts::apply_bootstrap_overrides(enable_country_ban).await {
                 Ok(()) => {
@@ -1502,28 +1517,39 @@ impl VpnConnection {
             }
         }
 
+        // Never inherit a previous session's answer.
+        crate::roblox_proxy::hosts::set_dpi_evasion_confirmed(false);
+
         if enable_country_ban {
-            // GoodbyeDPI is now a best-effort, supplementary DPI-evasion layer:
-            // the relay carries Roblox traffic regardless. So if it can't confirm
-            // a working mode (common under aggressive DPI like Egypt's — which is
-            // exactly why we relay), log it but do NOT raise the user-facing
-            // "bypass unavailable" signal. That signal is reserved for failures
-            // that actually break the relay bypass, e.g. the DNS repair above.
+            // GoodbyeDPI decides how much the relay has to carry.
+            //
+            // When it confirms a working mode, Roblox web and asset traffic goes
+            // direct and the relay carries gameplay alone. Assets are the bulk of
+            // the bytes, and funnelling a game's whole asset set through one
+            // relay hop is what made pages take minutes to load.
+            //
+            // When it cannot confirm (common under aggressive DPI like Egypt's,
+            // which is exactly why we relay at all) the relay carries everything,
+            // which is the behaviour that shipped before this split. Failing to
+            // confirm is therefore never a user-facing error: that signal stays
+            // reserved for failures that actually break the relay bypass, such as
+            // the DNS repair above.
             match crate::roblox_proxy::goodbyedpi::start_for_roblox().await {
                 Ok(Some(guard)) => {
                     self.goodbye_dpi_guard = Some(guard);
+                    crate::roblox_proxy::hosts::set_dpi_evasion_confirmed(true);
                     log::info!(
-                        "V3: Started Bypass country bans GoodbyeDPI helper for Roblox traffic"
+                        "V3: GoodbyeDPI confirmed a working mode; Roblox web and assets go DIRECT, relay carries gameplay only"
                     );
                 }
                 Ok(None) => {
                     log::info!(
-                        "V3: GoodbyeDPI helper unavailable; relying on the relay for country-ban bypass"
+                        "V3: GoodbyeDPI helper unavailable; relay carries Roblox web, assets and gameplay"
                     );
                 }
                 Err(e) => {
                     log::warn!(
-                        "V3: GoodbyeDPI could not confirm a working mode; relying on the relay for country-ban bypass: {}",
+                        "V3: GoodbyeDPI could not confirm a working mode; relay carries Roblox web, assets and gameplay: {}",
                         e
                     );
                 }
@@ -1578,32 +1604,30 @@ impl VpnConnection {
         // our servers"). Now that the relay tunnel is up, resolve Roblox's real
         // IPs *through* the relay (which sits outside the censorship) and merge
         // them into the pins. Best-effort: an older relay just returns nothing.
-        if enable_country_ban {
-            if let Some(relay) = self
+        if enable_country_ban
+            && let Some(relay) = self
                 .split_tunnel
                 .as_ref()
                 .and_then(|st| st.try_lock().ok().and_then(|d| d.get_relay_context()))
-            {
-                let resolved = relay
-                    .resolve_roblox_hosts(
-                        crate::roblox_proxy::hosts::ROBLOX_BOOTSTRAP_DOMAINS,
-                        std::time::Duration::from_secs(3),
-                    )
-                    .await;
-                if resolved.is_empty() {
-                    log::info!(
-                        "Relay-resolved DNS returned nothing (relay without resolve support, or hosts unresolved)"
-                    );
-                } else {
-                    let count = resolved.len();
-                    match crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved).await
-                    {
-                        Ok(()) => log::info!(
-                            "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay)"
-                        ),
-                        Err(e) => {
-                            log::warn!("Relay-resolved Roblox pins could not be applied: {e}")
-                        }
+        {
+            let resolved = relay
+                .resolve_roblox_hosts(
+                    crate::roblox_proxy::hosts::ROBLOX_BOOTSTRAP_DOMAINS,
+                    std::time::Duration::from_secs(3),
+                )
+                .await;
+            if resolved.is_empty() {
+                log::info!(
+                    "Relay-resolved DNS returned nothing (relay without resolve support, or hosts unresolved)"
+                );
+            } else {
+                let count = resolved.len();
+                match crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved).await {
+                    Ok(()) => log::info!(
+                        "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay)"
+                    ),
+                    Err(e) => {
+                        log::warn!("Relay-resolved Roblox pins could not be applied: {e}")
                     }
                 }
             }
@@ -1637,6 +1661,7 @@ impl VpnConnection {
     /// 3. Create UDP relay to server
     /// 4. Configure with relay context (no WireGuard)
     /// 5. Start process monitor
+    #[allow(clippy::too_many_arguments)]
     async fn setup_split_tunnel(
         &mut self,
         access_token: &str,
@@ -2628,8 +2653,8 @@ impl VpnConnection {
 
                                     // Update UI state promptly when games start/stop
                                     state_handle.send_if_modified(|state| {
-                                        if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
-                                            if *tunneled_processes != running_names {
+                                        if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state
+                                            && *tunneled_processes != running_names {
                                                 if !running_names.is_empty() && tunneled_processes.is_empty() {
                                                     log::info!("V3: Game detected, relaying: {:?}", running_names);
                                                 } else if running_names.is_empty() && !tunneled_processes.is_empty() {
@@ -2638,7 +2663,6 @@ impl VpnConnection {
                                                 *tunneled_processes = running_names;
                                                 return true;
                                             }
-                                        }
                                         false
                                     });
 
@@ -2758,8 +2782,8 @@ impl VpnConnection {
                                 }
 
                                 state_handle.send_if_modified(|state| {
-                                    if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state {
-                                        if *tunneled_processes != running_names {
+                                    if let ConnectionState::Connected { ref mut tunneled_processes, .. } = *state
+                                        && *tunneled_processes != running_names {
                                             if !running_names.is_empty() && tunneled_processes.is_empty() {
                                                 log::info!("V3: Game detected, relaying: {:?}", running_names);
                                             } else if running_names.is_empty() && !tunneled_processes.is_empty() {
@@ -2768,7 +2792,6 @@ impl VpnConnection {
                                             *tunneled_processes = running_names;
                                             return true;
                                         }
-                                    }
                                     false
                                 });
                             }
@@ -2781,8 +2804,8 @@ impl VpnConnection {
                         if let Some(ref auto_router) = auto_router_for_monitor {
                             let current_auto_region = auto_router.current_region();
                             state_handle.send_if_modified(|state| {
-                                if let ConnectionState::Connected { ref mut server_region, .. } = *state {
-                                    if *server_region != current_auto_region && !current_auto_region.is_empty() {
+                                if let ConnectionState::Connected { ref mut server_region, .. } = *state
+                                    && *server_region != current_auto_region && !current_auto_region.is_empty() {
                                         log::info!(
                                             "Auto-routing: Syncing UI state to region '{}'",
                                             current_auto_region
@@ -2790,7 +2813,6 @@ impl VpnConnection {
                                         *server_region = current_auto_region;
                                         return true;
                                     }
-                                }
                                 false
                             });
                         }
@@ -2928,8 +2950,8 @@ impl VpnConnection {
                                 }
                                 RelayHealthAction::Continue { relay_status: new_status } => {
                                     state_handle.send_if_modified(|state| {
-                                        if let ConnectionState::Connected { ref mut relay_status, .. } = *state {
-                                            if *relay_status != new_status {
+                                        if let ConnectionState::Connected { ref mut relay_status, .. } = *state
+                                            && *relay_status != new_status {
                                                 match &new_status {
                                                     Some(status) => log::warn!(
                                                         "V3: Relay health degraded to '{}' - updating UI state",
@@ -2944,7 +2966,6 @@ impl VpnConnection {
                                                 *relay_status = new_status;
                                                 return true;
                                             }
-                                        }
                                         false
                                     });
                                 }
@@ -3086,6 +3107,7 @@ impl VpnConnection {
 
     pub async fn disconnect(&mut self) -> VpnResult<()> {
         log::info!("Disconnecting VPN");
+        crate::vpn::bypass_diag::end_session();
         self.set_state(ConnectionState::Disconnecting).await;
         self.cleanup().await;
         self.release_free_tier_quota().await;
@@ -3372,10 +3394,10 @@ impl Drop for VpnConnection {
             }
         }
 
-        if let Some(ref driver) = self.split_tunnel {
-            if let Ok(mut guard) = driver.try_lock() {
-                let _ = guard.close();
-            }
+        if let Some(ref driver) = self.split_tunnel
+            && let Ok(mut guard) = driver.try_lock()
+        {
+            let _ = guard.close();
         }
 
         super::wfp_block::cleanup();
@@ -3384,10 +3406,10 @@ impl Drop for VpnConnection {
             guard.stop();
         }
 
-        if self.bootstrap_dns_repair_applied {
-            if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
-                log::warn!("Failed to remove Roblox bootstrap DNS repair during drop: {e}");
-            }
+        if self.bootstrap_dns_repair_applied
+            && let Err(e) = crate::roblox_proxy::hosts::remove_overrides()
+        {
+            log::warn!("Failed to remove Roblox bootstrap DNS repair during drop: {e}");
         }
     }
 }
@@ -3529,7 +3551,7 @@ mod tests {
 
     #[test]
     fn no_toggles_keeps_plain_vpn_behavior() {
-        let flags = resolve_tunnel_routing_flags(false, false, false);
+        let flags = resolve_tunnel_routing_flags(false, false);
 
         assert!(!flags.api_tunneling);
         assert!(flags.udp_tunneling);
@@ -3540,36 +3562,15 @@ mod tests {
         // Egypt-style full block: nothing can be trusted to the direct path,
         // so full bypass alone relays gameplay UDP too (it used to require
         // also enabling Route Assist, which confused users).
-        let flags = resolve_tunnel_routing_flags(false, true, false);
+        let flags = resolve_tunnel_routing_flags(false, true);
 
         assert!(flags.api_tunneling);
         assert!(flags.udp_tunneling);
     }
 
     #[test]
-    fn partial_ban_bypass_keeps_gameplay_udp_direct_for_real_ping() {
-        // Vietnam-style game ban: relay Roblox join/control TCP so banned
-        // games show and launch; gameplay UDP stays direct = real ping.
-        let flags = resolve_tunnel_routing_flags(false, false, true);
-
-        assert!(flags.api_tunneling);
-        assert!(!flags.udp_tunneling);
-    }
-
-    #[test]
-    fn partial_ban_plus_route_assist_keeps_gameplay_udp_direct() {
-        // Partial Bypass wins over Route Assist: Vietnam-style users need
-        // Roblox TCP relayed, but stacking gameplay relay causes temporary
-        // joins followed by Roblox server/menu failures.
-        let flags = resolve_tunnel_routing_flags(true, false, true);
-
-        assert!(flags.api_tunneling);
-        assert!(!flags.udp_tunneling);
-    }
-
-    #[test]
     fn route_assist_without_bypass_keeps_existing_udp_relay_behavior() {
-        let flags = resolve_tunnel_routing_flags(true, false, false);
+        let flags = resolve_tunnel_routing_flags(true, false);
 
         assert!(flags.api_tunneling);
         assert!(flags.udp_tunneling);
@@ -3587,7 +3588,7 @@ mod tests {
     fn relay_choice_prefers_the_faster_region_outside_the_tie_band() {
         // Occupancy must never send anyone to a slower region. 23ms vs 115ms is
         // far outside the band, so latency decides regardless of load.
-        let candidates = vec![candidate("mumbai", 23), candidate("tokyo", 115)];
+        let candidates = [candidate("mumbai", 23), candidate("tokyo", 115)];
         let picked = pick_lowest_latency_server(candidates.iter()).unwrap();
         assert_eq!(picked.0, "mumbai");
     }
@@ -3598,14 +3599,14 @@ mod tests {
         // candidate has unknown occupancy. They all land in the same bucket and
         // latency breaks the tie, which is exactly the old behaviour: the
         // feature must not change anything until real data exists.
-        let candidates = vec![candidate("mumbai", 23), candidate("mumbai-02", 25)];
+        let candidates = [candidate("mumbai", 23), candidate("mumbai-02", 25)];
         let picked = pick_lowest_latency_server(candidates.iter()).unwrap();
         assert_eq!(picked.0, "mumbai");
     }
 
     #[test]
     fn relay_choice_ignores_candidates_without_a_latency_sample() {
-        let candidates = vec![
+        let candidates = [
             (
                 "unmeasured".to_string(),
                 "127.0.0.1:51820".parse().unwrap(),
@@ -3619,7 +3620,7 @@ mod tests {
 
     #[test]
     fn relay_choice_returns_none_when_nothing_was_measured() {
-        let candidates = vec![(
+        let candidates = [(
             "unmeasured".to_string(),
             "127.0.0.1:51820".parse().unwrap(),
             None,

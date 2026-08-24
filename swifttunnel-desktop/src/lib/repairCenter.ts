@@ -162,7 +162,7 @@ export const REPAIR_ISSUES: RepairIssueDefinition[] = [
   {
     id: "route_assist",
     label: "Route Assist",
-    description: "Checks Roblox API/browser routing state without changing it.",
+    description: "Checks whether join traffic is routed for region placement, without changing it.",
     actionLabel: "Check",
     systemChanging: false,
   },
@@ -1005,23 +1005,17 @@ async function checkRouteAssist(
 ): Promise<RepairReport> {
   const diagnostics = await deps.vpnGetDiagnostics().catch(() => null);
   const fullBypassActive = settings.enable_country_ban;
-  const partialBypassActive = settings.enable_partial_country_ban;
-  const routeAssistEffectivelyEnabled =
-    settings.enable_api_tunneling && !partialBypassActive;
+  const routeAssistEffectivelyEnabled = settings.enable_api_tunneling;
   const routeAssistValue = fullBypassActive
     ? "handled by Full Country Ban"
-    : partialBypassActive
-      ? "disabled by Partial Bypass"
-      : routeAssistEffectivelyEnabled
-        ? "enabled"
-        : "disabled";
+    : routeAssistEffectivelyEnabled
+      ? "enabled"
+      : "disabled";
   const routeAssistNextStep = fullBypassActive
     ? "Full Country Ban already relays Roblox routing. Route Assist does not need to be enabled separately."
-    : partialBypassActive
-      ? "Partial Bypass already routes the Roblox join path and keeps gameplay direct."
-      : routeAssistEffectivelyEnabled
-        ? "Route Assist is enabled. Copy this result for support if browser login/API routing still fails."
-        : "Route Assist is disabled. Enable it only when Roblox browser login or API routing needs relay help.";
+    : routeAssistEffectivelyEnabled
+      ? "Route Assist is enabled. Copy this result for support if browser login/API routing still fails."
+      : "Route Assist is disabled. Enable it only when Roblox browser login or API routing needs relay help.";
 
   return {
     status: "checked",

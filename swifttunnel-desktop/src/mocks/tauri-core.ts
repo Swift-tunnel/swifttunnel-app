@@ -87,7 +87,8 @@ const MOCK_SETTINGS: AppSettings = {
   },
   enable_api_tunneling: false,
   enable_country_ban: false,
-  enable_partial_country_ban: false,
+  idle_when_unfocused: true,
+  show_live_graph: true,
 };
 
 let mockVpnConnected = false;

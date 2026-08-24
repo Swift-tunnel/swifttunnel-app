@@ -18,7 +18,6 @@ use crate::process_names::process_name_matches_any_tunnel_app;
 use ahash::{AHashMap, AHashSet};
 use arc_swap::ArcSwap;
 use parking_lot::Mutex;
-use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -209,8 +208,9 @@ pub fn is_game_server(
 /// This is called when on-demand PID lookup succeeds but the PID isn't
 /// in the cached snapshot (stale snapshot race condition).
 #[cfg(windows)]
+#[allow(dead_code)]
 fn get_process_name_by_pid_fast(pid: u32) -> Option<String> {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 

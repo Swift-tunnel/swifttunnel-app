@@ -485,6 +485,52 @@ fn apply_webview2_resource_tuning() {}
 /// the frontend. The watcher (see `swifttunnel_core::roblox_watcher`) handles
 /// new sessions by switching to the newest log file, so it fires whether Roblox
 /// was already running or launched fresh.
+/// Put the user's launch window size back after Roblox closes.
+///
+/// Roblox writes its own window geometry into GlobalBasicSettings when it
+/// exits, overwriting the size configured in the Boost tab. That is why the
+/// "Window resolution" option looks like it does nothing: it is applied, then
+/// clobbered, so the next launch uses Roblox's number instead.
+///
+/// Restoring it on the way out rather than on the way in is deliberate. By the
+/// time Roblox is running it has already read the file, so writing then would
+/// only affect the launch after next.
+///
+/// Only runs on the falling edge, and only rewrites the window keys, so it is
+/// silent for anyone who never touched the setting.
+fn spawn_roblox_window_size_watcher(app: tauri::AppHandle) {
+    let _ = std::thread::Builder::new()
+        .name("roblox-window-size-watcher".into())
+        .spawn(move || {
+            let mut was_running = false;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(2000));
+
+                let Some(state) = app.try_state::<AppState>() else {
+                    continue;
+                };
+
+                let running = {
+                    let ro = state.roblox_optimizer.lock();
+                    ro.is_roblox_running()
+                };
+
+                if was_running && !running {
+                    let config = {
+                        let s = state.settings.lock();
+                        s.config.roblox_settings.clone()
+                    };
+                    let ro = state.roblox_optimizer.lock();
+                    if let Err(e) = ro.reapply_window_size(&config) {
+                        log::warn!("Could not restore Roblox window size after exit: {e}");
+                    }
+                }
+
+                was_running = running;
+            }
+        });
+}
+
 fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
     use swifttunnel_core::roblox_watcher::{RobloxEvent, RobloxWatcher};
     let _ = std::thread::Builder::new()
@@ -543,6 +589,7 @@ pub fn run() {
             commands::auth::auth_refresh_profile,
             commands::auth::auth_update_required,
             commands::system::close_splash,
+            commands::system::ensure_overlay_window,
             // VPN
             commands::vpn::vpn_get_state,
             commands::vpn::vpn_preflight_binding,
@@ -620,22 +667,13 @@ pub fn run() {
                 let _ = window.set_icon(APP_ICON.clone());
             }
 
-            // Keep the in-game overlay windows from ever stealing foreground
-            // focus from the game. A normal topmost window activates when
-            // clicked (e.g. to grab/drag the overlay), which knocks Roblox out
-            // of the foreground and makes the overlay's foreground-gated
-            // visibility flicker off mid-drag. WS_EX_NOACTIVATE lets them
-            // receive clicks while the game stays focused.
-            #[cfg(windows)]
-            for label in ["overlay", "overlay-stats"] {
-                if let Some(win) = app.get_webview_window(label) {
-                    if let Ok(hwnd) = win.hwnd() {
-                        swifttunnel_core::performance_monitor::set_window_no_activate(
-                            hwnd.0 as isize,
-                        );
-                    }
-                }
-            }
+            // The overlay windows are no longer built during startup: each one
+            // costs its own ~60MB WebView2 renderer, and neither is visible
+            // until something asks for it (the in-game bar is off by default).
+            // `commands::system::ensure_overlay_window` creates them on first
+            // use and applies WS_EX_NOACTIVATE there, which is what stops a
+            // topmost window activating on click and knocking Roblox out of
+            // the foreground.
 
             let runtime =
                 Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
@@ -728,6 +766,10 @@ pub fn run() {
             // auto RAM clean + in-game overlay). Lightweight; app-lifetime.
             spawn_roblox_game_join_watcher(app.handle().clone());
 
+            // Background: put the configured Roblox launch window size back
+            // after Roblox overwrites it on exit.
+            spawn_roblox_window_size_watcher(app.handle().clone());
+
             // Background startup chain: everything slow that used to block
             // setup, in the same order it ran before. Runs on the app's own
             // runtime, so Tauri commands and the UI are never blocked by it.
@@ -790,7 +832,11 @@ pub fn run() {
                 // Routine connectivity maintenance for common Roblox connect/login
                 // issues (stale DNS, wrong clock). Detached + after the UI is
                 // released, so it never delays startup.
-                let _ = tokio::task::spawn_blocking(run_startup_connectivity_maintenance);
+                // Detached on purpose. Dropping the JoinHandle does not cancel a
+                // spawn_blocking task, it only means nothing waits for the result.
+                drop(tokio::task::spawn_blocking(
+                    run_startup_connectivity_maintenance,
+                ));
 
                 // 2. Local recovery + Roblox settings sync (file IO, icacls,
                 //    powercfg - cheap for the runtime, too slow for setup).

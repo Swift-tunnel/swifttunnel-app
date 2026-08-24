@@ -152,17 +152,15 @@ fn watch_logs(
                     for line in lines {
                         // Try each pattern
                         for pattern in [joining_pattern, udmux_pattern] {
-                            if let Some(caps) = pattern.captures(&line) {
-                                if let Some(ip_match) = caps.get(1) {
-                                    if let Ok(ip) = ip_match.as_str().parse::<Ipv4Addr>() {
-                                        // Skip private IPs (10.x.x.x, 192.168.x.x, etc.)
-                                        if !is_private_ip(ip) && !seen_ips.contains(&ip) {
-                                            seen_ips.insert(ip);
-                                            log::info!("Detected game server: {}", ip);
-                                            let _ =
-                                                sender.send(RobloxEvent::GameServerDetected { ip });
-                                        }
-                                    }
+                            if let Some(caps) = pattern.captures(&line)
+                                && let Some(ip_match) = caps.get(1)
+                                && let Ok(ip) = ip_match.as_str().parse::<Ipv4Addr>()
+                            {
+                                // Skip private IPs (10.x.x.x, 192.168.x.x, etc.)
+                                if !is_private_ip(ip) && !seen_ips.contains(&ip) {
+                                    seen_ips.insert(ip);
+                                    log::info!("Detected game server: {}", ip);
+                                    let _ = sender.send(RobloxEvent::GameServerDetected { ip });
                                 }
                             }
                         }

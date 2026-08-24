@@ -440,7 +440,23 @@ export interface AppSettings {
   game_process_performance: GameProcessPerformanceSettings;
   enable_api_tunneling: boolean;
   enable_country_ban: boolean;
-  enable_partial_country_ban: boolean;
+  /**
+   * Throttle background polling while the window is not focused.
+   *
+   * The UI runs in WebView2 and, while connected, polls throughput, state
+   * and ping several times a second. Nobody reads that once they alt-tab
+   * into a game, but it keeps costing IPC round trips and re-renders that
+   * compete with the game. On by default.
+   */
+  idle_when_unfocused: boolean;
+  /**
+   * Draw the live throughput graph on the Connect tab.
+   *
+   * The canvas redraw loop and its 500ms sampling are the most expensive
+   * part of the UI. Turning it off stops both, which matters for anyone
+   * who leaves the window open on a second monitor while playing.
+   */
+  show_live_graph: boolean;
 }
 
 // ── System ──

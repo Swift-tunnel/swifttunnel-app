@@ -747,12 +747,12 @@ impl SplitTunnelDriver {
     /// Get the path to the driver file
     fn get_driver_path() -> Option<PathBuf> {
         // First try: Same directory as executable (for dev builds)
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let driver_path = exe_dir.join("drivers").join("ndisrd.sys");
-                if driver_path.exists() {
-                    return Some(driver_path);
-                }
+        if let Ok(exe_path) = std::env::current_exe()
+            && let Some(exe_dir) = exe_path.parent()
+        {
+            let driver_path = exe_dir.join("drivers").join("ndisrd.sys");
+            if driver_path.exists() {
+                return Some(driver_path);
             }
         }
 
@@ -1159,92 +1159,95 @@ impl SplitTunnelDriver {
         service: windows::Win32::System::Services::SC_HANDLE,
         expected_path: &Path,
     ) {
-        use windows::Win32::System::Services::*;
-        use windows::core::PCWSTR;
+        unsafe {
+            use windows::Win32::System::Services::*;
+            use windows::core::PCWSTR;
 
-        // Query the current service config to get the binary path.
-        let mut bytes_needed = 0u32;
-        let _ = QueryServiceConfigW(service, None, 0, &mut bytes_needed);
-        if bytes_needed == 0 {
-            return;
-        }
+            // Query the current service config to get the binary path.
+            let mut bytes_needed = 0u32;
+            let _ = QueryServiceConfigW(service, None, 0, &mut bytes_needed);
+            if bytes_needed == 0 {
+                return;
+            }
 
-        // Use Vec<u64> instead of Vec<u8> to guarantee pointer-width alignment,
-        // which QUERY_SERVICE_CONFIGW requires (it contains pointer fields).
-        let u64_len = (bytes_needed as usize + 7) / 8;
-        let mut buf = vec![0u64; u64_len];
-        let config_ptr = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
-        if QueryServiceConfigW(service, Some(config_ptr), bytes_needed, &mut bytes_needed).is_err()
-        {
-            log::warn!("Could not query NDISRD service config for binary path verification");
-            return;
-        }
+            // Use Vec<u64> instead of Vec<u8> to guarantee pointer-width alignment,
+            // which QUERY_SERVICE_CONFIGW requires (it contains pointer fields).
+            let u64_len = (bytes_needed as usize).div_ceil(8);
+            let mut buf = vec![0u64; u64_len];
+            let config_ptr = buf.as_mut_ptr() as *mut QUERY_SERVICE_CONFIGW;
+            if QueryServiceConfigW(service, Some(config_ptr), bytes_needed, &mut bytes_needed)
+                .is_err()
+            {
+                log::warn!("Could not query NDISRD service config for binary path verification");
+                return;
+            }
 
-        let config = &*config_ptr;
-        let current_path_raw = config.lpBinaryPathName;
-        if current_path_raw.is_null() {
-            return;
-        }
+            let config = &*config_ptr;
+            let current_path_raw = config.lpBinaryPathName;
+            if current_path_raw.is_null() {
+                return;
+            }
 
-        let current_path_str = current_path_raw.to_string().unwrap_or_default();
-        let expected_str = expected_path.to_string_lossy();
+            let current_path_str = current_path_raw.to_string().unwrap_or_default();
+            let expected_str = expected_path.to_string_lossy();
 
-        // Compare normalized, NOT raw. Windows stores a driver's ImagePath in NT
-        // namespace form, so a perfectly healthy NDISRD reads back as
-        // `\??\C:\Windows\System32\drivers\ndisrd.sys` (or the registry-relative
-        // `System32\drivers\ndisrd.sys`), which never string-matches the plain
-        // Win32 path we expect.
-        //
-        // Comparing raw meant every check decided the service was broken and
-        // rewrote its config. One user's log shows that firing 113 times, and
-        // hammering ChangeServiceConfigW on a driver service is how it ends up
-        // "marked for deletion" — after which the driver cannot load at all and
-        // the machine loses networking until the service is rebuilt. That user
-        // could not reach the internet after boot, or run any other VPN, until
-        // they ran SwiftTunnel's repair.
-        if Self::normalize_service_binary_path(&current_path_str)
-            == Self::normalize_service_binary_path(&expected_str)
-        {
-            return;
-        }
+            // Compare normalized, NOT raw. Windows stores a driver's ImagePath in NT
+            // namespace form, so a perfectly healthy NDISRD reads back as
+            // `\??\C:\Windows\System32\drivers\ndisrd.sys` (or the registry-relative
+            // `System32\drivers\ndisrd.sys`), which never string-matches the plain
+            // Win32 path we expect.
+            //
+            // Comparing raw meant every check decided the service was broken and
+            // rewrote its config. One user's log shows that firing 113 times, and
+            // hammering ChangeServiceConfigW on a driver service is how it ends up
+            // "marked for deletion" — after which the driver cannot load at all and
+            // the machine loses networking until the service is rebuilt. That user
+            // could not reach the internet after boot, or run any other VPN, until
+            // they ran SwiftTunnel's repair.
+            if Self::normalize_service_binary_path(&current_path_str)
+                == Self::normalize_service_binary_path(&expected_str)
+            {
+                return;
+            }
 
-        if !expected_path.exists() {
-            // Don't update to a path that doesn't exist.
-            log::debug!(
-                "NDISRD service binary path mismatch but expected path does not exist: current='{}', expected='{}'",
+            if !expected_path.exists() {
+                // Don't update to a path that doesn't exist.
+                log::debug!(
+                    "NDISRD service binary path mismatch but expected path does not exist: current='{}', expected='{}'",
+                    current_path_str,
+                    expected_str
+                );
+                return;
+            }
+
+            log::warn!(
+                "NDISRD service binary path mismatch: current='{}', expected='{}'; updating",
                 current_path_str,
                 expected_str
             );
-            return;
-        }
 
-        log::warn!(
-            "NDISRD service binary path mismatch: current='{}', expected='{}'; updating",
-            current_path_str,
-            expected_str
-        );
-
-        let new_path_wide: Vec<u16> = expected_str
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let no_change_str = PCWSTR::null();
-        if let Err(e) = ChangeServiceConfigW(
-            service,
-            ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
-            SERVICE_START_TYPE(SERVICE_NO_CHANGE),
-            SERVICE_ERROR(SERVICE_NO_CHANGE),
-            PCWSTR(new_path_wide.as_ptr()),
-            no_change_str,
-            None,
-            no_change_str,
-            no_change_str,
-            no_change_str,
-            no_change_str,
-        ) {
-            log::warn!("Failed to update NDISRD service binary path: {}", e);
-        } else {
-            log::info!("NDISRD service binary path updated to '{}'", expected_str);
+            let new_path_wide: Vec<u16> = expected_str
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let no_change_str = PCWSTR::null();
+            if let Err(e) = ChangeServiceConfigW(
+                service,
+                ENUM_SERVICE_TYPE(SERVICE_NO_CHANGE),
+                SERVICE_START_TYPE(SERVICE_NO_CHANGE),
+                SERVICE_ERROR(SERVICE_NO_CHANGE),
+                PCWSTR(new_path_wide.as_ptr()),
+                no_change_str,
+                None,
+                no_change_str,
+                no_change_str,
+                no_change_str,
+                no_change_str,
+            ) {
+                log::warn!("Failed to update NDISRD service binary path: {}", e);
+            } else {
+                log::info!("NDISRD service binary path updated to '{}'", expected_str);
+            }
         }
     }
 
@@ -1279,13 +1282,14 @@ impl SplitTunnelDriver {
                     msi_path.display()
                 );
 
-                match {
+                let res = {
                     use std::os::windows::process::CommandExt;
                     std::process::Command::new("msiexec")
                         .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
                         .creation_flags(crate::utils::CREATE_NO_WINDOW)
                         .output()
-                } {
+                };
+                match res {
                     Ok(output) => {
                         let code = output.status.code().unwrap_or(-1);
                         if Self::driver_uninstall_success_exit_code(code) {

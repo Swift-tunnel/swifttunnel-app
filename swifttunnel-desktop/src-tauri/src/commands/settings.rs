@@ -606,11 +606,13 @@ mod tests {
 
     #[test]
     fn compose_bundle_text_contains_required_sections() {
-        let mut settings = swifttunnel_core::settings::AppSettings::default();
-        settings.selected_region = "mumbai".to_string();
-        settings.selected_game_presets = vec!["roblox".to_string()];
-        settings.auto_routing_enabled = true;
-        settings.custom_relay_server = "relay.example.com:51821".to_string();
+        let settings = swifttunnel_core::settings::AppSettings {
+            selected_region: "mumbai".to_string(),
+            selected_game_presets: vec!["roblox".to_string()],
+            auto_routing_enabled: true,
+            custom_relay_server: "relay.example.com:51821".to_string(),
+            ..Default::default()
+        };
 
         let context = BundleContext {
             generated_at: "2026-02-19T15:45:00Z".to_string(),

@@ -1134,10 +1134,10 @@ pub fn revert(id: &str) -> Result<bool, String> {
 
     let mut first_error: Option<String> = None;
     for (action, snap) in tweak.actions.iter().zip(captured.iter()) {
-        if let Err(e) = restore_action(action, snap) {
-            if first_error.is_none() {
-                first_error = Some(e);
-            }
+        if let Err(e) = restore_action(action, snap)
+            && first_error.is_none()
+        {
+            first_error = Some(e);
         }
     }
 

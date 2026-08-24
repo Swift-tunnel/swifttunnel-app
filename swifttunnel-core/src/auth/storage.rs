@@ -31,6 +31,7 @@ use std::path::PathBuf;
 
 const SERVICE_NAME: &str = "SwiftTunnel";
 const SESSION_KEY: &str = "auth_session";
+#[allow(dead_code)]
 const OAUTH_STATE_FILE: &str = "oauth_pending.json";
 const AUTH_SESSION_FILE: &str = "auth_session.dat";
 const REFRESH_FAILURES_FILE: &str = "refresh_failures.json";
@@ -80,10 +81,10 @@ fn read_machine_id() -> String {
     use winreg::enums::HKEY_LOCAL_MACHINE;
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    if let Ok(key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Cryptography") {
-        if let Ok(guid) = key.get_value::<String, _>("MachineGuid") {
-            return guid;
-        }
+    if let Ok(key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Cryptography")
+        && let Ok(guid) = key.get_value::<String, _>("MachineGuid")
+    {
+        return guid;
     }
     String::from("swifttunnel-unknown-machine")
 }
@@ -571,16 +572,19 @@ impl SecureStorage {
     /// Callers MUST follow up with `load_session` before assuming the user is
     /// logged in. We accept the false-positive because keyring reads on Windows
     /// are synchronous RPCs that don't belong on a hot path.
+    #[allow(dead_code)]
     pub fn has_session(&self) -> bool {
         self.session_file_path().exists()
     }
 
     /// Get the OAuth state file path
+    #[allow(dead_code)]
     fn oauth_state_path(&self) -> PathBuf {
         self.data_dir.join(OAUTH_STATE_FILE)
     }
 
     /// Save OAuth pending state to disk (for deep link callback after app restart)
+    #[allow(dead_code)]
     pub fn save_oauth_state(&self, state: &OAuthPendingState) -> Result<(), AuthError> {
         let path = self.oauth_state_path();
 
@@ -596,6 +600,7 @@ impl SecureStorage {
     }
 
     /// Load OAuth pending state from disk
+    #[allow(dead_code)]
     pub fn load_oauth_state(&self) -> Result<Option<OAuthPendingState>, AuthError> {
         let path = self.oauth_state_path();
 
@@ -616,6 +621,7 @@ impl SecureStorage {
     }
 
     /// Clear OAuth pending state from disk
+    #[allow(dead_code)]
     pub fn clear_oauth_state(&self) -> Result<(), AuthError> {
         let path = self.oauth_state_path();
 
@@ -690,6 +696,7 @@ impl SecureStorage {
     }
 
     /// Get the current (in-window) refresh failure count.
+    #[allow(dead_code)]
     pub fn get_refresh_failures(&self) -> u32 {
         self.read_refresh_record().map(|r| r.count).unwrap_or(0)
     }

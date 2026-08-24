@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { useBoostStore } from "../stores/boostStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useVpnStore } from "../stores/vpnStore";
@@ -115,8 +116,20 @@ export function useOverlayDriver() {
     let sessionStart = 0;
     let wasRunning = false;
 
+    // The stats window is built the first time the overlay is switched on,
+    // not during startup. It costs its own WebView2 renderer process (~60MB
+    // measured) and the feature is off by default, so building it eagerly made
+    // every user pay for a window most of them never show. Idempotent, and the
+    // failure path is the same as before: ticks push to a window that is not
+    // there and the emit is swallowed.
+    const overlayWindowReady = invoke("ensure_overlay_window", {
+      label: "overlay-stats",
+    }).catch(() => {});
+
     const tick = async () => {
       const cfgBefore = ovRef.current;
+      if (disposed) return;
+      await overlayWindowReady;
       if (disposed) return;
       const vpnBefore = useVpnStore.getState();
       try {

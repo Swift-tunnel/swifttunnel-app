@@ -1,0 +1,15 @@
+[package]
+name = "swifttunnel-setup"
+version = "0.1.0"
+edition = "2021"
+description = "Website installer for SwiftTunnel: repairs a broken MSI registration, then runs the installer"
+
+[dependencies]
+swifttunnel-msi-repair = { path = "../swifttunnel-msi-repair" }
+
+[build-dependencies]
+embed-manifest = "1.4"
+
+[[bin]]
+name = "SwiftTunnel-Setup"
+path = "src/main.rs"

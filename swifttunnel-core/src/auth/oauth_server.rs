@@ -8,8 +8,6 @@
 //! - Industry standard (used by Discord, Slack, VS Code, Spotify)
 
 use log::{debug, error, info, warn};
-use std::io::{Read, Write};
-use std::net::TcpListener;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
     Arc,

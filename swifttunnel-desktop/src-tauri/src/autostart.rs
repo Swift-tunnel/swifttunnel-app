@@ -29,10 +29,10 @@ pub fn sync_run_on_startup(_app: &AppHandle, enabled: bool) -> Result<(), String
         run_key
             .set_value(RUN_VALUE_NAME, &command)
             .map_err(|e| format!("Failed to set startup registry value: {}", e))?;
-    } else if let Err(e) = run_key.delete_value(RUN_VALUE_NAME) {
-        if e.kind() != ErrorKind::NotFound {
-            return Err(format!("Failed to remove startup registry value: {}", e));
-        }
+    } else if let Err(e) = run_key.delete_value(RUN_VALUE_NAME)
+        && e.kind() != ErrorKind::NotFound
+    {
+        return Err(format!("Failed to remove startup registry value: {}", e));
     }
 
     Ok(())
