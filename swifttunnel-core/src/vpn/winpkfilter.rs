@@ -1,8 +1,5 @@
 use std::path::{Path, PathBuf};
 
-#[cfg(windows)]
-use crate::hidden_command;
-
 // ═══════════════════════════════════════════════════════════════════════════════
 //  MSI PACKAGE METADATA & ARCHITECTURE DETECTION
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -393,9 +390,9 @@ fn driver_pnputil_install_command(inf_path: &str) -> (&'static str, [&str; 3]) {
 }
 
 #[cfg(windows)]
-fn pnputil_output_detail(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+fn pnputil_output_detail(output: &crate::BoundedCommandOutput) -> String {
+    let stderr = output.stderr.trim().to_string();
+    let stdout = output.stdout.trim().to_string();
 
     if !stderr.is_empty() && !stdout.is_empty() {
         format!("{stderr}; {stdout}")
@@ -439,13 +436,16 @@ fn netcfg_not_installed_detail(detail: &str) -> bool {
 #[cfg(windows)]
 fn run_netcfg_install(inf_path: &str) -> Result<(), String> {
     let (program, args) = driver_netcfg_install_command(inf_path);
-    let output = hidden_command(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("Failed to run netcfg: {}", e))?;
+    let output = crate::run_hidden_command_with_timeout(program, &args, DRIVER_COMMAND_TIMEOUT);
+    if output.timed_out {
+        return Err(format!(
+            "netcfg did not respond within {}s and was stopped. Restart the PC and try Repair again.",
+            DRIVER_COMMAND_TIMEOUT.as_secs()
+        ));
+    }
 
-    let code = output.status.code().unwrap_or(-1);
-    if output.status.success() {
+    let code = output.exit_code.unwrap_or(-1);
+    if output.success {
         log::info!("WinpkFilter network component installed/refreshed with netcfg");
         return Ok(());
     }
@@ -482,13 +482,16 @@ fn run_netcfg_install(inf_path: &str) -> Result<(), String> {
 #[cfg(windows)]
 pub fn remove_installed_network_component() -> Result<(), String> {
     let (program, args) = driver_netcfg_uninstall_command();
-    let output = hidden_command(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("Failed to run netcfg /u: {}", e))?;
+    let output = crate::run_hidden_command_with_timeout(program, &args, DRIVER_COMMAND_TIMEOUT);
+    if output.timed_out {
+        return Err(format!(
+            "netcfg /u did not respond within {}s and was stopped. Restart the PC and try again.",
+            DRIVER_COMMAND_TIMEOUT.as_secs()
+        ));
+    }
 
-    let code = output.status.code().unwrap_or(-1);
-    if output.status.success() {
+    let code = output.exit_code.unwrap_or(-1);
+    if output.success {
         log::info!("WinpkFilter network component unregistered with netcfg");
         return Ok(());
     }
@@ -530,6 +533,12 @@ pub fn remove_installed_network_component() -> Result<(), String> {
 /// Maximum number of pnputil install attempts before giving up.
 const PNPUTIL_INSTALL_MAX_ATTEMPTS: u32 = 3;
 
+/// Deadline for netcfg and pnputil. Driver work is legitimately slow, so this
+/// is generous, but it has to be finite: with no deadline a wedged driver stack
+/// leaves Repair spinning forever with nothing to report.
+#[cfg(windows)]
+const DRIVER_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 #[cfg(windows)]
 fn run_pnputil_install(inf_path: &str) -> Result<(), String> {
     let mut last_error = String::new();
@@ -547,21 +556,21 @@ fn run_pnputil_install(inf_path: &str) -> Result<(), String> {
         }
 
         let (program, args) = driver_pnputil_install_command(inf_path);
-        let output = match hidden_command(program).args(args).output() {
-            Ok(output) => output,
-            Err(e) => {
-                last_error = format!("Failed to run pnputil: {}", e);
-                log::warn!(
-                    "{} (attempt {}/{})",
-                    last_error,
-                    attempt,
-                    PNPUTIL_INSTALL_MAX_ATTEMPTS
-                );
-                continue;
-            }
-        };
+        let output = crate::run_hidden_command_with_timeout(program, &args, DRIVER_COMMAND_TIMEOUT);
+        if !output.success && output.exit_code.is_none() {
+            // Either it never started or it blew the deadline. Both are worth
+            // another attempt, and both must leave a reason behind.
+            last_error = output.stderr.trim().to_string();
+            log::warn!(
+                "{} (attempt {}/{})",
+                last_error,
+                attempt,
+                PNPUTIL_INSTALL_MAX_ATTEMPTS
+            );
+            continue;
+        }
 
-        let code = output.status.code().unwrap_or(-1);
+        let code = output.exit_code.unwrap_or(-1);
         if pnputil_success_exit_code(code) {
             // Verify the driver actually appeared in the store.
             match find_installed_driver_published_name() {
@@ -724,13 +733,20 @@ fn parse_enum_drivers_output(output: &str, original_name: &str) -> Option<String
 
 #[cfg(windows)]
 pub fn find_installed_driver_published_name() -> Result<Option<String>, String> {
-    let output = hidden_command("pnputil")
-        .args(["/enum-drivers"])
-        .output()
-        .map_err(|e| format!("Failed to run pnputil /enum-drivers: {}", e))?;
+    let output = crate::run_hidden_command_with_timeout(
+        "pnputil",
+        &["/enum-drivers"],
+        DRIVER_COMMAND_TIMEOUT,
+    );
+    if output.timed_out {
+        return Err(format!(
+            "pnputil /enum-drivers did not respond within {}s and was stopped.",
+            DRIVER_COMMAND_TIMEOUT.as_secs()
+        ));
+    }
 
-    let code = output.status.code().unwrap_or(-1);
-    if !output.status.success() {
+    let code = output.exit_code.unwrap_or(-1);
+    if !output.success {
         let detail = pnputil_output_detail(&output);
         if detail.is_empty() {
             return Err(format!("pnputil /enum-drivers failed with code {}", code));
@@ -741,8 +757,8 @@ pub fn find_installed_driver_published_name() -> Result<Option<String>, String> 
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_enum_drivers_output(&stdout, DRIVER_INF_NAME))
+    let stdout = output.stdout.as_str();
+    Ok(parse_enum_drivers_output(stdout, DRIVER_INF_NAME))
 }
 
 #[cfg(not(windows))]
@@ -757,12 +773,19 @@ pub fn remove_installed_driver_package() -> Result<(), String> {
         return Ok(());
     };
 
-    let output = hidden_command("pnputil")
-        .args(["/delete-driver", &published_name, "/uninstall", "/force"])
-        .output()
-        .map_err(|e| format!("Failed to run pnputil /delete-driver: {}", e))?;
+    let output = crate::run_hidden_command_with_timeout(
+        "pnputil",
+        &["/delete-driver", &published_name, "/uninstall", "/force"],
+        DRIVER_COMMAND_TIMEOUT,
+    );
+    if output.timed_out {
+        return Err(format!(
+            "pnputil /delete-driver did not respond within {}s and was stopped.",
+            DRIVER_COMMAND_TIMEOUT.as_secs()
+        ));
+    }
 
-    let code = output.status.code().unwrap_or(-1);
+    let code = output.exit_code.unwrap_or(-1);
     if pnputil_success_exit_code(code) {
         return Ok(());
     }

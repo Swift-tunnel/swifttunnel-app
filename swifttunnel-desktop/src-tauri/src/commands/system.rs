@@ -50,8 +50,19 @@ pub fn close_splash(app: tauri::AppHandle) {
 /// The property list below has to stay in step with how these windows used to
 /// be declared. `visible(false)` matters most: the windows manage their own
 /// visibility once they exist, and showing one here would flash it on screen.
+/// **Must stay `async`.** Tauri runs a synchronous command on the main thread,
+/// and building a webview on Windows needs that same thread to pump its event
+/// loop, so a sync version deadlocks the moment the overlay is switched on: the
+/// UI stops repainting, regions never load, and the window cannot even be
+/// closed. That shipped in v3.0.6, where these windows moved out of
+/// `tauri.conf.json` to being created on demand. It survives a restart too,
+/// because the overlay preference is persisted and the driver asks for the
+/// window again on launch.
+///
+/// An async command runs on a worker, which lets the builder hand the work to
+/// the main thread instead of blocking it.
 #[tauri::command]
-pub fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
+pub async fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Result<(), String> {
     use tauri::Manager;
 
     // Whitelisted, because `label` reaches WebviewWindowBuilder and the
@@ -90,6 +101,17 @@ pub fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Result<(),
     }
 
     Ok(())
+}
+
+/// Compile-time proof that the overlay command stays off the main thread.
+///
+/// Referencing it as a future is what pins it: if someone drops the `async`,
+/// this stops compiling rather than silently reintroducing the deadlock that
+/// froze the app in v3.0.6.
+#[allow(dead_code)]
+fn ensure_overlay_window_must_stay_async() {
+    fn assert_future<F: std::future::Future>(_: fn(tauri::AppHandle, String) -> F) {}
+    assert_future(ensure_overlay_window);
 }
 
 #[cfg(windows)]
@@ -273,8 +295,11 @@ fn extract_msi_to_dir(msi_path: &Path, extract_dir: &Path, log_path: &Path) -> R
     reject_reparse_point(extract_dir)?;
 
     let target_dir_arg = format!("TARGETDIR={}", extract_dir.display());
-    let output = swifttunnel_core::hidden_command("msiexec")
-        .args([
+    // Same global installer mutex as the install path, so the same deadline
+    // applies: an administrative extract can queue behind someone else forever.
+    let output = swifttunnel_core::run_hidden_command_with_timeout(
+        "msiexec",
+        &[
             "/a",
             &msi_path.to_string_lossy(),
             &target_dir_arg,
@@ -282,16 +307,22 @@ fn extract_msi_to_dir(msi_path: &Path, extract_dir: &Path, log_path: &Path) -> R
             "/norestart",
             "/L*V",
             &log_path.to_string_lossy(),
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run msiexec /a: {}", e))?;
+        ],
+        Duration::from_secs(600),
+    );
+    if output.timed_out {
+        return Err(format!(
+            "Windows Installer did not respond within 10 minutes while extracting (log: {})",
+            log_path.display()
+        ));
+    }
 
-    let code = output.status.code().unwrap_or(-1);
+    let code = output.exit_code.unwrap_or(-1);
     if code == 0 {
         return Ok(());
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stderr = output.stderr.trim().to_string();
     if stderr.is_empty() {
         Err(format!(
             "msiexec /a failed with code {} (log: {})",
@@ -883,13 +914,27 @@ fn install_winpkfilter_driver_from_msi(
                 args.push("REINSTALL=ALL");
                 args.push("REINSTALLMODE=vamus");
             }
-            let output = swifttunnel_core::hidden_command("msiexec")
-                .args(args)
-                .output()
-                .map_err(|e| format!("Failed to run msiexec: {}", e))?;
+            // msiexec serialises on a global Windows Installer mutex, so a
+            // stuck install elsewhere on the machine blocks this one forever.
+            // Support tickets on 2026-08-24 described Repair still spinning
+            // after twenty minutes against a usual three to five, which is what
+            // that looks like from the outside. Ten minutes is generous for a
+            // driver install and still finite.
+            let outcome = swifttunnel_core::run_hidden_command_with_timeout(
+                "msiexec",
+                &args,
+                Duration::from_secs(600),
+            );
+            if outcome.timed_out {
+                log::warn!("Driver install: msiexec exceeded its deadline and was stopped");
+                return Err(
+                    "Windows Installer did not respond within 10 minutes. Another install may be                      stuck; restart the PC and run Repair again."
+                        .to_string(),
+                );
+            }
             Ok((
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                if outcome.success { 0 } else { -1 },
+                outcome.stderr.trim().to_string(),
             ))
         } else {
             let args =
@@ -3174,29 +3219,30 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
 
     // Step 7: DNS cache, so fixed connectivity takes effect immediately.
     steps.push(
-        match swifttunnel_core::hidden_command("ipconfig")
-            .arg("/flushdns")
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                // Routine maintenance, not evidence of a found problem — must
+        match swifttunnel_core::run_hidden_command_with_timeout(
+            "ipconfig",
+            &["/flushdns"],
+            Duration::from_secs(30),
+        ) {
+            output if output.success => {
+                // Routine maintenance, not evidence of a found problem, must
                 // not flip the overall result to "fixed" on a healthy system.
                 network_repair_step("dns", "DNS cache", "healthy", "DNS cache flushed.")
             }
-            Ok(output) => network_repair_step(
+            output if output.timed_out => network_repair_step(
+                "dns",
+                "DNS cache",
+                "failed",
+                "ipconfig /flushdns did not respond and was stopped.".to_string(),
+            ),
+            output => network_repair_step(
                 "dns",
                 "DNS cache",
                 "failed",
                 format!(
                     "ipconfig /flushdns exited with {}",
-                    output.status.code().unwrap_or(-1)
+                    output.exit_code.unwrap_or(-1)
                 ),
-            ),
-            Err(e) => network_repair_step(
-                "dns",
-                "DNS cache",
-                "failed",
-                format!("Could not run ipconfig /flushdns: {}", e),
             ),
         },
     );
@@ -3634,21 +3680,60 @@ for ($i = 0; $i -lt 5; $i++) {{
             escaped
         );
 
-        let output = tauri::async_runtime::spawn_blocking(move || {
-            swifttunnel_core::hidden_command("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", &script])
-                .output()
-                .map_err(|e| format!("Failed to run clipboard helper: {}", e))
+        // Bounded, because this is the button people reach for when the app is
+        // already misbehaving. Two tickets on 2026-08-24 reported Copy log doing
+        // nothing at all: the previous `output()` here had no deadline, so on a
+        // machine where PowerShell will not start it simply never returned and
+        // the button stayed dead with nothing to report. Reinstalling could not
+        // help, because the broken part was Windows rather than the app.
+        const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(15);
+
+        let script_for_thread = script.clone();
+        let outcome = tauri::async_runtime::spawn_blocking(move || {
+            swifttunnel_core::run_hidden_command_with_timeout(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-STA",
+                    "-Command",
+                    &script_for_thread,
+                ],
+                CLIPBOARD_TIMEOUT,
+            )
         })
         .await
-        .map_err(|e| format!("Clipboard task failed: {}", e))??;
+        .map_err(|e| format!("Clipboard task failed: {}", e))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(if stderr.is_empty() {
-                "Clipboard helper returned a non-zero exit status.".to_string()
+        if !outcome.success {
+            // Failing is survivable; leaving the user with nothing is not. Hand
+            // back the path so they can attach the file by hand, which is the
+            // only thing they actually needed from this button.
+            let reason = outcome.stderr.trim();
+            log::warn!(
+                "Copy log helper failed (timed_out={}): {}",
+                outcome.timed_out,
+                if reason.is_empty() {
+                    "no output"
+                } else {
+                    reason
+                }
+            );
+
+            return Err(if outcome.timed_out {
+                format!(
+                    "Windows did not respond, so the log could not be copied.                      Open this folder and attach swifttunnel.log by hand: {}",
+                    path.parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or(path_str)
+                )
             } else {
-                format!("Clipboard helper failed: {}", stderr)
+                format!(
+                    "Could not copy the log. Open this folder and attach                      swifttunnel.log by hand: {}",
+                    path.parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or(path_str)
+                )
             });
         }
 

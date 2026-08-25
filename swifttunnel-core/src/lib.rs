@@ -28,7 +28,6 @@ pub mod vpn;
 
 // Re-export commonly used items
 pub use utils::PendingConnection;
-pub use utils::hidden_command;
 pub use utils::is_administrator;
 pub use utils::load_pending_connection;
 pub use utils::pending_connection_path;
@@ -39,3 +38,4 @@ pub use utils::relaunch_elevated_with_args_and_wait;
 pub use utils::rotate_log_if_needed;
 pub use utils::save_pending_connection;
 pub use utils::with_retry;
+pub use utils::{BoundedCommandOutput, hidden_command, run_hidden_command_with_timeout};

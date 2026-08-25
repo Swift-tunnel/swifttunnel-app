@@ -130,8 +130,15 @@ impl AuthClient {
     fn add_common_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         // Report the running build so the server can lock out old versions.
         let request = request.header("X-SwiftTunnel-Version", client_version());
-        match &self.device_hwid {
+        let request = match &self.device_hwid {
             Some(hwid) => request.header("X-SwiftTunnel-HWID", hwid),
+            None => request,
+        };
+        // Richer device signals for per-device quota. Sent alongside the v1
+        // header rather than replacing it, so the API keeps working unchanged
+        // until it learns to read this, and older clients keep working after.
+        match super::device_identity::device_fingerprint() {
+            Some(fingerprint) => request.header("X-SwiftTunnel-Device", fingerprint),
             None => request,
         }
     }

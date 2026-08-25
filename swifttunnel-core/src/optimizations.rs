@@ -1437,14 +1437,17 @@ fn read_service_start_type(name: &str) -> Option<u32> {
 
 #[cfg(windows)]
 fn read_service_running(name: &str) -> Option<bool> {
-    let out = crate::hidden_command("sc")
-        .args(["query", name])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    // `sc query` blocks on the service control manager, which a hung service
+    // can hold. Reporting "unknown" beats stalling the caller.
+    let out = crate::run_hidden_command_with_timeout(
+        "sc",
+        &["query", name],
+        std::time::Duration::from_secs(20),
+    );
+    if !out.success {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = out.stdout;
     for line in text.lines() {
         let line = line.trim();
         if line.starts_with("STATE") {

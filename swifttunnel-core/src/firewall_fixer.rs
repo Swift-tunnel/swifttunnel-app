@@ -168,33 +168,30 @@ impl FirewallFixer {
         }
 
         // 2. Flush DNS cache
-        let output = hidden_command("ipconfig").args(["/flushdns"]).output();
-        match output {
-            Ok(result) if result.status.success() => {
-                info!("DNS cache flushed");
-            }
-            Ok(_) => {
-                warn!("Failed to flush DNS cache");
-            }
-            Err(e) => {
-                warn!("Failed to flush DNS cache: {}", e);
-            }
+        // A wedged DNS Client service hangs flushdns, and this runs inside
+        // Repair, so an unbounded call here is one of the ways Repair can spin
+        // forever without reporting anything.
+        let output = crate::run_hidden_command_with_timeout(
+            "ipconfig",
+            &["/flushdns"],
+            std::time::Duration::from_secs(30),
+        );
+        if output.success {
+            info!("DNS cache flushed");
+        } else {
+            warn!("Failed to flush DNS cache: {}", output.stderr.trim());
         }
 
         // 3. Flush ARP cache
-        let output = hidden_command("netsh")
-            .args(["interface", "ip", "delete", "arpcache"])
-            .output();
-        match output {
-            Ok(result) if result.status.success() => {
-                info!("ARP cache flushed");
-            }
-            Ok(_) => {
-                warn!("Failed to flush ARP cache");
-            }
-            Err(e) => {
-                warn!("Failed to flush ARP cache: {}", e);
-            }
+        let output = crate::run_hidden_command_with_timeout(
+            "netsh",
+            &["interface", "ip", "delete", "arpcache"],
+            std::time::Duration::from_secs(30),
+        );
+        if output.success {
+            info!("ARP cache flushed");
+        } else {
+            warn!("Failed to flush ARP cache: {}", output.stderr.trim());
         }
 
         if executables.is_empty() {

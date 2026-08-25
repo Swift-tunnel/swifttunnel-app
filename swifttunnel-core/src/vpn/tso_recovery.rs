@@ -239,21 +239,30 @@ fn build_restore_script(marker: &TsoMarker) -> String {
     lines.join("\n")
 }
 
+/// Deadline for the adapter tools driven here.
+///
+/// The query path above already polls with a timeout because WMI is known to
+/// hang; the restore paths had no such bound, which meant a hung PowerShell
+/// could block rollback indefinitely.
+#[cfg(windows)]
+const TSO_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn restore_tso_for_marker(marker: &TsoMarker) -> bool {
     let script = build_restore_script(marker);
-    match crate::hidden_command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-    {
-        Ok(output) => {
-            if output.status.success() {
+    match crate::run_hidden_command_with_timeout(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+        TSO_COMMAND_TIMEOUT,
+    ) {
+        output if !output.timed_out => {
+            if output.success {
                 log::info!(
                     "TSO restored successfully for adapter: {}",
                     marker.adapter_name()
                 );
                 true
             } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = output.stderr.trim();
                 log::warn!(
                     "TSO restore failed for adapter {}: {}",
                     marker.adapter_name(),
@@ -262,8 +271,11 @@ fn restore_tso_for_marker(marker: &TsoMarker) -> bool {
                 false
             }
         }
-        Err(e) => {
-            log::error!("Failed to run PowerShell for TSO restore: {}", e);
+        _ => {
+            log::error!(
+                "TSO restore for adapter {} exceeded its deadline and was stopped",
+                marker.adapter_name()
+            );
             false
         }
     }
@@ -299,9 +311,13 @@ pub fn recover_tso_on_startup() {
 pub fn emergency_tso_restore() {
     if let Some(marker) = read_tso_marker() {
         let script = build_restore_script(&marker);
-        let _ = crate::hidden_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .output();
+        // Best effort on the way out, but still bounded: this runs during
+        // shutdown, and a hang here would keep the process alive.
+        let _ = crate::run_hidden_command_with_timeout(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+            TSO_COMMAND_TIMEOUT,
+        );
     }
 }
 

@@ -1247,16 +1247,22 @@ fn is_usable_public_ipv4(ip: Ipv4Addr) -> bool {
 
 /// Flush the Windows DNS resolver cache (`ipconfig /flushdns`).
 fn flush_dns_cache() {
-    let output = crate::hidden_command("ipconfig").arg("/flushdns").output();
+    // Bounded: a wedged DNS Client service hangs flushdns, and this runs on
+    // the connect path where a stall is indistinguishable from a failed connect.
+    let output = crate::run_hidden_command_with_timeout(
+        "ipconfig",
+        &["/flushdns"],
+        std::time::Duration::from_secs(30),
+    );
 
-    match output {
-        Ok(o) if o.status.success() => debug!("DNS cache flushed"),
-        Ok(o) => warn!(
-            "ipconfig /flushdns exited {}: {}",
-            o.status,
-            String::from_utf8_lossy(&o.stderr)
-        ),
-        Err(e) => warn!("Failed to run ipconfig /flushdns: {e}"),
+    if output.success {
+        debug!("DNS cache flushed");
+    } else {
+        warn!(
+            "ipconfig /flushdns did not succeed (timed_out={}): {}",
+            output.timed_out,
+            output.stderr.trim()
+        );
     }
 }
 

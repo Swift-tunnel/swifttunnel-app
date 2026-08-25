@@ -1801,13 +1801,12 @@ impl ParallelInterceptor {
                     NEXT_HOP_GATEWAY_SENTINEL
                 };
 
-                log::info!(
-                    "Active internet adapter selected via GetBestInterfaceEx ({}): if_index {}, source={}, point_to_point={}",
-                    ip,
-                    idx,
-                    source.as_str(),
-                    is_point_to_point
-                );
+                // Logged on change only. This runs on the selection path and
+                // was firing ~21x/second: a support log arrived with 905,410
+                // copies of this one line, 62% of the file and about 118 MB of
+                // it. The interesting event is the adapter *changing*, and
+                // repeating the same answer buries everything else.
+                log_adapter_selection_if_changed(ip, idx, source.as_str(), is_point_to_point);
                 return Some((
                     DefaultRouteInfo {
                         if_index: idx,
@@ -4360,25 +4359,32 @@ impl ParallelInterceptor {
     /// the leak backstop; this only changes *how fast* apps give up on IPv6.
     #[cfg(windows)]
     fn steer_ipv6_default_route_off(if_index: u32) {
-        match crate::hidden_command("netsh")
-            .args(Self::ipv6_router_discovery_args(if_index, false))
-            .output()
-        {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => log::warn!(
-                "netsh routerdiscovery=disabled (if {if_index}) exited {}",
-                o.status.code().unwrap_or(-1)
-            ),
-            Err(e) => log::warn!("netsh routerdiscovery=disabled (if {if_index}) failed: {e}"),
+        let discovery = crate::run_hidden_command_with_timeout(
+            "netsh",
+            &Self::ipv6_router_discovery_args(if_index, false),
+            NETSH_ROUTE_TIMEOUT,
+        );
+        if !discovery.success {
+            log::warn!(
+                "netsh routerdiscovery=disabled (if {if_index}) failed: {}",
+                discovery.stderr.trim()
+            );
         }
-        match crate::hidden_command("netsh")
-            .args(Self::ipv6_delete_default_route_args(if_index))
-            .output()
-        {
-            Ok(_) => log::info!(
+
+        let delete_route = crate::run_hidden_command_with_timeout(
+            "netsh",
+            &Self::ipv6_delete_default_route_args(if_index),
+            NETSH_ROUTE_TIMEOUT,
+        );
+        if delete_route.success {
+            log::info!(
                 "Steered IPv6 default route off on if_index {if_index}: apps fall back to IPv4 instantly"
-            ),
-            Err(e) => log::warn!("netsh delete ::/0 route (if {if_index}) failed: {e}"),
+            );
+        } else {
+            log::warn!(
+                "netsh delete ::/0 route (if {if_index}) failed: {}",
+                delete_route.stderr.trim()
+            );
         }
     }
 
@@ -4388,12 +4394,18 @@ impl ParallelInterceptor {
     /// Re-enable IPv6 router discovery so the default route is re-learned via RA.
     #[cfg(windows)]
     fn restore_ipv6_default_route(if_index: u32) {
-        match crate::hidden_command("netsh")
-            .args(Self::ipv6_router_discovery_args(if_index, true))
-            .output()
-        {
-            Ok(_) => log::info!("Restored IPv6 router discovery on if_index {if_index}"),
-            Err(e) => log::warn!("netsh routerdiscovery=enabled (if {if_index}) failed: {e}"),
+        let restored = crate::run_hidden_command_with_timeout(
+            "netsh",
+            &Self::ipv6_router_discovery_args(if_index, true),
+            NETSH_ROUTE_TIMEOUT,
+        );
+        if restored.success {
+            log::info!("Restored IPv6 router discovery on if_index {if_index}");
+        } else {
+            log::warn!(
+                "netsh routerdiscovery=enabled (if {if_index}) failed: {}",
+                restored.stderr.trim()
+            );
         }
     }
 
@@ -7250,6 +7262,52 @@ enum AutoRoutingPacketAction {
 }
 
 const ROBLOX_GAME_SERVER_PORT_START: u16 = 49152;
+
+/// Emit the adapter-selection line only when the answer differs from last time.
+///
+/// Re-logs unchanged state every few minutes so a long session still shows the
+/// route is being evaluated, without one message swamping the file.
+fn log_adapter_selection_if_changed(
+    ip: std::net::Ipv4Addr,
+    if_index: u32,
+    source: &str,
+    point_to_point: bool,
+) {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    const REPEAT_AFTER: Duration = Duration::from_secs(300);
+    static LAST: Mutex<Option<(String, Instant)>> = Mutex::new(None);
+
+    let current = format!("{ip}|{if_index}|{source}|{point_to_point}");
+
+    let should_log = match LAST.lock() {
+        Ok(mut last) => {
+            let stale = last
+                .as_ref()
+                .is_none_or(|(seen, at)| *seen != current || at.elapsed() >= REPEAT_AFTER);
+            if stale {
+                *last = Some((current, Instant::now()));
+            }
+            stale
+        }
+        // A poisoned lock must not silence the log entirely.
+        Err(_) => true,
+    };
+
+    if should_log {
+        log::info!(
+            "Active internet adapter selected via GetBestInterfaceEx ({ip}): if_index {if_index}, source={source}, point_to_point={point_to_point}"
+        );
+    }
+}
+
+/// Deadline for the netsh calls that steer the IPv6 default route.
+///
+/// These run on connect and on teardown. A hang on teardown is the dangerous
+/// one: it would leave IPv6 steered off after the tunnel is gone.
+#[cfg(windows)]
+const NETSH_ROUTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Roblox voice (WebRTC STUN/TURN) rides this port.
 const ROBLOX_VOICE_PORT: u16 = 3478;

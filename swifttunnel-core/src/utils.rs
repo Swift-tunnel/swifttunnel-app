@@ -783,6 +783,109 @@ pub fn rotate_log_if_needed(log_path: &std::path::Path) -> std::io::Result<bool>
     Ok(true)
 }
 
+/// Outcome of a bounded external command run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedCommandOutput {
+    pub success: bool,
+    /// True when the child was still running at the deadline and was killed.
+    pub timed_out: bool,
+    /// Process exit code. Callers that branch on specific codes need this;
+    /// 3010 from a driver install means "reboot required", not failure.
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Run a hidden command and give up after `timeout`.
+///
+/// `Command::output()` blocks until the child exits, with no upper bound. That
+/// is fine when the child always exits, but PowerShell on a damaged Windows
+/// install does not always start, and support tickets showed the result: the
+/// Repair tab spinning for twenty minutes and Copy log doing nothing at all,
+/// with no error to report, because the call never returned to produce one.
+/// Reinstalling the app cannot fix that, since the broken part is Windows.
+///
+/// Anything that shells out on a user's machine needs a deadline. A button that
+/// reports a failure is recoverable; a button that hangs forever is not.
+pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
+    program: &str,
+    args: &[S],
+    timeout: Duration,
+) -> BoundedCommandOutput {
+    use std::io::Read;
+    use std::time::Instant;
+
+    fn drain<R: Read>(pipe: Option<R>) -> String {
+        let mut out = String::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_string(&mut out);
+        }
+        out
+    }
+
+    let mut child = match hidden_command(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            return BoundedCommandOutput {
+                success: false,
+                timed_out: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: format!("Failed to start {program}: {e}"),
+            };
+        }
+    };
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return BoundedCommandOutput {
+                    success: status.success(),
+                    timed_out: false,
+                    exit_code: status.code(),
+                    stdout: drain(child.stdout.take()),
+                    stderr: drain(child.stderr.take()),
+                };
+            }
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Kill before draining: a live child holds its pipes open,
+                    // so reading first would block until the timeout we are
+                    // already past, defeating the point of having one.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return BoundedCommandOutput {
+                        success: false,
+                        timed_out: true,
+                        exit_code: None,
+                        stdout: String::new(),
+                        stderr: format!(
+                            "{program} did not finish within {}s and was stopped",
+                            timeout.as_secs()
+                        ),
+                    };
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                return BoundedCommandOutput {
+                    success: false,
+                    timed_out: false,
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: format!("Failed while waiting for {program}: {e}"),
+                };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,5 +1083,65 @@ mod tests {
     #[test]
     fn test_quote_windows_arg_no_special_chars() {
         assert_eq!(quote_windows_arg("--resume-connect"), "--resume-connect");
+    }
+
+    /// Reproduces the support tickets: a helper that never exits.
+    ///
+    /// Before the timeout existed this call could not return at all, which is
+    /// what made Repair spin for twenty minutes and Copy log look dead. The
+    /// point of the test is the deadline, so it asserts we come back promptly
+    /// and say why, rather than asserting anything about the child.
+    #[cfg(windows)]
+    #[test]
+    fn hanging_helper_is_killed_at_the_deadline() {
+        use std::time::Instant;
+
+        let started = Instant::now();
+        // `ping -t` runs until killed, standing in for a PowerShell that never
+        // starts properly on a damaged install.
+        let out =
+            run_hidden_command_with_timeout("ping", &["-t", "127.0.0.1"], Duration::from_secs(2));
+        let elapsed = started.elapsed();
+
+        assert!(out.timed_out, "expected the deadline to fire");
+        assert!(!out.success);
+        assert!(
+            out.stderr.contains("did not finish"),
+            "caller needs something to show the user, got: {}",
+            out.stderr
+        );
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "returned after {elapsed:?}; the deadline is what stops the UI hanging"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quick_helper_still_succeeds_and_captures_output() {
+        let out = run_hidden_command_with_timeout(
+            "cmd",
+            &["/C", "echo swifttunnel-ok"],
+            Duration::from_secs(30),
+        );
+        assert!(out.success, "stderr: {}", out.stderr);
+        assert!(!out.timed_out);
+        assert!(
+            out.stdout.contains("swifttunnel-ok"),
+            "stdout: {}",
+            out.stdout
+        );
+    }
+
+    #[test]
+    fn missing_program_reports_instead_of_hanging() {
+        let out = run_hidden_command_with_timeout(
+            "swifttunnel-no-such-program",
+            &[] as &[&str],
+            Duration::from_secs(5),
+        );
+        assert!(!out.success);
+        assert!(!out.timed_out, "a missing program is not a timeout");
+        assert!(!out.stderr.is_empty(), "the caller needs a reason to show");
     }
 }

@@ -14,6 +14,15 @@ pub const IPV6_BLOCK_REMOTE_IPS: &str = "2000::/3,64:ff9b::/96";
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
+
+/// Deadline for the external tools this module drives.
+///
+/// These run while connecting and while rolling back. A hang here is worse than
+/// a failure: it strands the adapter with IPv6 still disabled and leaves the
+/// caller waiting forever with nothing to report.
+#[cfg(windows)]
+const RECOVERY_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(target_os = "windows")]
 use ndisapi::StaticFilterTable;
@@ -314,16 +323,21 @@ pub fn query_ipv6_binding_enabled(adapter_name: &str) -> Option<bool> {
         adapter_name.replace('\'', "''")
     );
 
-    let output = crate::hidden_command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .ok()?;
+    let output = crate::run_hidden_command_with_timeout(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+        RECOVERY_COMMAND_TIMEOUT,
+    );
 
-    if !output.status.success() {
+    if !output.success {
+        if output.timed_out {
+            log::warn!("IPv6 adapter query exceeded its deadline and was stopped");
+        }
         return None;
     }
 
-    match String::from_utf8_lossy(&output.stdout)
+    match output
+        .stdout
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
@@ -544,35 +558,33 @@ fn build_restore_script(marker: &Ipv6Marker) -> String {
 fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
     let name_arg = format!("name={IPV6_BLOCK_RULE_NAME}");
 
-    let delete_output = crate::hidden_command("netsh")
-        .args([
+    let delete_output = crate::run_hidden_command_with_timeout(
+        "netsh",
+        &[
             "advfirewall",
             "firewall",
             "delete",
             "rule",
             name_arg.as_str(),
-        ])
-        .output();
-    let delete_output = match delete_output {
-        Ok(output) => output,
-        Err(e) => {
-            log::error!("Failed to run netsh for IPv6 firewall restore: {}", e);
-            return false;
-        }
-    };
+        ],
+        RECOVERY_COMMAND_TIMEOUT,
+    );
+    if delete_output.timed_out {
+        log::error!("netsh did not respond while restoring the IPv6 firewall rule");
+        return false;
+    }
 
-    let show_output = crate::hidden_command("netsh")
-        .args(["advfirewall", "firewall", "show", "rule", name_arg.as_str()])
-        .output();
-    let show_output = match show_output {
-        Ok(output) => output,
-        Err(e) => {
-            log::error!("Failed to verify IPv6 firewall restore with netsh: {}", e);
-            return false;
-        }
-    };
+    let show_output = crate::run_hidden_command_with_timeout(
+        "netsh",
+        &["advfirewall", "firewall", "show", "rule", name_arg.as_str()],
+        RECOVERY_COMMAND_TIMEOUT,
+    );
+    if show_output.timed_out {
+        log::error!("netsh did not respond while verifying the IPv6 firewall restore");
+        return false;
+    }
 
-    if show_output.status.success() {
+    if show_output.success {
         log::warn!(
             "IPv6 block firewall rule still exists after delete attempt for adapter {}",
             adapter_name
@@ -580,13 +592,9 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
         return false;
     }
 
-    let show_text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&show_output.stdout),
-        String::from_utf8_lossy(&show_output.stderr)
-    );
+    let show_text = format!("{}{}", show_output.stdout, show_output.stderr);
 
-    if !delete_output.status.success() && !show_text.contains("No rules match") {
+    if !delete_output.success && !show_text.contains("No rules match") {
         log::warn!(
             "Could not verify IPv6 block firewall rule removal for adapter {}: {}",
             adapter_name,
@@ -750,31 +758,28 @@ fn restore_ipv6_for_marker(marker: &Ipv6Marker) -> bool {
     }
 
     let script = build_restore_script(marker);
-    match crate::hidden_command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-    {
-        Ok(output) => {
-            if output.status.success() {
-                log::info!(
-                    "IPv6 state restored successfully for adapter: {}",
-                    marker.adapter_name()
-                );
-                true
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                log::warn!(
-                    "IPv6 restore failed for adapter {}: {}",
-                    marker.adapter_name(),
-                    stderr
-                );
-                false
-            }
-        }
-        Err(e) => {
-            log::error!("Failed to run PowerShell for IPv6 restore: {}", e);
-            false
-        }
+    let output = crate::run_hidden_command_with_timeout(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+        RECOVERY_COMMAND_TIMEOUT,
+    );
+
+    if output.success {
+        log::info!(
+            "IPv6 state restored successfully for adapter: {}",
+            marker.adapter_name()
+        );
+        true
+    } else {
+        // Timing out and failing are reported the same way on purpose: the
+        // caller retries on next launch either way, and the stderr already
+        // says which one happened.
+        log::warn!(
+            "IPv6 restore failed for adapter {}: {}",
+            marker.adapter_name(),
+            output.stderr.trim()
+        );
+        false
     }
 }
 

@@ -410,11 +410,13 @@ impl NetworkBooster {
 
     fn remove_legacy_roblox_priority_policy() -> Result<()> {
         let script = Self::legacy_qos_policy_removal_script(LEGACY_ROBLOX_PRIORITY_POLICY);
-        let output = hidden_command("powershell")
-            .args(["-Command", &script])
-            .output()?;
+        let output = crate::run_hidden_command_with_timeout(
+            "powershell",
+            &["-Command", &script],
+            std::time::Duration::from_secs(60),
+        );
 
-        if !output.status.success() {
+        if !output.success {
             return Err(anyhow::anyhow!(
                 "failed to remove removed RobloxPriority QoS policy"
             ));

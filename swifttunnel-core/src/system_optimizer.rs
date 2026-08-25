@@ -1514,17 +1514,29 @@ impl SystemOptimizer {
             description.replace('\'', "''") // Escape single quotes
         );
 
-        let output = hidden_command("powershell")
-            .args(["-Command", &ps_command])
-            .output();
+        // Restore points go through VSS, which is one of the more reliable
+        // ways to hang a Windows box. Two minutes is generous for a snapshot
+        // and still returns control if the writer is stuck.
+        let output = crate::run_hidden_command_with_timeout(
+            "powershell",
+            &["-Command", &ps_command],
+            std::time::Duration::from_secs(120),
+        );
 
-        match output {
-            Ok(result) => {
-                if result.status.success() {
+        if output.timed_out {
+            warn!("Restore point creation exceeded its deadline and was stopped");
+            return Err(anyhow::anyhow!(
+                "Windows did not finish creating a restore point in time"
+            ));
+        }
+
+        {
+            {
+                if output.success {
                     info!("System Restore Point created successfully");
                     Ok(description.to_string())
                 } else {
-                    let stderr = String::from_utf8_lossy(&result.stderr);
+                    let stderr = output.stderr.trim();
                     // Check for common issues
                     if stderr.contains("frequency") || stderr.contains("24 hours") {
                         warn!("Restore point not created: Windows limits to one per 24 hours");
@@ -1538,10 +1550,6 @@ impl SystemOptimizer {
                         ))
                     }
                 }
-            }
-            Err(e) => {
-                warn!("Failed to run restore point command: {}", e);
-                Err(anyhow::anyhow!("Failed to create restore point: {}", e))
             }
         }
     }
