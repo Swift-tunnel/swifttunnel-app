@@ -4,7 +4,7 @@ import {
 } from "../components/optimization/optimizationCatalog";
 import { navItemFor } from "../components/shell/nav";
 import type { TabId } from "./types";
-import { IS_LITE, LITE_TABS } from "./lite";
+import { IS_LITE, LITE_HIDDEN_BOOST_ANCHORS, LITE_TABS } from "./lite";
 
 export interface SearchEntry {
   id: string;
@@ -490,8 +490,12 @@ const ALL_ENTRIES: SearchEntry[] = [
  * and then navigates to a page that is not there.
  */
 export const SEARCH_ENTRIES: SearchEntry[] = IS_LITE
-  ? ALL_ENTRIES.filter((entry) =>
-      (LITE_TABS as readonly string[]).includes(entry.tab),
+  ? ALL_ENTRIES.filter(
+      (entry) =>
+        (LITE_TABS as readonly string[]).includes(entry.tab) &&
+        // Every boost row points at the Roblox page, which Lite keeps, so the
+        // tab check alone cannot tell that whole sections of it are gone.
+        !(entry.anchor && LITE_HIDDEN_BOOST_ANCHORS.has(entry.anchor)),
     )
   : ALL_ENTRIES;
 

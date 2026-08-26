@@ -28,3 +28,33 @@ export const LITE_TABS = ["connect", "games", "settings"] as const;
 
 /** Where Lite opens, since Home is one of the screens it drops. */
 export const LITE_DEFAULT_TAB = "connect";
+
+/**
+ * Roblox-page settings Lite does not render.
+ *
+ * These are the System, Network and Process Scheduling sections, which are
+ * Windows tuning rather than game or tunnel settings, so Lite drops them and
+ * leaves that job to the full app's Optimize page.
+ *
+ * They need naming separately because every one of them deep-links to
+ * `tab: "games"`, which Lite *does* keep. Filtering the search index by tab
+ * alone leaves them in, offering a setting that is on no page and then
+ * scrolling to an anchor that is not in the document.
+ *
+ * Must stay in step with the `!IS_LITE` guards in `BoostTab`. If a section is
+ * ever added or removed there, this list moves with it.
+ */
+export const LITE_HIDDEN_BOOST_ANCHORS: ReadonlySet<string> = new Set([
+  // System
+  "high_priority",
+  "timer_resolution",
+  "mmcss",
+  "game_mode",
+  // Network
+  "disable_nagle",
+  "network_throttling",
+  // Process Scheduling
+  "gpu_binding",
+  "performance_cores",
+  "unbind_cpu0",
+]);

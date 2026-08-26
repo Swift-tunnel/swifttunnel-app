@@ -23,6 +23,10 @@
   },
   "bundle": {
     "shortDescription": "SwiftTunnel Lite",
-    "longDescription": "The SwiftTunnel tunnel and Roblox frame cap, without the rest of the app."
+    "longDescription": "The SwiftTunnel tunnel and Roblox frame cap, without the rest of the app.",
+    "resources": [
+      "resources/drivers",
+      "resources/swifty.png"
+    ]
   }
 }
