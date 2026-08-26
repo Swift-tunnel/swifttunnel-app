@@ -4,6 +4,7 @@ import {
 } from "../components/optimization/optimizationCatalog";
 import { navItemFor } from "../components/shell/nav";
 import type { TabId } from "./types";
+import { IS_LITE, LITE_TABS } from "./lite";
 
 export interface SearchEntry {
   id: string;
@@ -470,7 +471,7 @@ const SPEEDUP: SearchEntry[] = SPEEDUP_OPTIMIZATIONS.map((def) => ({
   keywords: `${def.name} ${def.description} ${def.category} speed up razer`,
 }));
 
-export const SEARCH_ENTRIES: SearchEntry[] = [
+const ALL_ENTRIES: SearchEntry[] = [
   ...TABS,
   ...ACTIONS,
   ...TOOLS,
@@ -480,6 +481,19 @@ export const SEARCH_ENTRIES: SearchEntry[] = [
   ...OPTS,
   ...SPEEDUP,
 ];
+
+/**
+ * Everything this build can actually navigate to.
+ *
+ * Filtered by page, because every entry deep-links to a tab and Lite does not
+ * ship most of them. Without this, searching Lite offers settings it removed
+ * and then navigates to a page that is not there.
+ */
+export const SEARCH_ENTRIES: SearchEntry[] = IS_LITE
+  ? ALL_ENTRIES.filter((entry) =>
+      (LITE_TABS as readonly string[]).includes(entry.tab),
+    )
+  : ALL_ENTRIES;
 
 /** Rank entries for a query. Empty query → the page list (tabs). */
 export function searchEntries(query: string): SearchEntry[] {
