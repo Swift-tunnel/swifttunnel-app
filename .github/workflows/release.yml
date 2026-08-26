@@ -484,14 +484,23 @@ jobs:
           }
           Write-Host "Bundled NVIDIA Profile Inspector $npiTag helper ($size bytes, sha256=$actualExeSha256)"
 
-      - name: Prepare bundled GoodbyeDPI helper
+      - name: Verify the GoodbyeDPI component against upstream
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Bypass country bans starts a scoped GoodbyeDPI process with a
-          # generated Roblox-only hostlist. Ship the upstream helper and its
-          # matching WinDivert files in updater/MSI resources.
+          # These files are NOT bundled into the installer any more. They are
+          # unsigned and Defender carries HackTool signatures for both
+          # GoodbyeDPI and WinDivert, which was getting the entire SwiftTunnel
+          # download quarantined for users who never enabled the feature. The
+          # client fetches them on first use instead, hash-pinned, see
+          # swifttunnel-core/src/optional_components.rs.
+          #
+          # The step stays because it still earns its place: it proves the
+          # upstream release hashes to exactly what the client pins, and it
+          # produces the files that get uploaded to the component host. If
+          # upstream ever republishes different bytes, this fails here rather
+          # than on every user's machine at once.
           $gdpiVersion = "0.2.2"
           $zipName = "goodbyedpi-$gdpiVersion.zip"
           $expectedZipSha256 = "00a2f8b99cd817f8c7fc4c449033015f039d18af213de78cb66bf202277c0628"
@@ -633,7 +642,7 @@ jobs:
           SWIFTTUNNEL_SIGN_COMMAND: ${{ secrets.SWIFTTUNNEL_SIGN_COMMAND }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SWIFTTUNNEL_SIGN_COMMAND)) {
-            Write-Host "::notice::SWIFTTUNNEL_SIGN_COMMAND secret not set - building unsigned (Defender may flag the installer until the binary accrues SmartScreen reputation)"
+            Write-Host "::notice::SWIFTTUNNEL_SIGN_COMMAND secret not set - building unsigned, so users get SmartScreen's unknown-publisher warning. That is a separate thing from an antivirus detection, which signing does not clear."
             exit 0
           }
           $confPath = "swifttunnel-desktop/src-tauri/tauri.conf.json"
