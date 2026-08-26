@@ -58,7 +58,16 @@ fn main() {
             .cloned()
             .unwrap_or_else(|| "preview.bmp".to_string());
         let connected = args.iter().any(|a| a == "--connected");
-        match ui::render_preview(auth, &path, connected) {
+        let screen = match args
+            .iter()
+            .position(|a| a == "--screen")
+            .and_then(|i| args.get(i + 1))
+        {
+            Some(name) if name == "roblox" => ui::Screen::Roblox,
+            Some(name) if name == "settings" => ui::Screen::Settings,
+            _ => ui::Screen::Connect,
+        };
+        match ui::render_preview(auth, &path, connected, screen) {
             Ok(()) => println!("wrote {path}"),
             Err(error) => eprintln!("preview failed: {error}"),
         }

@@ -7,7 +7,7 @@
 
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -31,8 +31,32 @@ use crate::theme;
 #[derive(PartialEq, Clone, Copy)]
 enum Hot {
     None,
+    Nav(u8),
     Connect,
     Unlock,
+    Region(u8),
+}
+
+/// Which page is showing. Three, deliberately: the tunnel, the game, and
+/// the account. Everything the full app has beyond that is what makes it
+/// the full app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Connect,
+    Roblox,
+    Settings,
+}
+
+impl Screen {
+    const ALL: [Screen; 3] = [Screen::Connect, Screen::Roblox, Screen::Settings];
+
+    fn label(self) -> &'static str {
+        match self {
+            Screen::Connect => "Connect",
+            Screen::Roblox => "Roblox",
+            Screen::Settings => "Settings",
+        }
+    }
 }
 
 /// Timer that refreshes the readings. Any non-zero id will do; this one
@@ -65,6 +89,13 @@ pub struct App {
     scale_num: i32,
     scale_den: i32,
 
+    screen: Screen,
+    /// Snapshot of the fleet. Copied out of the engine on the timer so the
+    /// paint path never waits on a lock.
+    regions: Vec<crate::engine::RegionRow>,
+    best_ping: Option<u32>,
+    roblox_running: bool,
+    frame_cap: u32,
     connected: bool,
     region: String,
     unlock_cap: bool,
@@ -78,6 +109,9 @@ pub struct App {
     /// since the frame counter was removed.
     #[allow(dead_code)]
     mono_big: Font,
+    mono_small: Font,
+    ui_semi: Font,
+    ui_display: Font,
 }
 
 impl App {
@@ -112,81 +146,184 @@ impl App {
 /// 1200px one and reads as a bad copy at this size. This is what Windows does
 /// for a small utility: a status line, one primary action, and the settings
 /// gathered into a single list.
+/// Where everything sits.
+///
+/// Heavy inspiration from the full app's Connect tab, reduced to what fits a
+/// utility window: the kicker and big region name, one primary action, the
+/// measurements in mono, and the region list with its badges, bars and round
+/// trips. What is not here is everything that makes the full app the full app.
 struct Layout {
-    /// State dot, left of the headline.
-    dot: RECT,
+    nav: [RECT; 3],
+
+    // Connect
+    kicker: RECT,
+    badge: RECT,
     headline: RECT,
-    subtitle: RECT,
+    sub: RECT,
     connect: RECT,
-    /// The list both rows share.
-    list: RECT,
-    region_row: RECT,
-    unlock_row: RECT,
-    account: RECT,
+    stat_left: RECT,
+    stat_right: RECT,
+    list_label: RECT,
+
+    /// The card the rows live in, on every screen.
+    card: RECT,
+    /// One rect per row, whatever the screen's rows happen to be.
+    rows: Vec<RECT>,
+
+    footer: RECT,
 }
 
-fn layout(app: &App, client: RECT) -> Layout {
+fn layout(app: &App, client: RECT, rows: usize) -> Layout {
     let pad = app.s(theme::PAD);
     let left = client.left + pad;
     let right = client.right - pad;
     let y = |v: i32| client.top + app.s(v);
-    let row_h = app.s(theme::ROW_H);
 
-    // Headline is indented past the dot so the two read as one line.
-    let text_left = left + app.s(16);
-    let list_top = y(150);
+    // Segmented nav across the top, one third each.
+    let nav_top = y(16);
+    let nav_bottom = y(50);
+    let third = (right - left) / 3;
+    let nav = [0, 1, 2].map(|i| RECT {
+        left: left + third * i,
+        top: nav_top,
+        right: if i == 2 {
+            right
+        } else {
+            left + third * (i + 1)
+        },
+        bottom: nav_bottom,
+    });
+
+    // The badge sits left of the headline, so both indent past it.
+    let text_left = left + app.s(40);
+
+    let row_h = match app.screen {
+        Screen::Connect => app.s(theme::REGION_H),
+        _ => app.s(theme::ROW_H),
+    };
+    let card_top = match app.screen {
+        Screen::Connect => y(328),
+        _ => y(150),
+    };
 
     Layout {
-        dot: RECT {
+        nav,
+        kicker: RECT {
             left,
-            top: y(30),
-            right: left + app.s(8),
-            bottom: y(38),
+            top: y(76),
+            right,
+            bottom: y(90),
+        },
+        badge: RECT {
+            left,
+            top: y(98),
+            right: left + app.s(32),
+            bottom: y(120),
         },
         headline: RECT {
             left: text_left,
-            top: y(22),
+            top: y(92),
             right,
-            bottom: y(50),
+            bottom: y(126),
         },
-        subtitle: RECT {
+        sub: RECT {
             left: text_left,
-            top: y(52),
+            top: y(128),
             right,
-            bottom: y(70),
+            bottom: y(146),
         },
         connect: RECT {
             left,
-            top: y(88),
+            top: y(166),
             right,
-            bottom: y(132),
+            bottom: y(212),
         },
-        list: RECT {
+        stat_left: RECT {
             left,
-            top: list_top,
-            right,
-            bottom: list_top + row_h * 2,
+            top: y(232),
+            right: left + (right - left) / 2,
+            bottom: y(290),
         },
-        region_row: RECT {
-            left,
-            top: list_top,
+        stat_right: RECT {
+            left: left + (right - left) / 2,
+            top: y(232),
             right,
-            bottom: list_top + row_h,
+            bottom: y(290),
         },
-        unlock_row: RECT {
+        list_label: RECT {
             left,
-            top: list_top + row_h,
+            top: y(306),
             right,
-            bottom: list_top + row_h * 2,
+            bottom: y(320),
         },
-        account: RECT {
+        card: RECT {
             left,
-            top: y(258),
+            top: card_top,
             right,
-            bottom: y(276),
+            bottom: card_top + row_h * rows.max(1) as i32,
+        },
+        rows: (0..rows)
+            .map(|i| RECT {
+                left,
+                top: card_top + row_h * i as i32,
+                right,
+                bottom: card_top + row_h * (i as i32 + 1),
+            })
+            .collect(),
+        footer: RECT {
+            left,
+            top: y(theme::WINDOW_H - 40),
+            right,
+            bottom: y(theme::WINDOW_H - 22),
         },
     }
 }
+
+/// How many rows the current screen shows.
+fn row_count(app: &App) -> usize {
+    match app.screen {
+        Screen::Connect => app.regions.len().max(1),
+        // Unlock frame cap, then the cap itself.
+        Screen::Roblox => 2,
+        // Version, then channel.
+        Screen::Settings => 2,
+    }
+}
+/// What is under the pointer.
+///
+/// One function for both hover and click so the two can never disagree about
+/// what a pixel belongs to.
+fn hit_test(app: &App, l: &Layout, x: i32, y: i32) -> Hot {
+    for (i, rect) in l.nav.iter().enumerate() {
+        if contains(*rect, x, y) {
+            return Hot::Nav(i as u8);
+        }
+    }
+
+    match app.screen {
+        Screen::Connect => {
+            if contains(l.connect, x, y) {
+                return Hot::Connect;
+            }
+            for (i, row) in l.rows.iter().enumerate() {
+                if i < app.regions.len() && contains(*row, x, y) {
+                    return Hot::Region(i as u8);
+                }
+            }
+        }
+        Screen::Roblox => {
+            if let Some(row) = l.rows.first()
+                && contains(*row, x, y)
+            {
+                return Hot::Unlock;
+            }
+        }
+        Screen::Settings => {}
+    }
+
+    Hot::None
+}
+
 fn contains(r: RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
@@ -297,6 +434,11 @@ fn new_app(auth: AuthManager, dpi: i32) -> Box<App> {
         dpi,
         scale_num: theme::WINDOW_W,
         scale_den: theme::WINDOW_W,
+        screen: Screen::Connect,
+        regions: Vec::new(),
+        best_ping: None,
+        roblox_running: false,
+        frame_cap: 60,
         connected: false,
         region: "Auto".to_string(),
         unlock_cap,
@@ -307,6 +449,9 @@ fn new_app(auth: AuthManager, dpi: i32) -> Box<App> {
         ui_title: Font(HFONT(std::ptr::null_mut())),
         ui_button: Font(HFONT(std::ptr::null_mut())),
         mono_big: Font(HFONT(std::ptr::null_mut())),
+        mono_small: Font(HFONT(std::ptr::null_mut())),
+        ui_semi: Font(HFONT(std::ptr::null_mut())),
+        ui_display: Font(HFONT(std::ptr::null_mut())),
     })
 }
 
@@ -316,7 +461,12 @@ fn new_app(auth: AuthManager, dpi: i32) -> Box<App> {
 /// raising or capturing an elevated window, so this is the only way to see a
 /// visual change without asking a person to look at their own screen. It
 /// drives the same `paint` the window does, so nothing can drift.
-pub fn render_preview(auth: AuthManager, path: &str, connected: bool) -> std::io::Result<()> {
+pub fn render_preview(
+    auth: AuthManager,
+    path: &str,
+    connected: bool,
+    screen: Screen,
+) -> std::io::Result<()> {
     // 2x so the antialiasing and the type are legible when the image is
     // looked at rather than glanced past.
     let dpi = 192;
@@ -325,6 +475,24 @@ pub fn render_preview(auth: AuthManager, path: &str, connected: bool) -> std::io
 
     let mut app = new_app(auth, dpi);
     app.connected = connected;
+    app.screen = screen;
+
+    // The relay list arrives on a background thread, so give it a moment.
+    // A preview of an empty list would not show the thing being reviewed.
+    for _ in 0..40 {
+        app.regions = app.engine.regions();
+        if !app.regions.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    app.best_ping = app.engine.best_ping();
+    app.roblox_running = app.engine.roblox_running();
+    app.unlock_cap = app.engine.fps_unlocked();
+    app.frame_cap = app.engine.frame_cap();
+    if let Some(first) = app.regions.first() {
+        app.region = first.id.clone();
+    }
     app.scale_num = width;
     app.scale_den = theme::WINDOW_W;
 
@@ -393,15 +561,8 @@ unsafe extern "system" fn wndproc(
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     let mut client = RECT::default();
                     let _ = GetClientRect(hwnd, &mut client);
-                    let l = layout(app, client);
-
-                    let hot = if contains(l.connect, x, y) {
-                        Hot::Connect
-                    } else if contains(l.unlock_row, x, y) {
-                        Hot::Unlock
-                    } else {
-                        Hot::None
-                    };
+                    let l = layout(app, client, row_count(app));
+                    let hot = hit_test(app, &l, x, y);
 
                     if hot != app.hot {
                         app.hot = hot;
@@ -417,27 +578,47 @@ unsafe extern "system" fn wndproc(
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     let mut client = RECT::default();
                     let _ = GetClientRect(hwnd, &mut client);
-                    let l = layout(app, client);
+                    let l = layout(app, client, row_count(app));
 
-                    if contains(l.connect, x, y) {
-                        // Still visual only: the tunnel is the next piece.
-                        // It no longer invents a frame rate to go with it,
-                        // because the number on screen now comes from the
-                        // game and inventing one was a lie waiting to ship.
-                        app.connected = !app.connected;
-                        let _ = InvalidateRect(Some(hwnd), None, false);
-                    } else if contains(l.unlock_row, x, y) {
-                        let wanted = !app.unlock_cap;
-                        match app.engine.set_fps_unlocked(wanted) {
-                            // Only move the switch once the cap actually
-                            // changed, so what is on screen is what is on
-                            // disk.
-                            Ok(()) => app.unlock_cap = wanted,
-                            Err(reason) => {
-                                log::warn!("could not change the frame cap: {reason}")
+                    match hit_test(app, &l, x, y) {
+                        Hot::Nav(i) => {
+                            if let Some(screen) = Screen::ALL.get(i as usize) {
+                                app.screen = *screen;
+                                app.hot = Hot::None;
+                                let _ = InvalidateRect(Some(hwnd), None, false);
                             }
                         }
-                        let _ = InvalidateRect(Some(hwnd), None, false);
+                        Hot::Connect => {
+                            // Still visual only: the tunnel itself is the
+                            // remaining piece, and faking it convincingly is
+                            // exactly the kind of lie that shipped a
+                            // hardcoded frame rate last time.
+                            app.connected = !app.connected;
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                        Hot::Region(i) => {
+                            if let Some(region) = app.regions.get(i as usize) {
+                                app.region = region.id.clone();
+                                let _ = InvalidateRect(Some(hwnd), None, false);
+                            }
+                        }
+                        Hot::Unlock => {
+                            let wanted = !app.unlock_cap;
+                            match app.engine.set_fps_unlocked(wanted) {
+                                // Only move the switch once the cap actually
+                                // changed, so what is on screen is what is
+                                // on disk.
+                                Ok(()) => {
+                                    app.unlock_cap = wanted;
+                                    app.frame_cap = app.engine.frame_cap();
+                                }
+                                Err(reason) => {
+                                    log::warn!("could not change the frame cap: {reason}")
+                                }
+                            }
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
+                        Hot::None => {}
                     }
                 }
                 LRESULT(0)
@@ -476,12 +657,42 @@ unsafe extern "system" fn wndproc(
                     // only on a real change: invalidating on every tick would
                     // put this window back in the business of burning frames
                     // for nothing, which is the whole problem Lite avoids.
+                    // The region list moves on its own as pings land, so it
+                    // is copied every tick. The Roblox settings live in a
+                    // file and only change when somebody changes them, so
+                    // they are checked far less often.
+                    let regions = app.engine.regions();
+                    let best_ping = app.engine.best_ping();
+                    let mut dirty = regions.len() != app.regions.len()
+                        || best_ping != app.best_ping
+                        || regions
+                            .iter()
+                            .zip(app.regions.iter())
+                            .any(|(a, b)| a.ping_ms != b.ping_ms);
+                    app.regions = regions;
+                    app.best_ping = best_ping;
+
                     if app.tick % CAP_RECHECK_TICKS == 0 {
                         let unlock_cap = app.engine.fps_unlocked();
-                        if unlock_cap != app.unlock_cap {
+                        let frame_cap = app.engine.frame_cap();
+                        let running = app.engine.roblox_running();
+                        if unlock_cap != app.unlock_cap
+                            || frame_cap != app.frame_cap
+                            || running != app.roblox_running
+                        {
                             app.unlock_cap = unlock_cap;
-                            let _ = InvalidateRect(Some(hwnd), None, false);
+                            app.frame_cap = frame_cap;
+                            app.roblox_running = running;
+                            dirty = true;
                         }
+                    }
+
+                    // Repaint only on a real change. Invalidating every tick
+                    // would put this window back in the business of burning
+                    // frames for nothing, which is the whole problem Lite
+                    // exists to avoid.
+                    if dirty {
+                        let _ = InvalidateRect(Some(hwnd), None, false);
                     }
                 }
                 LRESULT(0)
@@ -516,7 +727,10 @@ unsafe fn build_fonts(app: &mut App) {
     app.ui_body = gdi::font(theme::FACE_UI, theme::FACE_UI_FALLBACK, px(13), 400, 0);
     app.ui_title = gdi::font(theme::FACE_UI, theme::FACE_UI_FALLBACK, px(19), 600, 0);
     app.ui_button = gdi::font(theme::FACE_UI, theme::FACE_UI_FALLBACK, px(14), 600, 0);
-    app.mono_big = gdi::font(theme::FACE_MONO, theme::FACE_MONO_FALLBACK, px(30), 600, -1);
+    app.mono_big = gdi::font(theme::FACE_MONO, theme::FACE_MONO_FALLBACK, px(26), 600, -1);
+    app.mono_small = gdi::font(theme::FACE_MONO, theme::FACE_MONO_FALLBACK, px(12), 500, 0);
+    app.ui_semi = gdi::font(theme::FACE_UI, theme::FACE_UI_FALLBACK, px(13), 600, 0);
+    app.ui_display = gdi::font(theme::FACE_UI, theme::FACE_UI_FALLBACK, px(25), 700, px(-1));
 }
 
 unsafe fn app_from<'a>(hwnd: HWND) -> Option<&'a mut App> {
@@ -559,11 +773,10 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
             return;
         }
 
-        let l = layout(app, client);
+        let l = layout(app, client, row_count(app));
 
         // Pass one: every shape, composited in software because GDI cannot
-        // antialias a rounded corner and its stair-steps were the single
-        // most visible thing wrong with this window.
+        // antialias a rounded corner.
         let mut canvas = Canvas::new(w, h, theme::BG);
         surface::paint_atmosphere(&mut canvas, app.connected);
         draw_shapes(&mut canvas, app, &l);
@@ -575,35 +788,83 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
     }
 }
 
-/// Everything that is a shape rather than a glyph.
+fn rect_of(r: RECT, radius: i32) -> RoundRect {
+    RoundRect::new(r.left, r.top, r.right - r.left, r.bottom - r.top, radius)
+}
+
+/// Colour for a round trip, on the app's own latency scale.
+fn latency_paint(ms: Option<u32>) -> Rgba {
+    match ms {
+        None => theme::INACTIVE,
+        Some(v) if v <= 60 => theme::CONNECTED,
+        Some(v) if v <= 140 => theme::LATENCY_FAIR,
+        Some(_) => theme::LATENCY_POOR,
+    }
+}
+
+fn latency_ink(ms: Option<u32>) -> COLORREF {
+    match ms {
+        None => theme::TEXT_MUTED,
+        Some(v) if v <= 60 => theme::CONNECTED_TEXT,
+        Some(v) if v <= 140 => theme::LATENCY_FAIR_TEXT,
+        Some(_) => theme::LATENCY_POOR_TEXT,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shapes
+// ---------------------------------------------------------------------------
+
 fn draw_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
-    let card = theme::CARD;
-    let border = theme::BORDER;
-    let border_strong = theme::BORDER_STRONG;
-    let accent = theme::ACCENT;
+    draw_nav_shapes(canvas, app, l);
 
-    // Status dot.
-    let dot_r = app.s(4) as f32;
-    canvas.fill_circle(
-        l.dot.left as f32 + dot_r,
-        l.dot.top as f32 + dot_r,
-        dot_r,
-        if app.connected {
-            theme::CONNECTED
-        } else {
-            theme::INACTIVE
-        },
-    );
+    match app.screen {
+        Screen::Connect => draw_connect_shapes(canvas, app, l),
+        Screen::Roblox => draw_roblox_shapes(canvas, app, l),
+        Screen::Settings => draw_settings_shapes(canvas, app, l),
+    }
+}
 
-    // Connect button. The primary state gets a shadow so it lifts off the
-    // background the way the app's does; the secondary state is a plain card.
+fn draw_nav_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
+    // The track behind the three segments.
+    let track = RECT {
+        left: l.nav[0].left,
+        top: l.nav[0].top,
+        right: l.nav[2].right,
+        bottom: l.nav[0].bottom,
+    };
+    canvas.fill_round_rect(rect_of(track, app.s(10)), theme::CARD);
+
+    // The selected segment, inset so the track reads as a groove.
+    let index = Screen::ALL
+        .iter()
+        .position(|s| *s == app.screen)
+        .unwrap_or(0);
+    let selected = rect_of(l.nav[index], app.s(10)).inset(app.s(3) as f32);
+    canvas.fill_round_rect(selected, theme::BG);
+    canvas.stroke_round_rect(selected.inset(0.5), theme::BORDER, 1.0);
+}
+
+fn draw_connect_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
+    // Country badge beside the headline.
+    let badge = rect_of(l.badge, app.s(6));
+    canvas.fill_round_rect(badge, theme::CARD);
+    canvas.stroke_round_rect(badge.inset(0.5), theme::BORDER, 1.0);
+
+    // Primary action. The shadow is what lifts it off the page the way the
+    // app's does; the connected state drops to a plain card because the
+    // primary action is done.
     let button = rect_of(l.connect, app.s(theme::RADIUS_BTN));
     let hot = app.hot == Hot::Connect;
     if app.connected {
-        canvas.fill_round_rect(button, card);
+        canvas.fill_round_rect(button, theme::CARD);
         canvas.stroke_round_rect(
             button.inset(0.5),
-            if hot { border_strong } else { border },
+            if hot {
+                theme::BORDER_STRONG
+            } else {
+                theme::BORDER
+            },
             1.0,
         );
     } else {
@@ -613,140 +874,530 @@ fn draw_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
             app.s(18) as f32,
             app.s(6) as f32,
         );
-        canvas.fill_round_rect(button, if hot { Rgba::hex(0xFFFFFF) } else { accent });
+        canvas.fill_round_rect(
+            button,
+            if hot {
+                Rgba::hex(0xFFFFFF)
+            } else {
+                theme::ACCENT
+            },
+        );
     }
 
-    // Settings list.
-    let list = rect_of(l.list, app.s(theme::RADIUS));
-    canvas.fill_round_rect(list, card);
-    canvas.stroke_round_rect(list.inset(0.5), border, 1.0);
+    // The region list.
+    let card = rect_of(l.card, app.s(theme::RADIUS));
+    canvas.fill_round_rect(card, theme::CARD);
+    canvas.stroke_round_rect(card.inset(0.5), theme::BORDER, 1.0);
 
-    // Hairline between the rows, inset so it never touches the corners.
+    let pad = app.s(14) as f32;
+    for (i, row) in l.rows.iter().enumerate() {
+        let Some(region) = app.regions.get(i) else {
+            continue;
+        };
+
+        if app.hot == Hot::Region(i as u8) {
+            let mut hover = rect_of(*row, app.s(8));
+            hover.x += 4.0;
+            hover.w -= 8.0;
+            canvas.fill_round_rect(hover, theme::BORDER);
+        }
+
+        // Hairline above every row but the first.
+        if i > 0 {
+            canvas.fill_round_rect(
+                RoundRect {
+                    x: card.x + pad,
+                    y: row.top as f32,
+                    w: card.w - pad * 2.0,
+                    h: 1.0,
+                    radius: 0.0,
+                },
+                theme::BORDER,
+            );
+        }
+
+        // Country badge.
+        let badge = RoundRect::new(
+            row.left + app.s(14),
+            (row.top + row.bottom) / 2 - app.s(10),
+            app.s(26),
+            app.s(20),
+            app.s(5),
+        );
+        canvas.fill_round_rect(badge, theme::BG);
+        canvas.stroke_round_rect(badge.inset(0.5), theme::BORDER_STRONG, 1.0);
+
+        // Signal bars, rising left to right.
+        let bars = region.bars();
+        let bar_w = app.s(3);
+        let gap = app.s(2);
+        let base = row.right - app.s(74);
+        let bottom = (row.top + row.bottom) / 2 + app.s(6);
+        for b in 0..3u8 {
+            let height = app.s(4 + 3 * b as i32);
+            let lit = b < bars;
+            canvas.fill_round_rect(
+                RoundRect::new(
+                    base + (bar_w + gap) * b as i32,
+                    bottom - height,
+                    bar_w,
+                    height,
+                    1,
+                ),
+                if lit {
+                    latency_paint(region.ping_ms)
+                } else {
+                    theme::BORDER_STRONG
+                },
+            );
+        }
+    }
+}
+
+fn draw_roblox_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
+    let card = rect_of(l.card, app.s(theme::RADIUS));
+    canvas.fill_round_rect(card, theme::CARD);
+    canvas.stroke_round_rect(card.inset(0.5), theme::BORDER, 1.0);
+
     let pad = app.s(16) as f32;
-    canvas.fill_round_rect(
-        RoundRect {
-            x: list.x + pad,
-            y: l.region_row.bottom as f32,
-            w: list.w - pad * 2.0,
-            h: 1.0,
-            radius: 0.0,
-        },
-        border,
-    );
-
-    // The switch.
-    let knob = app.s(18);
-    let mid = (l.unlock_row.top + l.unlock_row.bottom) / 2;
-    let check = RoundRect::new(
-        l.unlock_row.right - app.s(16) - knob,
-        mid - knob / 2,
-        knob,
-        knob,
-        app.s(5),
-    );
-    if app.unlock_cap {
-        canvas.fill_round_rect(check, accent);
-    } else {
-        canvas.fill_round_rect(check, theme::BG);
-        canvas.stroke_round_rect(
-            check.inset(0.5),
-            if app.hot == Hot::Unlock {
-                border_strong
-            } else {
-                border
+    if let Some(second) = l.rows.get(1) {
+        canvas.fill_round_rect(
+            RoundRect {
+                x: card.x + pad,
+                y: second.top as f32,
+                w: card.w - pad * 2.0,
+                h: 1.0,
+                radius: 0.0,
             },
-            1.0,
+            theme::BORDER,
+        );
+    }
+
+    // Pill switch for the frame cap, in the app's own idiom rather than a
+    // checkbox.
+    if let Some(row) = l.rows.first() {
+        let w = app.s(38);
+        let h = app.s(22);
+        let mid = (row.top + row.bottom) / 2;
+        let track = RoundRect::new(row.right - app.s(16) - w, mid - h / 2, w, h, h / 2);
+
+        canvas.fill_round_rect(
+            track,
+            if app.unlock_cap {
+                theme::ACCENT
+            } else {
+                theme::BG
+            },
+        );
+        if !app.unlock_cap {
+            canvas.stroke_round_rect(
+                track.inset(0.5),
+                if app.hot == Hot::Unlock {
+                    theme::BORDER_STRONG
+                } else {
+                    theme::BORDER
+                },
+                1.0,
+            );
+        }
+
+        let knob_r = (h as f32 / 2.0) - app.s(3) as f32;
+        let knob_x = if app.unlock_cap {
+            track.x + track.w - knob_r - app.s(3) as f32
+        } else {
+            track.x + knob_r + app.s(3) as f32
+        };
+        canvas.fill_circle(
+            knob_x,
+            mid as f32,
+            knob_r,
+            if app.unlock_cap {
+                Rgba::hex(0x0A0A0A)
+            } else {
+                theme::BORDER_STRONG
+            },
         );
     }
 }
 
-fn rect_of(r: RECT, radius: i32) -> RoundRect {
-    RoundRect::new(r.left, r.top, r.right - r.left, r.bottom - r.top, radius)
+fn draw_settings_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
+    let card = rect_of(l.card, app.s(theme::RADIUS));
+    canvas.fill_round_rect(card, theme::CARD);
+    canvas.stroke_round_rect(card.inset(0.5), theme::BORDER, 1.0);
+
+    let pad = app.s(16) as f32;
+    if let Some(second) = l.rows.get(1) {
+        canvas.fill_round_rect(
+            RoundRect {
+                x: card.x + pad,
+                y: second.top as f32,
+                w: card.w - pad * 2.0,
+                h: 1.0,
+                radius: 0.0,
+            },
+            theme::BORDER,
+        );
+    }
 }
 
-/// Everything that is a glyph rather than a shape.
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
 fn draw_text(dc: HDC, app: &App, l: &Layout) {
-    {
+    for (i, screen) in Screen::ALL.iter().enumerate() {
+        let selected = *screen == app.screen;
         gdi::text(
             dc,
-            if app.connected {
-                app.region.as_str()
-            } else {
-                "Not connected"
-            },
-            l.headline,
-            &app.ui_title,
-            theme::TEXT,
-            DT_SINGLELINE | DT_NOPREFIX,
-            0,
-        );
-
-        gdi::text(
-            dc,
-            if app.connected {
-                "Tunnel active"
-            } else {
-                "Tunnel is off"
-            },
-            l.subtitle,
-            &app.ui_body,
-            theme::TEXT_MUTED,
-            DT_SINGLELINE | DT_NOPREFIX,
-            0,
-        );
-
-        gdi::text(
-            dc,
-            if app.connected {
-                "Disconnect"
-            } else {
-                "Connect"
-            },
-            l.connect,
-            &app.ui_button,
-            if app.connected {
+            screen.label(),
+            l.nav[i],
+            &app.ui_semi,
+            if selected {
                 theme::TEXT
             } else {
-                theme::ON_ACCENT
+                theme::TEXT_MUTED
             },
             DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
             0,
         );
+    }
 
-        let pad = app.s(16);
-        row_label(dc, app, l.region_row, pad, "Region");
-        row_value(dc, app, l.region_row, pad, app.region.as_str());
-        row_label(dc, app, l.unlock_row, pad, "Unlock Roblox frame cap");
+    match app.screen {
+        Screen::Connect => draw_connect_text(dc, app, l),
+        Screen::Roblox => draw_roblox_text(dc, app, l),
+        Screen::Settings => draw_settings_text(dc, app, l),
+    }
 
-        if app.unlock_cap {
-            let knob = app.s(18);
-            let mid = (l.unlock_row.top + l.unlock_row.bottom) / 2;
-            let check = RECT {
-                left: l.unlock_row.right - pad - knob,
-                top: mid - knob / 2,
-                right: l.unlock_row.right - pad,
-                bottom: mid + knob / 2,
-            };
+    gdi::text(
+        dc,
+        &app.account(),
+        l.footer,
+        &app.ui_body,
+        theme::TEXT_MUTED,
+        DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        0,
+    );
+}
+
+/// The tracked uppercase label the app puts above every value.
+fn kicker(dc: HDC, app: &App, text: &str, rect: RECT) {
+    gdi::text(
+        dc,
+        &text.to_uppercase(),
+        rect,
+        &app.ui_micro,
+        theme::TEXT_MUTED,
+        DT_SINGLELINE | DT_NOPREFIX,
+        app.s(2),
+    );
+}
+
+fn draw_connect_text(dc: HDC, app: &App, l: &Layout) {
+    let selected = app.regions.iter().find(|r| r.id == app.region);
+
+    kicker(
+        dc,
+        app,
+        if app.connected {
+            "tunnelled to"
+        } else {
+            "ready to tunnel"
+        },
+        l.kicker,
+    );
+
+    gdi::text(
+        dc,
+        selected.map(|r| r.country.as_str()).unwrap_or("ST"),
+        l.badge,
+        &app.ui_micro,
+        theme::TEXT_MUTED,
+        DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+        app.s(1),
+    );
+
+    gdi::text(
+        dc,
+        selected.map(|r| r.name.as_str()).unwrap_or("Auto"),
+        l.headline,
+        &app.ui_display,
+        theme::TEXT,
+        DT_SINGLELINE | DT_NOPREFIX,
+        0,
+    );
+
+    let relays = selected.map(|r| r.relays).unwrap_or(0);
+    let sub = match relays {
+        0 => "picks the fastest relay".to_string(),
+        1 => "1 relay available".to_string(),
+        n => format!("{n} relays available"),
+    };
+    gdi::text(
+        dc,
+        &sub,
+        l.sub,
+        &app.ui_body,
+        theme::TEXT_MUTED,
+        DT_SINGLELINE | DT_NOPREFIX,
+        0,
+    );
+
+    gdi::text(
+        dc,
+        if app.connected {
+            "Disconnect"
+        } else {
+            "Connect"
+        },
+        l.connect,
+        &app.ui_button,
+        if app.connected {
+            theme::TEXT
+        } else {
+            theme::ON_ACCENT
+        },
+        DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+        0,
+    );
+
+    // Measurements, in mono, the way the app reports every number.
+    let ping = selected.and_then(|r| r.ping_ms).or_else(|| app.best_ping);
+    stat(
+        dc,
+        app,
+        l.stat_left,
+        "relay rtt",
+        &ping
+            .map(|v| format!("{v} ms"))
+            .unwrap_or_else(|| "--".to_string()),
+        latency_ink(ping),
+    );
+    stat(
+        dc,
+        app,
+        l.stat_right,
+        "session",
+        if app.connected { "live" } else { "--" },
+        if app.connected {
+            theme::CONNECTED_TEXT
+        } else {
+            theme::TEXT_MUTED
+        },
+    );
+
+    kicker(
+        dc,
+        app,
+        &format!("regions  {}", app.regions.len()),
+        l.list_label,
+    );
+
+    for (i, row) in l.rows.iter().enumerate() {
+        let Some(region) = app.regions.get(i) else {
             gdi::text(
                 dc,
-                "\u{2713}",
-                check,
+                "Loading relays...",
+                *row,
                 &app.ui_body,
-                theme::ON_ACCENT,
-                DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+                theme::TEXT_MUTED,
+                DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX,
                 0,
             );
-        }
+            continue;
+        };
+
+        let badge = RECT {
+            left: row.left + app.s(14),
+            top: row.top,
+            right: row.left + app.s(40),
+            bottom: row.bottom,
+        };
+        gdi::text(
+            dc,
+            &region.country,
+            badge,
+            &app.ui_micro,
+            theme::TEXT_MUTED,
+            DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
+            app.s(1),
+        );
 
         gdi::text(
             dc,
-            &app.account(),
-            l.account,
+            &region.name,
+            RECT {
+                left: row.left + app.s(50),
+                top: row.top,
+                right: row.right - app.s(80),
+                bottom: row.bottom,
+            },
+            &app.ui_semi,
+            if region.id == app.region {
+                theme::TEXT
+            } else {
+                theme::TEXT_SECONDARY
+            },
+            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+            0,
+        );
+
+        gdi::text(
+            dc,
+            &region
+                .ping_ms
+                .map(|v| format!("{v} ms"))
+                .unwrap_or_else(|| "--".to_string()),
+            RECT {
+                left: row.right - app.s(62),
+                top: row.top,
+                right: row.right - app.s(14),
+                bottom: row.bottom,
+            },
+            &app.mono_small,
+            latency_ink(region.ping_ms),
+            DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX,
+            0,
+        );
+    }
+}
+
+/// A tracked label with a mono value beneath it.
+fn stat(dc: HDC, app: &App, rect: RECT, label: &str, value: &str, ink: COLORREF) {
+    kicker(
+        dc,
+        app,
+        label,
+        RECT {
+            bottom: rect.top + app.s(14),
+            ..rect
+        },
+    );
+    gdi::text(
+        dc,
+        value,
+        RECT {
+            top: rect.top + app.s(18),
+            ..rect
+        },
+        &app.mono_big,
+        ink,
+        DT_SINGLELINE | DT_NOPREFIX,
+        app.s(-1),
+    );
+}
+
+fn draw_roblox_text(dc: HDC, app: &App, l: &Layout) {
+    kicker(dc, app, "roblox", l.kicker);
+
+    gdi::text(
+        dc,
+        if app.roblox_running {
+            "Running"
+        } else {
+            "Not running"
+        },
+        l.headline,
+        &app.ui_display,
+        theme::TEXT,
+        DT_SINGLELINE | DT_NOPREFIX,
+        0,
+    );
+    gdi::text(
+        dc,
+        if app.roblox_running {
+            "changes apply on the next launch"
+        } else {
+            "start Roblox to see it here"
+        },
+        l.sub,
+        &app.ui_body,
+        theme::TEXT_MUTED,
+        DT_SINGLELINE | DT_NOPREFIX,
+        0,
+    );
+
+    if let Some(row) = l.rows.first() {
+        gdi::text(
+            dc,
+            "Unlock frame cap",
+            RECT {
+                left: row.left + app.s(16),
+                top: row.top + app.s(12),
+                right: row.right - app.s(70),
+                bottom: row.top + app.s(32),
+            },
+            &app.ui_semi,
+            theme::TEXT,
+            DT_SINGLELINE | DT_NOPREFIX,
+            0,
+        );
+        gdi::text(
+            dc,
+            "Removes Roblox's 60 FPS limit",
+            RECT {
+                left: row.left + app.s(16),
+                top: row.top + app.s(34),
+                right: row.right - app.s(70),
+                bottom: row.bottom - app.s(8),
+            },
             &app.ui_body,
             theme::TEXT_MUTED,
             DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
             0,
         );
+    }
+
+    if let Some(row) = l.rows.get(1) {
+        row_label(dc, app, *row, app.s(16), "Frame cap");
+        gdi::text(
+            dc,
+            &app.frame_cap.to_string(),
+            RECT {
+                left: row.left,
+                top: row.top,
+                right: row.right - app.s(16),
+                bottom: row.bottom,
+            },
+            &app.mono_small,
+            if app.unlock_cap {
+                theme::CONNECTED_TEXT
+            } else {
+                theme::TEXT_MUTED
+            },
+            DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX,
+            0,
+        );
+    }
+}
+
+fn draw_settings_text(dc: HDC, app: &App, l: &Layout) {
+    kicker(dc, app, "signed in as", l.kicker);
+    gdi::text(
+        dc,
+        &app.account(),
+        l.headline,
+        &app.ui_title,
+        theme::TEXT,
+        DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        0,
+    );
+    gdi::text(
+        dc,
+        "the full app shares this session",
+        l.sub,
+        &app.ui_body,
+        theme::TEXT_MUTED,
+        DT_SINGLELINE | DT_NOPREFIX,
+        0,
+    );
+
+    if let Some(row) = l.rows.first() {
+        row_label(dc, app, *row, app.s(16), "Version");
+        row_value(dc, app, *row, app.s(16), env!("CARGO_PKG_VERSION"));
+    }
+    if let Some(row) = l.rows.get(1) {
+        row_label(dc, app, *row, app.s(16), "Channel");
+        row_value(dc, app, *row, app.s(16), "Preview");
     }
 }
 /// Left-hand label of a list row.

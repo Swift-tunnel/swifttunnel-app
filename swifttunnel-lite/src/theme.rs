@@ -56,7 +56,7 @@ pub const ON_ACCENT: COLORREF = rgb(0x0A0A0A);
 pub const WINDOW_W: i32 = 400;
 /// Shorter than it was: the frame counter is gone and the two remaining
 /// settings share one list, so the old height left a band of empty black.
-pub const WINDOW_H: i32 = 300;
+pub const WINDOW_H: i32 = 712;
 
 /// Gutter down both sides of the content.
 pub const PAD: i32 = 22;
@@ -67,8 +67,20 @@ pub const PAD: i32 = 22;
 /// reads as a lozenge.
 pub const RADIUS: i32 = 12;
 
-/// Height of one row in the settings list.
-pub const ROW_H: i32 = 46;
+/// Height of one row in a settings list.
+pub const ROW_H: i32 = 62;
+
+/// Height of one region row. Taller than a settings row because it carries
+/// a badge, two lines of text, the bars and the round trip.
+pub const REGION_H: i32 = 46;
+
+/// Amber and orange for round trips that are usable but not good. Taken
+/// from the app's own latency scale, one notch less saturated than status.
+pub const LATENCY_FAIR: Rgba = Rgba::hex(0xF5B942);
+pub const LATENCY_POOR: Rgba = Rgba::hex(0xFB923C);
+pub const LATENCY_FAIR_TEXT: COLORREF = rgb(0xF5B942);
+pub const LATENCY_POOR_TEXT: COLORREF = rgb(0xFB923C);
+pub const CONNECTED_TEXT: COLORREF = rgb(0x34D39A);
 /// Button corner radius.
 pub const RADIUS_BTN: i32 = 12;
 
