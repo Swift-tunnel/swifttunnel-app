@@ -492,7 +492,6 @@ fn terminal_relay_lease_error_message(error: &AuthError) -> Option<String> {
 /// inside the band, while different regions are 50ms+ apart and never get
 /// mistaken for one another. Nobody can feel 3ms; everybody feels a saturated
 /// box.
-#[allow(dead_code)]
 const LATENCY_TIE_BAND_MS: u32 = 15;
 
 /// Pick a relay, preferring a quieter one among those that are equally fast.
@@ -515,22 +514,33 @@ fn pick_lowest_latency_server<'a>(
     all.into_iter()
         .filter(|(_, _, ms)| ms.is_some_and(|v| v.saturating_sub(fastest) <= LATENCY_TIE_BAND_MS))
         .min_by_key(|(region, _, latency_ms)| {
-            let load = crate::vpn::servers::relay_load(region);
-            // Unknown occupancy counts as full, never as empty: a relay that
-            // has stopped reporting must not become the preferred one.
-            let bucket = match load.and_then(|l| l.active_users) {
-                Some(users) => (users / RELAY_LOAD_BUCKET_USERS).min(4),
-                None => 4,
-            };
-            let metered = load.map_or(0, |l| u32::from(l.metered));
+            let (bucket, metered) = relay_load_rank(region);
             (bucket, metered, latency_ms.unwrap_or(u32::MAX))
         })
 }
 
 /// Occupancy is compared in coarse steps so ordinary churn does not flip the
 /// choice between two relays on every reconnect.
-#[allow(dead_code)]
 const RELAY_LOAD_BUCKET_USERS: u32 = 20;
+
+/// Bucket given to a relay whose occupancy is unknown: the worst one.
+const RELAY_LOAD_BUCKET_MAX: u32 = 4;
+
+/// How a relay's occupancy and cost rank it against an equally fast neighbour.
+/// Lower is preferred.
+///
+/// Unknown occupancy ranks worst rather than best. A relay that has stopped
+/// reporting must not become the box everybody is sent to, which is exactly
+/// what treating `None` as empty would do.
+fn relay_load_rank(region: &str) -> (u32, u32) {
+    let load = crate::vpn::servers::relay_load(region);
+    let bucket = match load.and_then(|l| l.active_users) {
+        Some(users) => (users / RELAY_LOAD_BUCKET_USERS).min(RELAY_LOAD_BUCKET_MAX),
+        None => RELAY_LOAD_BUCKET_MAX,
+    };
+    let metered = load.map_or(0, |l| u32::from(l.metered));
+    (bucket, metered)
+}
 
 async fn wait_for_tunnel_process_connections(
     driver: &Arc<Mutex<SplitTunnelDriver>>,
@@ -665,35 +675,52 @@ fn sort_ranked_candidates(candidates: &mut [RankedRelayCandidate]) -> RelaySelec
         .iter()
         .any(|candidate| candidate.probed_latency_ms.is_some());
 
-    candidates.sort_by(|a, b| {
+    // The number everything is ranked on. Once any probe has succeeded a
+    // measured latency beats a remembered one outright, so unprobed candidates
+    // drop to the back rather than competing on a stale figure.
+    let ranking_latency = |candidate: &RankedRelayCandidate| -> Option<u32> {
         if any_successful_probe {
-            let a_has_probe = a.probed_latency_ms.is_some();
-            let b_has_probe = b.probed_latency_ms.is_some();
-            a_has_probe
-                .cmp(&b_has_probe)
-                .reverse()
-                .then_with(|| {
-                    a.probed_latency_ms
-                        .unwrap_or(u32::MAX)
-                        .cmp(&b.probed_latency_ms.unwrap_or(u32::MAX))
-                })
-                .then_with(|| {
-                    a.cached_latency_ms
-                        .unwrap_or(u32::MAX)
-                        .cmp(&b.cached_latency_ms.unwrap_or(u32::MAX))
-                })
-                .then_with(|| a.region.cmp(&b.region))
-                .then_with(|| a.addr.ip().cmp(&b.addr.ip()))
-                .then_with(|| a.addr.port().cmp(&b.addr.port()))
+            candidate.probed_latency_ms
         } else {
-            let a_latency = a.cached_latency_ms.unwrap_or(u32::MAX);
-            let b_latency = b.cached_latency_ms.unwrap_or(u32::MAX);
-            a_latency
-                .cmp(&b_latency)
-                .then_with(|| a.region.cmp(&b.region))
-                .then_with(|| a.addr.ip().cmp(&b.addr.ip()))
-                .then_with(|| a.addr.port().cmp(&b.addr.port()))
+            candidate.cached_latency_ms
         }
+    };
+
+    // Relays within LATENCY_TIE_BAND_MS of this count as equally fast, and the
+    // choice between them is made on occupancy instead.
+    //
+    // Computed once over the whole set rather than inside the comparator:
+    // "within the band" is a property of the group, not of any pair, and a
+    // comparator that cannot see the fastest candidate cannot decide it.
+    let fastest = candidates.iter().filter_map(ranking_latency).min();
+
+    candidates.sort_by_cached_key(|candidate| {
+        let latency = ranking_latency(candidate);
+        let in_tie_band = match (latency, fastest) {
+            (Some(ms), Some(best)) => ms.saturating_sub(best) <= LATENCY_TIE_BAND_MS,
+            _ => false,
+        };
+
+        // Occupancy only ever breaks a tie. Outside the band it is zeroed, so a
+        // quiet relay can never pull anyone into a slower region: the band flag
+        // itself has already ordered those candidates behind every in-band one.
+        let (load_bucket, metered) = if in_tie_band {
+            relay_load_rank(&candidate.region)
+        } else {
+            (0, 0)
+        };
+
+        (
+            latency.is_none(),
+            u8::from(!in_tie_band),
+            load_bucket,
+            metered,
+            latency.unwrap_or(u32::MAX),
+            candidate.cached_latency_ms.unwrap_or(u32::MAX),
+            candidate.region.clone(),
+            candidate.addr.ip(),
+            candidate.addr.port(),
+        )
     });
 
     if any_successful_probe {
@@ -3595,13 +3622,156 @@ mod tests {
 
     #[test]
     fn relay_choice_keeps_the_fastest_when_load_is_unknown() {
-        // No server list has been fetched in this test process, so every
-        // candidate has unknown occupancy. They all land in the same bucket and
-        // latency breaks the tie, which is exactly the old behaviour: the
-        // feature must not change anything until real data exists.
+        // Every candidate has unknown occupancy, so they all land in the same
+        // bucket and latency breaks the tie. This is the old behaviour, and it
+        // must not change until real data exists.
+        let _guard = load_test_guard();
+        crate::vpn::servers::clear_relay_load_for_test();
+
         let candidates = [candidate("mumbai", 23), candidate("mumbai-02", 25)];
         let picked = pick_lowest_latency_server(candidates.iter()).unwrap();
         assert_eq!(picked.0, "mumbai");
+    }
+
+    /// Take the registry lock, recovering it if an earlier test panicked while
+    /// holding it. A poisoned lock is not a reason to fail every later test.
+    fn load_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::vpn::servers::RELAY_LOAD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn ranked(region: &str, ip: &str, latency_ms: Option<u32>) -> RankedRelayCandidate {
+        RankedRelayCandidate::from_candidate((
+            region.to_string(),
+            format!("{ip}:51820").parse().unwrap(),
+            latency_ms,
+        ))
+    }
+
+    fn ranked_regions(mut candidates: Vec<RankedRelayCandidate>) -> Vec<String> {
+        sort_ranked_candidates(&mut candidates);
+        candidates.into_iter().map(|c| c.region).collect()
+    }
+
+    #[test]
+    fn live_ranking_sends_new_sessions_to_the_quieter_twin() {
+        // The regression this exists for. mumbai-03 and mumbai-04 sit in the
+        // same availability zone, so their latencies are 2ms apart and the sort
+        // was deterministic: every client picked mumbai-03, and mumbai-04 took
+        // zero traffic for two days while mumbai-03 ran 80% through its bundle.
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_load_for_test(&[
+            ("mumbai-03", Some(60), false),
+            ("mumbai-04", Some(0), false),
+        ]);
+
+        let order = ranked_regions(vec![
+            ranked("mumbai-03", "10.0.0.3", Some(23)),
+            ranked("mumbai-04", "10.0.0.4", Some(25)),
+        ]);
+
+        assert_eq!(order.first().map(String::as_str), Some("mumbai-04"));
+        crate::vpn::servers::clear_relay_load_for_test();
+    }
+
+    #[test]
+    fn live_ranking_never_trades_a_region_for_occupancy() {
+        // An empty box in the wrong country is not a better box. 23ms vs 60ms
+        // is far outside the tie band, so latency decides outright.
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_load_for_test(&[
+            ("mumbai-03", Some(90), false),
+            ("singapore-04", Some(0), false),
+        ]);
+
+        let order = ranked_regions(vec![
+            ranked("mumbai-03", "10.0.0.3", Some(23)),
+            ranked("singapore-04", "10.0.1.4", Some(60)),
+        ]);
+
+        assert_eq!(order.first().map(String::as_str), Some("mumbai-03"));
+        crate::vpn::servers::clear_relay_load_for_test();
+    }
+
+    #[test]
+    fn live_ranking_treats_a_silent_relay_as_full() {
+        // mumbai-04 has stopped reporting. Unknown occupancy must rank worst,
+        // never best, or a relay becomes most attractive precisely when it has
+        // gone wrong.
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_load_for_test(&[("mumbai-03", Some(40), false)]);
+
+        let order = ranked_regions(vec![
+            ranked("mumbai-04", "10.0.0.4", Some(23)),
+            ranked("mumbai-03", "10.0.0.3", Some(25)),
+        ]);
+
+        assert_eq!(order.first().map(String::as_str), Some("mumbai-03"));
+        crate::vpn::servers::clear_relay_load_for_test();
+    }
+
+    #[test]
+    fn live_ranking_breaks_a_dead_heat_on_cost() {
+        // Same speed, same occupancy bucket. The only thing left to separate
+        // them is which one bills per gigabyte.
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_load_for_test(&[
+            ("germany-03", Some(2), true),
+            ("germany-04", Some(2), false),
+        ]);
+
+        let order = ranked_regions(vec![
+            ranked("germany-03", "10.1.0.3", Some(30)),
+            ranked("germany-04", "10.1.0.4", Some(30)),
+        ]);
+
+        assert_eq!(order.first().map(String::as_str), Some("germany-04"));
+        crate::vpn::servers::clear_relay_load_for_test();
+    }
+
+    #[test]
+    fn live_ranking_keeps_probed_candidates_ahead_of_unprobed_ones() {
+        // Occupancy must not disturb the existing precedence: once any probe
+        // has succeeded, a measured latency outranks a remembered one even when
+        // the remembered number looks better.
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_load_for_test(&[
+            ("mumbai-03", Some(0), false),
+            ("mumbai-04", Some(60), false),
+        ]);
+
+        let mut candidates = vec![
+            ranked("mumbai-03", "10.0.0.3", Some(10)),
+            ranked("mumbai-04", "10.0.0.4", Some(90)),
+        ];
+        apply_probe_measurements(
+            &mut candidates,
+            &[RelayProbeMeasurement {
+                region: "mumbai-04".to_string(),
+                addr: "10.0.0.4:51820".parse().unwrap(),
+                latency_ms: Some(90),
+            }],
+        );
+
+        sort_ranked_candidates(&mut candidates);
+        assert_eq!(candidates[0].region, "mumbai-04");
+        crate::vpn::servers::clear_relay_load_for_test();
+    }
+
+    #[test]
+    fn live_ranking_is_deterministic_without_any_measurement() {
+        // Nothing measured and nothing known. The order still has to be stable,
+        // or two clients with identical inputs disagree about the fleet.
+        let _guard = load_test_guard();
+        crate::vpn::servers::clear_relay_load_for_test();
+
+        let order = ranked_regions(vec![
+            ranked("mumbai-04", "10.0.0.4", None),
+            ranked("mumbai-03", "10.0.0.3", None),
+        ]);
+
+        assert_eq!(order, vec!["mumbai-03".to_string(), "mumbai-04".to_string()]);
     }
 
     #[test]

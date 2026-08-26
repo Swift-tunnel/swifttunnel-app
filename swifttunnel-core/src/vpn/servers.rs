@@ -382,6 +382,50 @@ pub fn relay_load(region: &str) -> Option<RelayLoad> {
         .and_then(|guard| guard.as_ref().and_then(|m| m.get(region).copied()))
 }
 
+/// Seed occupancy directly, for tests that need a known fleet state.
+///
+/// Entries are `(region, active_users, metered)`. `busy` is left false because
+/// ranking never reads it, so modelling it here would only invite the question
+/// of what it should be.
+///
+/// This writes a process-wide static, so callers must hold
+/// [`RELAY_LOAD_TEST_LOCK`] and clear up after themselves.
+#[cfg(test)]
+pub(crate) fn set_relay_load_for_test(entries: &[(&str, Option<u32>, bool)]) {
+    let map: HashMap<String, RelayLoad> = entries
+        .iter()
+        .map(|(region, active_users, metered)| {
+            (
+                (*region).to_string(),
+                RelayLoad {
+                    active_users: *active_users,
+                    busy: false,
+                    metered: *metered,
+                },
+            )
+        })
+        .collect();
+
+    if let Ok(mut guard) = RELAY_LOAD.write() {
+        *guard = Some(map);
+    }
+}
+
+/// Put the registry back to "nothing fetched yet" so a later test is not
+/// steered by occupancy an earlier one seeded.
+#[cfg(test)]
+pub(crate) fn clear_relay_load_for_test() {
+    if let Ok(mut guard) = RELAY_LOAD.write() {
+        *guard = None;
+    }
+}
+
+/// Serialises the tests that write the shared occupancy registry. Rust runs
+/// tests in one process across several threads, so without this they would
+/// overwrite one another's fleet state at random.
+#[cfg(test)]
+pub(crate) static RELAY_LOAD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Load server list from API or cache.
 ///
 /// Strategy:
