@@ -13,6 +13,12 @@
 
 use windows::Win32::Foundation::COLORREF;
 
+use crate::canvas::Rgba;
+
+/// Shapes are painted by [`crate::canvas`] and text by GDI, so the palette
+/// exists in both forms: `Rgba` for anything drawn, `COLORREF` for anything
+/// typeset. Same values, one definition each.
+///
 /// Win32 wants 0x00BBGGRR; the design tokens are written #RRGGBB.
 const fn rgb(hex: u32) -> COLORREF {
     let r = (hex >> 16) & 0xFF;
@@ -22,13 +28,13 @@ const fn rgb(hex: u32) -> COLORREF {
 }
 
 /// `--color-bg-base`
-pub const BG: COLORREF = rgb(0x060606);
+pub const BG: Rgba = Rgba::hex(0x060606);
 /// `--color-bg-card`
-pub const CARD: COLORREF = rgb(0x1B1B1D);
+pub const CARD: Rgba = Rgba::hex(0x1B1B1D);
 /// `--color-border-subtle`, the card outline
-pub const BORDER: COLORREF = rgb(0x262628);
+pub const BORDER: Rgba = Rgba::hex(0x262628);
 /// `--color-border-default`
-pub const BORDER_STRONG: COLORREF = rgb(0x34343A);
+pub const BORDER_STRONG: Rgba = Rgba::hex(0x34343A);
 /// Body text
 pub const TEXT: COLORREF = rgb(0xF5F5F5);
 /// The uppercase micro-labels, measured at rgb(90,90,90) in the running app.
@@ -38,11 +44,11 @@ pub const TEXT_MUTED: COLORREF = rgb(0x5A5A5A);
 #[allow(dead_code)]
 pub const TEXT_SECONDARY: COLORREF = rgb(0x8A8A90);
 /// `--color-status-connected`
-pub const CONNECTED: COLORREF = rgb(0x34D39A);
+pub const CONNECTED: Rgba = Rgba::hex(0x34D39A);
 /// `--color-status-inactive`
-pub const INACTIVE: COLORREF = rgb(0x525252);
+pub const INACTIVE: Rgba = Rgba::hex(0x525252);
 /// Primary button fill: the app's accent is near-white on black.
-pub const ACCENT: COLORREF = rgb(0xF5F5F5);
+pub const ACCENT: Rgba = Rgba::hex(0xF5F5F5);
 /// Text on the accent fill.
 pub const ON_ACCENT: COLORREF = rgb(0x0A0A0A);
 

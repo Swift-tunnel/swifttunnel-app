@@ -17,10 +17,12 @@
 
 use swifttunnel_core::auth::AuthManager;
 
-mod backdrop;
+mod canvas;
 mod engine;
 mod fonts;
 mod gdi;
+mod preview;
+mod surface;
 mod theme;
 mod ui;
 
@@ -45,6 +47,23 @@ fn main() {
         "SwiftTunnel Lite starting, signed in: {}",
         auth.is_logged_in()
     );
+
+    // Developer switch: paint one frame to a file and exit. Exists because
+    // this process is elevated and Windows will not let an unelevated tool
+    // capture its window, which left visual work with no feedback loop.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--preview") {
+        let path = args
+            .get(i + 1)
+            .cloned()
+            .unwrap_or_else(|| "preview.bmp".to_string());
+        let connected = args.iter().any(|a| a == "--connected");
+        match ui::render_preview(auth, &path, connected) {
+            Ok(()) => println!("wrote {path}"),
+            Err(error) => eprintln!("preview failed: {error}"),
+        }
+        return;
+    }
 
     if let Err(error) = ui::run(auth) {
         log::error!("window failed: {error}");

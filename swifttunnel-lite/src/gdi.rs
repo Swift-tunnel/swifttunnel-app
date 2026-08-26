@@ -104,49 +104,6 @@ fn face_exists(face: &str) -> bool {
     }
 }
 
-/// Fill a rounded rectangle, optionally outlining it.
-pub fn round_rect(
-    dc: HDC,
-    rect: RECT,
-    radius: i32,
-    fill: Option<COLORREF>,
-    outline: Option<COLORREF>,
-) {
-    unsafe {
-        let brush = match fill {
-            Some(c) => CreateSolidBrush(c),
-            // A null brush leaves whatever is underneath.
-            None => HBRUSH(GetStockObject(NULL_BRUSH).0),
-        };
-        let pen = match outline {
-            Some(c) => CreatePen(PS_SOLID, 1, c),
-            None => HPEN(GetStockObject(NULL_PEN).0),
-        };
-
-        let old_brush = SelectObject(dc, brush.into());
-        let old_pen = SelectObject(dc, pen.into());
-
-        let _ = RoundRect(
-            dc,
-            rect.left,
-            rect.top,
-            rect.right,
-            rect.bottom,
-            radius * 2,
-            radius * 2,
-        );
-
-        SelectObject(dc, old_brush);
-        SelectObject(dc, old_pen);
-        if fill.is_some() {
-            let _ = DeleteObject(brush.into());
-        }
-        if outline.is_some() {
-            let _ = DeleteObject(pen.into());
-        }
-    }
-}
-
 /// Draw a run of text. `tracking` is per-character extra spacing.
 pub fn text(
     dc: HDC,
@@ -191,21 +148,5 @@ pub fn text_width(dc: HDC, value: &str, font: &Font, tracking: i32) -> i32 {
         SetTextCharacterExtra(dc, 0);
         SelectObject(dc, old);
         r.right - r.left
-    }
-}
-
-/// A filled circle, used for the status dot.
-pub fn dot(dc: HDC, cx: i32, cy: i32, r: i32, colour: COLORREF) {
-    unsafe {
-        let brush = CreateSolidBrush(colour);
-        let pen = HPEN(GetStockObject(NULL_PEN).0);
-        let old_brush = SelectObject(dc, brush.into());
-        let old_pen = SelectObject(dc, pen.into());
-
-        let _ = Ellipse(dc, cx - r, cy - r, cx + r, cy + r);
-
-        SelectObject(dc, old_brush);
-        SelectObject(dc, old_pen);
-        let _ = DeleteObject(brush.into());
     }
 }

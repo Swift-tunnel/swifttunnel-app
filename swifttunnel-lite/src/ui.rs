@@ -7,7 +7,7 @@
 
 use std::ffi::c_void;
 
-use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -20,8 +20,9 @@ use windows::core::w;
 
 use swifttunnel_core::auth::AuthManager;
 
-use crate::backdrop::Backdrop;
+use crate::canvas::{Canvas, Rgba, RoundRect};
 use crate::engine::Engine;
+use crate::surface;
 
 use crate::gdi::{self, Font};
 use crate::theme;
@@ -57,8 +58,6 @@ const CAP_RECHECK_TICKS: u32 = 10;
 pub struct App {
     auth: AuthManager,
     engine: Engine,
-    /// Cached atmosphere. Rebuilt only on a resize or a connection change.
-    backdrop: Backdrop,
     /// Refresh count, used to space out the slower checks.
     tick: u32,
     dpi: i32,
@@ -243,30 +242,7 @@ pub fn run(auth: AuthManager) -> windows::core::Result<()> {
         let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
         let _ = AdjustWindowRectEx(&mut frame, style, false, WINDOW_EX_STYLE::default());
 
-        // Built before the window so the first paint already shows the
-        // real frame cap rather than flicking from off to on a moment later.
-        let engine = Engine::new();
-        let unlock_cap = engine.fps_unlocked();
-
-        let app = Box::new(App {
-            auth,
-            engine,
-            backdrop: Backdrop::new(),
-            tick: 0,
-            dpi,
-            scale_num: theme::WINDOW_W,
-            scale_den: theme::WINDOW_W,
-            connected: false,
-            region: "Auto".to_string(),
-            unlock_cap,
-            hot: Hot::None,
-            // Placeholders; rebuilt at the real DPI in WM_CREATE.
-            ui_micro: Font(HFONT(std::ptr::null_mut())),
-            ui_body: Font(HFONT(std::ptr::null_mut())),
-            ui_title: Font(HFONT(std::ptr::null_mut())),
-            ui_button: Font(HFONT(std::ptr::null_mut())),
-            mono_big: Font(HFONT(std::ptr::null_mut())),
-        });
+        let app = new_app(auth, dpi);
 
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
@@ -302,6 +278,64 @@ pub fn run(auth: AuthManager) -> windows::core::Result<()> {
         }
         Ok(())
     }
+}
+
+/// Build the application state.
+///
+/// Shared by the real window and the offscreen preview so there is only one
+/// definition of what a fresh Lite looks like.
+fn new_app(auth: AuthManager, dpi: i32) -> Box<App> {
+    // Built before the window so the first paint already shows the
+    // real frame cap rather than flicking from off to on a moment later.
+    let engine = Engine::new();
+    let unlock_cap = engine.fps_unlocked();
+
+    Box::new(App {
+        auth,
+        engine,
+        tick: 0,
+        dpi,
+        scale_num: theme::WINDOW_W,
+        scale_den: theme::WINDOW_W,
+        connected: false,
+        region: "Auto".to_string(),
+        unlock_cap,
+        hot: Hot::None,
+        // Placeholders; rebuilt at the real DPI in WM_CREATE.
+        ui_micro: Font(HFONT(std::ptr::null_mut())),
+        ui_body: Font(HFONT(std::ptr::null_mut())),
+        ui_title: Font(HFONT(std::ptr::null_mut())),
+        ui_button: Font(HFONT(std::ptr::null_mut())),
+        mono_big: Font(HFONT(std::ptr::null_mut())),
+    })
+}
+
+/// Paint one frame into a file instead of onto the screen.
+///
+/// Lite runs elevated, and Windows blocks a non-elevated process from
+/// raising or capturing an elevated window, so this is the only way to see a
+/// visual change without asking a person to look at their own screen. It
+/// drives the same `paint` the window does, so nothing can drift.
+pub fn render_preview(auth: AuthManager, path: &str, connected: bool) -> std::io::Result<()> {
+    // 2x so the antialiasing and the type are legible when the image is
+    // looked at rather than glanced past.
+    let dpi = 192;
+    let width = theme::WINDOW_W * dpi / 96;
+    let height = theme::WINDOW_H * dpi / 96;
+
+    let mut app = new_app(auth, dpi);
+    app.connected = connected;
+    app.scale_num = width;
+    app.scale_den = theme::WINDOW_W;
+
+    crate::preview::render(path, width, height, |dc, rect| {
+        // SAFETY: the DC belongs to the offscreen bitmap the preview owns
+        // for the duration of this call, which is what paint expects.
+        unsafe {
+            build_fonts(&mut app);
+            paint(dc, rect, &mut app);
+        }
+    })
 }
 
 unsafe extern "system" fn wndproc(
@@ -515,34 +549,124 @@ unsafe fn paint_buffered(hwnd: HWND, dc: HDC, app: &mut App) {
 }
 
 unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
-    unsafe {
-        // Ground. The flat fill stays as a floor under the atmosphere so a
-        // failed bitmap shows the right black rather than uninitialised memory.
-        let bg = CreateSolidBrush(theme::BG);
-        FillRect(dc, &client, bg);
-        let _ = DeleteObject(bg.into());
-
-        let width = client.right - client.left;
-        let height = client.bottom - client.top;
-        app.backdrop.draw(dc, width, height, app.connected);
+    // Nothing here is unsafe any more: shapes go through the canvas and the
+    // blit and text helpers own their own unsafety. Kept as an unsafe fn so the
+    // call sites, which hold raw device contexts, still read as such.
+    {
+        let w = client.right - client.left;
+        let h = client.bottom - client.top;
+        if w <= 0 || h <= 0 {
+            return;
+        }
 
         let l = layout(app, client);
 
-        // ---- Status --------------------------------------------------------
-        // A line, not a card. At this width a border around two strings is just
-        // a border, and it was the thing making the window look like a dialog.
-        gdi::dot(
-            dc,
-            l.dot.left + app.s(4),
-            l.dot.top + app.s(4),
-            app.s(4),
-            if app.connected {
-                theme::CONNECTED
-            } else {
-                theme::INACTIVE
-            },
-        );
+        // Pass one: every shape, composited in software because GDI cannot
+        // antialias a rounded corner and its stair-steps were the single
+        // most visible thing wrong with this window.
+        let mut canvas = Canvas::new(w, h, theme::BG);
+        surface::paint_atmosphere(&mut canvas, app.connected);
+        draw_shapes(&mut canvas, app, &l);
+        surface::blit(dc, &canvas);
 
+        // Pass two: text straight onto the result. GDI's rasteriser is the
+        // good half of GDI, and it already has the embedded faces.
+        draw_text(dc, app, &l);
+    }
+}
+
+/// Everything that is a shape rather than a glyph.
+fn draw_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
+    let card = theme::CARD;
+    let border = theme::BORDER;
+    let border_strong = theme::BORDER_STRONG;
+    let accent = theme::ACCENT;
+
+    // Status dot.
+    let dot_r = app.s(4) as f32;
+    canvas.fill_circle(
+        l.dot.left as f32 + dot_r,
+        l.dot.top as f32 + dot_r,
+        dot_r,
+        if app.connected {
+            theme::CONNECTED
+        } else {
+            theme::INACTIVE
+        },
+    );
+
+    // Connect button. The primary state gets a shadow so it lifts off the
+    // background the way the app's does; the secondary state is a plain card.
+    let button = rect_of(l.connect, app.s(theme::RADIUS_BTN));
+    let hot = app.hot == Hot::Connect;
+    if app.connected {
+        canvas.fill_round_rect(button, card);
+        canvas.stroke_round_rect(
+            button.inset(0.5),
+            if hot { border_strong } else { border },
+            1.0,
+        );
+    } else {
+        canvas.drop_shadow(
+            button,
+            Rgba::hexa(0x000000, 0.55),
+            app.s(18) as f32,
+            app.s(6) as f32,
+        );
+        canvas.fill_round_rect(button, if hot { Rgba::hex(0xFFFFFF) } else { accent });
+    }
+
+    // Settings list.
+    let list = rect_of(l.list, app.s(theme::RADIUS));
+    canvas.fill_round_rect(list, card);
+    canvas.stroke_round_rect(list.inset(0.5), border, 1.0);
+
+    // Hairline between the rows, inset so it never touches the corners.
+    let pad = app.s(16) as f32;
+    canvas.fill_round_rect(
+        RoundRect {
+            x: list.x + pad,
+            y: l.region_row.bottom as f32,
+            w: list.w - pad * 2.0,
+            h: 1.0,
+            radius: 0.0,
+        },
+        border,
+    );
+
+    // The switch.
+    let knob = app.s(18);
+    let mid = (l.unlock_row.top + l.unlock_row.bottom) / 2;
+    let check = RoundRect::new(
+        l.unlock_row.right - app.s(16) - knob,
+        mid - knob / 2,
+        knob,
+        knob,
+        app.s(5),
+    );
+    if app.unlock_cap {
+        canvas.fill_round_rect(check, accent);
+    } else {
+        canvas.fill_round_rect(check, theme::BG);
+        canvas.stroke_round_rect(
+            check.inset(0.5),
+            if app.hot == Hot::Unlock {
+                border_strong
+            } else {
+                border
+            },
+            1.0,
+        );
+    }
+}
+
+fn rect_of(r: RECT, radius: i32) -> RoundRect {
+    RoundRect::new(r.left, r.top, r.right - r.left, r.bottom - r.top, radius)
+}
+
+/// Everything that is a glyph rather than a shape.
+fn draw_text(dc: HDC, app: &App, l: &Layout) {
+    {
         gdi::text(
             dc,
             if app.connected {
@@ -571,27 +695,6 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
             0,
         );
 
-        // ---- Connect -------------------------------------------------------
-        let hot = app.hot == Hot::Connect;
-        let (fill, ink, outline): (Option<COLORREF>, COLORREF, Option<COLORREF>) = if app.connected
-        {
-            // Secondary once connected: the primary action is done.
-            (
-                Some(theme::CARD),
-                theme::TEXT,
-                Some(if hot {
-                    theme::BORDER_STRONG
-                } else {
-                    theme::BORDER
-                }),
-            )
-        } else if hot {
-            (Some(theme::TEXT), theme::ON_ACCENT, None)
-        } else {
-            (Some(theme::ACCENT), theme::ON_ACCENT, None)
-        };
-
-        gdi::round_rect(dc, l.connect, app.s(theme::RADIUS_BTN), fill, outline);
         gdi::text(
             dc,
             if app.connected {
@@ -601,65 +704,29 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
             },
             l.connect,
             &app.ui_button,
-            ink,
+            if app.connected {
+                theme::TEXT
+            } else {
+                theme::ON_ACCENT
+            },
             DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
             0,
         );
 
-        // ---- Settings list -------------------------------------------------
-        gdi::round_rect(
-            dc,
-            l.list,
-            app.s(theme::RADIUS),
-            Some(theme::CARD),
-            Some(theme::BORDER),
-        );
+        let pad = app.s(16);
+        row_label(dc, app, l.region_row, pad, "Region");
+        row_value(dc, app, l.region_row, pad, app.region.as_str());
+        row_label(dc, app, l.unlock_row, pad, "Unlock Roblox frame cap");
 
-        let row_pad = app.s(16);
-
-        // Hairline between the rows, inset so it does not touch the corners.
-        let line = RECT {
-            left: l.list.left + row_pad,
-            top: l.region_row.bottom,
-            right: l.list.right - row_pad,
-            bottom: l.region_row.bottom + app.s(1).max(1),
-        };
-        let hairline = CreateSolidBrush(theme::BORDER);
-        FillRect(dc, &line, hairline);
-        let _ = DeleteObject(hairline.into());
-
-        row_label(dc, app, l.region_row, row_pad, "Region");
-        row_value(dc, app, l.region_row, row_pad, app.region.as_str());
-
-        row_label(dc, app, l.unlock_row, row_pad, "Unlock Roblox frame cap");
-
-        // The switch sits at the right of its row, where Windows puts it.
-        let knob = app.s(18);
-        let mid = (l.unlock_row.top + l.unlock_row.bottom) / 2;
-        let check = RECT {
-            left: l.unlock_row.right - row_pad - knob,
-            top: mid - knob / 2,
-            right: l.unlock_row.right - row_pad,
-            bottom: mid + knob / 2,
-        };
-        gdi::round_rect(
-            dc,
-            check,
-            app.s(5),
-            Some(if app.unlock_cap {
-                theme::ACCENT
-            } else {
-                theme::BG
-            }),
-            Some(if app.unlock_cap {
-                theme::ACCENT
-            } else if app.hot == Hot::Unlock {
-                theme::BORDER_STRONG
-            } else {
-                theme::BORDER
-            }),
-        );
         if app.unlock_cap {
+            let knob = app.s(18);
+            let mid = (l.unlock_row.top + l.unlock_row.bottom) / 2;
+            let check = RECT {
+                left: l.unlock_row.right - pad - knob,
+                top: mid - knob / 2,
+                right: l.unlock_row.right - pad,
+                bottom: mid + knob / 2,
+            };
             gdi::text(
                 dc,
                 "\u{2713}",
@@ -671,7 +738,6 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
             );
         }
 
-        // ---- Account -------------------------------------------------------
         gdi::text(
             dc,
             &app.account(),
@@ -683,7 +749,6 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
         );
     }
 }
-
 /// Left-hand label of a list row.
 fn row_label(dc: HDC, app: &App, row: RECT, pad: i32, value: &str) {
     gdi::text(
