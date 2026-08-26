@@ -109,9 +109,28 @@ pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
         return Ok(None);
     }
 
-    let Some(exe_path) = locate_goodbyedpi_executable() else {
-        warn!("GoodbyeDPI helper not found; Bypass country bans will not apply");
-        return Ok(None);
+    let exe_path = match locate_goodbyedpi_executable() {
+        Some(path) => path,
+        None => {
+            // Not shipped in the installer any more, so the first user to turn
+            // this on fetches it. Every failure here is survivable: the relay
+            // already carries this traffic and needs none of it.
+            match ensure_goodbyedpi_component(native_arch).await {
+                Ok(()) => match locate_goodbyedpi_executable() {
+                    Some(path) => path,
+                    None => {
+                        warn!(
+                            "GoodbyeDPI component installed but no executable found; staying on the relay"
+                        );
+                        return Ok(None);
+                    }
+                },
+                Err(reason) => {
+                    warn!("GoodbyeDPI helper unavailable ({reason}); staying on the relay");
+                    return Ok(None);
+                }
+            }
+        }
     };
 
     let hostlist_path = write_roblox_hostlist()?;
@@ -207,6 +226,36 @@ fn current_goodbyedpi_native_arch() -> GoodbyeDpiNativeArch {
 
 pub(crate) fn bundled_goodbyedpi_supports_arch(arch: GoodbyeDpiNativeArch) -> bool {
     matches!(arch, GoodbyeDpiNativeArch::X86 | GoodbyeDpiNativeArch::X64)
+}
+
+/// Fetch the DPI helper for this machine if it is not already installed.
+///
+/// Separate from the installer on purpose: the files are unsigned and Defender
+/// carries HackTool signatures for them, so bundling them got the whole
+/// SwiftTunnel download quarantined for people who never used this feature.
+/// See [`crate::optional_components`].
+async fn ensure_goodbyedpi_component(arch: GoodbyeDpiNativeArch) -> Result<(), String> {
+    use crate::optional_components::{ComponentArch, ensure_installed, goodbyedpi_component};
+
+    let component_arch = match arch {
+        GoodbyeDpiNativeArch::X86 => ComponentArch::X86,
+        GoodbyeDpiNativeArch::X64 => ComponentArch::X64,
+        // Guarded earlier by bundled_goodbyedpi_supports_arch, but a wrong
+        // answer here would mean downloading a payload that cannot run.
+        GoodbyeDpiNativeArch::Arm64 => return Err("no GoodbyeDPI build for ARM64".to_string()),
+    };
+
+    let component = goodbyedpi_component(component_arch);
+    log::info!(
+        "Fetching the GoodbyeDPI helper ({} {}) for Bypass country bans",
+        component.id,
+        component.version
+    );
+
+    ensure_installed(&component)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn locate_goodbyedpi_executable() -> Option<PathBuf> {
@@ -377,6 +426,14 @@ pub(crate) fn candidate_executable_paths(
     if let Some(path) = env_path {
         paths.push(path);
     }
+
+    // Where the on-demand component installs. Checked ahead of the bundled
+    // locations because installers from before the split still carry a copy,
+    // and the fetched one is the version whose hashes we pin and test.
+    add_goodbyedpi_candidates(
+        &mut paths,
+        &crate::optional_components::goodbyedpi_install_dir(),
+    );
 
     if let Some(base) = current_exe.and_then(Path::parent) {
         add_goodbyedpi_candidates(&mut paths, &base.join("tools").join("goodbyedpi"));
