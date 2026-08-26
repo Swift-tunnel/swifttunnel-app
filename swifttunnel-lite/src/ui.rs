@@ -20,6 +20,7 @@ use windows::core::w;
 
 use swifttunnel_core::auth::AuthManager;
 
+use crate::backdrop::Backdrop;
 use crate::engine::Engine;
 
 use crate::gdi::{self, Font};
@@ -56,6 +57,8 @@ const CAP_RECHECK_TICKS: u32 = 10;
 pub struct App {
     auth: AuthManager,
     engine: Engine,
+    /// Cached atmosphere. Rebuilt only on a resize or a connection change.
+    backdrop: Backdrop,
     /// Refresh count, used to space out the slower checks.
     tick: u32,
     dpi: i32,
@@ -65,7 +68,6 @@ pub struct App {
 
     connected: bool,
     region: String,
-    fps: Option<u32>,
     unlock_cap: bool,
     hot: Hot,
 
@@ -73,6 +75,9 @@ pub struct App {
     ui_body: Font,
     ui_title: Font,
     ui_button: Font,
+    /// Reserved for the tunnel's latency readout. Nothing renders numbers
+    /// since the frame counter was removed.
+    #[allow(dead_code)]
     mono_big: Font,
 }
 
@@ -101,11 +106,23 @@ impl App {
 }
 
 /// Vertical layout, in logical pixels, resolved against the client width.
+/// Where everything sits.
+///
+/// Deliberately not a miniature of the full app. The previous version stacked
+/// three floating cards down a 400px window, which is a shape designed for a
+/// 1200px one and reads as a bad copy at this size. This is what Windows does
+/// for a small utility: a status line, one primary action, and the settings
+/// gathered into a single list.
 struct Layout {
-    status: RECT,
+    /// State dot, left of the headline.
+    dot: RECT,
+    headline: RECT,
+    subtitle: RECT,
     connect: RECT,
-    fps: RECT,
-    unlock: RECT,
+    /// The list both rows share.
+    list: RECT,
+    region_row: RECT,
+    unlock_row: RECT,
     account: RECT,
 }
 
@@ -113,23 +130,64 @@ fn layout(app: &App, client: RECT) -> Layout {
     let pad = app.s(theme::PAD);
     let left = client.left + pad;
     let right = client.right - pad;
+    let y = |v: i32| client.top + app.s(v);
+    let row_h = app.s(theme::ROW_H);
 
-    let card = |top: i32, height: i32| RECT {
-        left,
-        top: client.top + app.s(top),
-        right,
-        bottom: client.top + app.s(top + height),
-    };
+    // Headline is indented past the dot so the two read as one line.
+    let text_left = left + app.s(16);
+    let list_top = y(150);
 
     Layout {
-        status: card(22, 96),
-        connect: card(134, 50),
-        fps: card(200, 96),
-        unlock: card(314, 24),
-        account: card(352, 18),
+        dot: RECT {
+            left,
+            top: y(30),
+            right: left + app.s(8),
+            bottom: y(38),
+        },
+        headline: RECT {
+            left: text_left,
+            top: y(22),
+            right,
+            bottom: y(50),
+        },
+        subtitle: RECT {
+            left: text_left,
+            top: y(52),
+            right,
+            bottom: y(70),
+        },
+        connect: RECT {
+            left,
+            top: y(88),
+            right,
+            bottom: y(132),
+        },
+        list: RECT {
+            left,
+            top: list_top,
+            right,
+            bottom: list_top + row_h * 2,
+        },
+        region_row: RECT {
+            left,
+            top: list_top,
+            right,
+            bottom: list_top + row_h,
+        },
+        unlock_row: RECT {
+            left,
+            top: list_top + row_h,
+            right,
+            bottom: list_top + row_h * 2,
+        },
+        account: RECT {
+            left,
+            top: y(258),
+            right,
+            bottom: y(276),
+        },
     }
 }
-
 fn contains(r: RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
@@ -193,13 +251,13 @@ pub fn run(auth: AuthManager) -> windows::core::Result<()> {
         let app = Box::new(App {
             auth,
             engine,
+            backdrop: Backdrop::new(),
             tick: 0,
             dpi,
             scale_num: theme::WINDOW_W,
             scale_den: theme::WINDOW_W,
             connected: false,
             region: "Auto".to_string(),
-            fps: None,
             unlock_cap,
             hot: Hot::None,
             // Placeholders; rebuilt at the real DPI in WM_CREATE.
@@ -305,7 +363,7 @@ unsafe extern "system" fn wndproc(
 
                     let hot = if contains(l.connect, x, y) {
                         Hot::Connect
-                    } else if contains(l.unlock, x, y) {
+                    } else if contains(l.unlock_row, x, y) {
                         Hot::Unlock
                     } else {
                         Hot::None
@@ -334,7 +392,7 @@ unsafe extern "system" fn wndproc(
                         // game and inventing one was a lie waiting to ship.
                         app.connected = !app.connected;
                         let _ = InvalidateRect(Some(hwnd), None, false);
-                    } else if contains(l.unlock, x, y) {
+                    } else if contains(l.unlock_row, x, y) {
                         let wanted = !app.unlock_cap;
                         match app.engine.set_fps_unlocked(wanted) {
                             // Only move the switch once the cap actually
@@ -379,21 +437,17 @@ unsafe extern "system" fn wndproc(
                 if let Some(app) = app_from(hwnd) {
                     app.tick = app.tick.wrapping_add(1);
 
-                    let fps = app.engine.fps();
-                    let unlock_cap = if app.tick % CAP_RECHECK_TICKS == 0 {
-                        app.engine.fps_unlocked()
-                    } else {
-                        app.unlock_cap
-                    };
-
-                    // Repaint only on a real change. Invalidating every
-                    // half second regardless would put this window back in
-                    // the business of burning frames for nothing, which is
-                    // the entire problem Lite exists to avoid.
-                    if fps != app.fps || unlock_cap != app.unlock_cap {
-                        app.fps = fps;
-                        app.unlock_cap = unlock_cap;
-                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    // Only the frame cap needs watching now, and it lives in
+                    // a file that changes when somebody changes it. Repaint
+                    // only on a real change: invalidating on every tick would
+                    // put this window back in the business of burning frames
+                    // for nothing, which is the whole problem Lite avoids.
+                    if app.tick % CAP_RECHECK_TICKS == 0 {
+                        let unlock_cap = app.engine.fps_unlocked();
+                        if unlock_cap != app.unlock_cap {
+                            app.unlock_cap = unlock_cap;
+                            let _ = InvalidateRect(Some(hwnd), None, false);
+                        }
                     }
                 }
                 LRESULT(0)
@@ -439,7 +493,7 @@ unsafe fn app_from<'a>(hwnd: HWND) -> Option<&'a mut App> {
 }
 
 /// Paint into a memory DC, then blit once.
-unsafe fn paint_buffered(hwnd: HWND, dc: HDC, app: &App) {
+unsafe fn paint_buffered(hwnd: HWND, dc: HDC, app: &mut App) {
     unsafe {
         let mut client = RECT::default();
         let _ = GetClientRect(hwnd, &mut client);
@@ -460,69 +514,27 @@ unsafe fn paint_buffered(hwnd: HWND, dc: HDC, app: &App) {
     }
 }
 
-unsafe fn paint(dc: HDC, client: RECT, app: &App) {
+unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
     unsafe {
-        // Ground
+        // Ground. The flat fill stays as a floor under the atmosphere so a
+        // failed bitmap shows the right black rather than uninitialised memory.
         let bg = CreateSolidBrush(theme::BG);
         FillRect(dc, &client, bg);
         let _ = DeleteObject(bg.into());
 
+        let width = client.right - client.left;
+        let height = client.bottom - client.top;
+        app.backdrop.draw(dc, width, height, app.connected);
+
         let l = layout(app, client);
-        let pad = app.s(18);
 
-        // ---- Status card -------------------------------------------------
-        gdi::round_rect(
-            dc,
-            l.status,
-            app.s(theme::RADIUS),
-            Some(theme::CARD),
-            Some(theme::BORDER),
-        );
-
-        let label = if app.connected {
-            "TUNNELED TO"
-        } else {
-            "NOT CONNECTED"
-        };
-        gdi::text(
-            dc,
-            label,
-            RECT {
-                left: l.status.left + pad,
-                top: l.status.top + pad,
-                right: l.status.right - pad,
-                bottom: l.status.top + pad + app.s(14),
-            },
-            &app.ui_micro,
-            theme::TEXT_MUTED,
-            DT_SINGLELINE | DT_NOPREFIX,
-            app.s(2),
-        );
-
-        let headline = if app.connected {
-            app.region.as_str()
-        } else {
-            "Ready when you are"
-        };
-        gdi::text(
-            dc,
-            headline,
-            RECT {
-                left: l.status.left + pad,
-                top: l.status.top + app.s(44),
-                right: l.status.right - pad,
-                bottom: l.status.bottom - pad,
-            },
-            &app.ui_title,
-            theme::TEXT,
-            DT_SINGLELINE | DT_NOPREFIX,
-            0,
-        );
-
+        // ---- Status --------------------------------------------------------
+        // A line, not a card. At this width a border around two strings is just
+        // a border, and it was the thing making the window look like a dialog.
         gdi::dot(
             dc,
-            l.status.right - pad - app.s(4),
-            l.status.top + pad + app.s(5),
+            l.dot.left + app.s(4),
+            l.dot.top + app.s(4),
             app.s(4),
             if app.connected {
                 theme::CONNECTED
@@ -531,11 +543,39 @@ unsafe fn paint(dc: HDC, client: RECT, app: &App) {
             },
         );
 
-        // ---- Connect ------------------------------------------------------
+        gdi::text(
+            dc,
+            if app.connected {
+                app.region.as_str()
+            } else {
+                "Not connected"
+            },
+            l.headline,
+            &app.ui_title,
+            theme::TEXT,
+            DT_SINGLELINE | DT_NOPREFIX,
+            0,
+        );
+
+        gdi::text(
+            dc,
+            if app.connected {
+                "Tunnel active"
+            } else {
+                "Tunnel is off"
+            },
+            l.subtitle,
+            &app.ui_body,
+            theme::TEXT_MUTED,
+            DT_SINGLELINE | DT_NOPREFIX,
+            0,
+        );
+
+        // ---- Connect -------------------------------------------------------
         let hot = app.hot == Hot::Connect;
         let (fill, ink, outline): (Option<COLORREF>, COLORREF, Option<COLORREF>) = if app.connected
         {
-            // Secondary treatment once connected: the primary action is done.
+            // Secondary once connected: the primary action is done.
             (
                 Some(theme::CARD),
                 theme::TEXT,
@@ -566,55 +606,41 @@ unsafe fn paint(dc: HDC, client: RECT, app: &App) {
             0,
         );
 
-        // ---- FPS ----------------------------------------------------------
+        // ---- Settings list -------------------------------------------------
         gdi::round_rect(
             dc,
-            l.fps,
+            l.list,
             app.s(theme::RADIUS),
             Some(theme::CARD),
             Some(theme::BORDER),
         );
-        gdi::text(
-            dc,
-            "FRAMES PER SECOND",
-            RECT {
-                left: l.fps.left + pad,
-                top: l.fps.top + pad,
-                right: l.fps.right - pad,
-                bottom: l.fps.top + pad + app.s(14),
-            },
-            &app.ui_micro,
-            theme::TEXT_MUTED,
-            DT_SINGLELINE | DT_NOPREFIX,
-            app.s(2),
-        );
 
-        let (value, ink) = match app.fps {
-            Some(v) => (v.to_string(), theme::CONNECTED),
-            None => ("--".to_string(), theme::INACTIVE),
+        let row_pad = app.s(16);
+
+        // Hairline between the rows, inset so it does not touch the corners.
+        let line = RECT {
+            left: l.list.left + row_pad,
+            top: l.region_row.bottom,
+            right: l.list.right - row_pad,
+            bottom: l.region_row.bottom + app.s(1).max(1),
         };
-        gdi::text(
-            dc,
-            &value,
-            RECT {
-                left: l.fps.left + pad,
-                top: l.fps.top + app.s(40),
-                right: l.fps.right - pad,
-                bottom: l.fps.bottom - app.s(8),
-            },
-            &app.mono_big,
-            ink,
-            DT_SINGLELINE | DT_NOPREFIX,
-            app.s(-1),
-        );
+        let hairline = CreateSolidBrush(theme::BORDER);
+        FillRect(dc, &line, hairline);
+        let _ = DeleteObject(hairline.into());
 
-        // ---- Roblox toggle -------------------------------------------------
-        let box_size = app.s(18);
+        row_label(dc, app, l.region_row, row_pad, "Region");
+        row_value(dc, app, l.region_row, row_pad, app.region.as_str());
+
+        row_label(dc, app, l.unlock_row, row_pad, "Unlock Roblox frame cap");
+
+        // The switch sits at the right of its row, where Windows puts it.
+        let knob = app.s(18);
+        let mid = (l.unlock_row.top + l.unlock_row.bottom) / 2;
         let check = RECT {
-            left: l.unlock.left,
-            top: l.unlock.top + app.s(3),
-            right: l.unlock.left + box_size,
-            bottom: l.unlock.top + app.s(3) + box_size,
+            left: l.unlock_row.right - row_pad - knob,
+            top: mid - knob / 2,
+            right: l.unlock_row.right - row_pad,
+            bottom: mid + knob / 2,
         };
         gdi::round_rect(
             dc,
@@ -623,9 +649,11 @@ unsafe fn paint(dc: HDC, client: RECT, app: &App) {
             Some(if app.unlock_cap {
                 theme::ACCENT
             } else {
-                theme::CARD
+                theme::BG
             }),
-            Some(if app.hot == Hot::Unlock {
+            Some(if app.unlock_cap {
+                theme::ACCENT
+            } else if app.hot == Hot::Unlock {
                 theme::BORDER_STRONG
             } else {
                 theme::BORDER
@@ -636,26 +664,12 @@ unsafe fn paint(dc: HDC, client: RECT, app: &App) {
                 dc,
                 "\u{2713}",
                 check,
-                &app.ui_button,
+                &app.ui_body,
                 theme::ON_ACCENT,
                 DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
                 0,
             );
         }
-        gdi::text(
-            dc,
-            "Unlock Roblox frame rate cap",
-            RECT {
-                left: check.right + app.s(10),
-                top: l.unlock.top,
-                right: l.unlock.right,
-                bottom: l.unlock.bottom,
-            },
-            &app.ui_body,
-            theme::TEXT,
-            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-            0,
-        );
 
         // ---- Account -------------------------------------------------------
         gdi::text(
@@ -668,4 +682,40 @@ unsafe fn paint(dc: HDC, client: RECT, app: &App) {
             0,
         );
     }
+}
+
+/// Left-hand label of a list row.
+fn row_label(dc: HDC, app: &App, row: RECT, pad: i32, value: &str) {
+    gdi::text(
+        dc,
+        value,
+        RECT {
+            left: row.left + pad,
+            top: row.top,
+            right: row.right - pad,
+            bottom: row.bottom,
+        },
+        &app.ui_body,
+        theme::TEXT,
+        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        0,
+    );
+}
+
+/// Right-aligned value of a list row.
+fn row_value(dc: HDC, app: &App, row: RECT, pad: i32, value: &str) {
+    gdi::text(
+        dc,
+        value,
+        RECT {
+            left: row.left + pad,
+            top: row.top,
+            right: row.right - pad,
+            bottom: row.bottom,
+        },
+        &app.ui_body,
+        theme::TEXT_SECONDARY,
+        DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX,
+        0,
+    );
 }

@@ -48,12 +48,21 @@ pub const ON_ACCENT: COLORREF = rgb(0x0A0A0A);
 
 /// Logical window size, scaled by DPI at creation.
 pub const WINDOW_W: i32 = 400;
-pub const WINDOW_H: i32 = 392;
+/// Shorter than it was: the frame counter is gone and the two remaining
+/// settings share one list, so the old height left a band of empty black.
+pub const WINDOW_H: i32 = 300;
 
 /// Gutter down both sides of the content.
 pub const PAD: i32 = 22;
-/// Card corner radius, matching the app's 18px.
-pub const RADIUS: i32 = 18;
+/// List corner radius.
+///
+/// 12, not the app's 18. That radius is drawn on cards several hundred
+/// pixels wide, where it reads as a soft edge. At this size the same number
+/// reads as a lozenge.
+pub const RADIUS: i32 = 12;
+
+/// Height of one row in the settings list.
+pub const ROW_H: i32 = 46;
 /// Button corner radius.
 pub const RADIUS_BTN: i32 = 12;
 

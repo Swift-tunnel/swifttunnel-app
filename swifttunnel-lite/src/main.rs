@@ -17,6 +17,7 @@
 
 use swifttunnel_core::auth::AuthManager;
 
+mod backdrop;
 mod engine;
 mod gdi;
 mod theme;
