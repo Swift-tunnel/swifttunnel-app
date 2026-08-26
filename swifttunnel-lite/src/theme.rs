@@ -1,0 +1,64 @@
+//! Colours, type and metrics taken from the running app rather than guessed.
+//!
+//! Values were read off the live UI at `localhost:1420` with
+//! `getComputedStyle`, so Lite matches the product instead of approximating it:
+//! base `rgb(6,6,6)`, text `rgb(245,245,245)`, cards `rgb(27,27,29)` with a
+//! `1px rgb(38,38,40)` border and an 18px radius, body type tracked slightly
+//! negative, and numeric readouts in monospace at 30px/600 with -1.2px
+//! tracking, green when healthy.
+//!
+//! The app's own face is Geist, which is a bundled web font and therefore not
+//! available to GDI. Segoe UI Variable is the next entry in the app's own font
+//! stack, so it is what Lite asks for.
+
+use windows::Win32::Foundation::COLORREF;
+
+/// Win32 wants 0x00BBGGRR; the design tokens are written #RRGGBB.
+const fn rgb(hex: u32) -> COLORREF {
+    let r = (hex >> 16) & 0xFF;
+    let g = (hex >> 8) & 0xFF;
+    let b = hex & 0xFF;
+    COLORREF(b << 16 | g << 8 | r)
+}
+
+/// `--color-bg-base`
+pub const BG: COLORREF = rgb(0x060606);
+/// `--color-bg-card`
+pub const CARD: COLORREF = rgb(0x1B1B1D);
+/// `--color-border-subtle`, the card outline
+pub const BORDER: COLORREF = rgb(0x262628);
+/// `--color-border-default`
+pub const BORDER_STRONG: COLORREF = rgb(0x34343A);
+/// Body text
+pub const TEXT: COLORREF = rgb(0xF5F5F5);
+/// The uppercase micro-labels, measured at rgb(90,90,90) in the running app.
+/// Deliberately dim: they are structure, not content.
+pub const TEXT_MUTED: COLORREF = rgb(0x5A5A5A);
+/// Secondary copy, a step brighter than the micro-labels.
+#[allow(dead_code)]
+pub const TEXT_SECONDARY: COLORREF = rgb(0x8A8A90);
+/// `--color-status-connected`
+pub const CONNECTED: COLORREF = rgb(0x34D39A);
+/// `--color-status-inactive`
+pub const INACTIVE: COLORREF = rgb(0x525252);
+/// Primary button fill: the app's accent is near-white on black.
+pub const ACCENT: COLORREF = rgb(0xF5F5F5);
+/// Text on the accent fill.
+pub const ON_ACCENT: COLORREF = rgb(0x0A0A0A);
+
+/// Logical window size, scaled by DPI at creation.
+pub const WINDOW_W: i32 = 400;
+pub const WINDOW_H: i32 = 392;
+
+/// Gutter down both sides of the content.
+pub const PAD: i32 = 22;
+/// Card corner radius, matching the app's 18px.
+pub const RADIUS: i32 = 18;
+/// Button corner radius.
+pub const RADIUS_BTN: i32 = 12;
+
+pub const FACE_UI: &str = "Segoe UI Variable Display";
+pub const FACE_UI_FALLBACK: &str = "Segoe UI";
+/// Stand-in for Geist Mono.
+pub const FACE_MONO: &str = "Cascadia Mono";
+pub const FACE_MONO_FALLBACK: &str = "Consolas";

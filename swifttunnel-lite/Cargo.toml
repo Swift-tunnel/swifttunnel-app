@@ -1,0 +1,56 @@
+[package]
+name = "swifttunnel-lite"
+version = "0.1.0"
+edition = "2024"
+authors = ["SwiftTunnel <support@swifttunnel.net>"]
+description = "SwiftTunnel Lite - tunnel, Roblox FPS unlock and an FPS readout, nothing else"
+publish = false
+
+# Deliberately no Tauri and no WebView2.
+#
+# Measured on the full app: WebView2 costs a fixed ~188MB (browser process, GPU
+# process, crashpad, two utility processes) before a single line of UI is
+# rendered, while the whole Rust backend is ~28MB. A stripped-down Tauri build
+# would therefore still land around 250MB, which is not a lightweight client by
+# any honest reading. A plain Win32 window keeps the footprint at roughly the
+# Rust side alone.
+#
+# Everything security-relevant is reused rather than reimplemented:
+# swifttunnel-core owns auth, relay ticket signing and the tunnel, and the
+# free-tier limit is enforced server-side by /api/vpn/relay-ticket. Lite gets
+# identical behaviour by going through the same code path.
+
+[[bin]]
+name = "swifttunnel-lite"
+path = "src/main.rs"
+
+[dependencies]
+swifttunnel-core = { path = "../swifttunnel-core" }
+
+# The window is painted by hand with GDI rather than built from stock Win32
+# controls. Stock controls cannot be themed to match the product: the first
+# attempt came out as a light-grey system dialog with clipped text. Painting it
+# gives exact control over the palette and typography, costs nothing at rest
+# (the window only draws on WM_PAINT, no compositor and no GPU process), and
+# needs no UI dependency beyond the Win32 bindings already in the workspace.
+
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+log = "0.4"
+simplelog = "0.12"
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_LibraryLoader",
+] }
+
+[build-dependencies]
+embed-manifest = "1"

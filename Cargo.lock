@@ -4420,6 +4420,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "swifttunnel-lite"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "embed-manifest",
+ "log",
+ "serde",
+ "serde_json",
+ "simplelog",
+ "swifttunnel-core",
+ "tokio",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "swifttunnel-msi-repair"
 version = "0.1.0"
 dependencies = [
