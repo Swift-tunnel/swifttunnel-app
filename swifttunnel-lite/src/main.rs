@@ -19,12 +19,17 @@ use swifttunnel_core::auth::AuthManager;
 
 mod backdrop;
 mod engine;
+mod fonts;
 mod gdi;
 mod theme;
 mod ui;
 
 fn main() {
     init_logging();
+
+    // Before any window or font is created: the whole UI is set in these, and
+    // GDI silently substitutes rather than failing if they are missing.
+    fonts::install();
 
     // Loads the stored session, so a user signed in to the full app is already
     // signed in here.

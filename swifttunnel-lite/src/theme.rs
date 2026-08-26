@@ -66,8 +66,9 @@ pub const ROW_H: i32 = 46;
 /// Button corner radius.
 pub const RADIUS_BTN: i32 = 12;
 
-pub const FACE_UI: &str = "Segoe UI Variable Display";
-pub const FACE_UI_FALLBACK: &str = "Segoe UI";
-/// Stand-in for Geist Mono.
-pub const FACE_MONO: &str = "Cascadia Mono";
+/// The product's own faces, embedded and registered by [`crate::fonts`].
+/// The fallbacks only matter if registration failed.
+pub const FACE_UI: &str = "Figtree";
+pub const FACE_UI_FALLBACK: &str = "Segoe UI Variable Display";
+pub const FACE_MONO: &str = "Azeret Mono";
 pub const FACE_MONO_FALLBACK: &str = "Consolas";
