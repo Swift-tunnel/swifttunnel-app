@@ -19,6 +19,16 @@ const HOSTLIST_NAME: &str = "roblox-hostlist.txt";
 /// where the censor RST-injects *after* the TLS ClientHello (Egypt-style SNI
 /// block), so the old TCP-connect probe reported success on a dead path.
 const ROBLOX_REACHABILITY_URL: &str = "https://www.roblox.com/";
+
+/// A second probe target on the asset CDN.
+///
+/// The website and the asset CDN are separate domains and get blocked
+/// separately, so proving one reachable says nothing about the other. That
+/// mattered the moment Country Ban started routing on this answer: confirming
+/// on `www.roblox.com` alone sent assets direct on evidence that never touched
+/// an asset host, and users reported assets still failing to load. Both must
+/// pass before we take traffic off the relay.
+const ROBLOX_ASSET_REACHABILITY_URL: &str = "https://assetdelivery.roblox.com/v1/assetId/1818";
 /// Per-mode wait for GoodbyeDPI/WinDivert to attach before probing.
 const GOODBYEDPI_MODE_STARTUP_WAIT: Duration = Duration::from_secs(2);
 /// Overall budget for the whole mode escalation. The relay is the primary
@@ -318,9 +328,28 @@ async fn roblox_https_reachable() -> bool {
     };
 
     // Any HTTP response (even an error status) means the TLS handshake completed
-    // through the DPI. An RST/timeout — what Egypt-style SNI blocking does after
-    // the ClientHello — surfaces here as a transport error, not a status code.
-    client.get(ROBLOX_REACHABILITY_URL).send().await.is_ok()
+    // through the DPI. An RST or timeout, which is what SNI blocking does after
+    // the ClientHello, surfaces here as a transport error rather than a status.
+    if client.get(ROBLOX_REACHABILITY_URL).send().await.is_err() {
+        return false;
+    }
+
+    // Assets are the bulk of the bytes and the thing users actually notice
+    // missing, so the CDN gets its own check. Confirming without it is what
+    // sent asset traffic direct into a block it could not get through.
+    if client
+        .get(ROBLOX_ASSET_REACHABILITY_URL)
+        .send()
+        .await
+        .is_err()
+    {
+        warn!(
+            "GoodbyeDPI got the site through but not the asset CDN; leaving Roblox traffic on the relay"
+        );
+        return false;
+    }
+
+    true
 }
 
 pub(crate) fn build_goodbyedpi_args(mode: u8, hostlist_path: &Path) -> Vec<String> {
