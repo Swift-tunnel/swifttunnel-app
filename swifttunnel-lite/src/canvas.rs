@@ -97,6 +97,27 @@ impl Canvas {
         self.blend(x, y, colour, cover);
     }
 
+    /// Copy the surface out, to be restored later.
+    ///
+    /// The atmosphere costs three radial gradients over every pixel, which
+    /// is square roots and powers per pixel per paint. Recomputing it on
+    /// every hover was the stutter: this lets it be computed once per size
+    /// and connection state and then memcpy'd, which is roughly two orders
+    /// of magnitude cheaper.
+    pub fn snapshot(&self) -> Vec<[f32; 3]> {
+        self.pixels.clone()
+    }
+
+    /// Put a snapshot back. Ignores one of the wrong size rather than
+    /// panicking, since a stale cache is a repaint, not a crash.
+    pub fn restore(&mut self, snapshot: &[[f32; 3]]) -> bool {
+        if snapshot.len() != self.pixels.len() {
+            return false;
+        }
+        self.pixels.copy_from_slice(snapshot);
+        true
+    }
+
     /// Write the surface out as BGRX, which is what a 32bpp `BI_RGB` DIB wants.
     pub fn write_bgrx(&self, out: &mut [u32]) {
         for (i, p) in self.pixels.iter().enumerate() {

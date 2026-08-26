@@ -53,10 +53,13 @@ pub const ACCENT: Rgba = Rgba::hex(0xF5F5F5);
 pub const ON_ACCENT: COLORREF = rgb(0x0A0A0A);
 
 /// Logical window size, scaled by DPI at creation.
-pub const WINDOW_W: i32 = 400;
+/// Wide rather than tall. 400x712 was a phone: a narrow portrait column
+/// with everything stacked down it. A desktop utility is landscape, so the
+/// tunnel sits on the left and the region list beside it.
+pub const WINDOW_W: i32 = 660;
 /// Shorter than it was: the frame counter is gone and the two remaining
 /// settings share one list, so the old height left a band of empty black.
-pub const WINDOW_H: i32 = 712;
+pub const WINDOW_H: i32 = 470;
 
 /// Gutter down both sides of the content.
 pub const PAD: i32 = 22;
@@ -86,7 +89,7 @@ pub const RADIUS_BTN: i32 = 12;
 
 /// The product's own faces, embedded and registered by [`crate::fonts`].
 /// The fallbacks only matter if registration failed.
-pub const FACE_UI: &str = "Figtree";
+pub const FACE_UI: &str = "Geist";
 pub const FACE_UI_FALLBACK: &str = "Segoe UI Variable Display";
-pub const FACE_MONO: &str = "Azeret Mono";
+pub const FACE_MONO: &str = "Geist Mono";
 pub const FACE_MONO_FALLBACK: &str = "Consolas";

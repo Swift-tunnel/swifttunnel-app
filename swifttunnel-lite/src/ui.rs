@@ -90,6 +90,9 @@ pub struct App {
     scale_den: i32,
 
     screen: Screen,
+    /// The atmosphere, already composited. Keyed by size and connection
+    /// state, which is everything it depends on.
+    backdrop: Option<(i32, i32, bool, Vec<[f32; 3]>)>,
     /// Snapshot of the fleet. Copied out of the engine on the timer so the
     /// paint path never waits on a lock.
     regions: Vec<crate::engine::RegionRow>,
@@ -182,27 +185,33 @@ fn layout(app: &App, client: RECT, rows: usize) -> Layout {
     // Segmented nav across the top, one third each.
     let nav_top = y(16);
     let nav_bottom = y(50);
-    let third = (right - left) / 3;
+    // Sized to its content rather than the window: three tabs spread across
+    // 660px read as a stretched toolbar rather than a control.
+    let third = app.s(330) / 3;
     let nav = [0, 1, 2].map(|i| RECT {
         left: left + third * i,
         top: nav_top,
-        right: if i == 2 {
-            right
-        } else {
-            left + third * (i + 1)
-        },
+        right: left + third * (i + 1),
         bottom: nav_bottom,
     });
 
     // The badge sits left of the headline, so both indent past it.
     let text_left = left + app.s(40);
 
+    // Connect is two columns; the other screens are one. A 660px window
+    // stacked into a single column is just a phone that happens to be wide.
+    let split = left + app.s(300);
+    let two_col = matches!(app.screen, Screen::Connect);
+    let content_right = if two_col { split } else { right };
+    let card_left = if two_col { split + app.s(22) } else { left };
+
     let row_h = match app.screen {
         Screen::Connect => app.s(theme::REGION_H),
         _ => app.s(theme::ROW_H),
     };
     let card_top = match app.screen {
-        Screen::Connect => y(328),
+        // Beside the tunnel column, aligned with its kicker.
+        Screen::Connect => y(96),
         _ => y(150),
     };
 
@@ -211,7 +220,7 @@ fn layout(app: &App, client: RECT, rows: usize) -> Layout {
         kicker: RECT {
             left,
             top: y(76),
-            right,
+            right: content_right,
             bottom: y(90),
         },
         badge: RECT {
@@ -223,48 +232,48 @@ fn layout(app: &App, client: RECT, rows: usize) -> Layout {
         headline: RECT {
             left: text_left,
             top: y(92),
-            right,
+            right: content_right,
             bottom: y(126),
         },
         sub: RECT {
             left: text_left,
             top: y(128),
-            right,
+            right: content_right,
             bottom: y(146),
         },
         connect: RECT {
             left,
             top: y(166),
-            right,
+            right: content_right,
             bottom: y(212),
         },
         stat_left: RECT {
             left,
-            top: y(232),
-            right: left + (right - left) / 2,
-            bottom: y(290),
+            top: y(240),
+            right: left + app.s(150),
+            bottom: y(298),
         },
         stat_right: RECT {
-            left: left + (right - left) / 2,
-            top: y(232),
-            right,
-            bottom: y(290),
+            left: left + app.s(150),
+            top: y(240),
+            right: content_right,
+            bottom: y(298),
         },
         list_label: RECT {
-            left,
-            top: y(306),
+            left: card_left,
+            top: y(76),
             right,
-            bottom: y(320),
+            bottom: y(90),
         },
         card: RECT {
-            left,
+            left: card_left,
             top: card_top,
             right,
             bottom: card_top + row_h * rows.max(1) as i32,
         },
         rows: (0..rows)
             .map(|i| RECT {
-                left,
+                left: card_left,
                 top: card_top + row_h * i as i32,
                 right,
                 bottom: card_top + row_h * (i as i32 + 1),
@@ -435,6 +444,7 @@ fn new_app(auth: AuthManager, dpi: i32) -> Box<App> {
         scale_num: theme::WINDOW_W,
         scale_den: theme::WINDOW_W,
         screen: Screen::Connect,
+        backdrop: None,
         regions: Vec::new(),
         best_ping: None,
         roblox_running: false,
@@ -778,7 +788,21 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
         // Pass one: every shape, composited in software because GDI cannot
         // antialias a rounded corner.
         let mut canvas = Canvas::new(w, h, theme::BG);
-        surface::paint_atmosphere(&mut canvas, app.connected);
+
+        // The atmosphere is three radial gradients over every pixel, which is
+        // square roots per pixel per paint. Recomputing it on every hover was
+        // the stutter, so it is composited once per size and connection state
+        // and copied back after that.
+        let stale = match &app.backdrop {
+            Some((cw, ch, live, pixels)) if *cw == w && *ch == h && *live == app.connected => {
+                !canvas.restore(pixels)
+            }
+            _ => true,
+        };
+        if stale {
+            surface::paint_atmosphere(&mut canvas, app.connected);
+            app.backdrop = Some((w, h, app.connected, canvas.snapshot()));
+        }
         draw_shapes(&mut canvas, app, &l);
         surface::blit(dc, &canvas);
 
