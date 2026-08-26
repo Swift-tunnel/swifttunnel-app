@@ -50,10 +50,28 @@ import { BoostTab } from "./components/boost/BoostTab";
 import { IS_LITE } from "./lib/lite";
 
 function tabComponent(tab: TabId) {
-  // Lite keeps the Roblox tuning without the per-game surface around it,
-  // so it renders the boost panel directly rather than the Games page.
-  if (IS_LITE && tab === "games") {
-    return <BoostTab />;
+  // Lite's own switch, and deliberately a separate one.
+  //
+  // IS_LITE is a build-time constant, so Rollup drops the branch below it
+  // entirely and then the imports it was the only user of become
+  // unreachable and fall out of the bundle. Sharing one switch with a
+  // couple of conditionals would keep every screen in the output, and a
+  // Lite build that still ships the pages it removed is not lighter in any
+  // sense that matters.
+  //
+  // The Roblox page is the boost panel directly rather than the Games page,
+  // which wraps it in a per-game library Lite has no use for.
+  if (IS_LITE) {
+    switch (tab) {
+      case "connect":
+        return <ConnectTab />;
+      case "games":
+        return <BoostTab />;
+      case "settings":
+        return <SettingsTab />;
+      default:
+        return <ConnectTab />;
+    }
   }
 
   switch (tab) {

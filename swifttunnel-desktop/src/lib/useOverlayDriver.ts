@@ -10,6 +10,7 @@ import {
   type OverlayPositionPayload,
 } from "../components/ingame/overlayBus";
 import type { Config, OverlayConfig, OverlayMetric } from "../lib/types";
+import { IS_LITE } from "./lite";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -97,6 +98,9 @@ export function useOverlayDriver() {
 
   // Push render snapshots.
   useEffect(() => {
+    // Lite ships no in-game overlay, so nothing here should run.
+    if (IS_LITE) return;
+
     if (!overlay.enabled) {
       void pushOverlayRender({
         enabled: false,
@@ -225,6 +229,9 @@ export function useOverlayDriver() {
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
   useEffect(() => {
+    // Lite ships no in-game overlay, so nothing here should run.
+    if (IS_LITE) return;
+
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<OverlayPositionPayload>(OVERLAY_POSITION_EVENT, (e) => {

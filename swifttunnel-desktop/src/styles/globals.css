@@ -884,3 +884,19 @@ html.app-idle *::after {
     transition: none;
   }
 }
+
+/* — SwiftTunnel Lite: no motion —
+ *
+ * Lite exists because the full app was measured taking roughly a third of a CPU
+ * core plus GPU time to animate a window, and players reported it as lost frames
+ * in game. Pausing on blur (see lib/animationIdle.ts) fixed that for the full
+ * app; Lite goes further and never starts.
+ *
+ * Animations only. Transitions are left alone: they are one-shot and short, and
+ * removing them makes every state change jump.
+ */
+html.lite *,
+html.lite *::before,
+html.lite *::after {
+  animation: none !important;
+}
