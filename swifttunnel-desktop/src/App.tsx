@@ -46,8 +46,16 @@ import {
   normalizeWindowState,
 } from "./lib/windowState";
 import type { TabId } from "./lib/types";
+import { BoostTab } from "./components/boost/BoostTab";
+import { IS_LITE } from "./lib/lite";
 
 function tabComponent(tab: TabId) {
+  // Lite keeps the Roblox tuning without the per-game surface around it,
+  // so it renders the boost panel directly rather than the Games page.
+  if (IS_LITE && tab === "games") {
+    return <BoostTab />;
+  }
+
   switch (tab) {
     case "home":
       return <HomeTab />;

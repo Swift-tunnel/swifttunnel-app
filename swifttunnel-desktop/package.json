@@ -11,7 +11,11 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "dev:lite": "vite --mode lite",
+    "build:lite": "tsc && vite build --mode lite",
+    "tauri:dev:lite": "tauri dev --config src-tauri/tauri.lite.conf.json",
+    "tauri:build:lite": "tauri build --config src-tauri/tauri.lite.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

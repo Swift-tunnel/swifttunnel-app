@@ -3,6 +3,23 @@ import type { AppSettings, TabId } from "../lib/types";
 import { settingsLoad, settingsSave } from "../lib/commands";
 import { DEFAULT_SETTINGS, mergeAppSettings } from "../lib/settings";
 import { reportError } from "../lib/errors";
+import { IS_LITE, LITE_DEFAULT_TAB, LITE_TABS } from "../lib/lite";
+
+/**
+ * Keep the restored tab inside what this build actually has.
+ *
+ * Both clients share one settings file, so a Lite install can be handed a
+ * persisted tab for a page it does not ship, and would otherwise open on a
+ * blank content area with nothing selected in the sidebar.
+ */
+function sanitiseTab(tab: TabId | undefined): TabId {
+  const fallback: TabId = IS_LITE ? LITE_DEFAULT_TAB : "home";
+  if (!tab) return fallback;
+  if (IS_LITE && !(LITE_TABS as readonly string[]).includes(tab)) {
+    return fallback;
+  }
+  return tab;
+}
 
 interface SettingsStore {
   settings: AppSettings;
@@ -18,7 +35,7 @@ interface SettingsStore {
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   settings: DEFAULT_SETTINGS,
-  activeTab: "home",
+  activeTab: IS_LITE ? LITE_DEFAULT_TAB : "home",
   isLoaded: false,
 
   load: async () => {
@@ -31,7 +48,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         settings.current_tab === "boost" ? "games" : settings.current_tab;
       set({
         settings,
-        activeTab: (persistedTab as TabId) || "home",
+        // A build that dropped a page must not restore it from a settings
+        // file written by the full app: both clients share one account and
+        // one settings store.
+        activeTab: sanitiseTab(persistedTab as TabId | undefined),
         isLoaded: true,
       });
     } catch (error) {
