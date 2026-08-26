@@ -3771,7 +3771,10 @@ mod tests {
             ranked("mumbai-03", "10.0.0.3", None),
         ]);
 
-        assert_eq!(order, vec!["mumbai-03".to_string(), "mumbai-04".to_string()]);
+        assert_eq!(
+            order,
+            vec!["mumbai-03".to_string(), "mumbai-04".to_string()]
+        );
     }
 
     #[test]
