@@ -4,50 +4,58 @@
 //! app. An earlier pass used Figtree and Azeret Mono because the Connect tab's
 //! own stylesheet imports them, but those are a local override on one screen;
 //! the face anyone recognises as SwiftTunnel, in the sidebar and every heading,
-//! is Geist. Getting that wrong is why the window kept reading as somebody
-//! else's app even after the colours and the layout were right.
+//! is Geist.
 //!
 //! Neither ships with Windows, and GDI substitutes a missing face rather than
 //! failing, so asking for a font that is not registered silently gets you Segoe
-//! UI and no warning.
+//! UI and no warning at all.
 //!
-//! The files are embedded with `include_bytes!` and registered from memory, so:
+//! # Real weights, not a variable font
 //!
-//! - Lite stays one self-contained exe, which is the whole point of it.
-//! - Nothing is installed system-wide, so uninstalling leaves no trace and no
-//!   elevation is needed to render text.
-//! - There is no download at startup and no dependency on Google Fonts being
-//!   reachable, which matters for users behind exactly the sort of censorship
-//!   this product exists to get around.
+//! Google's font repository only publishes Geist as a variable font, and GDI
+//! has no idea what a weight axis is: it registers the default instance and
+//! fakes anything heavier by smearing the outline, which is why an earlier
+//! attempt still looked wrong even with the right family. These are the static
+//! per-weight files the Google Fonts CSS API serves to clients that cannot take
+//! woff2, so 500, 600 and 700 are genuinely drawn rather than emboldened.
+//!
+//! Embedded with `include_bytes!` and registered from memory, so Lite stays one
+//! self-contained exe, needs no elevation to draw text, installs nothing, leaves
+//! nothing behind, and does not depend on Google Fonts being reachable, which
+//! matters for users behind exactly the censorship this product exists to beat.
 //!
 //! Both are SIL Open Font Licence, which permits embedding and redistribution.
-//! `resources/fonts` carries their licences alongside them.
-//!
-//! # Variable fonts
-//!
-//! Upstream only publishes these as variable fonts, and GDI has no idea what a
-//! weight axis is: it registers the default instance and fakes anything heavier
-//! by smearing the outline. So the type scale leans on size and colour for
-//! hierarchy rather than on weight, and asks for at most one step of emphasis.
 
 use std::ffi::c_void;
 
 use windows::Win32::Graphics::Gdi::AddFontMemResourceEx;
 
-/// Geist, the UI face.
-const GEIST: &[u8] = include_bytes!("../resources/fonts/Geist.ttf");
+/// Geist at the four weights the interface actually uses: body, nav and labels,
+/// emphasis, and the page headings.
+const GEIST: &[&[u8]] = &[
+    include_bytes!("../resources/fonts/Geist-400.ttf"),
+    include_bytes!("../resources/fonts/Geist-500.ttf"),
+    include_bytes!("../resources/fonts/Geist-600.ttf"),
+    include_bytes!("../resources/fonts/Geist-700.ttf"),
+];
 
-/// Geist Mono, for every measurement.
-const GEIST_MONO: &[u8] = include_bytes!("../resources/fonts/GeistMono.ttf");
+/// Geist Mono, for every measurement. Two weights is all the numbers need.
+const GEIST_MONO: &[&[u8]] = &[
+    include_bytes!("../resources/fonts/GeistMono-400.ttf"),
+    include_bytes!("../resources/fonts/GeistMono-500.ttf"),
+];
 
-/// Register both faces for this process.
+/// Register every face for this process.
 ///
 /// Call once, before any font is created. Failures are deliberately silent: a
 /// face that does not register falls back to the stack in `theme`, which is
 /// worse looking but perfectly usable, and a window that refuses to open
 /// because a font did not load would be a far worse outcome.
 pub fn install() {
-    let loaded = register(GEIST) + register(GEIST_MONO);
+    let mut loaded = 0;
+    for bytes in GEIST.iter().chain(GEIST_MONO.iter()) {
+        loaded += register(bytes);
+    }
     log::info!("registered {loaded} embedded font faces");
 }
 

@@ -144,21 +144,26 @@ impl App {
 /// Vertical layout, in logical pixels, resolved against the client width.
 /// Where everything sits.
 ///
-/// Deliberately not a miniature of the full app. The previous version stacked
-/// three floating cards down a 400px window, which is a shape designed for a
-/// 1200px one and reads as a bad copy at this size. This is what Windows does
-/// for a small utility: a status line, one primary action, and the settings
-/// gathered into a single list.
-/// Where everything sits.
-///
-/// Heavy inspiration from the full app's Connect tab, reduced to what fits a
-/// utility window: the kicker and big region name, one primary action, the
-/// measurements in mono, and the region list with its badges, bars and round
-/// trips. What is not here is everything that makes the full app the full app.
+/// The full app's shell, reduced to three pages: a fixed sidebar carrying the
+/// wordmark, sectioned navigation and a session card, a header strip naming
+/// the page, and the content column beside them. An earlier pass used a
+/// segmented tab bar, which is a perfectly good control and looks nothing
+/// whatsoever like SwiftTunnel.
 struct Layout {
+    sidebar: RECT,
+    logo_mark: RECT,
+    logo_text: RECT,
+    /// TUNNEL / PERFORMANCE / SYSTEM.
+    sections: [RECT; 3],
     nav: [RECT; 3],
+    side_status: RECT,
+    side_account: RECT,
 
-    // Connect
+    header: RECT,
+    title: RECT,
+    subtitle: RECT,
+    pill: RECT,
+
     kicker: RECT,
     badge: RECT,
     headline: RECT,
@@ -168,102 +173,159 @@ struct Layout {
     stat_right: RECT,
     list_label: RECT,
 
-    /// The card the rows live in, on every screen.
     card: RECT,
-    /// One rect per row, whatever the screen's rows happen to be.
     rows: Vec<RECT>,
-
-    footer: RECT,
 }
 
 fn layout(app: &App, client: RECT, rows: usize) -> Layout {
-    let pad = app.s(theme::PAD);
-    let left = client.left + pad;
-    let right = client.right - pad;
     let y = |v: i32| client.top + app.s(v);
+    let x = |v: i32| client.left + app.s(v);
+    let right = client.right - app.s(24);
+    let bottom = client.bottom;
 
-    // Segmented nav across the top, one third each.
-    let nav_top = y(16);
-    let nav_bottom = y(50);
-    // Sized to its content rather than the window: three tabs spread across
-    // 660px read as a stretched toolbar rather than a control.
-    let third = app.s(330) / 3;
-    let nav = [0, 1, 2].map(|i| RECT {
-        left: left + third * i,
-        top: nav_top,
-        right: left + third * (i + 1),
-        bottom: nav_bottom,
-    });
+    let side_w = app.s(theme::SIDEBAR_W);
+    let content_left = client.left + side_w + app.s(24);
 
-    // The badge sits left of the headline, so both indent past it.
-    let text_left = left + app.s(40);
+    // Sidebar rows: a section label, then its one page.
+    let mut sections = [RECT::default(); 3];
+    let mut nav = [RECT::default(); 3];
+    for i in 0..3 {
+        let top = y(84 + 68 * i as i32);
+        sections[i] = RECT {
+            left: x(20),
+            top,
+            right: side_w - app.s(12),
+            bottom: top + app.s(12),
+        };
+        nav[i] = RECT {
+            left: x(12),
+            top: top + app.s(16),
+            right: side_w - app.s(12),
+            bottom: top + app.s(52),
+        };
+    }
 
-    // Connect is two columns; the other screens are one. A 660px window
-    // stacked into a single column is just a phone that happens to be wide.
-    let split = left + app.s(300);
+    // Connect is two columns, the others one. The fleet needs its own column
+    // or the page turns back into a single scrolling stack.
     let two_col = matches!(app.screen, Screen::Connect);
-    let content_right = if two_col { split } else { right };
-    let card_left = if two_col { split + app.s(22) } else { left };
-
-    let row_h = match app.screen {
-        Screen::Connect => app.s(theme::REGION_H),
-        _ => app.s(theme::ROW_H),
+    let col_w = app.s(300);
+    let content_right = if two_col { content_left + col_w } else { right };
+    let card_left = if two_col {
+        content_left + col_w + app.s(28)
+    } else {
+        content_left
     };
-    let card_top = match app.screen {
-        // Beside the tunnel column, aligned with its kicker.
-        Screen::Connect => y(96),
-        _ => y(150),
+    let row_h = if two_col {
+        app.s(theme::REGION_H)
+    } else {
+        app.s(theme::ROW_H)
     };
+    let card_top = if two_col { y(124) } else { y(190) };
 
     Layout {
+        sidebar: RECT {
+            left: client.left,
+            top: client.top,
+            right: client.left + side_w,
+            bottom,
+        },
+        logo_mark: RECT {
+            left: x(20),
+            top: y(24),
+            right: x(48),
+            bottom: y(52),
+        },
+        logo_text: RECT {
+            left: x(58),
+            top: y(26),
+            right: side_w - app.s(12),
+            bottom: y(50),
+        },
+        sections,
         nav,
+        side_status: RECT {
+            left: x(12),
+            top: bottom - app.s(112),
+            right: side_w - app.s(12),
+            bottom: bottom - app.s(60),
+        },
+        side_account: RECT {
+            left: x(12),
+            top: bottom - app.s(50),
+            right: side_w - app.s(12),
+            bottom: bottom - app.s(18),
+        },
+        header: RECT {
+            left: client.left + side_w,
+            top: client.top,
+            right: client.right,
+            bottom: y(theme::HEADER_H),
+        },
+        title: RECT {
+            left: content_left,
+            top: y(18),
+            right: right - app.s(170),
+            bottom: y(46),
+        },
+        subtitle: RECT {
+            left: content_left,
+            top: y(47),
+            right: right - app.s(170),
+            bottom: y(64),
+        },
+        pill: RECT {
+            left: right - app.s(158),
+            top: y(26),
+            right,
+            bottom: y(56),
+        },
         kicker: RECT {
-            left,
-            top: y(76),
+            left: content_left,
+            top: y(108),
             right: content_right,
-            bottom: y(90),
+            bottom: y(122),
         },
         badge: RECT {
-            left,
-            top: y(98),
-            right: left + app.s(32),
-            bottom: y(120),
+            left: content_left,
+            top: y(130),
+            right: content_left + app.s(32),
+            bottom: y(152),
         },
         headline: RECT {
-            left: text_left,
-            top: y(92),
+            left: content_left + app.s(42),
+            top: y(124),
             right: content_right,
-            bottom: y(126),
+            bottom: y(158),
         },
         sub: RECT {
-            left: text_left,
-            top: y(128),
+            left: content_left + app.s(42),
+            top: y(160),
             right: content_right,
-            bottom: y(146),
+            bottom: y(178),
         },
         connect: RECT {
-            left,
-            top: y(166),
+            left: content_left,
+            top: y(196),
             right: content_right,
-            bottom: y(212),
+            bottom: y(242),
         },
         stat_left: RECT {
-            left,
-            top: y(240),
-            right: left + app.s(150),
-            bottom: y(298),
+            left: content_left,
+            top: y(268),
+            right: content_left + app.s(150),
+            bottom: y(326),
         },
         stat_right: RECT {
-            left: left + app.s(150),
-            top: y(240),
+            left: content_left + app.s(150),
+            top: y(268),
             right: content_right,
-            bottom: y(298),
+            bottom: y(326),
         },
         list_label: RECT {
             left: card_left,
-            top: y(76),
+            top: y(108),
             right,
-            bottom: y(90),
+            bottom: y(122),
         },
         card: RECT {
             left: card_left,
@@ -279,12 +341,6 @@ fn layout(app: &App, client: RECT, rows: usize) -> Layout {
                 bottom: card_top + row_h * (i as i32 + 1),
             })
             .collect(),
-        footer: RECT {
-            left,
-            top: y(theme::WINDOW_H - 40),
-            right,
-            bottom: y(theme::WINDOW_H - 22),
-        },
     }
 }
 
@@ -292,12 +348,13 @@ fn layout(app: &App, client: RECT, rows: usize) -> Layout {
 fn row_count(app: &App) -> usize {
     match app.screen {
         Screen::Connect => app.regions.len().max(1),
-        // Unlock frame cap, then the cap itself.
+        // Unlock the frame cap, then the cap itself.
         Screen::Roblox => 2,
         // Version, then channel.
         Screen::Settings => 2,
     }
 }
+
 /// What is under the pointer.
 ///
 /// One function for both hover and click so the two can never disagree about
@@ -332,7 +389,6 @@ fn hit_test(app: &App, l: &Layout, x: i32, y: i32) -> Hot {
 
     Hot::None
 }
-
 fn contains(r: RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
@@ -774,8 +830,8 @@ unsafe fn paint_buffered(hwnd: HWND, dc: HDC, app: &mut App) {
 
 unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
     // Nothing here is unsafe any more: shapes go through the canvas and the
-    // blit and text helpers own their own unsafety. Kept as an unsafe fn so the
-    // call sites, which hold raw device contexts, still read as such.
+    // blit and text helpers own their own unsafety. Kept as an unsafe fn so
+    // the call sites, which hold raw device contexts, still read as such.
     {
         let w = client.right - client.left;
         let h = client.bottom - client.top;
@@ -785,8 +841,6 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
 
         let l = layout(app, client, row_count(app));
 
-        // Pass one: every shape, composited in software because GDI cannot
-        // antialias a rounded corner.
         let mut canvas = Canvas::new(w, h, theme::BG);
 
         // The atmosphere is three radial gradients over every pixel, which is
@@ -803,11 +857,9 @@ unsafe fn paint(dc: HDC, client: RECT, app: &mut App) {
             surface::paint_atmosphere(&mut canvas, app.connected);
             app.backdrop = Some((w, h, app.connected, canvas.snapshot()));
         }
+
         draw_shapes(&mut canvas, app, &l);
         surface::blit(dc, &canvas);
-
-        // Pass two: text straight onto the result. GDI's rasteriser is the
-        // good half of GDI, and it already has the embedded faces.
         draw_text(dc, app, &l);
     }
 }
@@ -835,49 +887,136 @@ fn latency_ink(ms: Option<u32>) -> COLORREF {
     }
 }
 
+/// Title and one line of explanation, per page, the way the header reads in
+/// the full app.
+fn page_heading(screen: Screen) -> (&'static str, &'static str) {
+    match screen {
+        Screen::Connect => ("Connect", "Route game traffic through the fastest relay"),
+        Screen::Roblox => ("Roblox", "Frame cap and launch settings"),
+        Screen::Settings => ("Settings", "Account, version and updates"),
+    }
+}
+
+/// The sidebar's section headings, one page each.
+const SECTIONS: [&str; 3] = ["tunnel", "performance", "system"];
+
 // ---------------------------------------------------------------------------
 // Shapes
 // ---------------------------------------------------------------------------
 
 fn draw_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
-    draw_nav_shapes(canvas, app, l);
+    draw_shell_shapes(canvas, app, l);
 
     match app.screen {
         Screen::Connect => draw_connect_shapes(canvas, app, l),
         Screen::Roblox => draw_roblox_shapes(canvas, app, l),
-        Screen::Settings => draw_settings_shapes(canvas, app, l),
+        Screen::Settings => draw_card(canvas, app, l),
     }
 }
 
-fn draw_nav_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
-    // The track behind the three segments.
-    let track = RECT {
-        left: l.nav[0].left,
-        top: l.nav[0].top,
-        right: l.nav[2].right,
-        bottom: l.nav[0].bottom,
-    };
-    canvas.fill_round_rect(rect_of(track, app.s(10)), theme::CARD);
+fn draw_shell_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
+    // Sidebar plate, square rather than rounded: it runs the full height of
+    // the window and a radius would read as a floating panel.
+    canvas.fill_round_rect(rect_of(l.sidebar, 0), theme::SIDEBAR);
+    canvas.fill_round_rect(
+        RoundRect::new(l.sidebar.right - 1, l.sidebar.top, 1, l.sidebar.bottom, 0),
+        theme::BORDER,
+    );
 
-    // The selected segment, inset so the track reads as a groove.
+    // Wordmark.
+    canvas.fill_round_rect(rect_of(l.logo_mark, app.s(8)), theme::ACCENT);
+
+    // The selected page.
     let index = Screen::ALL
         .iter()
         .position(|s| *s == app.screen)
         .unwrap_or(0);
-    let selected = rect_of(l.nav[index], app.s(10)).inset(app.s(3) as f32);
-    canvas.fill_round_rect(selected, theme::BG);
-    canvas.stroke_round_rect(selected.inset(0.5), theme::BORDER, 1.0);
+    for (i, item) in l.nav.iter().enumerate() {
+        let shape = rect_of(*item, app.s(9));
+        if i == index {
+            canvas.fill_round_rect(shape, theme::BG_HOVER);
+        } else if app.hot == Hot::Nav(i as u8) {
+            canvas.fill_round_rect(shape, theme::CARD);
+        }
+    }
+
+    // Session card at the foot of the sidebar.
+    let status = rect_of(l.side_status, app.s(10));
+    canvas.fill_round_rect(status, theme::BG);
+    canvas.stroke_round_rect(status.inset(0.5), theme::BORDER, 1.0);
+    canvas.fill_circle(
+        l.side_status.left as f32 + app.s(14) as f32,
+        l.side_status.top as f32 + app.s(17) as f32,
+        app.s(3) as f32,
+        if app.connected {
+            theme::CONNECTED
+        } else {
+            theme::INACTIVE
+        },
+    );
+
+    // Avatar.
+    canvas.fill_circle(
+        l.side_account.left as f32 + app.s(13) as f32,
+        (l.side_account.top + l.side_account.bottom) as f32 / 2.0,
+        app.s(13) as f32,
+        theme::CARD,
+    );
+
+    // Header hairline, so the content scrolls under something rather than
+    // floating free.
+    canvas.fill_round_rect(
+        RoundRect::new(
+            l.header.left,
+            l.header.bottom - 1,
+            l.header.right - l.header.left,
+            1,
+            0,
+        ),
+        theme::BORDER,
+    );
+
+    // Connection pill.
+    let pill = rect_of(l.pill, (l.pill.bottom - l.pill.top) / 2);
+    canvas.fill_round_rect(pill, theme::CARD);
+    canvas.stroke_round_rect(pill.inset(0.5), theme::BORDER, 1.0);
+    canvas.fill_circle(
+        l.pill.left as f32 + app.s(16) as f32,
+        (l.pill.top + l.pill.bottom) as f32 / 2.0,
+        app.s(3) as f32,
+        if app.connected {
+            theme::CONNECTED
+        } else {
+            theme::INACTIVE
+        },
+    );
+}
+
+fn draw_card(canvas: &mut Canvas, app: &App, l: &Layout) {
+    let card = rect_of(l.card, app.s(theme::RADIUS));
+    canvas.fill_round_rect(card, theme::CARD);
+    canvas.stroke_round_rect(card.inset(0.5), theme::BORDER, 1.0);
+
+    let pad = app.s(16) as f32;
+    for row in l.rows.iter().skip(1) {
+        canvas.fill_round_rect(
+            RoundRect {
+                x: card.x + pad,
+                y: row.top as f32,
+                w: card.w - pad * 2.0,
+                h: 1.0,
+                radius: 0.0,
+            },
+            theme::BORDER,
+        );
+    }
 }
 
 fn draw_connect_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
-    // Country badge beside the headline.
     let badge = rect_of(l.badge, app.s(6));
     canvas.fill_round_rect(badge, theme::CARD);
     canvas.stroke_round_rect(badge.inset(0.5), theme::BORDER, 1.0);
 
-    // Primary action. The shadow is what lifts it off the page the way the
-    // app's does; the connected state drops to a plain card because the
-    // primary action is done.
     let button = rect_of(l.connect, app.s(theme::RADIUS_BTN));
     let hot = app.hot == Hot::Connect;
     if app.connected {
@@ -908,12 +1047,9 @@ fn draw_connect_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
         );
     }
 
-    // The region list.
-    let card = rect_of(l.card, app.s(theme::RADIUS));
-    canvas.fill_round_rect(card, theme::CARD);
-    canvas.stroke_round_rect(card.inset(0.5), theme::BORDER, 1.0);
+    draw_card(canvas, app, l);
 
-    let pad = app.s(14) as f32;
+    let card = rect_of(l.card, app.s(theme::RADIUS));
     for (i, row) in l.rows.iter().enumerate() {
         let Some(region) = app.regions.get(i) else {
             continue;
@@ -923,26 +1059,26 @@ fn draw_connect_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
             let mut hover = rect_of(*row, app.s(8));
             hover.x += 4.0;
             hover.w -= 8.0;
-            canvas.fill_round_rect(hover, theme::BORDER);
+            canvas.fill_round_rect(hover, theme::BG_HOVER);
         }
 
-        // Hairline above every row but the first.
-        if i > 0 {
+        // Selected page marker down the left edge, the way the app marks the
+        // region you are pinned to.
+        if region.id == app.region {
             canvas.fill_round_rect(
-                RoundRect {
-                    x: card.x + pad,
-                    y: row.top as f32,
-                    w: card.w - pad * 2.0,
-                    h: 1.0,
-                    radius: 0.0,
-                },
-                theme::BORDER,
+                RoundRect::new(
+                    row.left + app.s(4),
+                    row.top + app.s(10),
+                    app.s(2),
+                    row.bottom - row.top - app.s(20),
+                    1,
+                ),
+                theme::ACCENT,
             );
         }
 
-        // Country badge.
         let badge = RoundRect::new(
-            row.left + app.s(14),
+            row.left + app.s(16),
             (row.top + row.bottom) / 2 - app.s(10),
             app.s(26),
             app.s(20),
@@ -951,24 +1087,22 @@ fn draw_connect_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
         canvas.fill_round_rect(badge, theme::BG);
         canvas.stroke_round_rect(badge.inset(0.5), theme::BORDER_STRONG, 1.0);
 
-        // Signal bars, rising left to right.
         let bars = region.bars();
         let bar_w = app.s(3);
         let gap = app.s(2);
-        let base = row.right - app.s(74);
-        let bottom = (row.top + row.bottom) / 2 + app.s(6);
+        let base = row.right - app.s(76);
+        let foot = (row.top + row.bottom) / 2 + app.s(6);
         for b in 0..3u8 {
             let height = app.s(4 + 3 * b as i32);
-            let lit = b < bars;
             canvas.fill_round_rect(
                 RoundRect::new(
                     base + (bar_w + gap) * b as i32,
-                    bottom - height,
+                    foot - height,
                     bar_w,
                     height,
                     1,
                 ),
-                if lit {
+                if b < bars {
                     latency_paint(region.ping_ms)
                 } else {
                     theme::BORDER_STRONG
@@ -976,92 +1110,58 @@ fn draw_connect_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
             );
         }
     }
+    let _ = card;
 }
 
 fn draw_roblox_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
-    let card = rect_of(l.card, app.s(theme::RADIUS));
-    canvas.fill_round_rect(card, theme::CARD);
-    canvas.stroke_round_rect(card.inset(0.5), theme::BORDER, 1.0);
+    draw_card(canvas, app, l);
 
-    let pad = app.s(16) as f32;
-    if let Some(second) = l.rows.get(1) {
-        canvas.fill_round_rect(
-            RoundRect {
-                x: card.x + pad,
-                y: second.top as f32,
-                w: card.w - pad * 2.0,
-                h: 1.0,
-                radius: 0.0,
-            },
-            theme::BORDER,
-        );
-    }
+    let Some(row) = l.rows.first() else {
+        return;
+    };
 
-    // Pill switch for the frame cap, in the app's own idiom rather than a
-    // checkbox.
-    if let Some(row) = l.rows.first() {
-        let w = app.s(38);
-        let h = app.s(22);
-        let mid = (row.top + row.bottom) / 2;
-        let track = RoundRect::new(row.right - app.s(16) - w, mid - h / 2, w, h, h / 2);
+    // Pill switch, in the app's idiom rather than a checkbox.
+    let w = app.s(38);
+    let h = app.s(22);
+    let mid = (row.top + row.bottom) / 2;
+    let track = RoundRect::new(row.right - app.s(16) - w, mid - h / 2, w, h, h / 2);
 
-        canvas.fill_round_rect(
-            track,
-            if app.unlock_cap {
-                theme::ACCENT
-            } else {
-                theme::BG
-            },
-        );
-        if !app.unlock_cap {
-            canvas.stroke_round_rect(
-                track.inset(0.5),
-                if app.hot == Hot::Unlock {
-                    theme::BORDER_STRONG
-                } else {
-                    theme::BORDER
-                },
-                1.0,
-            );
-        }
-
-        let knob_r = (h as f32 / 2.0) - app.s(3) as f32;
-        let knob_x = if app.unlock_cap {
-            track.x + track.w - knob_r - app.s(3) as f32
+    canvas.fill_round_rect(
+        track,
+        if app.unlock_cap {
+            theme::ACCENT
         } else {
-            track.x + knob_r + app.s(3) as f32
-        };
-        canvas.fill_circle(
-            knob_x,
-            mid as f32,
-            knob_r,
-            if app.unlock_cap {
-                Rgba::hex(0x0A0A0A)
-            } else {
+            theme::BG
+        },
+    );
+    if !app.unlock_cap {
+        canvas.stroke_round_rect(
+            track.inset(0.5),
+            if app.hot == Hot::Unlock {
                 theme::BORDER_STRONG
+            } else {
+                theme::BORDER
             },
+            1.0,
         );
     }
-}
 
-fn draw_settings_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
-    let card = rect_of(l.card, app.s(theme::RADIUS));
-    canvas.fill_round_rect(card, theme::CARD);
-    canvas.stroke_round_rect(card.inset(0.5), theme::BORDER, 1.0);
-
-    let pad = app.s(16) as f32;
-    if let Some(second) = l.rows.get(1) {
-        canvas.fill_round_rect(
-            RoundRect {
-                x: card.x + pad,
-                y: second.top as f32,
-                w: card.w - pad * 2.0,
-                h: 1.0,
-                radius: 0.0,
-            },
-            theme::BORDER,
-        );
-    }
+    let knob_r = (h as f32 / 2.0) - app.s(3) as f32;
+    let knob_x = if app.unlock_cap {
+        track.x + track.w - knob_r - app.s(3) as f32
+    } else {
+        track.x + knob_r + app.s(3) as f32
+    };
+    canvas.fill_circle(
+        knob_x,
+        mid as f32,
+        knob_r,
+        if app.unlock_cap {
+            Rgba::hex(0x0A0A0A)
+        } else {
+            theme::BORDER_STRONG
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1069,37 +1169,127 @@ fn draw_settings_shapes(canvas: &mut Canvas, app: &App, l: &Layout) {
 // ---------------------------------------------------------------------------
 
 fn draw_text(dc: HDC, app: &App, l: &Layout) {
-    for (i, screen) in Screen::ALL.iter().enumerate() {
-        let selected = *screen == app.screen;
-        gdi::text(
-            dc,
-            screen.label(),
-            l.nav[i],
-            &app.ui_semi,
-            if selected {
-                theme::TEXT
-            } else {
-                theme::TEXT_MUTED
-            },
-            DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
-            0,
-        );
-    }
+    draw_shell_text(dc, app, l);
 
     match app.screen {
         Screen::Connect => draw_connect_text(dc, app, l),
         Screen::Roblox => draw_roblox_text(dc, app, l),
         Screen::Settings => draw_settings_text(dc, app, l),
     }
+}
 
+fn draw_shell_text(dc: HDC, app: &App, l: &Layout) {
     gdi::text(
         dc,
-        &app.account(),
-        l.footer,
+        "SwiftTunnel",
+        l.logo_text,
+        &app.ui_semi,
+        theme::TEXT,
+        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+        0,
+    );
+
+    for (i, screen) in Screen::ALL.iter().enumerate() {
+        kicker(dc, app, SECTIONS[i], l.sections[i]);
+
+        let selected = *screen == app.screen;
+        gdi::text(
+            dc,
+            screen.label(),
+            RECT {
+                left: l.nav[i].left + app.s(14),
+                ..l.nav[i]
+            },
+            &app.ui_semi,
+            if selected {
+                theme::TEXT
+            } else {
+                theme::TEXT_SECONDARY
+            },
+            DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+            0,
+        );
+    }
+
+    kicker(
+        dc,
+        app,
+        if app.connected {
+            "connected"
+        } else {
+            "not connected"
+        },
+        RECT {
+            left: l.side_status.left + app.s(24),
+            top: l.side_status.top + app.s(11),
+            right: l.side_status.right - app.s(8),
+            bottom: l.side_status.top + app.s(25),
+        },
+    );
+    gdi::text(
+        dc,
+        if app.connected {
+            "Session live"
+        } else {
+            "No active session"
+        },
+        RECT {
+            left: l.side_status.left + app.s(24),
+            top: l.side_status.top + app.s(27),
+            right: l.side_status.right - app.s(8),
+            bottom: l.side_status.bottom - app.s(6),
+        },
         &app.ui_body,
         theme::TEXT_MUTED,
         DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         0,
+    );
+
+    gdi::text(
+        dc,
+        &app.account(),
+        RECT {
+            left: l.side_account.left + app.s(32),
+            ..l.side_account
+        },
+        &app.ui_body,
+        theme::TEXT_MUTED,
+        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
+        0,
+    );
+
+    let (title, subtitle) = page_heading(app.screen);
+    gdi::text(
+        dc,
+        title,
+        l.title,
+        &app.ui_display,
+        theme::TEXT,
+        DT_SINGLELINE | DT_NOPREFIX,
+        0,
+    );
+    gdi::text(
+        dc,
+        subtitle,
+        l.subtitle,
+        &app.ui_body,
+        theme::TEXT_MUTED,
+        DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        0,
+    );
+
+    kicker(
+        dc,
+        app,
+        if app.connected {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        RECT {
+            left: l.pill.left + app.s(26),
+            ..l.pill
+        },
     );
 }
 
@@ -1111,7 +1301,7 @@ fn kicker(dc: HDC, app: &App, text: &str, rect: RECT) {
         rect,
         &app.ui_micro,
         theme::TEXT_MUTED,
-        DT_SINGLELINE | DT_NOPREFIX,
+        DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
         app.s(2),
     );
 }
@@ -1129,7 +1319,6 @@ fn draw_connect_text(dc: HDC, app: &App, l: &Layout) {
         },
         l.kicker,
     );
-
     gdi::text(
         dc,
         selected.map(|r| r.country.as_str()).unwrap_or("ST"),
@@ -1139,7 +1328,6 @@ fn draw_connect_text(dc: HDC, app: &App, l: &Layout) {
         DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
         app.s(1),
     );
-
     gdi::text(
         dc,
         selected.map(|r| r.name.as_str()).unwrap_or("Auto"),
@@ -1184,8 +1372,7 @@ fn draw_connect_text(dc: HDC, app: &App, l: &Layout) {
         0,
     );
 
-    // Measurements, in mono, the way the app reports every number.
-    let ping = selected.and_then(|r| r.ping_ms).or_else(|| app.best_ping);
+    let ping = selected.and_then(|r| r.ping_ms).or(app.best_ping);
     stat(
         dc,
         app,
@@ -1220,7 +1407,7 @@ fn draw_connect_text(dc: HDC, app: &App, l: &Layout) {
         let Some(region) = app.regions.get(i) else {
             gdi::text(
                 dc,
-                "Loading relays...",
+                "Finding relays...",
                 *row,
                 &app.ui_body,
                 theme::TEXT_MUTED,
@@ -1230,30 +1417,26 @@ fn draw_connect_text(dc: HDC, app: &App, l: &Layout) {
             continue;
         };
 
-        let badge = RECT {
-            left: row.left + app.s(14),
-            top: row.top,
-            right: row.left + app.s(40),
-            bottom: row.bottom,
-        };
         gdi::text(
             dc,
             &region.country,
-            badge,
+            RECT {
+                left: row.left + app.s(16),
+                right: row.left + app.s(42),
+                ..*row
+            },
             &app.ui_micro,
             theme::TEXT_MUTED,
             DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
             app.s(1),
         );
-
         gdi::text(
             dc,
             &region.name,
             RECT {
-                left: row.left + app.s(50),
-                top: row.top,
-                right: row.right - app.s(80),
-                bottom: row.bottom,
+                left: row.left + app.s(52),
+                right: row.right - app.s(84),
+                ..*row
             },
             &app.ui_semi,
             if region.id == app.region {
@@ -1264,7 +1447,6 @@ fn draw_connect_text(dc: HDC, app: &App, l: &Layout) {
             DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS,
             0,
         );
-
         gdi::text(
             dc,
             &region
@@ -1272,10 +1454,9 @@ fn draw_connect_text(dc: HDC, app: &App, l: &Layout) {
                 .map(|v| format!("{v} ms"))
                 .unwrap_or_else(|| "--".to_string()),
             RECT {
-                left: row.right - app.s(62),
-                top: row.top,
-                right: row.right - app.s(14),
-                bottom: row.bottom,
+                left: row.right - app.s(64),
+                right: row.right - app.s(16),
+                ..*row
             },
             &app.mono_small,
             latency_ink(region.ping_ms),
@@ -1300,7 +1481,7 @@ fn stat(dc: HDC, app: &App, rect: RECT, label: &str, value: &str, ink: COLORREF)
         dc,
         value,
         RECT {
-            top: rect.top + app.s(18),
+            top: rect.top + app.s(20),
             ..rect
         },
         &app.mono_big,
@@ -1311,8 +1492,7 @@ fn stat(dc: HDC, app: &App, rect: RECT, label: &str, value: &str, ink: COLORREF)
 }
 
 fn draw_roblox_text(dc: HDC, app: &App, l: &Layout) {
-    kicker(dc, app, "roblox", l.kicker);
-
+    kicker(dc, app, "game", l.kicker);
     gdi::text(
         dc,
         if app.roblox_running {
@@ -1320,7 +1500,10 @@ fn draw_roblox_text(dc: HDC, app: &App, l: &Layout) {
         } else {
             "Not running"
         },
-        l.headline,
+        RECT {
+            left: l.kicker.left,
+            ..l.headline
+        },
         &app.ui_display,
         theme::TEXT,
         DT_SINGLELINE | DT_NOPREFIX,
@@ -1333,7 +1516,10 @@ fn draw_roblox_text(dc: HDC, app: &App, l: &Layout) {
         } else {
             "start Roblox to see it here"
         },
-        l.sub,
+        RECT {
+            left: l.kicker.left,
+            ..l.sub
+        },
         &app.ui_body,
         theme::TEXT_MUTED,
         DT_SINGLELINE | DT_NOPREFIX,
@@ -1377,10 +1563,8 @@ fn draw_roblox_text(dc: HDC, app: &App, l: &Layout) {
             dc,
             &app.frame_cap.to_string(),
             RECT {
-                left: row.left,
-                top: row.top,
                 right: row.right - app.s(16),
-                bottom: row.bottom,
+                ..*row
             },
             &app.mono_small,
             if app.unlock_cap {
@@ -1399,7 +1583,10 @@ fn draw_settings_text(dc: HDC, app: &App, l: &Layout) {
     gdi::text(
         dc,
         &app.account(),
-        l.headline,
+        RECT {
+            left: l.kicker.left,
+            ..l.headline
+        },
         &app.ui_title,
         theme::TEXT,
         DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
@@ -1408,7 +1595,10 @@ fn draw_settings_text(dc: HDC, app: &App, l: &Layout) {
     gdi::text(
         dc,
         "the full app shares this session",
-        l.sub,
+        RECT {
+            left: l.kicker.left,
+            ..l.sub
+        },
         &app.ui_body,
         theme::TEXT_MUTED,
         DT_SINGLELINE | DT_NOPREFIX,

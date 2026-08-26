@@ -31,6 +31,16 @@ const fn rgb(hex: u32) -> COLORREF {
 pub const BG: Rgba = Rgba::hex(0x060606);
 /// `--color-bg-card`
 pub const CARD: Rgba = Rgba::hex(0x1B1B1D);
+/// `--color-bg-sidebar`, a step lighter than the page so the shell reads
+/// as a plate the content sits beside.
+pub const SIDEBAR: Rgba = Rgba::hex(0x161617);
+/// `--color-bg-hover`, used for the selected page and row hovers.
+pub const BG_HOVER: Rgba = Rgba::hex(0x2A2A2C);
+
+/// `--spacing-sidebar` from the app's own tokens.
+pub const SIDEBAR_W: i32 = 224;
+/// Header strip above the content column.
+pub const HEADER_H: i32 = 76;
 /// `--color-border-subtle`, the card outline
 pub const BORDER: Rgba = Rgba::hex(0x262628);
 /// `--color-border-default`
@@ -56,13 +66,11 @@ pub const ON_ACCENT: COLORREF = rgb(0x0A0A0A);
 /// Wide rather than tall. 400x712 was a phone: a narrow portrait column
 /// with everything stacked down it. A desktop utility is landscape, so the
 /// tunnel sits on the left and the region list beside it.
-pub const WINDOW_W: i32 = 660;
+pub const WINDOW_W: i32 = 960;
 /// Shorter than it was: the frame counter is gone and the two remaining
 /// settings share one list, so the old height left a band of empty black.
-pub const WINDOW_H: i32 = 470;
+pub const WINDOW_H: i32 = 620;
 
-/// Gutter down both sides of the content.
-pub const PAD: i32 = 22;
 /// List corner radius.
 ///
 /// 12, not the app's 18. That radius is drawn on cards several hundred
