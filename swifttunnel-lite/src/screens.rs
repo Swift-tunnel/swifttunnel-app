@@ -97,7 +97,7 @@ fn connect(state: &State) -> Vec<Item> {
         items.push(Item::Gap(12));
     }
 
-    items.push(Item::Caption("Tunnel".into()));
+    items.push(caption("Tunnel"));
     items.push(Item::Group(vec![
         Row::new("Region")
             .right(Right::TextChevron(region_label(state)))
@@ -179,7 +179,7 @@ fn roblox(state: &State) -> Vec<Item> {
     if !r.installed {
         return vec![
             Item::Gap(40),
-            Item::Caption("Roblox".into()),
+            caption("Roblox"),
             Item::Group(vec![
                 Row::new("Roblox is not installed")
                     .sub("Install it and reopen SwiftTunnel Lite")
@@ -189,7 +189,7 @@ fn roblox(state: &State) -> Vec<Item> {
     }
 
     let mut items = vec![
-        Item::Caption("Frame rate".into()),
+        caption("Frame rate"),
         Item::Group(vec![
             Row::new("Unlock frame rate")
                 .sub("Removes Roblox's 60 FPS cap")
@@ -209,7 +209,7 @@ fn roblox(state: &State) -> Vec<Item> {
                 .disabled(!r.unlock_fps),
         ]),
         Item::Gap(12),
-        Item::Caption("Game".into()),
+        caption("Game"),
         Item::Group(vec![
             Row::new("Graphics").right(Right::Choice(vec![
                 Chip {
@@ -262,42 +262,44 @@ fn roblox(state: &State) -> Vec<Item> {
 
 // ── Settings ────────────────────────────────────────────────────────────────
 
+/// Settings, and it has to fit.
+///
+/// The viewport is 280px. The first version of this screen laid out to 378 and
+/// scrolled, which sliced the last row in half against the window edge and
+/// looked like a rendering fault rather than a list. Every sub-label that was
+/// restating its own row is gone, and the version moved into the caption,
+/// which brings it to 276.
 fn settings(state: &State) -> Vec<Item> {
     vec![
-        Item::Caption("Startup".into()),
+        caption("Startup"),
         Item::Group(vec![
             Row::new("Start with Windows")
                 .right(Right::Switch(state.run_on_startup))
                 .action(Action::Toggle(Flag::RunOnStartup)),
             Row::new("Close to tray")
-                .sub("Keep the tunnel up when the window closes")
                 .right(Right::Switch(state.close_to_tray))
                 .action(Action::Toggle(Flag::CloseToTray)),
             Row::new("Reconnect automatically")
-                .sub("Retry after the connection drops")
                 .right(Right::Switch(state.auto_reconnect))
                 .action(Action::Toggle(Flag::AutoReconnect)),
         ]),
         Item::Gap(12),
-        Item::Caption("Network".into()),
+        caption("Network"),
         Item::Group(vec![
             Row::new("Adapter")
-                .sub("Which connection to bind")
                 .right(Right::TextChevron(adapter_label(state)))
                 .action(Action::OpenAdapters),
         ]),
         Item::Gap(12),
-        Item::Caption("About".into()),
+        // No update check. Lite ships inside the same installer as the full app
+        // and is replaced when it is, so a button offering to look for one
+        // would be a button that does nothing.
+        Item::Caption {
+            text: "Account".into(),
+            trailing: Some(format!("v{}", env!("CARGO_PKG_VERSION"))),
+        },
         Item::Group(vec![
-            Row::new("Account").right(Right::Text(
-                state.email.clone().unwrap_or_else(|| "Signed out".into()),
-            )),
-            // No update check here. Lite ships inside the same installer as
-            // the full app and is replaced when it is, so a button offering to
-            // look for one would be a button that does nothing.
-            Row::new("Version")
-                .sub("Updates arrive with SwiftTunnel")
-                .right(Right::Text(format!("v{}", env!("CARGO_PKG_VERSION")))),
+            Row::new(state.email.clone().unwrap_or_else(|| "Signed out".into())),
             Row::new(if state.signed_in { "Sign out" } else { "Sign in" })
                 .action(if state.signed_in {
                     Action::SignOut
@@ -307,6 +309,14 @@ fn settings(state: &State) -> Vec<Item> {
                 .danger_if(state.signed_in),
         ]),
     ]
+}
+
+/// A plain uppercase caption, which is almost all of them.
+fn caption(text: &str) -> Item {
+    Item::Caption {
+        text: text.into(),
+        trailing: None,
+    }
 }
 
 fn adapter_label(state: &State) -> String {

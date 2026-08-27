@@ -139,6 +139,17 @@ impl Engine {
         spawn_regions(shared.clone());
         spawn_poller(shared.clone());
 
+        // Once at startup, so the Settings row can put a name to a saved GUID
+        // rather than showing "Manual" until somebody opens the picker.
+        {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                let rows = list_adapters();
+                shared.edit(|s| s.adapters = rows);
+                shared.notify();
+            });
+        }
+
         Ok(Engine { shared })
     }
 
@@ -577,17 +588,43 @@ fn spawn_regions(shared: Arc<Shared>) {
 }
 
 /// Keep the tunnel readout and the Roblox switches honest.
+///
+/// # Why this is careful about doing nothing
+///
+/// The first version polled once a second and posted a repaint every time,
+/// which redrew a 340x356 window sixty times a minute to show the same
+/// pixels, and measured 2.6% of a core with the tunnel down and nobody
+/// looking. For a client whose whole argument is that it does not cost you
+/// frames, that is the one number that must not be wrong.
+///
+/// So: the interval stretches when there is nothing moving, the process scan
+/// runs at a fraction of the poll rate, and a repaint is only asked for when
+/// the snapshot actually differs from what the window already has.
 fn spawn_poller(shared: Arc<Shared>) {
     std::thread::Builder::new()
         .name("lite-poll".into())
         .spawn(move || {
             let mut since: Option<Instant> = None;
             let mut roblox_tick: u32 = 0;
+            let mut running = false;
 
             while !shared.stop.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(1000));
-                if shared.stop.load(Ordering::Relaxed) {
-                    return;
+                // A second while the session timer is ticking, five when the
+                // only thing that could change is somebody launching Roblox.
+                let idle = !matches!(
+                    shared
+                        .snapshot
+                        .read()
+                        .map(|s| s.tunnel.status)
+                        .unwrap_or(Status::Disconnected),
+                    Status::Connected | Status::Working
+                );
+                let period = if idle { 5 } else { 1 };
+                for _ in 0..period * 4 {
+                    if shared.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
                 }
 
                 let (state, throughput) = shared.runtime.block_on(async {
@@ -636,35 +673,51 @@ fn spawn_poller(shared: Arc<Shared>) {
                     tunnel.bytes_down = stats.bytes_rx.load(Ordering::Relaxed);
                 }
 
-                // Re-reading Roblox's settings file every second would be a
-                // disk hit for something that changes when a person clicks, so
-                // it is checked every ten. Whether the game is running is a
-                // cheap process-table look and is checked each time.
-                let running = RobloxOptimizer::new().is_roblox_running();
+                // Neither of these is free. "Is Roblox running" walks the
+                // process table and settings means reading a file off disk,
+                // and both answer a question that changes when a person does
+                // something, not several times a second.
                 roblox_tick += 1;
-                let refresh = roblox_tick % 10 == 0;
+                if roblox_tick % 4 == 0 || roblox_tick == 1 {
+                    running = RobloxOptimizer::new().is_roblox_running();
+                }
+                let refresh = roblox_tick % 20 == 0;
 
-                shared.edit(|s| {
-                    // A connect in flight owns the readout: the state watch
-                    // still says Disconnected for the first second or two, and
-                    // letting it overwrite "Connecting" makes the button flick.
-                    if !shared.busy.load(Ordering::Relaxed) {
-                        s.tunnel = tunnel;
-                    } else {
-                        s.tunnel.bytes_up = tunnel.bytes_up;
-                        s.tunnel.bytes_down = tunnel.bytes_down;
-                    }
-                    s.roblox.running = running;
-                    if refresh {
-                        let fresh = read_roblox(s.roblox.ultraboost);
-                        s.roblox = Roblox {
-                            running,
-                            error: s.roblox.error.clone(),
-                            ..fresh
-                        };
-                    }
-                });
-                shared.notify();
+                let changed = shared
+                    .edit(|s| {
+                        let before = (s.tunnel.clone(), s.roblox.clone());
+
+                        // A connect in flight owns the readout: the state
+                        // watch still says Disconnected for the first second
+                        // or two, and letting it overwrite "Connecting" makes
+                        // the button flick.
+                        if !shared.busy.load(Ordering::Relaxed) {
+                            s.tunnel = tunnel;
+                        } else {
+                            s.tunnel.bytes_up = tunnel.bytes_up;
+                            s.tunnel.bytes_down = tunnel.bytes_down;
+                        }
+                        s.roblox.running = running;
+                        if refresh {
+                            let fresh = read_roblox(s.roblox.ultraboost);
+                            s.roblox = Roblox {
+                                running,
+                                error: s.roblox.error.clone(),
+                                ..fresh
+                            };
+                        }
+
+                        before != (s.tunnel.clone(), s.roblox.clone())
+                    })
+                    .unwrap_or(false);
+
+                // Only when something is actually different. The window's own
+                // one-second heartbeat keeps the session timer moving while
+                // connected; this is for everything else, and asking for a
+                // repaint that changes no pixels is pure waste.
+                if changed {
+                    shared.notify();
+                }
             }
         })
         .expect("poller thread");

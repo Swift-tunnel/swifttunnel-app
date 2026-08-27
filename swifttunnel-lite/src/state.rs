@@ -30,7 +30,7 @@ pub enum Push {
     Adapters,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tunnel {
     pub status: Status,
     /// Core's own description of what it is doing, or why it failed.
@@ -67,7 +67,7 @@ pub struct AdapterRow {
 /// Roblox's own settings, read from its file rather than remembered here, so
 /// the switches reflect reality even when the full app or the player changed
 /// them.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Roblox {
     pub installed: bool,
     pub running: bool,

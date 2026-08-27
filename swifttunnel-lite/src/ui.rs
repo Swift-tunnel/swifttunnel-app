@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Dwm::{
 use windows::Win32::Graphics::Gdi::{
     ScreenToClient,
     BeginPaint, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, EndPaint,
-    ExcludeClipRect, GetMonitorInfoW, HDC, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, IntersectClipRect, HDC, InvalidateRect, MONITOR_DEFAULTTONEAREST,
     MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
     SelectClipRgn,
 };
@@ -380,8 +380,15 @@ pub fn paint(dc: HDC, client: RECT, app: &App) {
     let area = content_area(&app.m, client);
     view::paint_shapes(&mut canvas, &app.chrome);
 
-    // The content scrolls under the chrome, so it is confined to its own band.
-    let previous = canvas.clip_rows(area.top - app.m.s(theme::PAD) + 1, client.bottom);
+    // The content scrolls under the chrome, so it is confined to its own
+    // band. The band stops at the bottom of the content area rather than the
+    // bottom of the window: a list that overflows should run off against the
+    // same margin it started from, not get sliced flush with the frame, which
+    // read as the window being broken rather than as there being more below.
+    let previous = canvas.clip_rows(
+        area.top - app.m.s(theme::PAD) + 1,
+        area.bottom + app.m.s(theme::PAD) - 1,
+    );
     view::paint_shapes(&mut canvas, &app.content);
     canvas.restore_clip(previous);
 
@@ -394,12 +401,12 @@ pub fn paint(dc: HDC, client: RECT, app: &App) {
     unsafe {
         // Same band as the shapes, expressed as a clip: everything above the
         // content area is excluded so a scrolled row cannot print over the tabs.
-        let _ = ExcludeClipRect(
+        let _ = IntersectClipRect(
             dc,
             0,
-            0,
-            width,
             area.top - app.m.s(theme::PAD) + 1,
+            width,
+            area.bottom + app.m.s(theme::PAD) - 1,
         );
         view::paint_text(dc, &app.fonts, &app.content);
         let _ = SelectClipRgn(dc, None);
@@ -682,6 +689,19 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     let dc = BeginPaint(hwnd, &mut ps);
                     paint(dc, client_of(hwnd), app);
                     let _ = EndPaint(hwnd, &ps);
+                }
+                LRESULT(0)
+            }
+
+            // Draw into a device context somebody else owns, when asked.
+            //
+            // Everything that captures a window without going through the
+            // screen sends this: Task View, the Alt-Tab preview, the taskbar
+            // thumbnail, and PrintWindow. A window that only answers WM_PAINT
+            // hands all of them a blank white rectangle.
+            WM_PRINTCLIENT => {
+                if let Some(app) = app_of(hwnd) {
+                    paint(HDC(wparam.0 as *mut c_void), client_of(hwnd), app);
                 }
                 LRESULT(0)
             }

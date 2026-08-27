@@ -149,8 +149,14 @@ impl Row {
 
 #[derive(Debug, Clone)]
 pub enum Item {
-    /// Uppercase label over a group.
-    Caption(String),
+    /// Uppercase label over a group, optionally with a value on the right.
+    ///
+    /// The trailing slot exists so a fact that needs saying once (the version)
+    /// does not have to cost a whole 34px row in a 280px viewport.
+    Caption {
+        text: String,
+        trailing: Option<String>,
+    },
     /// A block of rows behind one rounded outline.
     Group(Vec<Row>),
     /// The status block: dot, headline, one line under it, optional right text.
@@ -201,7 +207,13 @@ pub enum Face {
     Body,
     Sub,
     Caption,
+    /// Numbers: the round trip, the throughput, the session timer. Monospaced
+    /// so a readout that changes does not shuffle the digits beside it.
     Value,
+    /// Words that happen to sit where a value goes: a region name, an email,
+    /// a version. Monospacing these was wrong and looked it, a proportional
+    /// face set in mono reads as a terminal, not as the product.
+    ValueText,
     Button,
     Tab,
     Chip,
@@ -319,7 +331,7 @@ pub fn layout(
         match item {
             Item::Gap(size) => y += m.s(*size),
 
-            Item::Caption(text) => {
+            Item::Caption { text, trailing } => {
                 let h = m.s(theme::CAPTION_H);
                 f.text(
                     rect(left + m.s(3), y, right, y + h),
@@ -328,6 +340,19 @@ pub fn layout(
                     theme::TEXT_DIMMED,
                     LEFT,
                 );
+                if let Some(value) = trailing {
+                    f.text(
+                        rect(left, y, right - m.s(3), y + h),
+                        value,
+                        // Not the caption face, which is tracked out: GDI adds
+                        // that extra advance after the final glyph too, and
+                        // DT_RIGHT then pushed it past the edge and clipped
+                        // the last character off the version.
+                        Face::Sub,
+                        theme::TEXT_DIMMED,
+                        RIGHT,
+                    );
+                }
                 y += h;
             }
 
@@ -631,7 +656,7 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
         Right::Text(value) => f.text(
             rect(text_right + m.s(6), r.top, edge, r.bottom),
             value,
-            Face::Value,
+            Face::ValueText,
             theme::TEXT_SECONDARY,
             RIGHT,
         ),
@@ -655,7 +680,7 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
             f.text(
                 rect(text_right + m.s(6), r.top, chevron - m.s(4), r.bottom),
                 value,
-                Face::Value,
+                Face::ValueText,
                 theme::TEXT_SECONDARY,
                 RIGHT,
             );
@@ -806,6 +831,7 @@ pub struct Fonts {
     pub sub: Font,
     pub caption: Font,
     pub value: Font,
+    pub value_text: Font,
     pub button: Font,
     pub tab: Font,
     pub chip: Font,
@@ -838,6 +864,7 @@ impl Fonts {
                 500,
                 0,
             ),
+            value_text: ui(12, 400),
             button: ui(13, 600),
             tab: ui(12, 500),
             chip: ui(11, 500),
@@ -857,6 +884,7 @@ impl Fonts {
             // them read as a label rather than as small text.
             Face::Caption => (&self.caption, 1),
             Face::Value => (&self.value, 0),
+            Face::ValueText => (&self.value_text, 0),
             Face::Button => (&self.button, 0),
             Face::Tab => (&self.tab, 0),
             Face::Chip => (&self.chip, 0),
