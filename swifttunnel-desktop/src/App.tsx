@@ -46,34 +46,10 @@ import {
   normalizeWindowState,
 } from "./lib/windowState";
 import type { TabId } from "./lib/types";
-import { BoostTab } from "./components/boost/BoostTab";
 import { IS_LITE } from "./lib/lite";
+import { LiteShell } from "./components/lite/LiteShell";
 
 function tabComponent(tab: TabId) {
-  // Lite's own switch, and deliberately a separate one.
-  //
-  // IS_LITE is a build-time constant, so Rollup drops the branch below it
-  // entirely and then the imports it was the only user of become
-  // unreachable and fall out of the bundle. Sharing one switch with a
-  // couple of conditionals would keep every screen in the output, and a
-  // Lite build that still ships the pages it removed is not lighter in any
-  // sense that matters.
-  //
-  // The Roblox page is the boost panel directly rather than the Games page,
-  // which wraps it in a per-game library Lite has no use for.
-  if (IS_LITE) {
-    switch (tab) {
-      case "connect":
-        return <ConnectTab />;
-      case "games":
-        return <BoostTab />;
-      case "settings":
-        return <SettingsTab />;
-      default:
-        return <ConnectTab />;
-    }
-  }
-
   switch (tab) {
     case "home":
       return <HomeTab />;
@@ -340,6 +316,15 @@ function App() {
   useEffect(() => {
     if (!isSettingsLoaded) return;
 
+    // Lite's window is a fixed 380x552 and cannot be resized, so there is
+    // nothing here to save and nothing to restore.
+    //
+    // It has to be skipped rather than left to no-op, because `window_state`
+    // lives in the settings file both builds share. Restoring it would open
+    // Lite at whatever size the full app was last left at, and with resizing
+    // off there would be no way back.
+    if (IS_LITE) return;
+
     const appWindow = getCurrentWindow();
     let disposed = false;
     let saveTimer: number | null = null;
@@ -605,6 +590,23 @@ function App() {
     return (
       <>
         <LoginScreen />
+        <WhatsNewDialog />
+      </>
+    );
+  }
+
+  // Lite's shell, and deliberately a separate return rather than a prop on
+  // AppShell.
+  //
+  // IS_LITE is a build-time constant, so this branch is the only one Rollup
+  // keeps, and AppShell, the sidebar, the top bar, the command palette and
+  // every screen reached through tabComponent fall out of the Lite bundle
+  // with it. Sharing one shell behind conditionals would ship all of it and
+  // draw none of it.
+  if (IS_LITE) {
+    return (
+      <>
+        <LiteShell />
         <WhatsNewDialog />
       </>
     );

@@ -6,8 +6,7 @@ import { RamOverlay } from "./components/overlay/RamOverlay";
 import { OverlayStatsBar } from "./components/ingame/OverlayStatsBar";
 import { installWebviewLockdown, shouldLockDown } from "./lib/webviewLockdown";
 import { installAnimationIdle } from "./lib/animationIdle";
-import { IS_LITE, LITE_ZOOM } from "./lib/lite";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { IS_LITE } from "./lib/lite";
 import { MotionConfig } from "framer-motion";
 import { useSettingsStore } from "./stores/settingsStore";
 import "./styles/globals.css";
@@ -61,17 +60,6 @@ if (isOverlay || isStatsOverlay) {
 if (IS_LITE) {
   document.documentElement.classList.add("lite");
 
-  // Zoom the webview rather than the document.
-  //
-  // CSS  scales what is drawn but leaves 100vw and 100vh resolving
-  // against the unzoomed viewport, so the shell shrank away from the window
-  // and left a band of empty black down the right and bottom. Zooming the
-  // webview scales the viewport with it, so the layout still fills the frame.
-  void getCurrentWebview()
-    .setZoom(LITE_ZOOM)
-    .catch(() => {
-      // Not fatal: the app is simply drawn at its normal size.
-    });
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

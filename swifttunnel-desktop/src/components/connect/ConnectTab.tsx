@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { IS_LITE } from "../../lib/lite";
 import { motion } from "framer-motion";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -64,10 +63,7 @@ export function ConnectTab() {
   const fetchState = useVpnStore((s) => s.fetchState);
 
   const settings = useSettingsStore((s) => s.settings);
-  // The graph is a canvas redrawn on a requestAnimationFrame loop fed by a
-  // throughput sample twice a second. It is the most expensive thing on this
-  // page and the first thing a lightweight client should not have.
-  const showLiveGraph = !IS_LITE && settings.show_live_graph;
+  const showLiveGraph = settings.show_live_graph;
   const update = useSettingsStore((s) => s.update);
   const save = useSettingsStore((s) => s.save);
 

@@ -1,74 +1,36 @@
 /**
- * SwiftTunnel Lite: the same app with most of it removed.
+ * SwiftTunnel Lite: the same product, built small.
  *
- * Lite is not a second client. It is this codebase built with a flag, so every
- * screen it keeps is the real component, with the real design system, the real
- * fonts and the real behaviour. Three earlier attempts at hand-building a
- * native window failed for the obvious reason: reimplementing a design system
- * in a drawing API gets you something that resembles the product at best, and
- * the resemblance was never good enough.
+ * Lite is not a second client and not a native rewrite. It is this codebase
+ * built with a flag, sharing the stores, the Rust backend, the settings file
+ * and the account. What it does not share is the interface: `LiteShell` and
+ * the three screens under `components/lite` are its own, because the earlier
+ * version reused the full app's pages and the result was exactly what it was:
+ * a 1020px app squeezed into a small window.
  *
- * What Lite is for: players who want the tunnel and the frame cap and nothing
- * else, on a machine where the full app's extra surface is not wanted.
+ * What Lite is for: players who want the tunnel and the frame cap on a machine
+ * that has nothing spare for anything else. It ships no sidebar, no command
+ * palette, no atmosphere layers, no live graph, no overlay, no RAM cleaner, no
+ * Windows tuning and no animation.
  *
- * Set at build time, never at runtime, so Vite can drop the unused screens from
- * the bundle rather than shipping them behind a branch nobody takes.
+ * Set at build time, never at runtime, so Rollup can drop the full app's
+ * screens from the Lite bundle rather than shipping them behind a branch
+ * nobody takes.
  */
 export const IS_LITE = import.meta.env.VITE_SWIFTTUNNEL_LITE === "1";
 
 /**
  * The three pages Lite keeps.
  *
- * `games` is reused rather than given a new id: it already carries the Roblox
- * tuning, and inventing a `roblox` TabId would mean touching the persisted
- * settings, the command palette and the keyboard shortcuts for no gain. Lite
- * relabels it in the sidebar instead.
+ * `games` is reused rather than given a new id: it already means "the Roblox
+ * page", and inventing a `roblox` TabId would mean touching the persisted
+ * settings and the tab validation for no gain. Lite relabels it in the nav.
+ *
+ * Read by the settings store, which has to reject a persisted tab that this
+ * build cannot render (someone who last used the full app on Diagnostics then
+ * opens Lite).
  */
 export const LITE_TABS = ["connect", "games", "settings"] as const;
 
 /** Where Lite opens, since Home is one of the screens it drops. */
 export const LITE_DEFAULT_TAB = "connect";
-
-/**
- * Roblox-page settings Lite does not render.
- *
- * These are the System, Network and Process Scheduling sections, which are
- * Windows tuning rather than game or tunnel settings, so Lite drops them and
- * leaves that job to the full app's Optimize page.
- *
- * They need naming separately because every one of them deep-links to
- * `tab: "games"`, which Lite *does* keep. Filtering the search index by tab
- * alone leaves them in, offering a setting that is on no page and then
- * scrolling to an anchor that is not in the document.
- *
- * Must stay in step with the `!IS_LITE` guards in `BoostTab`. If a section is
- * ever added or removed there, this list moves with it.
- */
-export const LITE_HIDDEN_BOOST_ANCHORS: ReadonlySet<string> = new Set([
-  // System
-  "high_priority",
-  "timer_resolution",
-  "mmcss",
-  "game_mode",
-  // Network
-  "disable_nagle",
-  "network_throttling",
-  // Process Scheduling
-  "gpu_binding",
-  "performance_cores",
-  "unbind_cpu0",
-]);
-
-/**
- * How far Lite zooms its webview out.
- *
- * The full app's type scale is drawn for a 1020px window. Lite's is much
- * smaller, so the same sizes would leave very little room for content, and
- * pushing every value down by hand would mean re-picking a scale the design
- * system already got right. Zooming keeps every proportion and asks for less
- * room.
- *
- * Applied to the webview rather than as CSS `zoom`, which scales what is drawn
- * but not the viewport units the shell is laid out with.
- */
-export const LITE_ZOOM = 0.8;

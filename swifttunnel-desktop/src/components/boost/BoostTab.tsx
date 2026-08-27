@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { IS_LITE } from "../../lib/lite";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
@@ -625,9 +624,6 @@ export function BoostTab() {
         />
       </Section>
 
-      {/* Windows-level tuning, which is what the full app's Optimize page is
-          for. Lite keeps the tunnel and the game's own settings and stops there. */}
-      {!IS_LITE && (
       <div className="grid gap-4 lg:grid-cols-2">
         <Section
           title="System"
@@ -688,10 +684,8 @@ export function BoostTab() {
           />
         </Section>
       </div>
-      )}
 
       {/* ── Process Scheduling ── */}
-      {!IS_LITE && (
       <Section title="Process Scheduling" tag={`${schedCount} / 3 on`}>
         <SettingRow
           title="High-Performance GPU Binding"
@@ -715,7 +709,6 @@ export function BoostTab() {
           onChange={(v) => updateGPP({ unbind_cpu0: v })}
         />
       </Section>
-      )}
 
       {/* ── Sticky Apply Bar ── */}
       <AnimatePresence>

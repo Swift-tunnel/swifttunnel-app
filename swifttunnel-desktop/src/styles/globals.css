@@ -910,30 +910,31 @@ html.lite *:not([data-lite-motion]):not([data-lite-motion] *)::after {
   animation: none !important;
 }
 
-/* A smaller interface.
+/* Lite's geometry.
  *
- * Lite is aimed at machines with less to spare and often smaller screens, and
- * the full app's type scale is drawn for a 1020px window. Scaling the root
- * keeps every proportion the design system already got right and simply asks
- * for less room, which is a far safer lever than re-picking sizes by hand.
+ * Only the shared pieces need overriding now. Lite's own screens are built
+ * at Lite's size, so there is nothing to scale down: what is left here is the
+ * handful of full-app components Lite still renders, which are the toast
+ * stack and the adapter-binding dialog.
+ *
+ * There used to be a great deal more in this block, back when Lite was the
+ * full app's pages in a smaller window. Restyling a 1020px layout was never
+ * going to make it a small one, and the overrides went when the pages did.
  */
 html.lite {
-  /* Tighter geometry. 18px is drawn for cards several hundred pixels wide in a
-   * 1020px window; at Lite's size the same radius reads as a lozenge. */
+  /* 18px is drawn for cards several hundred pixels wide. At 380px the same
+   * radius reads as a lozenge. */
   --radius-card: 10px;
   --radius-control: 8px;
 }
 
 /* Flat surfaces, not raised ones.
  *
- * This is the real difference between the two, more than the layout. The full
- * app's panels are lifted off the page: a gradient sheen down their first
- * 72px, an inset highlight along the top edge, and a drop shadow under them.
- * That is right for a window you sit and look at.
- *
- * Lite is a window you open, change one thing, and close. Its panels are
- * defined by a hairline and nothing else, which reads as a tool rather than a
- * showcase, and costs the compositor nothing to draw.
+ * The full app's panels are lifted off the page: a gradient sheen down their
+ * first 72px, an inset highlight along the top edge, and a drop shadow under
+ * them. That is right for a window you sit and look at. Lite is a window you
+ * open, change one thing, and close, so its surfaces are a hairline and
+ * nothing else, which costs the compositor nothing to draw.
  */
 html.lite .surface-card {
   background: var(--color-bg-card);
@@ -942,22 +943,4 @@ html.lite .surface-card {
 
 html.lite .surface-elevated {
   box-shadow: none;
-}
-
-/* No atmosphere.
- *
- * The overhead wash, the dot grid and the blurred aurora are the app's hero
- * treatment, and they are the most expensive thing on any page: a 14px blur
- * over a 320px layer that the compositor keeps alive for as long as the window
- * is open. Lite is flat black, which is both cheaper and the clearest signal
- * that it is a different thing.
- */
-html.lite .app-atmosphere {
-  background: var(--color-bg-base);
-}
-
-html.lite .aurora,
-html.lite .aurora-live,
-html.lite .dot-grid {
-  display: none;
 }

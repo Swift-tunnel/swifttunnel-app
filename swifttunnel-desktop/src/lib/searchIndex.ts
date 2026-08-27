@@ -4,7 +4,6 @@ import {
 } from "../components/optimization/optimizationCatalog";
 import { navItemFor } from "../components/shell/nav";
 import type { TabId } from "./types";
-import { IS_LITE, LITE_HIDDEN_BOOST_ANCHORS, LITE_TABS } from "./lite";
 
 export interface SearchEntry {
   id: string;
@@ -24,14 +23,26 @@ export interface SearchEntry {
   icon: string;
 }
 
-const homeIcon = navItemFor("home").icon;
-const connectIcon = navItemFor("connect").icon;
-const networkIcon = navItemFor("network").icon;
-const optimizeIcon = navItemFor("optimization").icon;
-const gamesIcon = navItemFor("games").icon;
-const ingameIcon = navItemFor("ingame").icon;
-const repairIcon = navItemFor("repair").icon;
-const settingsIcon = navItemFor("settings").icon;
+/**
+ * Row icons, borrowed from the destination tab.
+ *
+ * Wrapped in a helper and annotated pure so a build that never reaches the
+ * palette can drop them. Without it Rollup keeps eight calls it cannot prove
+ * are side-effect free, and they drag the whole nav table and the 33KB
+ * optimization catalog into the Lite bundle, which renders neither. The
+ * annotation only permits removal where the result goes unused, which in the
+ * full app it never does.
+ */
+const icon = (tab: TabId): string => navItemFor(tab).icon;
+
+const homeIcon = /* @__PURE__ */ icon("home");
+const connectIcon = /* @__PURE__ */ icon("connect");
+const networkIcon = /* @__PURE__ */ icon("network");
+const optimizeIcon = /* @__PURE__ */ icon("optimization");
+const gamesIcon = /* @__PURE__ */ icon("games");
+const ingameIcon = /* @__PURE__ */ icon("ingame");
+const repairIcon = /* @__PURE__ */ icon("repair");
+const settingsIcon = /* @__PURE__ */ icon("settings");
 
 // ── Top-level tabs ──
 const TABS: SearchEntry[] = [
@@ -483,21 +494,12 @@ const ALL_ENTRIES: SearchEntry[] = [
 ];
 
 /**
- * Everything this build can actually navigate to.
+ * Everything this build can navigate to.
  *
- * Filtered by page, because every entry deep-links to a tab and Lite does not
- * ship most of them. Without this, searching Lite offers settings it removed
- * and then navigates to a page that is not there.
+ * Not filtered for Lite any more: Lite has no command palette, so this
+ * whole module is dropped from that bundle rather than trimmed for it.
  */
-export const SEARCH_ENTRIES: SearchEntry[] = IS_LITE
-  ? ALL_ENTRIES.filter(
-      (entry) =>
-        (LITE_TABS as readonly string[]).includes(entry.tab) &&
-        // Every boost row points at the Roblox page, which Lite keeps, so the
-        // tab check alone cannot tell that whole sections of it are gone.
-        !(entry.anchor && LITE_HIDDEN_BOOST_ANCHORS.has(entry.anchor)),
-    )
-  : ALL_ENTRIES;
+export const SEARCH_ENTRIES: SearchEntry[] = ALL_ENTRIES;
 
 /** Rank entries for a query. Empty query → the page list (tabs). */
 export function searchEntries(query: string): SearchEntry[] {

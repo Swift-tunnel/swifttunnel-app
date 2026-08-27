@@ -7,8 +7,6 @@ import { useAuthStore } from "../../stores/authStore";
 import { getLatencyColor } from "../../lib/utils";
 import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
-import { IS_LITE } from "../../lib/lite";
-import { LiteTabs } from "./LiteTabs";
 import { navItemFor } from "./nav";
 
 /** `2h 14m` / `47m` / `<1m`, compact enough for a top-bar pill. */
@@ -115,26 +113,17 @@ export function TopBar() {
       }}
     >
       <div data-tauri-drag-region className="flex min-w-0 items-center gap-3.5">
-        {/* Lite puts the tabs where the page title would be.
-            The title only ever repeated the tab you are already on, and two
-            bars saying the same thing is a lot of vertical room to spend in a
-            500px window. */}
-        {IS_LITE ? (
-          <LiteTabs />
-        ) : (
-          <div className="min-w-0">
-            <h1
-              className="truncate text-[13.5px] font-semibold leading-none text-text-primary"
-              style={{ letterSpacing: "-0.01em" }}
-            >
-              {item.label}
-            </h1>
-            <p className="mt-1.5 truncate text-[10.5px] leading-none text-text-muted">
-              {item.description}
-            </p>
-          </div>
-        )}
-
+        <div className="min-w-0">
+          <h1
+            className="truncate text-[13.5px] font-semibold leading-none text-text-primary"
+            style={{ letterSpacing: "-0.01em" }}
+          >
+            {item.label}
+          </h1>
+          <p className="mt-1.5 truncate text-[10.5px] leading-none text-text-muted">
+            {item.description}
+          </p>
+        </div>
         {/* Game-status chip, Medal's "Waiting For Game": solid gamepad, no
             border, subtle inset pill. */}
         <div
@@ -261,7 +250,7 @@ export function TopBar() {
         {/* Lite ships one language. Translation pulls a dictionary per switch
             and re-applies it on every tab change, which is work a lightweight
             client should not be doing. */}
-        {!IS_LITE && <LanguageSelector />}
+        <LanguageSelector />
 
         {/* Profile avatar, moved from the sidebar to the top-right (Medal). */}
         <button

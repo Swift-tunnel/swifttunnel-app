@@ -1,5 +1,4 @@
 import type { TabId } from "../../lib/types";
-import { IS_LITE, LITE_TABS } from "../../lib/lite";
 
 export interface NavItem {
   id: TabId;
@@ -88,33 +87,8 @@ const ALL_SECTIONS: NavSection[] = [
   },
 ];
 
-/**
- * How Lite renames what it keeps.
- *
- * `games` carries the Roblox tuning, so Lite calls it what it is rather
- * than shipping a Games page that only has one game on it.
- */
-const LITE_OVERRIDES: Partial<Record<TabId, Pick<NavItem, "label" | "description">>> = {
-  games: {
-    label: "Roblox",
-    description: "Frame cap, FFlags and launch settings",
-  },
-};
 
-/**
- * The sidebar for this build.
- *
- * Lite keeps three pages and drops the sections that end up empty, so the
- * shell shrinks with the app rather than showing headings over nothing.
- */
-export const NAV_SECTIONS: NavSection[] = IS_LITE
-  ? ALL_SECTIONS.map((section) => ({
-      ...section,
-      items: section.items
-        .filter((item) => (LITE_TABS as readonly string[]).includes(item.id))
-        .map((item) => ({ ...item, ...(LITE_OVERRIDES[item.id] ?? {}) })),
-    })).filter((section) => section.items.length > 0)
-  : ALL_SECTIONS;
+export const NAV_SECTIONS: NavSection[] = ALL_SECTIONS;
 
 export const NAV_ITEMS: NavItem[] = NAV_SECTIONS.flatMap((s) => s.items);
 
