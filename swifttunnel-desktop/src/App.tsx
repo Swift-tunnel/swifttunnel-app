@@ -511,8 +511,12 @@ function App() {
     };
   }, []);
 
-  // Accumulate lifetime "time tunneled" (persisted) regardless of active tab,
-  // flushed every 10s so an app close mid-session loses at most 10s.
+  // Accumulate lifetime "time tunneled" (persisted) regardless of active tab.
+  //
+  // Every 60s rather than 10s: the counter now lives in the settings file so
+  // the full app and Lite share it, and writing the whole file six times a
+  // minute for a cosmetic stat is far more disk churn than it is worth. A
+  // crash loses at most a minute of a lifetime total.
   useEffect(() => {
     let baseline = Date.now();
     const flush = () => {
@@ -522,7 +526,7 @@ function App() {
       }
       baseline = now;
     };
-    const id = window.setInterval(flush, 10_000);
+    const id = window.setInterval(flush, 60_000);
     return () => {
       flush();
       window.clearInterval(id);

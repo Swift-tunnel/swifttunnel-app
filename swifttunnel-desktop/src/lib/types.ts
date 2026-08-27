@@ -412,6 +412,8 @@ export interface UpdaterInstallResponse {
 
 export interface AppSettings {
   theme: string;
+  /** Lifetime ms tunnelled. Shared between the full app and Lite. */
+  total_tunneled_ms: number;
   config: Config;
   window_state: WindowState;
   selected_region: string;

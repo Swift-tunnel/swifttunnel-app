@@ -4,6 +4,7 @@ import type { AppSettings } from "../lib/types";
 
 const MOCK_SETTINGS: AppSettings = {
   theme: "dark",
+  total_tunneled_ms: 0,
   config: {
     profile: "Balanced",
     system_optimization: {

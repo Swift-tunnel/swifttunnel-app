@@ -214,6 +214,15 @@ pub struct AppSettings {
     /// On by default. Turning it off stops both the redraw and the sampling.
     #[serde(default = "default_show_live_graph")]
     pub show_live_graph: bool,
+
+    /// Lifetime milliseconds spent tunnelling.
+    ///
+    /// Lives here rather than in the webview's localStorage so the full app
+    /// and Lite share one number. Each Tauri app gets its own webview data
+    /// directory, keyed by bundle identifier, so a browser-side counter would
+    /// silently fork into two the moment somebody installed both.
+    #[serde(default)]
+    pub total_tunneled_ms: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -312,6 +321,7 @@ impl Default for AppSettings {
             enable_country_ban: false,
             idle_when_unfocused: default_idle_when_unfocused(),
             show_live_graph: default_show_live_graph(),
+            total_tunneled_ms: 0,
         }
     }
 }

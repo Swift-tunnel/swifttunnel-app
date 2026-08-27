@@ -3,6 +3,7 @@ mod commands;
 mod events;
 mod harness;
 mod logging;
+mod single_client;
 mod state;
 mod tray;
 mod window_restore;
@@ -561,6 +562,15 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
 
 pub fn run() {
     logging::init();
+
+    // Before anything touches the network stack. SwiftTunnel and SwiftTunnel
+    // Lite have separate bundle identifiers, so Tauri's own single-instance
+    // guard does not span them, and two clients each installing the packet
+    // filter driver and rewriting routes is not a state worth reaching.
+    if !single_client::acquire() {
+        return;
+    }
+
     apply_webview2_resource_tuning();
     let launched_from_startup = autostart::launched_from_startup_flag();
 

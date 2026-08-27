@@ -55,6 +55,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   selected_region: "singapore",
   selected_server: "singapore",
   current_tab: "connect",
+  total_tunneled_ms: 0,
   update_settings: { auto_check: true, last_check: null },
   update_channel: "Stable",
   minimize_to_tray: true,
