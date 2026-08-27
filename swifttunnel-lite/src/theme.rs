@@ -89,13 +89,15 @@ pub fn latency_ink(ms: Option<u32>) -> COLORREF {
 
 /// Window size. Deliberately small: this is a thing you open, change, close.
 ///
-/// The height is measured, not chosen. Connect lays out to 304px and to 346
-/// once connected, when it grows the throughput strip, so 356 fits the state
-/// people actually sit and look at. Settings runs longer and scrolls, which is
-/// the right way round: the screen opened every day fits, the one visited
-/// twice a year does not have to.
+/// The height is measured, not chosen. Connect is the tallest screen, and
+/// connected, with the throughput strip and the adapter row, it lays out to
+/// 306px; 384 is that plus the chrome and the margins and nothing else.
+///
+/// It grew 28px when the adapter moved onto Connect. That is the cost of
+/// having the setting where the thing it affects is, and it is still less than
+/// half the height this window started at.
 pub const WINDOW_W: i32 = 340;
-pub const WINDOW_H: i32 = 356;
+pub const WINDOW_H: i32 = 384;
 
 /// Title bar. Just the wordmark, the free-tier budget and two buttons.
 pub const TITLE_H: i32 = 28;

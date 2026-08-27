@@ -68,6 +68,9 @@ pub struct App {
     hot: Option<Action>,
     dpi: i32,
     ticking: bool,
+    /// Reused across repaints rather than rebuilt, so a slow machine is not
+    /// allocating and zeroing 1.5MB to redraw a hover.
+    canvas: Canvas,
 }
 
 impl App {
@@ -368,17 +371,18 @@ fn free_tier_ink(seconds: u32) -> COLORREF {
 /// Shared by the window and the preview harness so there is only ever one
 /// rendering path, and a change cannot look right in the preview and wrong on
 /// screen.
-pub fn paint(dc: HDC, client: RECT, app: &App) {
+pub fn paint(dc: HDC, client: RECT, app: &mut App) {
     let width = client.right - client.left;
     let height = client.bottom - client.top;
     if width <= 0 || height <= 0 {
         return;
     }
 
-    let mut canvas = Canvas::new(width, height, theme::BG);
+    app.canvas.reset(width, height, theme::BG);
+    let canvas = &mut app.canvas;
 
     let area = content_area(&app.m, client);
-    view::paint_shapes(&mut canvas, &app.chrome);
+    view::paint_shapes(canvas, &app.chrome);
 
     // The content scrolls under the chrome, so it is confined to its own
     // band. The band stops at the bottom of the content area rather than the
@@ -389,10 +393,10 @@ pub fn paint(dc: HDC, client: RECT, app: &App) {
         area.top - app.m.s(theme::PAD) + 1,
         area.bottom + app.m.s(theme::PAD) - 1,
     );
-    view::paint_shapes(&mut canvas, &app.content);
+    view::paint_shapes(canvas, &app.content);
     canvas.restore_clip(previous);
 
-    crate::surface::blit(dc, &canvas);
+    crate::surface::blit(dc, canvas);
 
     // Text is drawn straight onto the device context afterwards, because GDI's
     // rasteriser is genuinely good and already has the embedded Geist faces.
@@ -556,6 +560,7 @@ pub fn new_app(engine: Engine, dpi: i32) -> Box<App> {
         hot: None,
         dpi,
         ticking: false,
+        canvas: Canvas::new(m.s(theme::WINDOW_W), m.s(theme::WINDOW_H), theme::BG),
     });
     let client = rect(0, 0, m.s(theme::WINDOW_W), m.s(theme::WINDOW_H));
     app.rebuild(client);
@@ -574,6 +579,9 @@ pub fn render_preview(
     screen: Screen,
     push: Push,
     connected: bool,
+    // Repaint many times and report the per-frame cost, for checking that a
+    // slow machine can still afford this window.
+    bench: bool,
 ) -> std::io::Result<()> {
     // Give the background fetch a moment to land, or every preview of the
     // region list shows an empty one. Only the harness waits; the window
@@ -599,7 +607,20 @@ pub fn render_preview(
     let client = rect(0, 0, w, h);
     app.rebuild(client);
 
-    crate::preview::render(path, w, h, |dc, r| paint(dc, r, &app))
+    crate::preview::render(path, w, h, move |dc, r| {
+        // --bench times the whole frame: clear the surface, rasterise every
+        // shape, blit, then draw the text. "Cheap enough for a slow machine"
+        // is a claim that needs a number, and this is where it comes from.
+        let runs: u32 = if bench { 50 } else { 1 };
+        let started = std::time::Instant::now();
+        for _ in 0..runs {
+            paint(dc, r, &mut app);
+        }
+        if bench {
+            let each = started.elapsed() / runs;
+            println!("paint: {:.2} ms/frame", each.as_secs_f64() * 1000.0);
+        }
+    })
 }
 
 // ── Message loop ────────────────────────────────────────────────────────────

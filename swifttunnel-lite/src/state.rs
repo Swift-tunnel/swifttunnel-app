@@ -64,6 +64,18 @@ pub struct AdapterRow {
     pub detail: String,
 }
 
+/// A reason this client must not be used, whatever else is true.
+///
+/// Both are enforced by the server regardless of what the client does: a
+/// banned account is refused a relay ticket, and a locked-out build is refused
+/// by the API with a 426. This is here so the window says which of the two it
+/// is, rather than leaving somebody to interpret a connect that keeps failing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lockout {
+    Banned(String),
+    UpdateRequired(String),
+}
+
 /// Roblox's own settings, read from its file rather than remembered here, so
 /// the switches reflect reality even when the full app or the player changed
 /// them.
@@ -90,6 +102,8 @@ pub struct State {
     pub regions: Vec<RegionRow>,
     pub adapters: Vec<AdapterRow>,
     pub roblox: Roblox,
+    /// Set when this client must not connect at all.
+    pub lockout: Option<Lockout>,
 
     // ── From the shared settings file ──
     pub selected_region: String,

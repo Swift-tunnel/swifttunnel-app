@@ -75,6 +75,24 @@ impl Canvas {
         }
     }
 
+    /// Clear this surface and use it for another frame.
+    ///
+    /// The buffer is a float per channel per pixel, which at 340x384 is about
+    /// 1.5MB. Allocating and freeing that on every repaint is work a machine
+    /// with little to spare should not be doing to redraw a settings window,
+    /// so the allocation is made once and refilled.
+    pub fn reset(&mut self, width: i32, height: i32, fill: Rgba) {
+        let count = (width.max(0) * height.max(0)) as usize;
+        self.width = width;
+        self.height = height;
+        self.clip_top = 0;
+        self.clip_bottom = height;
+        if self.pixels.len() != count {
+            self.pixels.resize(count, [fill.r, fill.g, fill.b]);
+        }
+        self.pixels.fill([fill.r, fill.g, fill.b]);
+    }
+
     /// Restrict painting to a horizontal band, and return the previous one so
     /// the caller can put it back.
     pub fn clip_rows(&mut self, top: i32, bottom: i32) -> (i32, i32) {
@@ -151,6 +169,42 @@ impl RoundRect {
         }
     }
 
+    /// Half-width of row `py` that is at least `inset` inside the edge.
+    ///
+    /// The distance field below is exact but expensive: a square root and two
+    /// squares for every pixel. For a rounded rectangle almost every pixel is
+    /// plainly inside or plainly outside, and only a one-pixel band around the
+    /// edge and the four corners are in doubt. This gives the span that needs
+    /// no test at all, in closed form, once per row.
+    ///
+    /// The inset is applied to the geometry rather than subtracted from the
+    /// answer. The two are not the same in a corner: there the edge runs
+    /// diagonally, so stepping half a pixel inward horizontally moves you less
+    /// than half a pixel closer to it. Subtracting instead of insetting
+    /// declared corner pixels solid that were only 87% covered, and the first
+    /// version of this did exactly that.
+    #[inline]
+    fn solid_half_width(&self, py: f32, inset: f32) -> f32 {
+        let hw = self.w / 2.0 - inset;
+        let hh = self.h / 2.0 - inset;
+        if hw <= 0.0 || hh <= 0.0 {
+            return 0.0;
+        }
+        let cy = self.y + self.h / 2.0;
+        let r = (self.radius.min(self.w / 2.0).min(self.h / 2.0) - inset).max(0.0);
+
+        // How far into the corner band this row is. At or below zero it is in
+        // the straight sides, where the full width is solid.
+        let dy = (py - cy).abs() - (hh - r);
+        if dy <= 0.0 {
+            return hw;
+        }
+        if dy >= r {
+            return 0.0;
+        }
+        (hw - r) + (r * r - dy * dy).max(0.0).sqrt()
+    }
+
     /// Signed distance to the shape's edge: negative inside, positive outside.
     ///
     /// A distance field rather than a scanline fill, because it gives
@@ -185,9 +239,34 @@ impl Canvas {
     /// Fill a rounded rectangle, antialiased.
     pub fn fill_round_rect(&mut self, shape: RoundRect, colour: Rgba) {
         let (x0, y0, x1, y1) = bounds(&shape, 1.0, self.width, self.height);
+        let cx = shape.x + shape.w / 2.0;
+
         for y in y0..y1 {
-            for x in x0..x1 {
-                let d = shape.distance(x as f32 + 0.5, y as f32 + 0.5);
+            let py = y as f32 + 0.5;
+
+            // The span that needs no test, pulled in half a pixel so the
+            // feathered edge is still computed properly. Everything between
+            // these two is solid, which for a group background several hundred
+            // pixels wide is nearly all of it.
+            let solid = shape.solid_half_width(py, 0.5);
+            let (inner_start, inner_end) = if solid > 0.0 {
+                (
+                    ((cx - solid).ceil() as i32).max(x0),
+                    ((cx + solid).floor() as i32).min(x1),
+                )
+            } else {
+                (x1, x1)
+            };
+
+            for x in x0..inner_start.min(x1) {
+                let d = shape.distance(x as f32 + 0.5, py);
+                self.blend(x, y, colour, coverage(d));
+            }
+            for x in inner_start.min(x1)..inner_end {
+                self.blend(x, y, colour, 1.0);
+            }
+            for x in inner_end.max(x0)..x1 {
+                let d = shape.distance(x as f32 + 0.5, py);
                 self.blend(x, y, colour, coverage(d));
             }
         }
@@ -197,10 +276,32 @@ impl Canvas {
     pub fn stroke_round_rect(&mut self, shape: RoundRect, colour: Rgba, width: f32) {
         let half = width / 2.0;
         let (x0, y0, x1, y1) = bounds(&shape, width + 1.0, self.width, self.height);
+        let cx = shape.x + shape.w / 2.0;
+
         for y in y0..y1 {
-            for x in x0..x1 {
-                let d = shape.distance(x as f32 + 0.5, y as f32 + 0.5).abs() - half;
+            let py = y as f32 + 0.5;
+
+            // A stroke paints nothing in the middle, so the deep interior can
+            // be jumped over entirely rather than tested pixel by pixel.
+            let solid = shape.solid_half_width(py, half + 1.0);
+            let (skip_start, skip_end) = if solid > 0.0 {
+                (
+                    ((cx - solid).ceil() as i32).max(x0),
+                    ((cx + solid).floor() as i32).min(x1),
+                )
+            } else {
+                (x1, x1)
+            };
+
+            let mut x = x0;
+            while x < x1 {
+                if x == skip_start && skip_end > skip_start {
+                    x = skip_end;
+                    continue;
+                }
+                let d = shape.distance(x as f32 + 0.5, py).abs() - half;
                 self.blend(x, y, colour, coverage(d));
+                x += 1;
             }
         }
     }
@@ -296,6 +397,38 @@ mod tests {
         c.restore_clip(previous);
         c.fill_round_rect(RoundRect::new(0, 0, 40, 40, 0), Rgba::hex(0xFFFFFF));
         assert!(probe(&c, 20, 10)[0] > 250.0, "restoring lifts the band");
+    }
+
+    #[test]
+    fn the_fast_path_draws_the_same_shape_as_the_slow_one() {
+        // fill_round_rect skips the distance field across the middle of every
+        // row. If that span is ever computed a pixel wide, the fill and the
+        // edge disagree and the seam shows. This compares it against the
+        // per-pixel field it replaced.
+        let shape = RoundRect::new(3, 5, 33, 27, 9);
+        let white = Rgba::hex(0xFFFFFF);
+
+        let mut fast = Canvas::new(40, 40, Rgba::hex(0x000000));
+        fast.fill_round_rect(shape, white);
+
+        let mut slow = Canvas::new(40, 40, Rgba::hex(0x000000));
+        for y in 0..40 {
+            for x in 0..40 {
+                let d = shape.distance(x as f32 + 0.5, y as f32 + 0.5);
+                slow.blend(x, y, white, coverage(d));
+            }
+        }
+
+        for y in 0..40 {
+            for x in 0..40 {
+                let a = probe(&fast, x, y)[0];
+                let b = probe(&slow, x, y)[0];
+                assert!(
+                    (a - b).abs() < 0.5,
+                    "pixel {x},{y}: fast {a} vs slow {b}"
+                );
+            }
+        }
     }
 
     #[test]

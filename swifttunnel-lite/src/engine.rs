@@ -11,7 +11,7 @@
 //! up disagreeing about the same machine. The settings file is the same file,
 //! so a region picked here is picked in both.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -19,16 +19,21 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
-use swifttunnel_core::auth::AuthManager;
+use swifttunnel_core::auth::types::AuthState;
+use swifttunnel_core::auth::{AuthManager, update_required_message};
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
 use swifttunnel_core::settings::{self, AdapterBindingMode, AppSettings};
 use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
+use swifttunnel_core::vpn::connect_policy::{
+    build_available_servers, current_binding_preference, resolve_initial_connect_region,
+};
+use swifttunnel_core::vpn::connection::{free_tier_grace_seconds, free_tier_quota};
 use swifttunnel_core::vpn::parallel_interceptor::list_network_adapters;
-use swifttunnel_core::vpn::servers::{self, DynamicServerInfo};
+use swifttunnel_core::vpn::servers::{self, DynamicServerList, ServerListSource};
 use swifttunnel_core::vpn::split_tunnel::{GamePreset, get_apps_for_preset_set};
 use swifttunnel_core::vpn::{ConnectionState, VpnConnection};
 
-use crate::state::{AdapterRow, RegionRow, Roblox, State, Status, Tunnel};
+use crate::state::{AdapterRow, Lockout, RegionRow, Roblox, State, Status, Tunnel};
 use crate::view::{Action, Flag};
 
 /// Posted when a background job lands, so a finished connect or a fresh ping
@@ -46,14 +51,19 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_FRAME_CAP: u32 = 60;
 
 /// What the background threads have found.
-#[derive(Default)]
 struct Snapshot {
     regions: Vec<RegionRow>,
-    /// The raw fleet, kept because connect has to hand core the candidate
-    /// relays it may auto-route between.
-    servers: Vec<DynamicServerInfo>,
+    /// The fleet, in core's own container.
+    ///
+    /// Not a private copy: this is the type `connect_policy` takes, and the
+    /// round trips measured below are written back into it, so the candidate
+    /// list handed to `connect` carries the latency auto-routing sorts by.
+    /// Lite used to build that list by hand with `None` for every latency,
+    /// which left the router unable to tell one relay from another.
+    server_list: DynamicServerList,
     adapters: Vec<AdapterRow>,
     roblox: Roblox,
+    lockout: Option<Lockout>,
     tunnel: Tunnel,
     email: Option<String>,
     signed_in: bool,
@@ -115,6 +125,8 @@ impl Engine {
         let auth = AuthManager::new().map_err(|e| format!("auth: {e}"))?;
         let signed_in = auth.is_logged_in();
         let email = auth.get_user().map(|u| u.email);
+        let auth_state = auth.get_state();
+        let banned_reason = auth.get_user().and_then(|u| u.banned_reason);
 
         let mut loaded = settings::load_settings();
         loaded.sanitize_in_place();
@@ -129,7 +141,12 @@ impl Engine {
                 signed_in,
                 email,
                 roblox: read_roblox(ultraboost),
-                ..Snapshot::default()
+                lockout: lockout_of(&auth_state, banned_reason.clone()),
+                server_list: DynamicServerList::new_empty(),
+                regions: Vec::new(),
+                adapters: Vec::new(),
+                tunnel: Tunnel::default(),
+                free_tier_secs: None,
             }),
             hwnd: AtomicIsize::new(0),
             stop: AtomicBool::new(false),
@@ -138,6 +155,25 @@ impl Engine {
 
         spawn_regions(shared.clone());
         spawn_poller(shared.clone());
+
+        // The profile is re-fetched once at startup, because a ban applied
+        // since the last session is only visible on the server until
+        // something asks.
+        {
+            let shared = shared.clone();
+            shared.runtime.spawn({
+                let shared = shared.clone();
+                async move {
+                    let auth = shared.auth.lock().await;
+                    let _ = auth.refresh_profile().await;
+                    let state = auth.get_state();
+                    let reason = auth.get_user().and_then(|u| u.banned_reason);
+                    drop(auth);
+                    shared.edit(|s| s.lockout = lockout_of(&state, reason));
+                    shared.notify();
+                }
+            });
+        }
 
         // Once at startup, so the Settings row can put a name to a saved GUID
         // rather than showing "Manual" until somebody opens the picker.
@@ -164,6 +200,7 @@ impl Engine {
             state.regions = snapshot.regions.clone();
             state.adapters = snapshot.adapters.clone();
             state.roblox = snapshot.roblox.clone();
+            state.lockout = snapshot.lockout.clone();
             state.tunnel = snapshot.tunnel.clone();
             state.email = snapshot.email.clone();
             state.signed_in = snapshot.signed_in;
@@ -288,7 +325,7 @@ impl Engine {
 
     /// Connect, or disconnect if already up.
     fn primary(&self, state: &State) {
-        if self.shared.busy.load(Ordering::Relaxed) {
+        if self.shared.busy.load(Ordering::Relaxed) || state.lockout.is_some() {
             return;
         }
         let connected = state.tunnel.status == Status::Connected;
@@ -457,11 +494,17 @@ impl Drop for Engine {
 /// The one thing Lite decides differently is the app list: it is always the
 /// Roblox preset, because that is the only thing this client is for.
 async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
-    let snapshot = shared
+    let mut settings = shared
         .settings
         .read()
         .map(|s| s.clone())
         .map_err(|_| "settings unavailable".to_string())?;
+
+    // Which adapter to bind. This was `None`, which meant the adapter the user
+    // picked in Settings was read, saved, displayed, and then ignored at the
+    // one moment it mattered. It also refuses a saved adapter that has since
+    // gone down or turned into a tunnel, before the connection is attempted.
+    let binding = current_binding_preference(&mut settings)?;
 
     let token = {
         let auth = shared.auth.lock().await;
@@ -470,39 +513,52 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
             .map_err(|e| format!("Sign in again: {e}"))?
     };
 
-    let fleet = shared
-        .snapshot
-        .read()
-        .map(|s| s.servers.clone())
-        .unwrap_or_default();
-    let available: Vec<(String, std::net::SocketAddr, Option<u32>)> = fleet
-        .iter()
-        .filter(|s| s.relay_available)
-        .filter_map(|s| {
-            let addr = format!("{}:{}", s.ip, s.port).parse().ok()?;
-            Some((s.region.clone(), addr, None))
-        })
-        .collect();
+    // The fleet with its measured round trips, and the region auto-routing
+    // would actually pick, both from core's own policy rather than from a
+    // second opinion held here.
+    let (available, region) = {
+        let snapshot = shared
+            .snapshot
+            .read()
+            .map_err(|_| "server list unavailable".to_string())?;
+        (
+            build_available_servers(&snapshot.server_list),
+            resolve_initial_connect_region(
+                &snapshot.server_list,
+                &settings.selected_region,
+                settings.auto_routing_enabled,
+                &settings.forced_servers,
+            ),
+        )
+    };
 
     // Always the Roblox preset, because that is the only thing this client
     // is for. The full app builds this from a saved list of games.
     let apps = get_apps_for_preset_set(&HashSet::from([GamePreset::Roblox]));
 
+    // An empty custom relay means "use the fleet", which is what the full app
+    // does with the same field.
+    let custom_relay = (!settings.custom_relay_server.is_empty())
+        .then(|| settings.custom_relay_server.clone());
+    // A custom relay and auto-routing contradict each other; the full app
+    // drops auto-routing for the session, so this does too.
+    let auto_routing = settings.auto_routing_enabled && custom_relay.is_none();
+
     let mut vpn = shared.vpn.lock().await;
     vpn.set_auth_manager(shared.auth.clone());
     vpn.connect(
         &token,
-        &snapshot.selected_region,
+        &region,
         apps,
-        None,
-        snapshot.auto_routing_enabled,
+        custom_relay,
+        auto_routing,
         available,
-        snapshot.whitelisted_regions.clone(),
-        HashMap::new(),
-        None,
-        snapshot.game_process_performance,
-        snapshot.enable_api_tunneling,
-        snapshot.enable_country_ban,
+        settings.whitelisted_regions.clone(),
+        settings.forced_servers.clone(),
+        binding,
+        settings.game_process_performance,
+        settings.enable_api_tunneling,
+        settings.enable_country_ban,
     )
     .await
     .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))
@@ -523,7 +579,8 @@ fn spawn_regions(shared: Arc<Shared>) {
                 return;
             };
 
-            let mut targets: Vec<(usize, String)> = Vec::new();
+            // (relay id, address to ping).
+            let mut targets: Vec<(String, String)> = Vec::new();
 
             match runtime.block_on(servers::fetch_server_list()) {
                 Ok(list) => {
@@ -532,15 +589,17 @@ fn spawn_regions(shared: Arc<Shared>) {
                         // Only relays the API is currently offering. A region
                         // whose relays are all withdrawn should not be listed
                         // as somewhere you can go.
-                        let members: Vec<&DynamicServerInfo> = list
+                        let Some(first) = list
                             .servers
                             .iter()
-                            .filter(|s| region.servers.contains(&s.region) && s.relay_available)
-                            .collect();
-                        let Some(first) = members.first() else {
+                            .find(|s| region.servers.contains(&s.region) && s.relay_available)
+                        else {
                             continue;
                         };
-                        targets.push((rows.len(), first.ip.clone()));
+                        // The relay id, not the region id: latency is keyed by
+                        // server in core's list, and `get_region_best_latency`
+                        // reads it back out per region.
+                        targets.push((first.region.clone(), first.ip.clone()));
                         rows.push(RegionRow {
                             id: region.id.clone(),
                             name: region.name.clone(),
@@ -551,7 +610,11 @@ fn spawn_regions(shared: Arc<Shared>) {
                     log::info!("region list: {} regions", rows.len());
                     shared.edit(|s| {
                         s.regions = rows;
-                        s.servers = list.servers.clone();
+                        s.server_list.update(
+                            list.servers.clone(),
+                            list.regions.clone(),
+                            ServerListSource::Api,
+                        );
                     });
                     shared.notify();
                 }
@@ -562,14 +625,18 @@ fn spawn_regions(shared: Arc<Shared>) {
             }
 
             while !shared.stop.load(Ordering::Relaxed) {
-                for (index, ip) in &targets {
+                for (server_id, ip) in &targets {
                     if shared.stop.load(Ordering::Relaxed) {
                         return;
                     }
                     let measured = servers::measure_latency_icmp(ip);
                     shared.edit(|s| {
-                        if let Some(row) = s.regions.get_mut(*index) {
-                            row.ping_ms = measured;
+                        // Into core's list, so a later connect hands the same
+                        // numbers to auto-routing, and back out per region for
+                        // the rows the picker draws.
+                        s.server_list.set_latency(server_id, measured);
+                        for row in s.regions.iter_mut() {
+                            row.ping_ms = s.server_list.get_region_best_latency(&row.id);
                         }
                     });
                 }
@@ -673,6 +740,17 @@ fn spawn_poller(shared: Arc<Shared>) {
                     tunnel.bytes_down = stats.bytes_rx.load(Ordering::Relaxed);
                 }
 
+                // The free-tier allowance. Read from core, which is where it
+                // is recorded as each relay ticket is issued and where the
+                // limit is actually enforced, so this is a readout of the
+                // server's decision rather than a second opinion about it.
+                let locked = update_required_message().map(Lockout::UpdateRequired);
+
+                let free_tier = match free_tier_grace_seconds() {
+                    Some(grace) => Some(grace.max(0) as u32),
+                    None => free_tier_quota().0.map(|left| left.max(0) as u32),
+                };
+
                 // Neither of these is free. "Is Roblox running" walks the
                 // process table and settings means reading a file off disk,
                 // and both answer a question that changes when a person does
@@ -685,7 +763,12 @@ fn spawn_poller(shared: Arc<Shared>) {
 
                 let changed = shared
                     .edit(|s| {
-                        let before = (s.tunnel.clone(), s.roblox.clone());
+                        let before = (
+                            s.tunnel.clone(),
+                            s.roblox.clone(),
+                            s.free_tier_secs,
+                            s.lockout.clone(),
+                        );
 
                         // A connect in flight owns the readout: the state
                         // watch still says Disconnected for the first second
@@ -697,6 +780,10 @@ fn spawn_poller(shared: Arc<Shared>) {
                             s.tunnel.bytes_up = tunnel.bytes_up;
                             s.tunnel.bytes_down = tunnel.bytes_down;
                         }
+                        s.free_tier_secs = free_tier;
+                        if let Some(locked) = locked.clone() {
+                            s.lockout = Some(locked);
+                        }
                         s.roblox.running = running;
                         if refresh {
                             let fresh = read_roblox(s.roblox.ultraboost);
@@ -707,7 +794,13 @@ fn spawn_poller(shared: Arc<Shared>) {
                             };
                         }
 
-                        before != (s.tunnel.clone(), s.roblox.clone())
+                        before
+                            != (
+                                s.tunnel.clone(),
+                                s.roblox.clone(),
+                                s.free_tier_secs,
+                                s.lockout.clone(),
+                            )
                     })
                     .unwrap_or(false);
 
@@ -724,6 +817,17 @@ fn spawn_poller(shared: Arc<Shared>) {
 }
 
 // ── Reading the machine ─────────────────────────────────────────────────────
+
+/// A ban is a lockout; an outdated build is decided separately, by the API.
+fn lockout_of(state: &AuthState, banned_reason: Option<String>) -> Option<Lockout> {
+    if let Some(message) = update_required_message() {
+        return Some(Lockout::UpdateRequired(message));
+    }
+    match state {
+        AuthState::Banned(_) => Some(Lockout::Banned(banned_reason.unwrap_or_default())),
+        _ => None,
+    }
+}
 
 fn describe(state: &ConnectionState) -> String {
     match state {

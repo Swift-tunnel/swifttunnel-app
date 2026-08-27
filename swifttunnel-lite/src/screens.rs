@@ -4,7 +4,7 @@
 //! clicked lives in `view`, so what is left here is what the screen actually
 //! says, which is the part worth being able to read and change quickly.
 
-use crate::state::{Push, Roblox, State, Status};
+use crate::state::{Lockout, Push, Roblox, State, Status};
 use crate::theme;
 use crate::view::{Action, Chip, Flag, Item, Right, Row, Screen, Tone, Variant};
 
@@ -13,6 +13,13 @@ const FPS_PRESETS: [u32; 5] = [60, 120, 144, 165, 240];
 
 /// Build the current screen, or whatever is pushed over it.
 pub fn build(state: &State) -> Vec<Item> {
+    // A lockout takes the whole window. Tabs would imply there is something
+    // useful behind them, and there is not: the account or the build is the
+    // problem and nothing on the other screens changes that.
+    if let Some(lockout) = &state.lockout {
+        return locked_out(state, lockout);
+    }
+
     match state.push {
         Push::Regions => regions(state),
         Push::Adapters => adapters(state),
@@ -22,6 +29,49 @@ pub fn build(state: &State) -> Vec<Item> {
             Screen::Settings => settings(state),
         },
     }
+}
+
+/// The screen shown instead of everything else.
+fn locked_out(state: &State, lockout: &Lockout) -> Vec<Item> {
+    let (headline, detail) = match lockout {
+        Lockout::Banned(reason) => (
+            "Account suspended",
+            if reason.trim().is_empty() {
+                "This account cannot use SwiftTunnel. Contact support if you think this is wrong.".to_string()
+            } else {
+                reason.clone()
+            },
+        ),
+        Lockout::UpdateRequired(message) => (
+            "Update required",
+            if message.trim().is_empty() {
+                "This build is too old to connect. Install the latest SwiftTunnel.".to_string()
+            } else {
+                message.clone()
+            },
+        ),
+    };
+
+    let mut items = vec![
+        Item::Gap(16),
+        Item::Status {
+            headline: headline.to_string(),
+            sub: String::new(),
+            dot: theme::ERROR,
+            sub_ink: theme::TEXT_MUTED,
+            right: None,
+        },
+        Item::Note(detail),
+        Item::Gap(8),
+    ];
+
+    if matches!(lockout, Lockout::Banned(_)) && state.signed_in {
+        items.push(Item::Group(vec![
+            Row::new("Sign out").action(Action::SignOut).danger_if(true),
+        ]));
+    }
+
+    items
 }
 
 // ── Connect ─────────────────────────────────────────────────────────────────
@@ -102,6 +152,9 @@ fn connect(state: &State) -> Vec<Item> {
         Row::new("Region")
             .right(Right::TextChevron(region_label(state)))
             .action(Action::OpenRegions),
+        Row::new("Adapter")
+            .right(Right::TextChevron(adapter_label(state)))
+            .action(Action::OpenAdapters),
         Row::new("Route Assist")
             .sub("Join servers in the tunneled region")
             .right(Right::Switch(state.route_assist))
@@ -264,11 +317,11 @@ fn roblox(state: &State) -> Vec<Item> {
 
 /// Settings, and it has to fit.
 ///
-/// The viewport is 280px. The first version of this screen laid out to 378 and
-/// scrolled, which sliced the last row in half against the window edge and
-/// looked like a rendering fault rather than a list. Every sub-label that was
-/// restating its own row is gone, and the version moved into the caption,
-/// which brings it to 276.
+/// An earlier version laid out well past the viewport and scrolled, which
+/// sliced the last row in half against the window edge and looked like a
+/// rendering fault rather than a list. Every sub-label that was restating its
+/// own row is gone, the version sits in the caption rather than costing a row,
+/// and the adapter moved to Connect, where the thing it affects is.
 fn settings(state: &State) -> Vec<Item> {
     vec![
         caption("Startup"),
@@ -282,13 +335,6 @@ fn settings(state: &State) -> Vec<Item> {
             Row::new("Reconnect automatically")
                 .right(Right::Switch(state.auto_reconnect))
                 .action(Action::Toggle(Flag::AutoReconnect)),
-        ]),
-        Item::Gap(12),
-        caption("Network"),
-        Item::Group(vec![
-            Row::new("Adapter")
-                .right(Right::TextChevron(adapter_label(state)))
-                .action(Action::OpenAdapters),
         ]),
         Item::Gap(12),
         // No update check. Lite ships inside the same installer as the full app

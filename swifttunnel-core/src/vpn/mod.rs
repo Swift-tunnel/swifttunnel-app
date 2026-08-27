@@ -20,6 +20,7 @@
 
 pub mod auto_routing;
 pub mod bypass_diag;
+pub mod connect_policy;
 pub mod connection;
 pub(crate) mod diskless_passthrough;
 pub mod error_messages;
@@ -40,6 +41,11 @@ pub mod wfp_block;
 pub mod winpkfilter;
 
 pub use auto_routing::{AutoRouter, AutoRoutingAction, AutoRoutingEvent};
+pub use connect_policy::{
+    build_available_servers, current_binding_preference, manual_adapter_label,
+    manual_adapter_unusable_reason, resolve_initial_connect_region, select_best_region_by_latency,
+    validate_manual_adapter_selection,
+};
 pub use connection::{ConnectionState, VpnConnection};
 pub use error_messages::{short_error, user_friendly_error};
 pub use ipv6_recovery::recover_ipv6_on_startup;

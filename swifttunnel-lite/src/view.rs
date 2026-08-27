@@ -76,8 +76,6 @@ pub enum Screen {
 #[derive(Debug, Clone)]
 pub enum Right {
     None,
-    /// Plain value text.
-    Text(String),
     /// Value text in the latency scale's ink.
     Latency(Option<u32>),
     Switch(bool),
@@ -606,7 +604,7 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
         Right::Latency(_) => m.s(46),
         // Three fifths of the row, which at 340 wide is enough for any value
         // these rows carry and still leaves the label more room than it needs.
-        Right::Text(_) | Right::TextChevron(_) => width * 3 / 5,
+        Right::TextChevron(_) => width * 3 / 5,
     };
     let text_right = (r.right - pad - reserved).max(r.left + pad + m.s(40));
 
@@ -632,7 +630,7 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
             // one short run at the far right and holding the second line to
             // the same stop truncated copy that had room to spare.
             let sub_right = match &row.right {
-                Right::Text(_) | Right::TextChevron(_) => {
+                Right::TextChevron(_) => {
                     text_right.max(r.right - pad - m.s(58))
                 }
                 _ => text_right,
@@ -652,14 +650,6 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
 
     match &row.right {
         Right::None => {}
-
-        Right::Text(value) => f.text(
-            rect(text_right + m.s(6), r.top, edge, r.bottom),
-            value,
-            Face::ValueText,
-            theme::TEXT_SECONDARY,
-            RIGHT,
-        ),
 
         Right::Latency(ms) => {
             let label = match ms {

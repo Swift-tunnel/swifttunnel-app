@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -9,10 +9,15 @@ use crate::events::{
 };
 use crate::state::AppState;
 use swifttunnel_core::auth::types::AuthError;
-use swifttunnel_core::settings::AdapterBindingMode;
 use swifttunnel_core::vpn::{
-    AdapterBindingPreference, BindingPreferenceSource, BindingPreflightInfo, VpnError,
-    preflight_binding, preflight_binding_for_connect,
+    BindingPreferenceSource, BindingPreflightInfo, VpnError, preflight_binding,
+    preflight_binding_for_connect,
+};
+// The connect-time policy: which adapter to bind, which region to land in,
+// which relays to offer. It lives in core so SwiftTunnel Lite runs the same
+// decisions rather than its own approximation of them.
+pub(crate) use swifttunnel_core::vpn::connect_policy::{
+    build_available_servers, current_binding_preference, resolve_initial_connect_region,
 };
 
 const VPN_CONNECT_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
@@ -138,98 +143,6 @@ pub(crate) fn parse_game_presets(
             }
         })
         .collect()
-}
-
-pub(crate) fn current_binding_preference(
-    settings: &mut swifttunnel_core::settings::AppSettings,
-) -> Result<Option<AdapterBindingPreference>, String> {
-    match settings.adapter_binding_mode {
-        AdapterBindingMode::Manual => {
-            let Some(guid) = settings.preferred_physical_adapter_guid.clone() else {
-                log::warn!(
-                    "Adapter binding mode is Manual but no adapter GUID is selected; using Smart Auto selection."
-                );
-                return Ok(None);
-            };
-
-            validate_manual_adapter_selection(&guid)?;
-
-            Ok(Some(AdapterBindingPreference {
-                guid,
-                source: BindingPreferenceSource::Manual,
-                network_signature: None,
-            }))
-        }
-        AdapterBindingMode::SmartAuto => {
-            let base = preflight_binding(None).map_err(|e| e.to_string())?;
-            let Some(guid) = settings
-                .network_binding_overrides
-                .get(&base.network_signature)
-                .cloned()
-            else {
-                return Ok(None);
-            };
-
-            Ok(Some(AdapterBindingPreference {
-                guid,
-                source: BindingPreferenceSource::RememberedAuto,
-                network_signature: Some(base.network_signature),
-            }))
-        }
-    }
-}
-
-fn manual_adapter_unusable_reason(
-    adapter: &swifttunnel_core::vpn::NetworkAdapterInfo,
-) -> Option<&'static str> {
-    if !adapter.is_up {
-        return Some("adapter is down");
-    }
-
-    match adapter.kind.as_str() {
-        "loopback" => Some("loopback adapters cannot carry game traffic"),
-        "tunnel" => Some("VPN/tunnel adapters cannot be used as the physical adapter"),
-        _ => None,
-    }
-}
-
-fn manual_adapter_label(adapter: &swifttunnel_core::vpn::NetworkAdapterInfo) -> &str {
-    if !adapter.friendly_name.trim().is_empty() {
-        adapter.friendly_name.as_str()
-    } else if !adapter.description.trim().is_empty() {
-        adapter.description.as_str()
-    } else {
-        adapter.guid.as_str()
-    }
-}
-
-fn validate_manual_adapter_selection(guid: &str) -> Result<(), String> {
-    let normalized_guid = guid.trim().to_ascii_lowercase();
-    if normalized_guid.is_empty() {
-        return Ok(());
-    }
-
-    let adapters = swifttunnel_core::vpn::list_network_adapters()
-        .map_err(|e| format!("Failed to validate manual adapter selection: {}", e))?;
-
-    let Some(adapter) = adapters
-        .iter()
-        .find(|adapter| adapter.guid.eq_ignore_ascii_case(&normalized_guid))
-    else {
-        // Missing saved adapters are still allowed to fall back later. This can
-        // happen after a driver reinstall or Windows recreates an adapter GUID.
-        return Ok(());
-    };
-
-    if let Some(reason) = manual_adapter_unusable_reason(adapter) {
-        return Err(format!(
-            "Selected adapter is not usable for SwiftTunnel ({}: {}). Choose an [OK] adapter or switch to Smart Auto.",
-            manual_adapter_label(adapter),
-            reason
-        ));
-    }
-
-    Ok(())
 }
 
 pub(crate) fn build_binding_preflight(
@@ -1032,25 +945,6 @@ fn build_latency_probe_targets(
         .collect()
 }
 
-/// Build the (region, socket_addr, latency) tuples passed into `VpnConnection::connect`
-/// from the dynamic server list. Honors each server's per-relay UDP port instead of
-/// hardcoding 51821 — relays migrating to alternate ports must remain reachable.
-pub(crate) fn build_available_servers(
-    sl: &swifttunnel_core::vpn::servers::DynamicServerList,
-) -> Vec<(String, SocketAddr, Option<u32>)> {
-    sl.servers()
-        .iter()
-        .filter(|s| s.relay_available)
-        .filter_map(|s| {
-            let addr: SocketAddr = format!("{}:{}", s.ip, s.effective_relay_port())
-                .parse()
-                .ok()?;
-            let latency = sl.get_latency(&s.region);
-            Some((s.region.clone(), addr, latency))
-        })
-        .collect()
-}
-
 fn apply_latency_measurements(
     sl: &mut swifttunnel_core::vpn::servers::DynamicServerList,
     measurements: &[(String, Option<u32>)],
@@ -1097,51 +991,6 @@ fn select_best_server_in_region(
             })
             .cloned()
     })
-}
-
-fn select_best_region_by_latency(
-    sl: &swifttunnel_core::vpn::servers::DynamicServerList,
-    forced_servers: &HashMap<String, String>,
-) -> Option<String> {
-    sl.regions()
-        .iter()
-        .filter_map(|region| {
-            let latency = forced_servers
-                .get(&region.id)
-                .and_then(|server_id| sl.get_latency(server_id))
-                .or_else(|| {
-                    if forced_servers.contains_key(&region.id) {
-                        None
-                    } else {
-                        sl.get_region_best_latency(&region.id)
-                    }
-                });
-            latency.map(|latency| (region.id.clone(), latency))
-        })
-        .min_by(|(region_a, latency_a), (region_b, latency_b)| {
-            latency_a
-                .cmp(latency_b)
-                .then_with(|| region_a.cmp(region_b))
-        })
-        .map(|(region_id, _)| region_id)
-}
-
-fn resolve_initial_connect_region(
-    sl: &swifttunnel_core::vpn::servers::DynamicServerList,
-    requested_region: &str,
-    auto_routing: bool,
-    forced_servers: &HashMap<String, String>,
-) -> String {
-    if !auto_routing {
-        return requested_region.to_string();
-    }
-
-    if forced_servers.contains_key(requested_region) {
-        return requested_region.to_string();
-    }
-
-    select_best_region_by_latency(sl, forced_servers)
-        .unwrap_or_else(|| requested_region.to_string())
 }
 
 #[tauri::command]
@@ -1267,42 +1116,6 @@ mod tests {
             ServerListSource::Api,
         );
         list
-    }
-
-    fn make_network_adapter(kind: &str, is_up: bool) -> swifttunnel_core::vpn::NetworkAdapterInfo {
-        swifttunnel_core::vpn::NetworkAdapterInfo {
-            guid: format!("{kind}-guid"),
-            friendly_name: kind.to_string(),
-            description: kind.to_string(),
-            if_index: 10,
-            is_up,
-            is_default_route: false,
-            kind: kind.to_string(),
-        }
-    }
-
-    #[test]
-    fn manual_adapter_validation_rejects_unusable_adapter_kinds() {
-        assert_eq!(
-            manual_adapter_unusable_reason(&make_network_adapter("loopback", true)),
-            Some("loopback adapters cannot carry game traffic")
-        );
-        assert_eq!(
-            manual_adapter_unusable_reason(&make_network_adapter("tunnel", true)),
-            Some("VPN/tunnel adapters cannot be used as the physical adapter")
-        );
-        assert_eq!(
-            manual_adapter_unusable_reason(&make_network_adapter("wifi", false)),
-            Some("adapter is down")
-        );
-    }
-
-    #[test]
-    fn manual_adapter_validation_allows_normal_up_adapter() {
-        assert_eq!(
-            manual_adapter_unusable_reason(&make_network_adapter("ethernet", true)),
-            None
-        );
     }
 
     #[test]
@@ -1459,70 +1272,6 @@ mod tests {
 
         let selected = select_best_server_in_region(&list, "singapore");
         assert_eq!(selected.as_deref(), Some("singapore"));
-    }
-
-    #[test]
-    fn select_best_region_by_latency_uses_ping_test_region_best() {
-        let mut list = make_dynamic_server_list();
-        list.set_latency("singapore", Some(28));
-        list.set_latency("singapore-02", Some(12));
-        list.set_latency("tokyo-01", Some(19));
-
-        let selected = select_best_region_by_latency(&list, &HashMap::new());
-        assert_eq!(selected.as_deref(), Some("singapore"));
-    }
-
-    #[test]
-    fn resolve_initial_connect_region_keeps_manual_region() {
-        let mut list = make_dynamic_server_list();
-        list.set_latency("singapore", Some(12));
-        list.set_latency("tokyo-01", Some(5));
-
-        let selected = resolve_initial_connect_region(&list, "singapore", false, &HashMap::new());
-        assert_eq!(selected, "singapore");
-    }
-
-    #[test]
-    fn resolve_initial_connect_region_uses_ping_test_best_for_auto_routing() {
-        let mut list = make_dynamic_server_list();
-        list.set_latency("singapore", Some(22));
-        list.set_latency("singapore-02", Some(16));
-        list.set_latency("tokyo-01", Some(9));
-
-        let selected = resolve_initial_connect_region(&list, "singapore", true, &HashMap::new());
-        assert_eq!(selected, "tokyo");
-    }
-
-    #[test]
-    fn resolve_initial_connect_region_falls_back_without_ping_results() {
-        let list = make_dynamic_server_list();
-
-        let selected = resolve_initial_connect_region(&list, "singapore", true, &HashMap::new());
-        assert_eq!(selected, "singapore");
-    }
-
-    #[test]
-    fn resolve_initial_connect_region_keeps_requested_region_with_forced_server() {
-        let mut list = make_dynamic_server_list();
-        list.set_latency("singapore", Some(22));
-        list.set_latency("singapore-02", Some(16));
-        list.set_latency("tokyo-01", Some(9));
-        let forced_servers = HashMap::from([("singapore".to_string(), "singapore-02".to_string())]);
-
-        let selected = resolve_initial_connect_region(&list, "singapore", true, &forced_servers);
-        assert_eq!(selected, "singapore");
-    }
-
-    #[test]
-    fn select_best_region_by_latency_scores_forced_region_by_forced_server() {
-        let mut list = make_dynamic_server_list();
-        list.set_latency("singapore", Some(5));
-        list.set_latency("singapore-02", Some(50));
-        list.set_latency("tokyo-01", Some(20));
-        let forced_servers = HashMap::from([("singapore".to_string(), "singapore-02".to_string())]);
-
-        let selected = select_best_region_by_latency(&list, &forced_servers);
-        assert_eq!(selected.as_deref(), Some("tokyo"));
     }
 
     #[test]

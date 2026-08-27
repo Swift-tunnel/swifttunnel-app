@@ -96,7 +96,8 @@ fn main() {
             Some("adapters") => Push::Adapters,
             _ => Push::None,
         };
-        match ui::render_preview(engine, &path, screen, push, connected) {
+        let bench = args.iter().any(|a| a == "--bench");
+        match ui::render_preview(engine, &path, screen, push, connected, bench) {
             Ok(()) => println!("wrote {path}"),
             Err(error) => eprintln!("preview failed: {error}"),
         }
