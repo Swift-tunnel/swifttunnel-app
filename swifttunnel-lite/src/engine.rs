@@ -20,6 +20,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use swifttunnel_core::auth::types::AuthState;
+use swifttunnel_core::autostart::{RUN_VALUE_LITE, sync_run_on_startup};
 use swifttunnel_core::auth::{AuthManager, update_required_message};
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
 use swifttunnel_core::settings::{self, AdapterBindingMode, AppSettings};
@@ -81,6 +82,12 @@ struct Shared {
     stop: AtomicBool,
     /// Guards against a second connect being started while one is in flight.
     busy: AtomicBool,
+    /// Set when the user pressed Disconnect, so auto-reconnect knows the
+    /// tunnel went down on purpose and leaves it down.
+    intentional_disconnect: AtomicBool,
+    /// Whether the tunnel has been up at least once, so a failed first connect
+    /// is not retried forever behind a dialog nobody asked for.
+    was_connected: AtomicBool,
 }
 
 impl Shared {
@@ -151,6 +158,8 @@ impl Engine {
             hwnd: AtomicIsize::new(0),
             stop: AtomicBool::new(false),
             busy: AtomicBool::new(false),
+            intentional_disconnect: AtomicBool::new(false),
+            was_connected: AtomicBool::new(false),
         });
 
         spawn_regions(shared.clone());
@@ -291,24 +300,7 @@ impl Engine {
                     }
                 });
             }
-            Action::SignIn => {
-                // Signing in needs a browser round trip and a form. Rather
-                // than build a second login UI, Lite hands off to the full
-                // app's, which both clients already share a session file with.
-                let shared = self.shared.clone();
-                shared.runtime.spawn({
-                    let shared = shared.clone();
-                    async move {
-                        let url = {
-                            let auth = shared.auth.lock().await;
-                            auth.start_google_sign_in().ok()
-                        };
-                        if let Some(url) = url {
-                            open_in_browser(&url);
-                        }
-                    }
-                });
-            }
+            Action::SignIn => self.sign_in(),
 
             // Handled by the window: they change what is on screen, not what
             // the machine is doing.
@@ -331,6 +323,9 @@ impl Engine {
         let connected = state.tunnel.status == Status::Connected;
         let shared = self.shared.clone();
         shared.busy.store(true, Ordering::Relaxed);
+        shared
+            .intentional_disconnect
+            .store(connected, Ordering::Relaxed);
 
         shared.edit(|s| {
             s.tunnel.status = Status::Working;
@@ -370,7 +365,22 @@ impl Engine {
         match flag {
             Flag::RouteAssist => self.settings(|s| s.enable_api_tunneling = !s.enable_api_tunneling),
             Flag::CountryBan => self.settings(|s| s.enable_country_ban = !s.enable_country_ban),
-            Flag::RunOnStartup => self.settings(|s| s.run_on_startup = !s.run_on_startup),
+            Flag::RunOnStartup => {
+                // Written to the registry, not just to the settings file. This
+                // switch saved a boolean and did nothing else for as long as it
+                // has existed.
+                let enabled = !self
+                    .shared
+                    .settings
+                    .read()
+                    .map(|s| s.run_on_startup)
+                    .unwrap_or(false);
+                if let Err(error) = sync_run_on_startup(RUN_VALUE_LITE, enabled) {
+                    log::warn!("could not change the startup entry: {error}");
+                    return;
+                }
+                self.settings(|s| s.run_on_startup = enabled);
+            }
             Flag::CloseToTray => self.settings(|s| s.minimize_to_tray = !s.minimize_to_tray),
             Flag::AutoReconnect => self.settings(|s| s.auto_reconnect = !s.auto_reconnect),
 
@@ -396,6 +406,75 @@ impl Engine {
                 self.patch_roblox(move |c| c.window_fullscreen = on);
             }
         }
+    }
+
+    /// Google sign-in, start to finish.
+    ///
+    /// The first version opened the browser and stopped there: nothing ever
+    /// collected the callback, so the flow began and never completed, and the
+    /// window sat on "Signed out" while the browser said it had worked.
+    ///
+    /// Core owns all of it, including the loopback server the callback lands
+    /// on. This starts the flow, waits for the token, and completes it.
+    fn sign_in(&self) {
+        let shared = self.shared.clone();
+        shared.runtime.spawn({
+            let shared = shared.clone();
+            async move {
+                let url = {
+                    let auth = shared.auth.lock().await;
+                    match auth.start_google_sign_in() {
+                        Ok(url) => url,
+                        Err(error) => {
+                            log::warn!("could not start sign-in: {error}");
+                            return;
+                        }
+                    }
+                };
+                open_in_browser(&url);
+
+                // The loopback server is already listening; this waits for it.
+                // Ten minutes matches the expiry core enforces on the flow.
+                let deadline = Instant::now() + Duration::from_secs(600);
+                let callback = loop {
+                    if Instant::now() > deadline || shared.stop.load(Ordering::Relaxed) {
+                        let auth = shared.auth.lock().await;
+                        auth.cancel_oauth();
+                        log::warn!("sign-in was not completed in time");
+                        return;
+                    }
+                    let found = {
+                        let auth = shared.auth.lock().await;
+                        auth.poll_oauth_callback()
+                    };
+                    if let Some(data) = found {
+                        break data;
+                    }
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                };
+
+                let auth = shared.auth.lock().await;
+                if let Err(error) = auth
+                    .complete_oauth_callback(&callback.token, &callback.state)
+                    .await
+                {
+                    log::warn!("sign-in failed: {error}");
+                    return;
+                }
+                let signed_in = auth.is_logged_in();
+                let email = auth.get_user().map(|u| u.email);
+                let state = auth.get_state();
+                let reason = auth.get_user().and_then(|u| u.banned_reason);
+                drop(auth);
+
+                shared.edit(|s| {
+                    s.signed_in = signed_in;
+                    s.email = email;
+                    s.lockout = lockout_of(&state, reason);
+                });
+                shared.notify();
+            }
+        });
     }
 
     fn snapshot_roblox(&self) -> Roblox {
@@ -718,6 +797,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                         server_region,
                         ..
                     } => {
+                        shared.was_connected.store(true, Ordering::Relaxed);
                         since = Some(*started);
                         tunnel.status = Status::Connected;
                         tunnel.region = Some(server_region.clone());
@@ -811,12 +891,80 @@ fn spawn_poller(shared: Arc<Shared>) {
                 if changed {
                     shared.notify();
                 }
+
+                maybe_reconnect(&shared);
             }
         })
         .expect("poller thread");
 }
 
 // ── Reading the machine ─────────────────────────────────────────────────────
+
+/// Bring the tunnel back up if it dropped on its own.
+///
+/// Only when it had been up, only when the user did not ask for it to go down,
+/// and never while a connect is already in flight. The retry is one attempt
+/// per poll: core's own candidate rotation handles a relay that is refusing,
+/// so hammering it from here would add nothing but load.
+fn maybe_reconnect(shared: &Arc<Shared>) {
+    if shared.busy.load(Ordering::Relaxed)
+        || shared.intentional_disconnect.load(Ordering::Relaxed)
+        || !shared.was_connected.load(Ordering::Relaxed)
+    {
+        return;
+    }
+
+    let wants = shared
+        .settings
+        .read()
+        .map(|s| s.auto_reconnect)
+        .unwrap_or(false);
+    if !wants {
+        return;
+    }
+
+    let down = shared
+        .snapshot
+        .read()
+        .map(|s| matches!(s.tunnel.status, Status::Disconnected | Status::Error))
+        .unwrap_or(false);
+    if !down {
+        return;
+    }
+
+    // A lockout means the server will refuse the ticket anyway.
+    if shared
+        .snapshot
+        .read()
+        .map(|s| s.lockout.is_some())
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    log::info!("tunnel dropped on its own; reconnecting");
+    shared.busy.store(true, Ordering::Relaxed);
+    shared.edit(|s| {
+        s.tunnel.status = Status::Working;
+        s.tunnel.detail = "Reconnecting".into();
+    });
+    shared.notify();
+
+    let shared = shared.clone();
+    shared.runtime.spawn({
+        let shared = shared.clone();
+        async move {
+            if let Err(error) = connect(&shared).await {
+                shared.edit(|s| {
+                    s.tunnel.status = Status::Error;
+                    s.tunnel.detail = error;
+                });
+            }
+            shared.busy.store(false, Ordering::Relaxed);
+            shared.notify();
+        }
+    });
+}
 
 /// A ban is a lockout; an outdated build is decided separately, by the API.
 fn lockout_of(state: &AuthState, banned_reason: Option<String>) -> Option<Lockout> {

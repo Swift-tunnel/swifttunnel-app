@@ -34,6 +34,7 @@ mod single_client;
 mod state;
 mod surface;
 mod theme;
+mod tray;
 mod ui;
 mod view;
 

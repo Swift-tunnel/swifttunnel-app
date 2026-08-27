@@ -38,6 +38,7 @@ use crate::canvas::{Canvas, Rgba};
 use crate::engine::Engine;
 use crate::state::{Push, State, Status};
 use crate::theme;
+use crate::tray::{CMD_QUIT, CMD_SHOW, Tray, WM_TRAY, tray_event};
 use crate::view::{
     self, Action, Face, Fonts, Frame, Metrics, Screen, Shape, TextRun, contains,
 };
@@ -71,6 +72,10 @@ pub struct App {
     /// Reused across repaints rather than rebuilt, so a slow machine is not
     /// allocating and zeroing 1.5MB to redraw a hover.
     canvas: Canvas,
+    /// `None` until the window exists, since the icon needs its handle.
+    tray: Option<Tray>,
+    /// Set by the tray's Quit item, so WM_CLOSE stops hiding and closes.
+    quitting: bool,
 }
 
 impl App {
@@ -561,6 +566,8 @@ pub fn new_app(engine: Engine, dpi: i32) -> Box<App> {
         dpi,
         ticking: false,
         canvas: Canvas::new(m.s(theme::WINDOW_W), m.s(theme::WINDOW_H), theme::BG),
+        tray: None,
+        quitting: false,
     });
     let client = rect(0, 0, m.s(theme::WINDOW_W), m.s(theme::WINDOW_H));
     app.rebuild(client);
@@ -679,6 +686,50 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.fonts = Fonts::new(&app.m);
                     app.rebuild(client_of(hwnd));
                     sync_timer(hwnd, app);
+                    app.tray = Some(Tray::new(hwnd));
+                }
+                LRESULT(0)
+            }
+
+            // Closing the window is not quitting.
+            //
+            // The tunnel lives in this process, so destroying the window drops
+            // the engine and tears the tunnel down. Doing that because someone
+            // clicked the X mid-game is the wrong answer, and Settings has
+            // promised otherwise since the day that switch was added.
+            WM_CLOSE => {
+                if let Some(app) = app_of(hwnd)
+                    && !app.quitting
+                    && app.state.close_to_tray
+                    && app.tray.as_ref().is_some_and(|t| t.present())
+                {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    return LRESULT(0);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+
+            WM_TRAY => {
+                if let Some(app) = app_of(hwnd) {
+                    match tray_event(lparam) {
+                        // Left click or double click: bring it back.
+                        WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
+                            let _ = ShowWindow(hwnd, SW_SHOW);
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                        WM_RBUTTONUP => match app.tray.as_ref().and_then(|t| t.menu()) {
+                            Some(CMD_SHOW) => {
+                                let _ = ShowWindow(hwnd, SW_SHOW);
+                                let _ = SetForegroundWindow(hwnd);
+                            }
+                            Some(CMD_QUIT) => {
+                                app.quitting = true;
+                                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
                 }
                 LRESULT(0)
             }

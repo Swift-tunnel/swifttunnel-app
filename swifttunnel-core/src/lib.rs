@@ -4,6 +4,7 @@
 //! and networking. Used by the Tauri desktop app.
 
 pub mod auth;
+pub mod autostart;
 pub mod discord_rpc;
 pub mod diskless;
 pub mod firewall_fixer;
