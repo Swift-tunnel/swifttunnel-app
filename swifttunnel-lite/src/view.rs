@@ -841,13 +841,12 @@ pub struct Fonts {
 impl Fonts {
     pub fn new(m: &Metrics) -> Self {
         let ui = |px: i32, weight: i32| {
-            gdi::font(
-                theme::FACE_UI,
-                theme::FACE_UI_FALLBACK,
-                m.s(px),
-                weight,
-                0,
-            )
+            let (family, gdi_weight) = theme::ui_face(weight);
+            gdi::font(family, theme::FACE_UI_FALLBACK, m.s(px), gdi_weight, 0)
+        };
+        let mono = |px: i32, weight: i32| {
+            let (family, gdi_weight) = theme::mono_face(weight);
+            gdi::font(family, theme::FACE_MONO_FALLBACK, m.s(px), gdi_weight, 0)
         };
         Self {
             title: ui(12, 600),
@@ -857,13 +856,7 @@ impl Fonts {
             caption: ui(9, 600),
             // Numbers in the mono face, so a changing readout does not shuffle
             // the digits beside it.
-            value: gdi::font(
-                theme::FACE_MONO,
-                theme::FACE_MONO_FALLBACK,
-                m.s(11),
-                500,
-                0,
-            ),
+            value: mono(11, 500),
             value_text: ui(12, 400),
             button: ui(13, 600),
             tab: ui(12, 500),

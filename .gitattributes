@@ -1,0 +1,6 @@
+# The embedded font files are binary. Without this git applied its CRLF
+# conversion to them, which would corrupt a TrueType file silently.
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary

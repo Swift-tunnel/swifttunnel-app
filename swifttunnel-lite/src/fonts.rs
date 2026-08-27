@@ -56,7 +56,22 @@ pub fn install() {
     for bytes in GEIST.iter().chain(GEIST_MONO.iter()) {
         loaded += register(bytes);
     }
-    log::info!("registered {loaded} embedded font faces");
+
+    // Loud, because the failure is silent everywhere else.
+    //
+    // These files shipped as EOT for a while (which is what the Google Fonts
+    // CSS API hands a user agent old enough to ask for it), and
+    // AddFontMemResourceEx rejects EOT. Every face failed, GDI substituted
+    // Segoe UI without a word, and the only symptom was that the app looked
+    // subtly wrong. A count of zero here is now the thing to look for.
+    if loaded == 0 {
+        log::error!(
+            "no embedded font faces registered: the UI will fall back to Segoe UI. \
+             Are resources/fonts/*.ttf actually TrueType?"
+        );
+    } else {
+        log::info!("registered {loaded} embedded font faces");
+    }
 }
 
 fn register(bytes: &'static [u8]) -> u32 {

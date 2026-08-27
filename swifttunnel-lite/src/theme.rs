@@ -136,7 +136,35 @@ pub const SCROLLBAR_W: i32 = 3;
 
 /// The product's own faces, embedded and registered by [`crate::fonts`].
 /// The fallbacks only matter if registration failed.
-pub const FACE_UI: &str = "Geist";
 pub const FACE_UI_FALLBACK: &str = "Segoe UI Variable Display";
-pub const FACE_MONO: &str = "Geist Mono";
 pub const FACE_MONO_FALLBACK: &str = "Consolas";
+
+/// Which family to ask GDI for, and at what weight.
+///
+/// # Why this is not just ("Geist", weight)
+///
+/// Google Fonts publishes each static weight of Geist as its **own family**:
+/// the 500 file registers as "Geist Medium" and the 600 as "Geist SemiBold",
+/// not as heavier members of "Geist". Asking for family "Geist" at weight 600
+/// therefore finds the regular and synthesises the rest by smearing the
+/// outline, which is the fake-bold look that made every heading wrong.
+///
+/// So the family carries the weight and GDI is asked for 400 within it. 700 is
+/// the exception: that file does register as a Bold style of "Geist", so it is
+/// selected the ordinary way.
+pub fn ui_face(weight: i32) -> (&'static str, i32) {
+    match weight {
+        w if w >= 700 => ("Geist", 700),
+        w if w >= 600 => ("Geist SemiBold", 400),
+        w if w >= 500 => ("Geist Medium", 400),
+        _ => ("Geist", 400),
+    }
+}
+
+/// The same, for the monospaced face.
+pub fn mono_face(weight: i32) -> (&'static str, i32) {
+    match weight {
+        w if w >= 500 => ("Geist Mono Medium", 400),
+        _ => ("Geist Mono", 400),
+    }
+}
