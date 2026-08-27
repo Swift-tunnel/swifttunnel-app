@@ -56,6 +56,10 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
     # The notification-area icon, so closing the window does not drop the tunnel.
     "Win32_UI_Shell",
+    # Reading a pasted FFlag payload off the clipboard.
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
 ] }
 
 [build-dependencies]

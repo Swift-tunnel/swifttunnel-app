@@ -5,7 +5,7 @@
 //! paints. Nothing here reaches out to core, so a screen can be laid out in the
 //! preview harness with no network, no driver and no account.
 
-use crate::view::Screen;
+use crate::view::{FieldId, Screen};
 
 /// Where the tunnel is, flattened from core's richer state machine.
 ///
@@ -89,6 +89,10 @@ pub struct Roblox {
     pub quality: u32,
     pub ultraboost: bool,
     pub fullscreen: bool,
+    /// Whether a custom FFlag payload is currently applied.
+    pub custom_fflags: bool,
+    /// The payload itself, so editing it starts from what is there.
+    pub custom_json: String,
     /// Set when a write failed, shown under the group.
     pub error: Option<String>,
 }
@@ -102,6 +106,10 @@ pub struct State {
     pub regions: Vec<RegionRow>,
     pub adapters: Vec<AdapterRow>,
     pub roblox: Roblox,
+    /// Pending Roblox edits. `None` means the screen mirrors the disk.
+    pub roblox_draft: Option<RobloxDraft>,
+    /// Which field has the caret, if any.
+    pub focus: Option<FieldId>,
     /// Set when this client must not connect at all.
     pub lockout: Option<Lockout>,
 
@@ -145,5 +153,103 @@ impl State {
             // region is a member rather than the group, so fall back to a
             // prefix match before giving up and showing the raw id.
             .or_else(|| self.regions.iter().find(|r| id.starts_with(&r.id)))
+    }
+}
+
+/// Pending Roblox edits, before they are written.
+///
+/// # Why a draft
+///
+/// Every control on the Roblox screen used to write Roblox's settings file the
+/// moment it was touched, each on its own thread, with a busy flag swallowing
+/// anything clicked while a write was in flight. Changing three things meant
+/// three writes and three re-reads racing each other, and clicks that appeared
+/// to do nothing. It was, correctly, described as buggy.
+///
+/// Nothing is written now until Apply. `None` means the screen is showing what
+/// is actually on disk; the first edit materialises a draft, and applying
+/// clears it so the truth flows back through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RobloxDraft {
+    pub unlock_fps: bool,
+    /// The frame cap as typed, which may not be a number yet.
+    pub fps_text: String,
+    pub quality: u32,
+    pub fullscreen: bool,
+    pub ultraboost: bool,
+    pub custom_fflags: bool,
+    pub custom_json: String,
+    /// What validating `custom_json` said, shown under the group.
+    pub fflag_note: Option<String>,
+    pub fflag_ok: bool,
+}
+
+impl RobloxDraft {
+    /// Start from what is actually applied to the client.
+    pub fn from_truth(truth: &Roblox) -> Self {
+        Self {
+            unlock_fps: truth.unlock_fps,
+            fps_text: truth.target_fps.to_string(),
+            quality: truth.quality,
+            fullscreen: truth.fullscreen,
+            ultraboost: truth.ultraboost,
+            custom_fflags: truth.custom_fflags,
+            custom_json: truth.custom_json.clone(),
+            fflag_note: None,
+            fflag_ok: truth.custom_fflags,
+        }
+    }
+
+    /// The typed cap, if it is a number Roblox will accept.
+    ///
+    /// Roblox stores this as an integer and treats anything at or below 60 as
+    /// no unlock at all. The ceiling is not Roblox's, it is ours: an uncapped
+    /// client will render thousands of frames a second on a menu, which heats
+    /// the GPU and buys nothing a monitor can show.
+    pub fn fps(&self) -> Option<u32> {
+        let value: u32 = self.fps_text.trim().parse().ok()?;
+        (30..=1000).contains(&value).then_some(value)
+    }
+}
+
+impl State {
+    /// What the Roblox screen should show: the draft if there is one, the
+    /// truth otherwise.
+    pub fn roblox_view(&self) -> RobloxDraft {
+        self.roblox_draft
+            .clone()
+            .unwrap_or_else(|| RobloxDraft::from_truth(&self.roblox))
+    }
+
+    /// Edit the draft, creating it from the truth on the first change.
+    pub fn edit_roblox(&mut self, edit: impl FnOnce(&mut RobloxDraft)) {
+        let mut draft = self.roblox_view();
+        edit(&mut draft);
+        self.roblox_draft = Some(draft);
+    }
+
+    /// Whether there is anything to apply.
+    pub fn roblox_dirty(&self) -> bool {
+        match &self.roblox_draft {
+            None => false,
+            Some(draft) => *draft != RobloxDraft::from_truth(&self.roblox),
+        }
+    }
+}
+
+impl RobloxDraft {
+    /// Whether this draft can be written at all.
+    ///
+    /// A cap that is not a number, or a custom payload that failed its check,
+    /// would be rejected by core anyway. Refusing here means the button says
+    /// so rather than the failure arriving after a game restart.
+    pub fn ready(&self) -> bool {
+        if self.unlock_fps && self.fps().is_none() {
+            return false;
+        }
+        if self.custom_fflags && !self.fflag_ok {
+            return false;
+        }
+        true
     }
 }

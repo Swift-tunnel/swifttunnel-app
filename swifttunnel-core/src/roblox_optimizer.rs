@@ -1936,6 +1936,32 @@ impl RobloxOptimizer {
     /// so it is no longer written by Ultraboost.
     const REMOVED_ULTRABOOST_FFLAGS: &[&str] = &["DFFlagDisableDPIScale"];
 
+    /// Check a custom FFlag payload without writing anything.
+    ///
+    /// Runs exactly the validation the writer runs, so whatever passes here is
+    /// what would be applied: valid JSON, a non-empty object, under 8KB, and
+    /// every key on Roblox local client FFlag allowlist. Returns how many
+    /// flags would be written.
+    ///
+    /// Exists so a client can reject a bad paste at the moment it happens
+    /// rather than at the moment it tries to restart the game.
+    pub fn validate_custom_fflags(json: &str) -> std::result::Result<usize, String> {
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: json.to_string(),
+            ultraboost: false,
+            ..RobloxSettingsConfig::default()
+        };
+        Self::parse_custom_fflags(&config)
+            .map(|flags| flags.len())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Every FFlag a custom payload is allowed to set.
+    pub fn allowed_custom_fflags() -> impl Iterator<Item = &'static str> {
+        Self::CUSTOM_FFLAG_ALLOWLIST.iter().map(|(key, _)| *key)
+    }
+
     fn parse_custom_fflags(config: &RobloxSettingsConfig) -> Result<HashMap<String, String>> {
         if !config.custom_fflags_enabled {
             return Ok(HashMap::new());

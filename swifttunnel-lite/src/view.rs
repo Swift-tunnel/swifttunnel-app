@@ -45,11 +45,24 @@ pub enum Action {
     OpenAdapters,
     PickAdapter(Option<String>),
     Toggle(Flag),
-    SetFps(u32),
+    /// Put the caret in a field. Clicking anywhere else takes it out again.
+    Focus(FieldId),
     SetQuality(u32),
-    RestartRoblox,
+    /// Write the pending Roblox edits, and restart the game if it is running.
+    ApplyRoblox,
+    /// Read a custom FFlag payload out of the clipboard and check it.
+    PasteFflags,
     SignOut,
     SignIn,
+}
+
+/// A value the user can type into.
+///
+/// One so far. It is an enum rather than a bare bool so focus can move to a
+/// second field later without every match arm having to be found again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldId {
+    FpsCap,
 }
 
 /// A boolean setting a row can flip.
@@ -59,6 +72,7 @@ pub enum Flag {
     CountryBan,
     UnlockFps,
     Ultraboost,
+    CustomFflags,
     Fullscreen,
     RunOnStartup,
     CloseToTray,
@@ -83,8 +97,18 @@ pub enum Right {
     Choice(Vec<Chip>),
     /// Selected marker in a picker list.
     Tick(bool),
+    /// A row that does something rather than showing a value.
+    Chevron,
     /// Text then a chevron, for a row that opens another view.
     TextChevron(String),
+    /// An editable value.
+    Field {
+        text: String,
+        focused: bool,
+        id: FieldId,
+        /// Drawn in the warning ink when what is typed is not usable yet.
+        valid: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -599,7 +623,8 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
     let reserved = match &row.right {
         Right::None => 0,
         Right::Switch(_) => m.s(theme::SWITCH_W + 6),
-        Right::Tick(_) => m.s(18),
+        Right::Tick(_) | Right::Chevron => m.s(18),
+        Right::Field { .. } => m.s(64),
         Right::Choice(chips) => chip_strip_width(chips, m),
         Right::Latency(_) => m.s(46),
         // Three fifths of the row, which at 340 wide is enough for any value
@@ -683,6 +708,67 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
             );
         }
 
+
+        Right::Field {
+            text,
+            focused,
+            id,
+            valid,
+        } => {
+            let w = m.s(56);
+            let h = m.s(22);
+            let box_rect = rect(edge - w, cy - h / 2, edge, cy + h / 2);
+            let border = if *focused {
+                theme::BORDER_FOCUS
+            } else if *valid {
+                theme::BORDER_STRONG
+            } else {
+                theme::ERROR
+            };
+            f.round(
+                box_rect,
+                m.s(theme::RADIUS_CHIP),
+                Some(theme::BG),
+                Some(border),
+            );
+
+            // The caret is a rule after the text rather than a real one: the
+            // field takes digits appended and removed, never a cursor moved
+            // into the middle, so there is nowhere else for it to be.
+            let pad_x = m.s(7);
+            let caret = if *focused { m.s(5) } else { 0 };
+            f.text(
+                rect(box_rect.left + pad_x, box_rect.top, box_rect.right - pad_x - caret, box_rect.bottom),
+                text,
+                Face::Value,
+                if *valid { theme::TEXT } else { theme::ERROR_TEXT },
+                RIGHT,
+            );
+            if *focused {
+                f.round(
+                    rect(
+                        box_rect.right - pad_x - m.s(3),
+                        box_rect.top + m.s(5),
+                        box_rect.right - pad_x - m.s(2),
+                        box_rect.bottom - m.s(5),
+                    ),
+                    0,
+                    Some(theme::ACCENT),
+                    None,
+                );
+            }
+            if !row.disabled {
+                f.hot(box_rect, Action::Focus(*id));
+            }
+        }
+
+        Right::Chevron => f.text(
+            rect(edge - m.s(10), r.top, edge, r.bottom),
+            "\u{203A}",
+            Face::Icon,
+            theme::TEXT_DIMMED,
+            CENTRE,
+        ),
 
         Right::Tick(on) => {
             if *on {

@@ -42,6 +42,8 @@ pub const ACTIVE: Rgba = Rgba::hex(0x343438);
 pub const BORDER: Rgba = Rgba::hex(0x262628);
 /// `--color-border-default`
 pub const BORDER_STRONG: Rgba = Rgba::hex(0x34343A);
+/// `--color-border-focus`, the outline on a field with the caret in it.
+pub const BORDER_FOCUS: Rgba = Rgba::hex(0xFFFFFF);
 
 // ── Ink ─────────────────────────────────────────────────────────────────────
 

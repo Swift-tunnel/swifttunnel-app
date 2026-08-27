@@ -25,6 +25,7 @@
 //! picked in both.
 
 mod canvas;
+mod clipboard;
 mod engine;
 mod fonts;
 mod gdi;

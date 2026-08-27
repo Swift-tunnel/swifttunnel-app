@@ -137,7 +137,7 @@ impl Engine {
 
         let mut loaded = settings::load_settings();
         loaded.sanitize_in_place();
-        let ultraboost = loaded.config.roblox_settings.ultraboost;
+        let roblox_intent = loaded.config.roblox_settings.clone();
 
         let shared = Arc::new(Shared {
             runtime,
@@ -147,7 +147,7 @@ impl Engine {
             snapshot: RwLock::new(Snapshot {
                 signed_in,
                 email,
-                roblox: read_roblox(ultraboost),
+                roblox: read_roblox(&roblox_intent),
                 lockout: lockout_of(&auth_state, banned_reason.clone()),
                 server_list: DynamicServerList::new_empty(),
                 regions: Vec::new(),
@@ -267,22 +267,11 @@ impl Engine {
                 });
             }
 
-            Action::Toggle(flag) => self.toggle(flag),
-            Action::SetFps(fps) => self.patch_roblox(move |c| {
-                c.unlock_fps = fps > DEFAULT_FRAME_CAP;
-                c.target_fps = fps;
-            }),
-            Action::SetQuality(level) => self.patch_roblox(move |c| {
-                c.graphics_quality = quality_of(level);
-            }),
-            Action::RestartRoblox => {
-                let shared = self.shared.clone();
-                std::thread::spawn(move || {
-                    let error = restart_roblox().err();
-                    shared.edit(|s| s.roblox.error = error);
-                    shared.notify();
-                });
-            }
+            Action::Toggle(flag) => self.toggle(flag, state),
+            Action::SetQuality(level) => state.edit_roblox(|d| d.quality = level),
+            Action::Focus(id) => state.focus = Some(id),
+            Action::PasteFflags => paste_fflags(state),
+            Action::ApplyRoblox => self.apply_roblox(state),
 
             Action::SignOut => {
                 let shared = self.shared.clone();
@@ -361,7 +350,7 @@ impl Engine {
         });
     }
 
-    fn toggle(&self, flag: Flag) {
+    fn toggle(&self, flag: Flag, state: &mut State) {
         match flag {
             Flag::RouteAssist => self.settings(|s| s.enable_api_tunneling = !s.enable_api_tunneling),
             Flag::CountryBan => self.settings(|s| s.enable_country_ban = !s.enable_country_ban),
@@ -384,28 +373,99 @@ impl Engine {
             Flag::CloseToTray => self.settings(|s| s.minimize_to_tray = !s.minimize_to_tray),
             Flag::AutoReconnect => self.settings(|s| s.auto_reconnect = !s.auto_reconnect),
 
-            Flag::UnlockFps => {
-                let on = !self.snapshot_roblox().unlock_fps;
-                self.patch_roblox(move |c| {
-                    c.unlock_fps = on;
-                    // Restoring the cap has to write the default back, or
-                    // Roblox keeps running at whatever it was raised to.
-                    if !on {
-                        c.target_fps = DEFAULT_FRAME_CAP;
-                    } else if c.target_fps <= DEFAULT_FRAME_CAP {
-                        c.target_fps = 240;
-                    }
-                });
-            }
-            Flag::Ultraboost => {
-                let on = !self.snapshot_roblox().ultraboost;
-                self.patch_roblox(move |c| c.ultraboost = on);
-            }
-            Flag::Fullscreen => {
-                let on = !self.snapshot_roblox().fullscreen;
-                self.patch_roblox(move |c| c.window_fullscreen = on);
-            }
+            // The Roblox switches edit the draft. Nothing reaches disk
+            // until Apply, so a run of clicks is one write rather than a
+            // race between several.
+            Flag::UnlockFps => state.edit_roblox(|d| {
+                d.unlock_fps = !d.unlock_fps;
+                // Turning it off writes Roblox's own default back, or the
+                // client keeps running at whatever it was raised to.
+                if !d.unlock_fps {
+                    d.fps_text = DEFAULT_FRAME_CAP.to_string();
+                } else if d.fps().is_none_or(|v| v <= DEFAULT_FRAME_CAP) {
+                    d.fps_text = "240".to_string();
+                }
+            }),
+            Flag::Ultraboost => state.edit_roblox(|d| {
+                d.ultraboost = !d.ultraboost;
+                // Core refuses both at once, so the UI cannot offer both.
+                if d.ultraboost {
+                    d.custom_fflags = false;
+                }
+            }),
+            Flag::CustomFflags => state.edit_roblox(|d| {
+                d.custom_fflags = !d.custom_fflags;
+                if d.custom_fflags {
+                    d.ultraboost = false;
+                } else {
+                    d.fflag_note = None;
+                }
+            }),
+            Flag::Fullscreen => state.edit_roblox(|d| d.fullscreen = !d.fullscreen),
         }
+    }
+
+    /// Write the pending Roblox edits, then restart the game if it is up.
+    ///
+    /// The only path in this client that touches Roblox's files.
+    fn apply_roblox(&self, state: &mut State) {
+        let draft = state.roblox_view();
+        if !draft.ready() {
+            return;
+        }
+        state.roblox_draft = None;
+        state.focus = None;
+
+        let config = RobloxSettingsConfig {
+            unlock_fps: draft.unlock_fps,
+            target_fps: draft.fps().unwrap_or(DEFAULT_FRAME_CAP),
+            graphics_quality: quality_of(draft.quality),
+            window_fullscreen: draft.fullscreen,
+            ultraboost: draft.ultraboost,
+            custom_fflags_enabled: draft.custom_fflags,
+            custom_fflags_json: draft.custom_json.clone(),
+            ..RobloxSettingsConfig::default()
+        };
+        let restart = state.roblox.running;
+        let shared = self.shared.clone();
+
+        std::thread::spawn(move || {
+            let optimizer = RobloxOptimizer::new();
+            let mut error = optimizer
+                .apply_optimizations(&config)
+                .err()
+                .map(|e| e.to_string());
+
+            // The intent for both FFlag paths is kept in the shared settings
+            // file, because neither can be read back off Roblox's own config
+            // in full: all core can tell is whether the flags are present.
+            if error.is_none()
+                && let Ok(mut guard) = shared.settings.write()
+            {
+                let roblox = &mut guard.config.roblox_settings;
+                roblox.ultraboost = config.ultraboost;
+                roblox.custom_fflags_enabled = config.custom_fflags_enabled;
+                roblox.custom_fflags_json.clone_from(&config.custom_fflags_json);
+                let snapshot = guard.clone();
+                drop(guard);
+                let _ = settings::save_settings(&snapshot);
+            }
+
+            if error.is_none() && restart {
+                error = restart_roblox().err();
+            }
+
+            let intent = shared
+                .settings
+                .read()
+                .map(|s| s.config.roblox_settings.clone())
+                .unwrap_or_default();
+            shared.edit(|s| {
+                s.roblox = read_roblox(&intent);
+                s.roblox.error = error;
+            });
+            shared.notify();
+        });
     }
 
     /// Google sign-in, start to finish.
@@ -463,26 +523,18 @@ impl Engine {
                 }
                 let signed_in = auth.is_logged_in();
                 let email = auth.get_user().map(|u| u.email);
-                let state = auth.get_state();
+                let auth_state = auth.get_state();
                 let reason = auth.get_user().and_then(|u| u.banned_reason);
                 drop(auth);
 
                 shared.edit(|s| {
                     s.signed_in = signed_in;
                     s.email = email;
-                    s.lockout = lockout_of(&state, reason);
+                    s.lockout = lockout_of(&auth_state, reason);
                 });
                 shared.notify();
             }
         });
-    }
-
-    fn snapshot_roblox(&self) -> Roblox {
-        self.shared
-            .snapshot
-            .read()
-            .map(|s| s.roblox.clone())
-            .unwrap_or_default()
     }
 
     /// Change a setting and write the file.
@@ -505,60 +557,8 @@ impl Engine {
         });
     }
 
-    /// Write one Roblox setting through core and re-read what landed.
-    ///
-    /// Goes through `apply_optimizations` rather than editing the file
-    /// directly, because that function owns the format, the permissions repair
-    /// and the backup taken before the first change, none of which is worth a
-    /// second implementation.
-    fn patch_roblox(&self, edit: impl FnOnce(&mut RobloxSettingsConfig) + Send + 'static) {
-        let shared = self.shared.clone();
-        std::thread::spawn(move || {
-            let optimizer = RobloxOptimizer::new();
-            if !optimizer.is_roblox_installed() {
-                shared.edit(|s| s.roblox.error = Some("Roblox is not installed.".into()));
-                shared.notify();
-                return;
-            }
-
-            let ultraboost_now = shared
-                .settings
-                .read()
-                .map(|s| s.config.roblox_settings.ultraboost)
-                .unwrap_or(false);
-            let mut config = current_roblox_config(ultraboost_now);
-            edit(&mut config);
-
-            // Ultraboost is FFlags rather than a Roblox setting, so
-            // nothing can read it back off disk. The intent is kept in
-            // the shared settings file, where the full app keeps it too.
-            if config.ultraboost != ultraboost_now {
-                if let Ok(mut guard) = shared.settings.write() {
-                    guard.config.roblox_settings.ultraboost = config.ultraboost;
-                    let snapshot = guard.clone();
-                    drop(guard);
-                    let _ = settings::save_settings(&snapshot);
-                }
-            }
-
-            let error = optimizer
-                .apply_optimizations(&config)
-                .err()
-                .map(|e| e.to_string());
-
-            let ultraboost = shared
-                .settings
-                .read()
-                .map(|s| s.config.roblox_settings.ultraboost)
-                .unwrap_or(config.ultraboost);
-            shared.edit(|s| {
-                s.roblox = read_roblox(ultraboost);
-                s.roblox.error = error;
-            });
-            shared.notify();
-        });
-    }
 }
+
 
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -831,6 +831,15 @@ fn spawn_poller(shared: Arc<Shared>) {
                     None => free_tier_quota().0.map(|left| left.max(0) as u32),
                 };
 
+                // Reconciled against what SwiftTunnel last asked for, since
+                // the FFlag switches cannot be read back off Roblox's config
+                // on their own.
+                let roblox_intent = shared
+                    .settings
+                    .read()
+                    .map(|s| s.config.roblox_settings.clone())
+                    .unwrap_or_default();
+
                 // Neither of these is free. "Is Roblox running" walks the
                 // process table and settings means reading a file off disk,
                 // and both answer a question that changes when a person does
@@ -866,7 +875,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                         }
                         s.roblox.running = running;
                         if refresh {
-                            let fresh = read_roblox(s.roblox.ultraboost);
+                            let fresh = read_roblox(&roblox_intent);
                             s.roblox = Roblox {
                                 running,
                                 error: s.roblox.error.clone(),
@@ -985,17 +994,6 @@ fn describe(state: &ConnectionState) -> String {
     }
 }
 
-fn current_roblox_config(ultraboost: bool) -> RobloxSettingsConfig {
-    let current = read_roblox(ultraboost);
-    RobloxSettingsConfig {
-        unlock_fps: current.unlock_fps,
-        target_fps: current.target_fps,
-        graphics_quality: quality_of(current.quality),
-        ultraboost: current.ultraboost,
-        window_fullscreen: current.fullscreen,
-        ..RobloxSettingsConfig::default()
-    }
-}
 
 fn quality_of(level: u32) -> GraphicsQuality {
     match level {
@@ -1044,16 +1042,30 @@ fn restart_roblox() -> Result<(), String> {
 
 /// Read Roblox's own settings rather than remembering them, so the switches
 /// reflect reality even when the full app or the player changed them.
-fn read_roblox(ultraboost: bool) -> Roblox {
+/// What is actually applied to the Roblox client.
+///
+/// The frame cap, the quality level and fullscreen are read back out of
+/// Roblox's own settings, so a cap the player changed in Roblox itself shows
+/// up here. The FFlag switches cannot be fully read back (all core can tell
+/// is whether the flags are present), so the saved intent is passed in and
+/// reconciled against reality by `effective_roblox_config`.
+fn read_roblox(intent: &RobloxSettingsConfig) -> Roblox {
     let optimizer = RobloxOptimizer::new();
     let installed = optimizer.is_roblox_installed();
     let running = optimizer.is_roblox_running();
+
+    // Turns the saved intent into what is really in force: it clears
+    // ultraboost when the flags are not in ClientAppSettings.json, and clears
+    // the unlock when the cap has fallen back to 60.
+    let effective = optimizer.effective_roblox_config(intent);
 
     let Ok(current) = optimizer.read_current_settings() else {
         return Roblox {
             installed,
             running,
-            ultraboost,
+            ultraboost: effective.ultraboost,
+            custom_fflags: effective.custom_fflags_enabled,
+            custom_json: effective.custom_fflags_json.clone(),
             target_fps: DEFAULT_FRAME_CAP,
             ..Roblox::default()
         };
@@ -1065,9 +1077,42 @@ fn read_roblox(ultraboost: bool) -> Roblox {
         unlock_fps: current.fps_cap > DEFAULT_FRAME_CAP,
         target_fps: current.fps_cap,
         quality: level_of(current.graphics_quality),
-        ultraboost,
+        ultraboost: effective.ultraboost,
+        custom_fflags: effective.custom_fflags_enabled,
+        custom_json: effective.custom_fflags_json,
         fullscreen: current.fullscreen,
         error: None,
+    }
+}
+
+/// Take a custom FFlag payload off the clipboard and check it.
+///
+/// Checked here rather than at apply time so a bad paste is refused where it
+/// happened. The rules are core's, not this window's: valid JSON, a non-empty
+/// object under 8KB, and every key on Roblox's local client allowlist. Nothing
+/// outside that list can be written whatever is pasted.
+fn paste_fflags(state: &mut State) {
+    let Some(text) = crate::clipboard::text(16 * 1024) else {
+        state.edit_roblox(|d| {
+            d.fflag_note = Some("Nothing on the clipboard to paste.".into());
+            d.fflag_ok = false;
+        });
+        return;
+    };
+
+    match RobloxOptimizer::validate_custom_fflags(&text) {
+        Ok(count) => state.edit_roblox(|d| {
+            d.custom_json = text;
+            d.fflag_ok = true;
+            d.fflag_note = Some(format!(
+                "{count} allowlisted flag{} ready. Apply to write them.",
+                if count == 1 { "" } else { "s" }
+            ));
+        }),
+        Err(reason) => state.edit_roblox(|d| {
+            d.fflag_ok = false;
+            d.fflag_note = Some(reason);
+        }),
     }
 }
 

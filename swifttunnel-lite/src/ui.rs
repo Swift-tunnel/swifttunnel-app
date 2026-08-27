@@ -40,7 +40,7 @@ use crate::state::{Push, State, Status};
 use crate::theme;
 use crate::tray::{CMD_QUIT, CMD_SHOW, Tray, WM_TRAY, tray_event};
 use crate::view::{
-    self, Action, Face, Fonts, Frame, Metrics, Screen, Shape, TextRun, contains,
+    self, Action, Face, FieldId, Fonts, Frame, Metrics, Screen, Shape, TextRun, contains,
 };
 
 /// Repaint cadence while something is moving.
@@ -64,11 +64,15 @@ pub struct App {
     fonts: Fonts,
     chrome: Frame,
     content: Frame,
+    /// The pinned control below the list, when the screen has one.
+    footer: Frame,
     scroll: i32,
     max_scroll: i32,
     hot: Option<Action>,
     dpi: i32,
     ticking: bool,
+    /// Where the list ended up, which the footer moves.
+    content_area: RECT,
     /// Reused across repaints rather than rebuilt, so a slow machine is not
     /// allocating and zeroing 1.5MB to redraw a hover.
     canvas: Canvas,
@@ -87,7 +91,29 @@ impl App {
     fn rebuild(&mut self, client: RECT) {
         self.chrome = chrome(&self.state, &self.m, client, self.hot.as_ref());
 
-        let area = content_area(&self.m, client);
+        // The footer is laid out first, because whether there is one changes
+        // how much room the list above it gets.
+        let footer_item = crate::screens::footer(&self.state);
+        let mut area = content_area(&self.m, client);
+        self.footer = match &footer_item {
+            None => Frame::default(),
+            Some(item) => {
+                let height = self.m.s(theme::BUTTON_H);
+                let strip = RECT {
+                    top: area.bottom - height,
+                    ..area
+                };
+                area.bottom = strip.top - self.m.s(10);
+                view::layout(
+                    std::slice::from_ref(item),
+                    strip,
+                    &self.m,
+                    0,
+                    self.hot.as_ref(),
+                )
+            }
+        };
+
         let items = crate::screens::build(&self.state);
 
         // Laid out once at the top to find its height, so the scroll can be
@@ -102,6 +128,7 @@ impl App {
         if self.max_scroll > 0 {
             add_scrollbar(&mut self.content, area, &self.m, self.scroll, self.max_scroll);
         }
+        self.content_area = area;
     }
 
     /// Whether the window needs a heartbeat right now.
@@ -110,7 +137,9 @@ impl App {
     }
 
     fn action_at(&self, x: i32, y: i32) -> Option<Action> {
-        view::hit(&self.chrome, x, y).or_else(|| view::hit(&self.content, x, y))
+        view::hit(&self.chrome, x, y)
+            .or_else(|| view::hit(&self.footer, x, y))
+            .or_else(|| view::hit(&self.content, x, y))
     }
 }
 
@@ -386,8 +415,9 @@ pub fn paint(dc: HDC, client: RECT, app: &mut App) {
     app.canvas.reset(width, height, theme::BG);
     let canvas = &mut app.canvas;
 
-    let area = content_area(&app.m, client);
+    let area = app.content_area;
     view::paint_shapes(canvas, &app.chrome);
+    view::paint_shapes(canvas, &app.footer);
 
     // The content scrolls under the chrome, so it is confined to its own
     // band. The band stops at the bottom of the content area rather than the
@@ -406,6 +436,7 @@ pub fn paint(dc: HDC, client: RECT, app: &mut App) {
     // Text is drawn straight onto the device context afterwards, because GDI's
     // rasteriser is genuinely good and already has the embedded Geist faces.
     view::paint_text(dc, &app.fonts, &app.chrome);
+    view::paint_text(dc, &app.fonts, &app.footer);
 
     unsafe {
         // Same band as the shapes, expressed as a clip: everything above the
@@ -560,6 +591,7 @@ pub fn new_app(engine: Engine, dpi: i32) -> Box<App> {
         fonts: Fonts::new(&m),
         chrome: Frame::default(),
         content: Frame::default(),
+        footer: Frame::default(),
         scroll: 0,
         max_scroll: 0,
         hot: None,
@@ -568,6 +600,7 @@ pub fn new_app(engine: Engine, dpi: i32) -> Box<App> {
         canvas: Canvas::new(m.s(theme::WINDOW_W), m.s(theme::WINDOW_H), theme::BG),
         tray: None,
         quitting: false,
+        content_area: RECT::default(),
     });
     let client = rect(0, 0, m.s(theme::WINDOW_W), m.s(theme::WINDOW_H));
     app.rebuild(client);
@@ -831,11 +864,57 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
 
+            // Typing into the frame cap.
+            //
+            // Digits and backspace only. The field takes a number, so there is
+            // nothing a letter could mean, and refusing them here is simpler
+            // than validating them out afterwards. What is typed is still
+            // checked before it can be applied, since "999999" is all digits
+            // and still not a frame rate.
+            WM_CHAR => {
+                if let Some(app) = app_of(hwnd)
+                    && app.state.focus == Some(FieldId::FpsCap)
+                {
+                    let ch = char::from_u32(wparam.0 as u32).unwrap_or('\0');
+                    let mut changed = true;
+                    match ch {
+                        '0'..='9' => app.state.edit_roblox(|d| {
+                            // Four digits is 9999, past any real refresh rate,
+                            // and stops the field growing out of its box.
+                            if d.fps_text.trim().len() < 4 {
+                                if d.fps_text.trim().is_empty() {
+                                    d.fps_text.clear();
+                                }
+                                d.fps_text.push(ch);
+                            }
+                        }),
+                        '\u{8}' => app.state.edit_roblox(|d| {
+                            d.fps_text.pop();
+                        }),
+                        // Enter and Escape both mean "done".
+                        '\r' | '\u{1b}' => app.state.focus = None,
+                        _ => changed = false,
+                    }
+                    if changed {
+                        app.rebuild(client_of(hwnd));
+                        repaint(hwnd);
+                    }
+                }
+                LRESULT(0)
+            }
+
             WM_LBUTTONDOWN => {
                 if let Some(app) = app_of(hwnd) {
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-                    if let Some(action) = app.action_at(x, y) {
+                    let action = app.action_at(x, y);
+                    let keeps_focus = matches!(action, Some(Action::Focus(_)));
+                    if !keeps_focus && app.state.focus.is_some() {
+                        app.state.focus = None;
+                        app.rebuild(client_of(hwnd));
+                        repaint(hwnd);
+                    }
+                    if let Some(action) = action {
                         dispatch(hwnd, app, action);
                     }
                 }

@@ -4,12 +4,9 @@
 //! clicked lives in `view`, so what is left here is what the screen actually
 //! says, which is the part worth being able to read and change quickly.
 
-use crate::state::{Lockout, Push, Roblox, State, Status};
+use crate::state::{Lockout, Push, Roblox, RobloxDraft, State, Status};
 use crate::theme;
-use crate::view::{Action, Chip, Flag, Item, Right, Row, Screen, Tone, Variant};
-
-/// Caps worth offering as buttons. Anything between them is a rounding error.
-const FPS_PRESETS: [u32; 5] = [60, 120, 144, 165, 240];
+use crate::view::{Action, Chip, FieldId, Flag, Item, Right, Row, Screen, Tone, Variant};
 
 /// Build the current screen, or whatever is pushed over it.
 pub fn build(state: &State) -> Vec<Item> {
@@ -226,6 +223,18 @@ fn regions(state: &State) -> Vec<Item> {
 
 // ── Roblox ──────────────────────────────────────────────────────────────────
 
+/// The Roblox screen.
+///
+/// Nothing here writes anything. Every control edits a draft, and Apply is
+/// the only thing that touches Roblox's files. The previous version wrote on
+/// every click, from a thread per click, with a busy flag swallowing anything
+/// pressed while a write was in flight; changing three settings raced three
+/// writes against three re-reads and dropped clicks on the floor.
+///
+/// What is shown when there is no draft is what is actually applied to the
+/// client, not what SwiftTunnel last asked for. Core reconciles the two, so a
+/// cap the player changed in Roblox itself, or FFlags a Roblox update wiped,
+/// show up here as gone.
 fn roblox(state: &State) -> Vec<Item> {
     let r: &Roblox = &state.roblox;
 
@@ -241,25 +250,25 @@ fn roblox(state: &State) -> Vec<Item> {
         ];
     }
 
+    let draft = state.roblox_view();
+    let dirty = state.roblox_dirty();
+
     let mut items = vec![
         caption("Frame rate"),
         Item::Group(vec![
             Row::new("Unlock frame rate")
                 .sub("Removes Roblox's 60 FPS cap")
-                .right(Right::Switch(r.unlock_fps))
+                .right(Right::Switch(draft.unlock_fps))
                 .action(Action::Toggle(Flag::UnlockFps)),
             Row::new("Cap")
-                .right(Right::Choice(
-                    FPS_PRESETS
-                        .iter()
-                        .map(|fps| Chip {
-                            label: fps.to_string(),
-                            selected: r.target_fps == *fps,
-                            action: Action::SetFps(*fps),
-                        })
-                        .collect(),
-                ))
-                .disabled(!r.unlock_fps),
+                .sub(fps_hint(&draft))
+                .right(Right::Field {
+                    text: draft.fps_text.clone(),
+                    focused: state.focus == Some(FieldId::FpsCap),
+                    id: FieldId::FpsCap,
+                    valid: draft.fps().is_some(),
+                })
+                .disabled(!draft.unlock_fps),
         ]),
         Item::Gap(12),
         caption("Game"),
@@ -267,50 +276,110 @@ fn roblox(state: &State) -> Vec<Item> {
             Row::new("Graphics").right(Right::Choice(vec![
                 Chip {
                     label: "Auto".into(),
-                    selected: r.quality == 0,
+                    selected: draft.quality == 0,
                     action: Action::SetQuality(0),
                 },
                 Chip {
                     label: "Low".into(),
-                    selected: r.quality == 1,
+                    selected: draft.quality == 1,
                     action: Action::SetQuality(1),
                 },
                 Chip {
                     label: "Max".into(),
-                    selected: r.quality == 10,
+                    selected: draft.quality == 10,
                     action: Action::SetQuality(10),
                 },
             ])),
-            Row::new("Ultraboost")
-                .sub("Strips post-processing for the most frames")
-                .right(Right::Switch(r.ultraboost))
-                .action(Action::Toggle(Flag::Ultraboost)),
             Row::new("Launch fullscreen")
-                .right(Right::Switch(r.fullscreen))
+                .right(Right::Switch(draft.fullscreen))
                 .action(Action::Toggle(Flag::Fullscreen)),
         ]),
         Item::Gap(12),
+        caption("FFlags"),
+        Item::Group(vec![
+            Row::new("Ultraboost")
+                .sub("SwiftTunnel's own performance flags")
+                .right(Right::Switch(draft.ultraboost))
+                .action(Action::Toggle(Flag::Ultraboost)),
+            Row::new("Custom FFlags")
+                .sub(custom_hint(&draft))
+                .right(Right::Switch(draft.custom_fflags))
+                .action(Action::Toggle(Flag::CustomFflags)),
+            Row::new("Paste from clipboard")
+                .right(Right::Chevron)
+                .action(Action::PasteFflags)
+                .disabled(!draft.custom_fflags),
+        ]),
+        Item::Gap(10),
     ];
 
+    if let Some(note) = &draft.fflag_note {
+        items.push(Item::Note(note.clone()));
+    }
     if let Some(error) = &r.error {
         items.push(Item::Note(error.clone()));
     }
 
-    // No explanatory note under this. It said that Roblox reads its settings
-    // at launch, which is exactly what the button already says, and it cost
-    // 34px in a 344px window.
-    items.push(Item::Button {
-        label: if r.running {
+    let _ = dirty;
+    items
+}
+
+/// The control pinned to the bottom of a screen, outside the scroll.
+///
+/// Roblox has more settings than fit, and the one button that writes them must
+/// not be the thing that scrolls off. It sits below the list instead, always
+/// reachable, which also makes it obvious that nothing above it has been
+/// applied yet.
+pub fn footer(state: &State) -> Option<Item> {
+    if state.push != Push::None || state.lockout.is_some() {
+        return None;
+    }
+    if state.screen != Screen::Roblox || !state.roblox.installed {
+        return None;
+    }
+
+    let draft = state.roblox_view();
+    let dirty = state.roblox_dirty();
+
+    // Roblox reads its settings once at launch, so applying while it is open
+    // does nothing until it restarts. The label says which is about to happen.
+    Some(Item::Button {
+        label: if !dirty {
+            "No changes to apply".into()
+        } else if state.roblox.running {
             "Restart Roblox to apply".into()
         } else {
-            "Roblox is not running".into()
+            "Apply".into()
         },
-        action: Action::RestartRoblox,
-        variant: Variant::Outline,
-        disabled: !r.running,
-    });
+        action: Action::ApplyRoblox,
+        variant: if dirty { Variant::Solid } else { Variant::Outline },
+        disabled: !dirty || !draft.ready(),
+    })
+}
 
-    items
+/// What the cap field is doing, said in the row's second line.
+fn fps_hint(draft: &RobloxDraft) -> String {
+    if !draft.unlock_fps {
+        return "Roblox's default 60".into();
+    }
+    match draft.fps() {
+        Some(_) => "Frames per second".into(),
+        None => "Enter a number between 30 and 1000".into(),
+    }
+}
+
+/// Whether a custom payload is loaded, and how big it is.
+fn custom_hint(draft: &RobloxDraft) -> String {
+    if draft.ultraboost {
+        return "Turn Ultraboost off to use your own".into();
+    }
+    if !draft.custom_fflags {
+        return "Import your own allowlisted flags".into();
+    }
+    if draft.custom_json.trim().is_empty() {
+        return "Nothing pasted yet".into();
+    }
+    "Your own flags".into()
 }
 
 // ── Settings ────────────────────────────────────────────────────────────────
