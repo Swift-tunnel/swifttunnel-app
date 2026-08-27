@@ -61,19 +61,21 @@ export function AppShell({ children }: AppShellProps) {
         style={{ backgroundColor: "var(--color-bg-sidebar)" }}
       >
         {!IS_LITE && <Sidebar />}
-        <div className="flex min-w-0 flex-1 flex-col pl-px pt-px">
+        <div className={`flex min-w-0 flex-1 flex-col pt-px ${IS_LITE ? "" : "pl-px"}`}>
           <TopBar />
           {/* Three pages do not need 224px of sidebar to list them. */}
           {IS_LITE && <LiteTabs />}
           <div
             ref={scrollRef}
-            className="app-atmosphere flex-1 overflow-y-auto rounded-tl-[20px] border-l border-t [scrollbar-gutter:stable_both-edges]"
+            className={`app-atmosphere flex-1 overflow-y-auto border-t [scrollbar-gutter:stable_both-edges] ${
+              IS_LITE ? "" : "rounded-tl-[20px] border-l"
+            }`}
             style={{
               backgroundColor: "var(--color-bg-base)",
               borderColor: "var(--color-border-subtle)",
             }}
           >
-            <div className="w-full min-w-0 px-6 pb-8 pt-5">
+            <div className={`w-full min-w-0 ${IS_LITE ? "px-4 pb-6 pt-4" : "px-6 pb-8 pt-5"}`}>
               <motion.div
                 key={activeTab}
                 initial={{ opacity: 0, y: 6 }}

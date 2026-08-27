@@ -895,8 +895,28 @@ html.app-idle *::after {
  * Animations only. Transitions are left alone: they are one-shot and short, and
  * removing them makes every state change jump.
  */
-html.lite *,
-html.lite *::before,
-html.lite *::after {
+/* Everything stops except a marked subtree.
+ *
+ * Blanket-killing motion also killed the connection orb, and an app that
+ * gives no sign it is doing anything while it connects reads as frozen. So
+ * the rule spares [data-lite-motion] and its descendants, which is the status
+ * ring and nothing else. That one is worth its cost: it runs only while the
+ * state is changing, not for the whole time the window is open, which is what
+ * the idle animations were doing.
+ */
+html.lite *:not([data-lite-motion]):not([data-lite-motion] *),
+html.lite *:not([data-lite-motion]):not([data-lite-motion] *)::before,
+html.lite *:not([data-lite-motion]):not([data-lite-motion] *)::after {
   animation: none !important;
+}
+
+/* A smaller interface.
+ *
+ * Lite is aimed at machines with less to spare and often smaller screens, and
+ * the full app's type scale is drawn for a 1020px window. Scaling the root
+ * keeps every proportion the design system already got right and simply asks
+ * for less room, which is a far safer lever than re-picking sizes by hand.
+ */
+html.lite {
+  zoom: 0.9;
 }

@@ -11,7 +11,19 @@
     "windows": [
       {
         "label": "splash",
-        "title": "SwiftTunnel Lite"
+        "url": "splash.html",
+        "title": "SwiftTunnel Lite",
+        "width": 460,
+        "height": 300,
+        "decorations": false,
+        "transparent": true,
+        "center": true,
+        "resizable": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "shadow": false,
+        "focus": true,
+        "visible": false
       },
       {
         "label": "main",
@@ -19,7 +31,15 @@
         "width": 780,
         "height": 560,
         "minWidth": 680,
-        "minHeight": 520
+        "minHeight": 520,
+        "maxWidth": 1100,
+        "maxHeight": 760,
+        "maximizable": true,
+        "decorations": false,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": false
       }
     ]
   },

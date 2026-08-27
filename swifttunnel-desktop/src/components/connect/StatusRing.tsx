@@ -22,6 +22,11 @@ export function StatusRing({
     <div
       className="relative shrink-0 select-none"
       style={{ width: size, height: size }}
+      // Lite stops all motion except inside this subtree. The ring is the one
+      // thing worth animating there: it only moves while the connection state
+      // is changing, and a connect button that gives no sign of working reads
+      // as a frozen app.
+      data-lite-motion=""
       aria-hidden
     >
       {/* Connected: expanding pulse halo behind the ring */}
