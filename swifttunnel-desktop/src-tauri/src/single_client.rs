@@ -22,7 +22,8 @@ mod imp {
     use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow,
+        FindWindowW, IsIconic, IsWindowVisible, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+        ShowWindow,
     };
     use windows::core::{PCWSTR, w};
 
@@ -79,8 +80,15 @@ mod imp {
                 if window.0.is_null() {
                     continue;
                 }
+                // Three states, not two. Minimised needs restoring, but a
+                // window closed to the tray is *hidden*, which is not the same
+                // thing: it is not iconic, so restoring alone left it invisible
+                // and the click that launched the second copy appeared to do
+                // nothing at all.
                 if IsIconic(window).as_bool() {
                     let _ = ShowWindow(window, SW_RESTORE);
+                } else if !IsWindowVisible(window).as_bool() {
+                    let _ = ShowWindow(window, SW_SHOW);
                 }
                 let _ = SetForegroundWindow(window);
                 return;

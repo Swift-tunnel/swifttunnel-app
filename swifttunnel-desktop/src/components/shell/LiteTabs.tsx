@@ -18,11 +18,7 @@ export function LiteTabs() {
 
   return (
     <nav
-      className="flex shrink-0 items-center gap-1 border-b px-3 py-1.5"
-      style={{
-        backgroundColor: "var(--color-bg-sidebar)",
-        borderColor: "var(--color-border-subtle)",
-      }}
+      className="flex shrink-0 items-center gap-0.5"
       aria-label="Sections"
     >
       {NAV_ITEMS.map((item) => {
@@ -34,7 +30,7 @@ export function LiteTabs() {
             onClick={() => setTab(item.id)}
             aria-current={selected ? "page" : undefined}
             title={item.description}
-            className="flex items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-[12.5px] font-medium"
+            className="flex items-center gap-1.5 rounded-[6px] px-2 py-1 text-[12px] font-medium"
             style={{
               backgroundColor: selected ? "var(--color-bg-hover)" : undefined,
               color: selected

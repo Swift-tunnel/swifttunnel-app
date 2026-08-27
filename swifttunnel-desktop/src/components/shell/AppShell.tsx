@@ -7,7 +7,6 @@ import { BindingChooserDialog } from "./BindingChooserDialog";
 import { CommandPalette } from "./CommandPalette";
 import { ToastContainer } from "../common/Toast";
 import { NAV_ITEMS } from "./nav";
-import { LiteTabs } from "./LiteTabs";
 import { IS_LITE } from "../../lib/lite";
 import { applyCachedTranslations, initI18n } from "../../lib/i18n";
 
@@ -63,8 +62,6 @@ export function AppShell({ children }: AppShellProps) {
         {!IS_LITE && <Sidebar />}
         <div className={`flex min-w-0 flex-1 flex-col pt-px ${IS_LITE ? "" : "pl-px"}`}>
           <TopBar />
-          {/* Three pages do not need 224px of sidebar to list them. */}
-          {IS_LITE && <LiteTabs />}
           <div
             ref={scrollRef}
             className={`app-atmosphere flex-1 overflow-y-auto border-t [scrollbar-gutter:stable_both-edges] ${
@@ -75,7 +72,7 @@ export function AppShell({ children }: AppShellProps) {
               borderColor: "var(--color-border-subtle)",
             }}
           >
-            <div className={`w-full min-w-0 ${IS_LITE ? "px-4 pb-6 pt-4" : "px-6 pb-8 pt-5"}`}>
+            <div className={`w-full min-w-0 ${IS_LITE ? "px-3 pb-4 pt-2.5" : "px-6 pb-8 pt-5"}`}>
               <motion.div
                 key={activeTab}
                 initial={{ opacity: 0, y: 6 }}

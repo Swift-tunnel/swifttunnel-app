@@ -58,3 +58,17 @@ export const LITE_HIDDEN_BOOST_ANCHORS: ReadonlySet<string> = new Set([
   "performance_cores",
   "unbind_cpu0",
 ]);
+
+/**
+ * How far Lite zooms its webview out.
+ *
+ * The full app's type scale is drawn for a 1020px window. Lite's is much
+ * smaller, so the same sizes would leave very little room for content, and
+ * pushing every value down by hand would mean re-picking a scale the design
+ * system already got right. Zooming keeps every proportion and asks for less
+ * room.
+ *
+ * Applied to the webview rather than as CSS `zoom`, which scales what is drawn
+ * but not the viewport units the shell is laid out with.
+ */
+export const LITE_ZOOM = 0.8;
