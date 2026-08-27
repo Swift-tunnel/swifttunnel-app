@@ -16,8 +16,10 @@
       {
         "label": "main",
         "title": "SwiftTunnel Lite",
-        "width": 900,
-        "height": 620
+        "width": 780,
+        "height": 560,
+        "minWidth": 680,
+        "minHeight": 520
       }
     ]
   },

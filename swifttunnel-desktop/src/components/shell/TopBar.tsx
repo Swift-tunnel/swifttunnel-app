@@ -7,6 +7,7 @@ import { useAuthStore } from "../../stores/authStore";
 import { getLatencyColor } from "../../lib/utils";
 import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
+import { IS_LITE } from "../../lib/lite";
 import { navItemFor } from "./nav";
 
 /** `2h 14m` / `47m` / `<1m`, compact enough for a top-bar pill. */
@@ -248,7 +249,10 @@ export function TopBar() {
         <StatusChip state={vpnState} />
 
         {/* Language, translate the whole UI to any language (Medal-style). */}
-        <LanguageSelector />
+        {/* Lite ships one language. Translation pulls a dictionary per switch
+            and re-applies it on every tab change, which is work a lightweight
+            client should not be doing. */}
+        {!IS_LITE && <LanguageSelector />}
 
         {/* Profile avatar, moved from the sidebar to the top-right (Medal). */}
         <button
