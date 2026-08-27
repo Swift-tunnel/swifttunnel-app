@@ -30,6 +30,7 @@ mod fonts;
 mod gdi;
 mod preview;
 mod screens;
+mod single_client;
 mod state;
 mod surface;
 mod theme;
@@ -45,6 +46,19 @@ fn main() {
     // Before any window or font is created: the whole UI is set in these, and
     // GDI substitutes silently rather than failing if they are missing.
     fonts::install();
+
+    // Before the engine, which starts threads and opens the settings file:
+    // if the full app is already up, this process should do nothing but
+    // bring it to the front and leave.
+    //
+    // The preview switch is exempt. It paints one frame offscreen and
+    // exits, touching no driver and no network, and refusing to render a
+    // screenshot because the app happens to be open would make the only
+    // feedback loop this UI has depend on it being closed.
+    let previewing = std::env::args().any(|a| a == "--preview");
+    if !previewing && !single_client::acquire() {
+        return;
+    }
 
     let engine = match engine::Engine::new() {
         Ok(engine) => engine,
