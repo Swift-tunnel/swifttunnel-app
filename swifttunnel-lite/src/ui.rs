@@ -537,23 +537,19 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
         // 125%, so all three screens overflowed and clipped. WM_CREATE already
         // rebuilds the metrics and the fonts at the real DPI; this makes the
         // frame agree with them.
-        let real_dpi = (GetDpiForWindow(hwnd) as i32).max(96);
-        if real_dpi != dpi {
-            log::info!("window opened at {real_dpi} DPI, not the {dpi} guessed; resizing");
-            let actual = Metrics::new(real_dpi);
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                actual.s(theme::WINDOW_W),
-                actual.s(theme::WINDOW_H),
-                SWP_NOMOVE | SWP_NOZORDER,
-            );
-        }
-
         centre(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOW);
+
+        // Correct the size now that the window is on a monitor.
+        //
+        // Two APIs were tried before this one and both answered 96 on a 125%
+        // display: GetDpiForWindow reports the system DPI until the window has
+        // been shown, and GetDpiForMonitor answered 96 as well because this
+        // process ends up per-monitor v1 aware rather than v2. GetDpiForWindow
+        // is correct the moment the window is visible, which is late enough to
+        // cost one frame of resize and early enough that nobody sees it.
+        sync_window_dpi(hwnd);
+
 
         // Published now rather than in WM_CREATE: the engine's threads
         // are already running and a ping that lands before this point
@@ -569,6 +565,73 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
         }
         Ok(())
     }
+}
+
+/// Make the window and its contents agree with the DPI it is actually at.
+///
+/// Everything inside is laid out from `App::m`, and the frame is whatever it
+/// was created as. When those two disagree the contents overflow the frame,
+/// which is what made every screen clip on a scaled display.
+fn sync_window_dpi(hwnd: HWND) {
+    // SAFETY: hwnd is live and shown by the time this runs.
+    let real = unsafe { GetDpiForWindow(hwnd).max(96) as i32 };
+    let Some(app) = app_of(hwnd) else {
+        log::warn!("sync_window_dpi: no app");
+        return;
+    };
+    {
+        let c = client_of(hwnd);
+        log::info!(
+            "sync_window_dpi: GetDpiForWindow={real} app.dpi={} client={}x{} want={}x{}",
+            app.dpi,
+            c.right - c.left,
+            c.bottom - c.top,
+            app.m.s(theme::WINDOW_W),
+            app.m.s(theme::WINDOW_H),
+        );
+    }
+
+    if real != app.dpi {
+        app.dpi = real;
+        app.m = Metrics::new(real);
+        app.fonts = Fonts::new(&app.m);
+    }
+
+    // Compare the frame against the layout, not one DPI against another.
+    //
+    // WM_CREATE had already picked up the right DPI, so the contents were
+    // correct all along and a DPI-to-DPI check found nothing to do. The thing
+    // that was wrong was the window, created from a guess made before it
+    // existed. This asks the question that actually matters: is the frame the
+    // size the contents were laid out for?
+    let want_w = app.m.s(theme::WINDOW_W);
+    let want_h = app.m.s(theme::WINDOW_H);
+    let client = client_of(hwnd);
+    if client.right - client.left == want_w && client.bottom - client.top == want_h {
+        return;
+    }
+
+    log::info!(
+        "window is {}x{} but laid out for {want_w}x{want_h} at {real} DPI; resizing",
+        client.right - client.left,
+        client.bottom - client.top,
+    );
+
+    // SAFETY: resizing a live window this process owns.
+    unsafe {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            0,
+            0,
+            want_w,
+            want_h,
+            SWP_NOMOVE | SWP_NOZORDER,
+        );
+    }
+    centre(hwnd);
+    app.rebuild(client_of(hwnd));
+    repaint(hwnd);
 }
 
 /// CW_USEDEFAULT places a popup at the top-left rather than cascading it.

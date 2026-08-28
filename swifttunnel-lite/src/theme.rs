@@ -91,15 +91,17 @@ pub fn latency_ink(ms: Option<u32>) -> COLORREF {
 
 /// Window size. Deliberately small: this is a thing you open, change, close.
 ///
-/// The height is measured, not chosen. Connect is the tallest screen, and
-/// connected, with the throughput strip and the adapter row, it lays out to
-/// 306px; 384 is that plus the chrome and the margins and nothing else.
+/// The height is measured, not chosen, and it is set by the tallest screen
+/// rather than the one opened most. Roblox lays out to 420px including its
+/// pinned Apply button and Settings to 410, so 500 is the taller of those plus
+/// the chrome and the margins.
 ///
-/// It grew 28px when the adapter moved onto Connect. That is the cost of
-/// having the setting where the thing it affects is, and it is still less than
-/// half the height this window started at.
+/// It was 384 and everything but Connect scrolled, which cut a row in half
+/// against the bottom edge and read as the window being broken rather than as
+/// a list with more below it. A window that is 116px taller and never clips is
+/// the better trade.
 pub const WINDOW_W: i32 = 340;
-pub const WINDOW_H: i32 = 384;
+pub const WINDOW_H: i32 = 500;
 
 /// Title bar. Just the wordmark, the free-tier budget and two buttons.
 pub const TITLE_H: i32 = 28;
