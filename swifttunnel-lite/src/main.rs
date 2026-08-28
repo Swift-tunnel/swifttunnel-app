@@ -49,6 +49,20 @@ fn main() {
     // GDI substitutes silently rather than failing if they are missing.
     fonts::install();
 
+    // --cleanup: undo every system change and exit.
+    //
+    // Run by the standalone installer before it takes the files away. It is
+    // core own uninstall routine, the same one the full app runs, so the
+    // routes, the firewall rules, the hosts entries and both clients Run
+    // entries go with it rather than being left on the machine.
+    if std::env::args().any(|a| a == "--cleanup") {
+        match swifttunnel_core::network_booster::cleanup_all_system_state() {
+            Ok(()) => log::info!("cleanup finished"),
+            Err(error) => log::error!("cleanup failed: {error}"),
+        }
+        return;
+    }
+
     // --install-driver: put the split tunnel driver in place and exit.
     //
     // Run by the standalone installer as a deferred custom action, the same
@@ -62,7 +76,7 @@ fn main() {
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let program_files = std::path::PathBuf::from(
-            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\Program Files".to_string()),
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
         );
 
         let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();

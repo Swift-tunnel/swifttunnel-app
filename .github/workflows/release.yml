@@ -737,6 +737,27 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
 
+      # SwiftTunnel Lite also ships inside the app MSI. This is the
+      # standalone installer, for someone on a machine that cannot
+      # comfortably run the full client and should not have to install it to
+      # get the small one. It reuses the WiX toolset the Tauri build above
+      # already downloaded, so this must stay after it.
+      - name: Build SwiftTunnel Lite installer (x64)
+        shell: pwsh
+        run: |
+          cargo build -p swifttunnel-lite --release --target x86_64-pc-windows-msvc
+          node swifttunnel-lite/scripts/build-msi.mjs --target x86_64-pc-windows-msvc
+          $msi = Get-ChildItem "swifttunnel-lite/target-msi/x64" -Filter "*.msi" |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msi) { throw "no Lite MSI was produced for x64" }
+          # A Lite MSI without the driver in it installs a client that can
+          # never bring a tunnel up, and the failure would only show at
+          # connect time on a user machine.
+          if ($msi.Length -lt 2MB) { throw "Lite MSI is $($msi.Length) bytes; the driver is probably missing" }
+          Write-Host "::notice::built $($msi.Name) ($($msi.Length) bytes)"
+          gh release upload "$env:GITHUB_REF_NAME" $msi.FullName --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish ARM64 release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
@@ -769,6 +790,27 @@ jobs:
           updaterJsonPreferNsis: false
           args: --target aarch64-pc-windows-msvc
 
+      # SwiftTunnel Lite also ships inside the app MSI. This is the
+      # standalone installer, for someone on a machine that cannot
+      # comfortably run the full client and should not have to install it to
+      # get the small one. It reuses the WiX toolset the Tauri build above
+      # already downloaded, so this must stay after it.
+      - name: Build SwiftTunnel Lite installer (arm64)
+        shell: pwsh
+        run: |
+          cargo build -p swifttunnel-lite --release --target aarch64-pc-windows-msvc
+          node swifttunnel-lite/scripts/build-msi.mjs --target aarch64-pc-windows-msvc
+          $msi = Get-ChildItem "swifttunnel-lite/target-msi/arm64" -Filter "*.msi" |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msi) { throw "no Lite MSI was produced for arm64" }
+          # A Lite MSI without the driver in it installs a client that can
+          # never bring a tunnel up, and the failure would only show at
+          # connect time on a user machine.
+          if ($msi.Length -lt 2MB) { throw "Lite MSI is $($msi.Length) bytes; the driver is probably missing" }
+          Write-Host "::notice::built $($msi.Name) ($($msi.Length) bytes)"
+          gh release upload "$env:GITHUB_REF_NAME" $msi.FullName --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Merge ARM64 updater metadata
         shell: powershell
         env:

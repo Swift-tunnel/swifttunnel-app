@@ -61,3 +61,4 @@ swifttunnel-desktop/src-tauri/resources/tools/nvidiaProfileInspector/Reference.x
 swifttunnel-desktop/src-tauri/resources/tools/nvidiaProfileInspector/nvidiaProfileInspector.exe.config
 swifttunnel-desktop/src-tauri/resources/tools/nvidiaProfileInspector/nvidiaProfileInspector.pdb
 
+swifttunnel-lite/target-msi/
