@@ -46,8 +46,6 @@ import {
   normalizeWindowState,
 } from "./lib/windowState";
 import type { TabId } from "./lib/types";
-import { IS_LITE } from "./lib/lite";
-import { LiteShell } from "./components/lite/LiteShell";
 
 function tabComponent(tab: TabId) {
   switch (tab) {
@@ -316,15 +314,6 @@ function App() {
   useEffect(() => {
     if (!isSettingsLoaded) return;
 
-    // Lite's window is a fixed 380x552 and cannot be resized, so there is
-    // nothing here to save and nothing to restore.
-    //
-    // It has to be skipped rather than left to no-op, because `window_state`
-    // lives in the settings file both builds share. Restoring it would open
-    // Lite at whatever size the full app was last left at, and with resizing
-    // off there would be no way back.
-    if (IS_LITE) return;
-
     const appWindow = getCurrentWindow();
     let disposed = false;
     let saveTimer: number | null = null;
@@ -590,23 +579,6 @@ function App() {
     return (
       <>
         <LoginScreen />
-        <WhatsNewDialog />
-      </>
-    );
-  }
-
-  // Lite's shell, and deliberately a separate return rather than a prop on
-  // AppShell.
-  //
-  // IS_LITE is a build-time constant, so this branch is the only one Rollup
-  // keeps, and AppShell, the sidebar, the top bar, the command palette and
-  // every screen reached through tabComponent fall out of the Lite bundle
-  // with it. Sharing one shell behind conditionals would ship all of it and
-  // draw none of it.
-  if (IS_LITE) {
-    return (
-      <>
-        <LiteShell />
         <WhatsNewDialog />
       </>
     );

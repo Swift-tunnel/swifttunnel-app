@@ -9,13 +9,10 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bundle:lite": "node scripts/bundle-lite.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "dev:lite": "vite --mode lite",
-    "build:lite": "tsc && vite build --mode lite",
-    "tauri:dev:lite": "tauri dev --config src-tauri/tauri.lite.conf.json",
-    "tauri:build:lite": "tauri build --config src-tauri/tauri.lite.conf.json"
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

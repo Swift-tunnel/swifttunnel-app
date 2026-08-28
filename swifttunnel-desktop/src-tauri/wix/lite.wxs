@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!--
+      Start Menu entry for SwiftTunnel Lite.
+
+      The executable itself is installed by Tauri, listed in
+      `bundle.resources`, which is why there is no <File> here: letting Tauri
+      place it keeps one source of truth for where resources land, and the
+      shortcut just points at the result.
+
+      The component's KeyPath is a registry value rather than the exe, because
+      a component may not claim a file another component installed. Windows
+      Installer needs *something* to decide the component is present, and a
+      per-user registry mark is the conventional answer for a shortcut.
+    -->
+    <!--
+      ApplicationProgramsFolder, not ProgramMenuFolder: Tauri puts its own
+      shortcut in a Start Menu folder named after the product, and a Lite
+      entry loose at the top level would be separated from the app it ships
+      with.
+    -->
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="LiteStartMenuShortcut"
+                 Guid="4F2A8C61-3D57-4B9E-8A02-6C1E9D7B3F84">
+        <Shortcut Id="LiteShortcut"
+                  Name="SwiftTunnel Lite"
+                  Description="The SwiftTunnel tunnel and Roblox frame cap, without the rest of the app"
+                  Target="[INSTALLDIR]resources\lite\swifttunnel-lite.exe"
+                  WorkingDirectory="INSTALLDIR" />
+
+        <RegistryValue Root="HKCU"
+                       Key="Software\SwiftTunnel\Lite"
+                       Name="Shortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <ComponentGroup Id="SwiftTunnelLite">
+      <ComponentRef Id="LiteStartMenuShortcut" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

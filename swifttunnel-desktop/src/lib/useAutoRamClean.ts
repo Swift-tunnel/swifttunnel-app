@@ -4,7 +4,6 @@ import { useBoostStore } from "../stores/boostStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { boostCleanRam } from "./commands";
 import { showRamOverlay } from "../components/overlay/RamOverlay";
-import { IS_LITE } from "./lite";
 
 const ROBLOX_GAME_JOINED = "roblox-game-joined";
 const STARTUP_GRACE_MS = 6000;
@@ -28,10 +27,6 @@ export function useAutoRamClean() {
   autoCleanRef.current = autoClean;
 
   useEffect(() => {
-    // Lite does not ship the RAM cleaner, so it should not be listening
-    // for game joins to run one.
-    if (IS_LITE) return;
-
     const mountedAt = Date.now();
     let lastClean = 0;
     let busy = false;

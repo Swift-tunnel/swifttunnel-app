@@ -866,6 +866,12 @@ pub fn cleanup_all_system_state() -> Result<()> {
     let mut firewall = FirewallFixer::new();
     let _ = firewall.restore();
 
+    // 7. Remove the startup entries.
+    //
+    // Both clients write their own at runtime, so Windows Installer does not
+    // know they exist and leaves them behind pointing at a deleted exe.
+    crate::autostart::remove_all_run_entries();
+
     // 8. Remove the snapshot file itself
     NetworkBooster::clear_snapshot();
 

@@ -91,3 +91,37 @@ mod tests {
         assert_ne!(RUN_VALUE_APP, RUN_VALUE_LITE);
     }
 }
+
+/// Remove every SwiftTunnel Run entry, whichever client wrote it.
+///
+/// For uninstall. The entries are written by the clients at runtime rather than
+/// by the installer, so Windows Installer does not know they exist and will not
+/// take them away: without this, uninstalling leaves one or two startup entries
+/// pointing at an executable that is no longer there. Windows fails them
+/// silently at sign-in, so nobody reports it, but the litter is real and it is
+/// two values.
+///
+/// Best effort, and deliberately not an error when there is nothing to remove:
+/// this runs during uninstall, where failing loudly buys nothing.
+#[cfg(windows)]
+pub fn remove_all_run_entries() {
+    use std::io::ErrorKind;
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(run_key) = hkcu.open_subkey_with_flags(RUN_KEY_PATH, KEY_SET_VALUE) else {
+        return;
+    };
+
+    for value in [RUN_VALUE_APP, RUN_VALUE_LITE] {
+        match run_key.delete_value(value) {
+            Ok(()) => log::info!("removed the {value} startup entry"),
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => log::warn!("could not remove the {value} startup entry: {e}"),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn remove_all_run_entries() {}

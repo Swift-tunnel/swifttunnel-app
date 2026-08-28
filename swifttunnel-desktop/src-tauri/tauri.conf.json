@@ -7,7 +7,7 @@
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && npm run bundle:lite",
     "removeUnusedCommands": false
   },
   "app": {
@@ -62,15 +62,18 @@
     "windows": {
       "wix": {
         "fragmentPaths": [
-          "wix/nsis-migration.wxs"
+          "wix/nsis-migration.wxs",
+          "wix/lite.wxs"
         ],
         "componentGroupRefs": [
-          "NsisMigration"
+          "NsisMigration",
+          "SwiftTunnelLite"
         ]
       }
     },
     "resources": [
       "resources/drivers",
+      "resources/lite",
       "resources/tools/nvidiaProfileInspector",
       "resources/swifty.png"
     ],

@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 
-export default defineConfig(({ command, mode }) => {
+export default defineConfig(({ command }) => {
   const isTauriRuntime =
     !!process.env.TAURI_ENV_PLATFORM ||
     !!process.env.TAURI_PLATFORM ||
@@ -21,33 +21,6 @@ export default defineConfig(({ command, mode }) => {
       host: "localhost",
     },
     envPrefix: ["VITE_", "TAURI_"],
-    build:
-      mode === "lite"
-        ? {
-            rollupOptions: {
-              treeshake: {
-                /**
-                 * Lite drops most of the app, and Rollup would not let it.
-                 *
-                 * A module stays in the bundle if Rollup cannot prove its
-                 * top-level statements are free of side effects, even when
-                 * nothing imports it any more. Statements as ordinary as a
-                 * module-scope `.map()` or `new Map()` count, and those alone
-                 * kept the Home page and the whole 33KB optimization catalog
-                 * in a build that renders neither.
-                 *
-                 * Nothing under src/ is imported for its side effects (there
-                 * is not one bare `import "./x"` outside CSS), so this says
-                 * so. Scoped to Lite: the full app renders all of it anyway,
-                 * so it would gain nothing there and is not worth the risk of
-                 * the claim turning out to be wrong.
-                 */
-                moduleSideEffects: (id) => !/[\\/]src[\\/].*\.tsx?$/.test(id),
-              },
-            },
-          }
-        : {},
-
     define: {
       __APP_VERSION__: JSON.stringify(process.env.npm_package_version || "0.1.0"),
     },
