@@ -22,6 +22,7 @@ use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 use swifttunnel_core::auth::types::AuthState;
 use swifttunnel_core::autostart::{RUN_VALUE_LITE, sync_run_on_startup};
 use swifttunnel_core::auth::{AuthManager, update_required_message};
+use swifttunnel_core::discord_rpc::DiscordManager;
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
 use swifttunnel_core::settings::{self, AdapterBindingMode, AppSettings};
 use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
@@ -77,6 +78,12 @@ struct Shared {
     auth: Arc<tokio::sync::Mutex<AuthManager>>,
     vpn: Arc<tokio::sync::Mutex<VpnConnection>>,
     settings: RwLock<AppSettings>,
+    /// Rich Presence, driven from the same tunnel state the window shows.
+    ///
+    /// Its own lock rather than living in the snapshot: the manager talks to
+    /// Discord's IPC socket, which can block, and the poller must not hold the
+    /// snapshot open while it does.
+    discord: std::sync::Mutex<DiscordManager>,
     snapshot: RwLock<Snapshot>,
     /// Set once the window exists. Stored as an isize because HWND is not Send.
     hwnd: AtomicIsize,
@@ -139,11 +146,13 @@ impl Engine {
         let mut loaded = settings::load_settings();
         loaded.sanitize_in_place();
         let roblox_intent = loaded.config.roblox_settings.clone();
+        let discord_enabled = loaded.enable_discord_rpc;
 
         let shared = Arc::new(Shared {
             runtime,
             auth: Arc::new(tokio::sync::Mutex::new(auth)),
             vpn: Arc::new(tokio::sync::Mutex::new(VpnConnection::new())),
+            discord: std::sync::Mutex::new(DiscordManager::new(discord_enabled)),
             settings: RwLock::new(loaded),
             snapshot: RwLock::new(Snapshot {
                 signed_in,
@@ -227,6 +236,7 @@ impl Engine {
             state.close_to_tray = s.minimize_to_tray;
             state.auto_reconnect = s.auto_reconnect;
             state.adapter_guid = s.preferred_physical_adapter_guid.clone();
+            state.discord_rpc = s.enable_discord_rpc;
         }
     }
 
@@ -376,6 +386,18 @@ impl Engine {
             }
             Flag::CloseToTray => self.settings(|s| s.minimize_to_tray = !s.minimize_to_tray),
             Flag::AutoReconnect => self.settings(|s| s.auto_reconnect = !s.auto_reconnect),
+            Flag::DiscordRpc => {
+                let on = !self
+                    .shared
+                    .settings
+                    .read()
+                    .map(|s| s.enable_discord_rpc)
+                    .unwrap_or(false);
+                self.settings(|s| s.enable_discord_rpc = on);
+                if let Ok(mut discord) = self.shared.discord.lock() {
+                    discord.set_enabled(on);
+                }
+            }
 
             // The Roblox switches edit the draft. Nothing reaches disk
             // until Apply, so a run of clicks is one write rather than a
@@ -970,6 +992,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                     shared.notify();
                 }
 
+                update_discord(&shared);
                 maybe_reconnect(&shared);
             }
         })
@@ -977,6 +1000,40 @@ fn spawn_poller(shared: Arc<Shared>) {
 }
 
 // ── Reading the machine ─────────────────────────────────────────────────────
+
+/// Keep Rich Presence in step with the tunnel.
+///
+/// Driven from the snapshot the window already reads rather than from the
+/// connect path, so it cannot disagree with what is on screen, and so a tunnel
+/// that dropped on its own is reflected without anything having to remember to
+/// tell Discord about it.
+fn update_discord(shared: &Arc<Shared>) {
+    let Ok(mut discord) = shared.discord.try_lock() else {
+        return;
+    };
+    if !discord.is_enabled() {
+        return;
+    }
+
+    let Ok(snapshot) = shared.snapshot.read() else {
+        return;
+    };
+    let status = snapshot.tunnel.status;
+    // The relay region core reports, falling back to whatever is selected
+    // so a connecting state still names somewhere.
+    let region = snapshot
+        .tunnel
+        .region
+        .clone()
+        .unwrap_or_else(|| "auto".to_string());
+    drop(snapshot);
+
+    match status {
+        Status::Connected => discord.set_connected(&region),
+        Status::Working => discord.set_connecting(&region),
+        _ => discord.set_idle(),
+    }
+}
 
 /// Bring the tunnel back up if it dropped on its own.
 ///

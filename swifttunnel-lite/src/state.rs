@@ -139,6 +139,7 @@ pub struct State {
     pub run_on_startup: bool,
     pub close_to_tray: bool,
     pub auto_reconnect: bool,
+    pub discord_rpc: bool,
     /// `None` when the adapter is picked automatically.
     pub adapter_guid: Option<String>,
 

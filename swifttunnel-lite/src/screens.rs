@@ -393,7 +393,7 @@ fn custom_hint(draft: &RobloxDraft) -> String {
 /// and the adapter moved to Connect, where the thing it affects is.
 fn settings(state: &State) -> Vec<Item> {
     vec![
-        caption("Startup"),
+        caption("General"),
         Item::Group(vec![
             Row::new("Start with Windows")
                 .right(Right::Switch(state.run_on_startup))
@@ -404,6 +404,10 @@ fn settings(state: &State) -> Vec<Item> {
             Row::new("Reconnect automatically")
                 .right(Right::Switch(state.auto_reconnect))
                 .action(Action::Toggle(Flag::AutoReconnect)),
+            Row::new("Discord Rich Presence")
+                .sub("Show the region you are tunneled to")
+                .right(Right::Switch(state.discord_rpc))
+                .action(Action::Toggle(Flag::DiscordRpc)),
         ]),
         Item::Gap(12),
         caption("Driver"),

@@ -79,6 +79,7 @@ pub enum Flag {
     RunOnStartup,
     CloseToTray,
     AutoReconnect,
+    DiscordRpc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
