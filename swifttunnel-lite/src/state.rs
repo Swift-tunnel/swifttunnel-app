@@ -64,6 +64,23 @@ pub struct AdapterRow {
     pub detail: String,
 }
 
+/// Where the split tunnel driver stands.
+///
+/// The tunnel cannot come up without it, and the ways it breaks (a Windows
+/// update, another VPN's older copy of the same driver, a half-finished
+/// install) are not things a person can be expected to diagnose. Lite says
+/// what it sees and offers to reinstall.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Driver {
+    /// What core's health check reported, e.g. "Ready" or the reason it is not.
+    pub status: String,
+    pub ready: bool,
+    /// A repair is running.
+    pub repairing: bool,
+    /// What the last repair said, success or failure.
+    pub note: Option<String>,
+}
+
 /// A reason this client must not be used, whatever else is true.
 ///
 /// Both are enforced by the server regardless of what the client does: a
@@ -110,6 +127,7 @@ pub struct State {
     pub roblox_draft: Option<RobloxDraft>,
     /// Which field has the caret, if any.
     pub focus: Option<FieldId>,
+    pub driver: Driver,
     /// Set when this client must not connect at all.
     pub lockout: Option<Lockout>,
 

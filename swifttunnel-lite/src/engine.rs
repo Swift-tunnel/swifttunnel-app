@@ -32,9 +32,9 @@ use swifttunnel_core::vpn::connection::{free_tier_grace_seconds, free_tier_quota
 use swifttunnel_core::vpn::parallel_interceptor::list_network_adapters;
 use swifttunnel_core::vpn::servers::{self, DynamicServerList, ServerListSource};
 use swifttunnel_core::vpn::split_tunnel::{GamePreset, get_apps_for_preset_set};
-use swifttunnel_core::vpn::{ConnectionState, VpnConnection};
+use swifttunnel_core::vpn::{ConnectionState, SplitTunnelDriver, VpnConnection};
 
-use crate::state::{AdapterRow, Lockout, RegionRow, Roblox, State, Status, Tunnel};
+use crate::state::{AdapterRow, Driver, Lockout, RegionRow, Roblox, State, Status, Tunnel};
 use crate::view::{Action, Flag};
 
 /// Posted when a background job lands, so a finished connect or a fresh ping
@@ -64,6 +64,7 @@ struct Snapshot {
     server_list: DynamicServerList,
     adapters: Vec<AdapterRow>,
     roblox: Roblox,
+    driver: Driver,
     lockout: Option<Lockout>,
     tunnel: Tunnel,
     email: Option<String>,
@@ -148,6 +149,7 @@ impl Engine {
                 signed_in,
                 email,
                 roblox: read_roblox(&roblox_intent),
+                driver: read_driver(),
                 lockout: lockout_of(&auth_state, banned_reason.clone()),
                 server_list: DynamicServerList::new_empty(),
                 regions: Vec::new(),
@@ -210,6 +212,7 @@ impl Engine {
             state.adapters = snapshot.adapters.clone();
             state.roblox = snapshot.roblox.clone();
             state.lockout = snapshot.lockout.clone();
+            state.driver = snapshot.driver.clone();
             state.tunnel = snapshot.tunnel.clone();
             state.email = snapshot.email.clone();
             state.signed_in = snapshot.signed_in;
@@ -290,6 +293,7 @@ impl Engine {
                 });
             }
             Action::SignIn => self.sign_in(),
+            Action::RepairDriver => self.repair_driver(),
 
             // Handled by the window: they change what is on screen, not what
             // the machine is doing.
@@ -464,6 +468,59 @@ impl Engine {
                 s.roblox = read_roblox(&intent);
                 s.roblox.error = error;
             });
+            shared.notify();
+        });
+    }
+
+    /// Reinstall the split tunnel driver.
+    ///
+    /// Lite had no way to do this at all, which meant a machine whose driver
+    /// was missing or broken showed a connect that failed with a raw error and
+    /// no route out of it except opening the full app.
+    ///
+    /// Force-reinstalls rather than installing only when absent: the cases
+    /// worth having a button for are the ones where something is present and
+    /// wrong, which a conditional install would skip. Needs admin, which this
+    /// build already has from its manifest.
+    fn repair_driver(&self) {
+        if self
+            .shared
+            .snapshot
+            .read()
+            .map(|s| s.driver.repairing)
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        let shared = self.shared.clone();
+        shared.edit(|s| {
+            s.driver.repairing = true;
+            s.driver.note = None;
+        });
+        shared.notify();
+
+        std::thread::spawn(move || {
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+            let program_files = std::path::PathBuf::from(
+                std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
+            );
+
+            let note = match SplitTunnelDriver::install_driver_from_bundled_package(
+                None,
+                exe_dir.as_deref(),
+                &program_files,
+                true,
+            ) {
+                Ok(()) => "Driver reinstalled. Try connecting again.".to_string(),
+                Err(error) => error,
+            };
+
+            let mut driver = read_driver();
+            driver.note = Some(note);
+            shared.edit(|s| s.driver = driver);
             shared.notify();
         });
     }
@@ -834,6 +891,10 @@ fn spawn_poller(shared: Arc<Shared>) {
                 // Reconciled against what SwiftTunnel last asked for, since
                 // the FFlag switches cannot be read back off Roblox's config
                 // on their own.
+                // Cheap, and the answer changes when Windows updates or
+                // another VPN installs its own copy of the same driver.
+                let driver = (roblox_tick % 20 == 0).then(read_driver);
+
                 let roblox_intent = shared
                     .settings
                     .read()
@@ -870,6 +931,14 @@ fn spawn_poller(shared: Arc<Shared>) {
                             s.tunnel.bytes_down = tunnel.bytes_down;
                         }
                         s.free_tier_secs = free_tier;
+                        if let Some(fresh) = driver.clone()
+                            && !s.driver.repairing
+                        {
+                            s.driver = Driver {
+                                note: s.driver.note.clone(),
+                                ..fresh
+                            };
+                        }
                         if let Some(locked) = locked.clone() {
                             s.lockout = Some(locked);
                         }
@@ -973,6 +1042,21 @@ fn maybe_reconnect(shared: &Arc<Shared>) {
             shared.notify();
         }
     });
+}
+
+/// What core's health check says about the split tunnel driver.
+fn read_driver() -> Driver {
+    let health = SplitTunnelDriver::health_check();
+    Driver {
+        ready: health.ready,
+        status: if health.ready {
+            "Installed and bound".to_string()
+        } else {
+            health.message.clone()
+        },
+        repairing: false,
+        note: None,
+    }
 }
 
 /// A ban is a lockout; an outdated build is decided separately, by the API.

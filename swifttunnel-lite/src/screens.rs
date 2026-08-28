@@ -406,6 +406,26 @@ fn settings(state: &State) -> Vec<Item> {
                 .action(Action::Toggle(Flag::AutoReconnect)),
         ]),
         Item::Gap(12),
+        caption("Driver"),
+        Item::Group(vec![
+            Row::new("Split tunnel driver")
+                .sub(state.driver.status.clone())
+                .right(Right::Text(if state.driver.ready {
+                    "Ready".into()
+                } else {
+                    "Not ready".into()
+                })),
+            Row::new(if state.driver.repairing {
+                "Reinstalling..."
+            } else {
+                "Reinstall driver"
+            })
+            .sub("Use if the tunnel will not start")
+            .right(Right::Chevron)
+            .action(Action::RepairDriver)
+            .disabled(state.driver.repairing),
+        ]),
+        Item::Gap(12),
         // No update check. Lite ships inside the same installer as the full app
         // and is replaced when it is, so a button offering to look for one
         // would be a button that does nothing.
