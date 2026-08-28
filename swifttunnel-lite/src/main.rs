@@ -49,6 +49,40 @@ fn main() {
     // GDI substitutes silently rather than failing if they are missing.
     fonts::install();
 
+    // --install-driver: put the split tunnel driver in place and exit.
+    //
+    // Run by the standalone installer as a deferred custom action, the same
+    // way the full app does it. Lite ships the driver package beside its own
+    // exe, and core already looks in `exe_dir/drivers` for it, so this needs
+    // no new driver logic. It comes before the single-client lock because it
+    // is not a client: it installs and exits, and refusing to do that because
+    // somebody has the app open would leave the machine without a driver.
+    if std::env::args().any(|a| a == "--install-driver") {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let program_files = std::path::PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\Program Files".to_string()),
+        );
+
+        let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+        if health.ready {
+            log::info!("driver already ready; installer helper exiting");
+            return;
+        }
+
+        match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
+            None,
+            exe_dir.as_deref(),
+            &program_files,
+            false,
+        ) {
+            Ok(()) => log::info!("driver installed by the Lite installer"),
+            Err(error) => log::error!("Lite installer driver install failed: {error}"),
+        }
+        return;
+    }
+
     // Before the engine, which starts threads and opens the settings file:
     // if the full app is already up, this process should do nothing but
     // bring it to the front and leave.

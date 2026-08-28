@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The standalone SwiftTunnel Lite installer.
+
+  Lite also ships inside the full app's MSI. This is the other route: someone
+  on a machine that cannot comfortably run the full client should not have to
+  install it first to get the small one.
+
+  What has to be here that a plain "copy an exe" would miss:
+
+  - The split tunnel driver. Lite cannot bring a tunnel up without it, and core
+    looks for the package in `exe_dir/drivers`, so it ships beside the exe and
+    a deferred custom action installs it after the files land. Same sequence
+    the full app uses.
+  - An uninstall that runs Lite's own cleanup first, so the driver, the routes
+    and the Run entry go with it rather than being left behind.
+
+  Built by scripts/build-msi.mjs, which passes the paths in as preprocessor
+  variables so this file holds no absolute paths.
+-->
+<?if $(sys.BUILDARCH)="x64"?>
+    <?define Win64 = "yes" ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?elseif $(sys.BUILDARCH)="arm64"?>
+    <?define Win64 = "yes" ?>
+    <?define PlatformProgramFilesFolder = "ProgramFiles64Folder" ?>
+<?else?>
+    <?error SwiftTunnel Lite is 64-bit only: sys.BUILDARCH=$(sys.BUILDARCH)?>
+<?endif?>
+
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+      Id="*"
+      Name="SwiftTunnel Lite"
+      UpgradeCode="9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520"
+      Language="1033"
+      Manufacturer="SwiftTunnel"
+      Version="$(var.Version)">
+
+    <Package Id="*"
+             Keywords="Installer"
+             Description="SwiftTunnel Lite"
+             InstallerVersion="450"
+             Languages="1033"
+             Compressed="yes"
+             InstallScope="perMachine" />
+
+    <!-- Reinstall every file, registry entry and shortcut, so a repair or an
+         upgrade over a half-broken install actually replaces what is there. -->
+    <Property Id="REINSTALLMODE" Value="amus" />
+
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  AllowDowngrades="yes" />
+
+    <Media Id="1" Cabinet="lite.cab" EmbedCab="yes" />
+
+    <Icon Id="LiteIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="LiteIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://www.swifttunnel.net/lite" />
+
+    <Condition Message="SwiftTunnel Lite needs Windows 10 or later.">
+      <![CDATA[Installed OR (VersionNT >= 603)]]>
+    </Condition>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="$(var.PlatformProgramFilesFolder)">
+        <Directory Id="INSTALLDIR" Name="SwiftTunnel Lite">
+          <Component Id="LiteExe" Guid="*" Win64="$(var.Win64)">
+            <File Id="LiteExeFile"
+                  Source="$(var.LitePath)"
+                  Name="swifttunnel-lite.exe"
+                  KeyPath="yes" />
+          </Component>
+
+          <!-- The driver package, in the layout core searches for:
+               drivers/<arch>/win10/. -->
+          <Directory Id="DriversDir" Name="drivers">
+            <Directory Id="DriverArchDir" Name="$(var.DriverArch)">
+              <Directory Id="DriverWin10Dir" Name="win10">
+                <Component Id="DriverInf" Guid="*" Win64="$(var.Win64)">
+                  <File Id="DriverInfFile" Source="$(var.DriverDir)\ndisrd_lwf.inf" KeyPath="yes" />
+                </Component>
+                <Component Id="DriverSys" Guid="*" Win64="$(var.Win64)">
+                  <File Id="DriverSysFile" Source="$(var.DriverDir)\ndisrd.sys" KeyPath="yes" />
+                </Component>
+                <Component Id="DriverCat" Guid="*" Win64="$(var.Win64)">
+                  <File Id="DriverCatFile" Source="$(var.DriverDir)\ndisrd.cat" KeyPath="yes" />
+                </Component>
+              </Directory>
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="LiteProgramsFolder" Name="SwiftTunnel Lite" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="LiteProgramsFolder">
+      <Component Id="LiteShortcuts" Guid="*">
+        <Shortcut Id="LiteStartMenu"
+                  Name="SwiftTunnel Lite"
+                  Description="Lower your Roblox ping, without the rest of the app"
+                  Target="[INSTALLDIR]swifttunnel-lite.exe"
+                  WorkingDirectory="INSTALLDIR"
+                  Icon="LiteIcon" />
+        <Shortcut Id="LiteUninstall"
+                  Name="Uninstall SwiftTunnel Lite"
+                  Description="Uninstalls SwiftTunnel Lite"
+                  Target="[System64Folder]msiexec.exe"
+                  Arguments="/x [ProductCode]" />
+        <RemoveFolder Id="LiteProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\SwiftTunnel\Lite"
+                       Name="Installed"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="Complete" Level="1" Title="SwiftTunnel Lite" Display="expand">
+      <ComponentRef Id="LiteExe" />
+      <ComponentRef Id="DriverInf" />
+      <ComponentRef Id="DriverSys" />
+      <ComponentRef Id="DriverCat" />
+      <ComponentRef Id="LiteShortcuts" />
+    </Feature>
+
+    <!-- Install the driver once the files are on disk, and clean up before
+         they are taken away. Both deferred and non-impersonated: they need the
+         elevated context the installer already has. Return="ignore" because a
+         driver that will not install is a thing Lite can report and offer to
+         retry, and is not a reason to roll back an otherwise good install. -->
+    <Property Id="LITE_EXE" Secure="yes" />
+
+    <CustomAction Id="SetLiteExePath"
+                  Property="LITE_EXE"
+                  Value="[INSTALLDIR]swifttunnel-lite.exe" />
+
+    <CustomAction Id="InstallDriverAfterFiles"
+                  Property="LITE_EXE"
+                  ExeCommand="--install-driver"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <CustomAction Id="SetLiteCleanupPath"
+                  Property="LITE_EXE"
+                  Value="[INSTALLDIR]swifttunnel-lite.exe" />
+
+    <CustomAction Id="CleanupOnUninstall"
+                  Property="LITE_EXE"
+                  ExeCommand="--cleanup"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="SetLiteExePath" Before="InstallDriverAfterFiles">
+        NOT REMOVE
+      </Custom>
+      <Custom Action="InstallDriverAfterFiles" After="InstallFiles">
+        NOT REMOVE
+      </Custom>
+      <Custom Action="SetLiteCleanupPath" Before="CleanupOnUninstall">
+        Installed AND REMOVE="ALL"
+      </Custom>
+      <Custom Action="CleanupOnUninstall" Before="RemoveFiles">
+        Installed AND REMOVE="ALL"
+      </Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>
