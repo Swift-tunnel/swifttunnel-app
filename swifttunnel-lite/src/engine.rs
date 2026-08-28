@@ -304,6 +304,7 @@ impl Engine {
             }
             Action::SignIn => self.sign_in(),
             Action::RepairDriver => self.repair_driver(),
+            Action::OpenLogs => open_logs(),
 
             // Handled by the window: they change what is on screen, not what
             // the machine is doing.
@@ -1276,6 +1277,20 @@ fn list_adapters() -> Vec<AdapterRow> {
             guid: a.guid,
         })
         .collect()
+}
+
+/// Show the log file in Explorer, selected.
+///
+/// Not opened in a text editor: the file is hundreds of kilobytes and what
+/// somebody actually needs to do with it is attach it to a message, which
+/// means finding it in a folder.
+fn open_logs() {
+    let Some(path) = crate::log_path() else {
+        return;
+    };
+    let _ = std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn();
 }
 
 fn open_in_browser(url: &str) {

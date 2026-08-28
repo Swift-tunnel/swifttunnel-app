@@ -159,19 +159,40 @@ fn main() {
     }
 }
 
-/// Log beside the full app's own log, under the shared SwiftTunnel data
-/// directory, so a support request can be answered from one place.
+/// Where Lite's log lives.
+///
+/// Beside the full app's own, under the shared SwiftTunnel data directory, so
+/// a support request can be answered from one place. Public because Settings
+/// offers to open it and there should be one definition of the path.
+pub fn log_path() -> Option<std::path::PathBuf> {
+    dirs::data_dir().map(|d| {
+        d.join("SwiftTunnel")
+            .join("logs")
+            .join("swifttunnel-lite.log")
+    })
+}
+
 fn init_logging() {
-    let Some(dir) = dirs::data_dir().map(|d| d.join("SwiftTunnel").join("logs")) else {
+    let Some(path) = log_path() else {
         return;
     };
-    if std::fs::create_dir_all(&dir).is_err() {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(dir).is_err() {
         return;
     }
+
+    // Roll a log that has grown too large rather than appending to it for
+    // ever. A connect that retries the driver eight times a second writes a
+    // surprising amount, and nobody can attach a 50MB file to a message. The
+    // threshold is core own, shared with the full app.
+    let _ = swifttunnel_core::rotate_log_if_needed(&path);
+
     let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("swifttunnel-lite.log"))
+        .open(&path)
     else {
         return;
     };

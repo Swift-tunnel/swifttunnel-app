@@ -428,6 +428,13 @@ fn settings(state: &State) -> Vec<Item> {
             .right(Right::Chevron)
             .action(Action::RepairDriver)
             .disabled(state.driver.repairing),
+            // Lite has always written a log; nothing told anyone where. The
+            // first thing asked for in a support thread is the log file, and
+            // hunting through AppData for it is not a reasonable ask.
+            Row::new("Open log file")
+                .sub("Send this when reporting a problem")
+                .right(Right::Chevron)
+                .action(Action::OpenLogs),
         ]),
         Item::Gap(12),
         // No update check. Lite ships inside the same installer as the full app

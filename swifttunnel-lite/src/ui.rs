@@ -528,6 +528,30 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
             size_of::<i32>() as u32,
         );
 
+        // Resize to the DPI the window actually got.
+        //
+        // The size above came from GetDpiForMonitor on the primary monitor,
+        // resolved before the window existed. That is a guess, and on a 125%
+        // display it came back 96 while GetDpiForWindow reports 120: the frame
+        // was built at 340x384 while every control inside it was laid out at
+        // 125%, so all three screens overflowed and clipped. WM_CREATE already
+        // rebuilds the metrics and the fonts at the real DPI; this makes the
+        // frame agree with them.
+        let real_dpi = (GetDpiForWindow(hwnd) as i32).max(96);
+        if real_dpi != dpi {
+            log::info!("window opened at {real_dpi} DPI, not the {dpi} guessed; resizing");
+            let actual = Metrics::new(real_dpi);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                actual.s(theme::WINDOW_W),
+                actual.s(theme::WINDOW_H),
+                SWP_NOMOVE | SWP_NOZORDER,
+            );
+        }
+
         centre(hwnd);
         let _ = ShowWindow(hwnd, SW_SHOW);
 

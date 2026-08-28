@@ -56,6 +56,8 @@ pub enum Action {
     SignIn,
     /// Reinstall the split tunnel driver.
     RepairDriver,
+    /// Show the log file in Explorer.
+    OpenLogs,
 }
 
 /// A value the user can type into.
