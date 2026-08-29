@@ -699,6 +699,32 @@ pub async fn updater_install_channel(
     // uninstall. download() above performed the same signature verification
     // the plugin does, so nothing about trust changes here.
     let installer_path = stage_installer(&update.version, &package)?;
+
+    // Clear a registration whose cached package has gone before handing over to
+    // msiexec. A major upgrade uninstalls the old version first, which needs
+    // that package; without it the install dies on "the feature you are trying
+    // to use is on a network resource that is unavailable" and the machine can
+    // neither upgrade nor uninstall. Staging above stops new orphans being
+    // made, but does nothing for a machine already in that state, which is
+    // every install predating it and anyone whose installer cache a cleanup
+    // tool removed.
+    //
+    // Best effort on purpose. It is a no-op when nothing is orphaned, and a
+    // failure here should still let the install be attempted: the worst case is
+    // the same error the user would have had anyway. The app is already
+    // elevated, which is the privilege the equivalent MSI custom action could
+    // never get.
+    match swifttunnel_msi_repair::repair() {
+        Ok(cleared) if !cleared.is_empty() => {
+            log::warn!(
+                "cleared {} orphaned SwiftTunnel registration(s) before upgrading",
+                cleared.len()
+            );
+        }
+        Ok(_) => {}
+        Err(error) => log::warn!("could not check for an orphaned registration: {error}"),
+    }
+
     launch_msi_installer(&installer_path)?;
 
     // Emit `done` only after signature verification + install actually

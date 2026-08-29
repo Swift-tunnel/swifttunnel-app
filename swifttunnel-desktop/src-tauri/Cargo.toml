@@ -8,6 +8,9 @@ description = "SwiftTunnel desktop app - Tauri v2 frontend"
 
 [dependencies]
 swifttunnel-core = { path = "../../swifttunnel-core" }
+# Clears an orphaned registration before an upgrade runs. Same crate the
+# standalone Setup launcher uses, so both paths heal identically.
+swifttunnel-msi-repair = { path = "../../swifttunnel-msi-repair" }
 # `default-features = false` drops the non-Windows defaults (`dbus`, `x11`,
 # `webkit2gtk`) and the rarely-used `dynamic-acl` capability codegen. We
 # re-enable only what this Windows-only app actually links against.
