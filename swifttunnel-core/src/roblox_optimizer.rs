@@ -1957,6 +1957,43 @@ impl RobloxOptimizer {
             .map_err(|e| e.to_string())
     }
 
+    /// Say which keys were turned down, and why.
+    ///
+    /// All of them at once. Reporting only the first meant correcting a file
+    /// one key per attempt, and since the keys are read in alphabetical order
+    /// rather than the order they were written, the one named was rarely the
+    /// one being looked at.
+    fn describe_rejected(keys: &[&str]) -> String {
+        let reserved = keys.contains(&Self::FPS_UNLOCK_FFLAG);
+        let mut others: Vec<&str> = keys
+            .iter()
+            .copied()
+            .filter(|key| *key != Self::FPS_UNLOCK_FFLAG)
+            .collect();
+        others.sort_unstable();
+
+        let mut message = String::new();
+        if reserved {
+            // Not rejected for being unsafe: SwiftTunnel writes this one itself
+            // from the Unlock frame rate switch and the Cap field, so a file
+            // setting it too would be two things arguing over one value.
+            message.push_str(&format!(
+                "{} is set by SwiftTunnel's frame rate controls, so take it out of the file.",
+                Self::FPS_UNLOCK_FFLAG
+            ));
+        }
+        if !others.is_empty() {
+            if reserved {
+                message.push(' ');
+            }
+            message.push_str(&format!(
+                "Not on SwiftTunnel's allowlist: {}.",
+                others.join(", ")
+            ));
+        }
+        message
+    }
+
     /// Every FFlag a custom payload is allowed to set.
     pub fn allowed_custom_fflags() -> impl Iterator<Item = &'static str> {
         Self::CUSTOM_FFLAG_ALLOWLIST.iter().map(|(key, _)| *key)
@@ -1998,19 +2035,22 @@ impl RobloxOptimizer {
         }
 
         let mut output = HashMap::new();
+        let mut rejected: Vec<&str> = Vec::new();
         for (key, value) in object {
             let Some((_, expected)) = Self::CUSTOM_FFLAG_ALLOWLIST
                 .iter()
                 .find(|(allowed_key, _)| *allowed_key == key)
             else {
-                return Err(anyhow::anyhow!(
-                    "Custom FFlag '{}' is not in Roblox's local client FFlag allowlist.",
-                    key
-                ));
+                rejected.push(key.as_str());
+                continue;
             };
 
             let normalized = Self::normalize_custom_fflag_value(key, expected, value)?;
             output.insert(key.clone(), normalized);
+        }
+
+        if !rejected.is_empty() {
+            return Err(anyhow::anyhow!("{}", Self::describe_rejected(&rejected)));
         }
 
         Ok(output)
@@ -3194,10 +3234,50 @@ mod tests {
 
         let err = RobloxOptimizer::parse_custom_fflags(&config).unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("not in Roblox's local client FFlag allowlist")
-        );
+        // The list is SwiftTunnel's, not Roblox's. Saying otherwise sent
+        // somebody looking for the flag in Roblox's documentation, where it is
+        // perfectly legitimate.
+        let message = err.to_string();
+        assert!(message.contains("SwiftTunnel"), "{message}");
+        assert!(message.contains("FFlagTotallyUnsafe"), "{message}");
+    }
+
+    #[test]
+    fn custom_fflags_name_every_rejected_key() {
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#" { "FFlagNopeOne": true, "FFlagNopeTwo": true, "FFlagNopeThree": true } "#.to_string(),
+            ..Default::default()
+        };
+
+        let message = RobloxOptimizer::parse_custom_fflags(&config)
+            .unwrap_err()
+            .to_string();
+
+        // Reporting only the first meant correcting a file one key at a time,
+        // and alphabetical order rarely matched the order they were written in.
+        for key in ["FFlagNopeOne", "FFlagNopeThree", "FFlagNopeTwo"] {
+            assert!(message.contains(key), "{key} missing from: {message}");
+        }
+    }
+
+    #[test]
+    fn custom_fflags_explain_the_frame_cap_is_reserved() {
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#" { "DFIntTaskSchedulerTargetFps": 240 } "#.to_string(),
+            ..Default::default()
+        };
+
+        let message = RobloxOptimizer::parse_custom_fflags(&config)
+            .unwrap_err()
+            .to_string();
+
+        // This one is refused because SwiftTunnel writes it from the Cap field,
+        // not because it is unsafe, and the wording has to say so or the advice
+        // reads as "your flag is bad" for a flag that plainly works.
+        assert!(message.contains("frame rate controls"), "{message}");
+        assert!(!message.contains("allowlist"), "{message}");
     }
 
     #[test]
