@@ -31,5 +31,16 @@ fn main() {
         .expect("failed to embed the Lite manifest");
     }
 
+    // The exe's own icon. WM_SETICON covers the running window, but Explorer,
+    // the Start Menu and a pinned taskbar button read the file's icon resource,
+    // and without this they all show the generic default.
+    if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
+        embed_resource::compile("icon.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("failed to embed the Lite icon");
+    }
+
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=icon.rc");
+    println!("cargo:rerun-if-changed=resources/icon.ico");
 }

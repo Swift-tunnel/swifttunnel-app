@@ -25,7 +25,7 @@ use windows::Win32::Graphics::Gdi::{
     SelectClipRgn,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
@@ -40,7 +40,7 @@ use crate::state::{Push, State, Status};
 use crate::theme;
 use crate::tray::{CMD_QUIT, CMD_SHOW, Tray, WM_TRAY, tray_event};
 use crate::view::{
-    self, Action, Face, FieldId, Fonts, Frame, Metrics, Screen, Shape, TextRun, contains,
+    self, Action, Face, FieldId, Fonts, Frame, Item, Metrics, Screen, Shape, TextRun, contains,
 };
 
 /// Repaint cadence while something is moving.
@@ -73,6 +73,14 @@ pub struct App {
     ticking: bool,
     /// Where the list ended up, which the footer moves.
     content_area: RECT,
+    /// Where the lit row is, so a hover change can repaint just the rows that
+    /// gained and lost the highlight instead of the whole window.
+    hot_rect: Option<RECT>,
+    /// The current screen's item tree, kept between frames.
+    ///
+    /// Hovering cannot change it, so rebuilding it on every mouse move was
+    /// allocating a String per row several dozen times a second.
+    items: Vec<Item>,
     /// Reused across repaints rather than rebuilt, so a slow machine is not
     /// allocating and zeroing 1.5MB to redraw a hover.
     canvas: Canvas,
@@ -89,12 +97,28 @@ impl App {
     /// cheap (a walk over about twenty items) and doing it in one place means
     /// the painted pixels and the clickable rectangles can never disagree.
     fn rebuild(&mut self, client: RECT) {
+        self.relayout(client, true);
+    }
+
+    /// Re-lay the frames for a hover change and nothing else.
+    ///
+    /// Hovering changes which row is filled. It cannot change what the rows
+    /// are, how tall they are, or how far the list scrolls, so none of the
+    /// work that answers those questions has to run again. Doing it anyway
+    /// meant every mouse move ran screens::build plus a second full layout
+    /// pass, and dragging the pointer down a list stuttered.
+    fn rehover(&mut self, client: RECT) {
+        self.relayout(client, false);
+    }
+
+    /// `rebuild_items` false reuses the cached item tree and scroll extent.
+    fn relayout(&mut self, client: RECT, rebuild_items: bool) {
         self.chrome = chrome(&self.state, &self.m, client, self.hot.as_ref());
 
         // The footer is laid out first, because whether there is one changes
         // how much room the list above it gets.
         let footer_item = crate::screens::footer(&self.state);
-        let mut area = content_area(&self.m, client);
+        let mut area = content_area(&self.m, client, self.state.lockout.is_some());
         self.footer = match &footer_item {
             None => Frame::default(),
             Some(item) => {
@@ -114,21 +138,50 @@ impl App {
             }
         };
 
-        let items = crate::screens::build(&self.state);
+        if rebuild_items {
+            self.items = crate::screens::build(&self.state);
 
-        // Laid out once at the top to find its height, so the scroll can be
-        // clamped before the frame that gets painted is built.
-        let probe = view::layout(&items, area, &self.m, 0, None);
-        let viewport = area.bottom - area.top;
-        self.max_scroll = (probe.content_height - viewport).max(0);
-        self.scroll = self.scroll.clamp(0, self.max_scroll);
+            // Laid out once at the top to find its height, so the scroll can be
+            // clamped before the frame that gets painted is built.
+            let probe = view::layout(&self.items, area, &self.m, 0, None);
+            let viewport = area.bottom - area.top;
+            self.max_scroll = (probe.content_height - viewport).max(0);
+            self.scroll = self.scroll.clamp(0, self.max_scroll);
+        }
 
-        self.content = view::layout(&items, area, &self.m, self.scroll, self.hot.as_ref());
+        self.content = view::layout(&self.items, area, &self.m, self.scroll, self.hot.as_ref());
 
         if self.max_scroll > 0 {
             add_scrollbar(&mut self.content, area, &self.m, self.scroll, self.max_scroll);
         }
         self.content_area = area;
+
+        // Where the highlight ended up. Taken from the hot zones rather than
+        // recomputed, so it cannot drift from what was actually drawn, and
+        // unioned because the fill is applied to every row carrying the action,
+        // not just the first one found.
+        self.hot_rect = self.hot.as_ref().and_then(|wanted| {
+            let zones = self
+                .chrome
+                .hots
+                .iter()
+                .chain(self.footer.hots.iter())
+                .chain(self.content.hots.iter());
+            zones.fold(None, |found: Option<RECT>, (r, action)| {
+                if action != wanted {
+                    return found;
+                }
+                Some(match found {
+                    None => *r,
+                    Some(f) => RECT {
+                        left: f.left.min(r.left),
+                        top: f.top.min(r.top),
+                        right: f.right.max(r.right),
+                        bottom: f.bottom.max(r.bottom),
+                    },
+                })
+            })
+        });
     }
 
     /// Whether the window needs a heartbeat right now.
@@ -144,10 +197,15 @@ impl App {
 }
 
 /// Where the screen is drawn, below the chrome and inside the margin.
-fn content_area(m: &Metrics, client: RECT) -> RECT {
+fn content_area(m: &Metrics, client: RECT, locked: bool) -> RECT {
+    let strips = if locked {
+        theme::TITLE_H
+    } else {
+        theme::TITLE_H + theme::TAB_H
+    };
     RECT {
         left: client.left + m.s(theme::PAD),
-        top: client.top + m.s(theme::TITLE_H + theme::TAB_H) + m.s(theme::PAD),
+        top: client.top + m.s(strips) + m.s(theme::PAD),
         right: client.right - m.s(theme::PAD),
         bottom: client.bottom - m.s(theme::PAD),
     }
@@ -216,7 +274,10 @@ fn push_text(
 fn chrome(state: &State, m: &Metrics, client: RECT, hot: Option<&Action>) -> Frame {
     let mut f = Frame::default();
     let title_h = m.s(theme::TITLE_H);
-    let tab_h = m.s(theme::TAB_H);
+    // A locked screen keeps the title bar, for the window buttons, but drops
+    // the tabs: they would imply there is something useful behind them.
+    let locked = state.lockout.is_some();
+    let tab_h = if locked { 0 } else { m.s(theme::TAB_H) };
     let width = client.right - client.left;
 
     // One plate behind both strips, so the tab underline sits on the same
@@ -316,6 +377,9 @@ fn chrome(state: &State, m: &Metrics, client: RECT, hot: Option<&Action>) -> Fra
     }
 
     // ── Tabs ──
+    if locked {
+        return f;
+    }
     let tab_w = width / 3;
     for (i, (screen, label)) in TABS.iter().enumerate() {
         let x = i as i32 * tab_w;
@@ -406,6 +470,14 @@ fn free_tier_ink(seconds: u32) -> COLORREF {
 /// rendering path, and a change cannot look right in the preview and wrong on
 /// screen.
 pub fn paint(dc: HDC, client: RECT, app: &mut App) {
+    paint_in(dc, client, app, None);
+}
+
+/// `damage` limits the work to the rows that actually changed.
+///
+/// None means the whole window, which is what a first paint, a resize and
+/// WM_PRINTCLIENT all need.
+pub fn paint_in(dc: HDC, client: RECT, app: &mut App, damage: Option<RECT>) {
     let width = client.right - client.left;
     let height = client.bottom - client.top;
     if width <= 0 || height <= 0 {
@@ -424,10 +496,13 @@ pub fn paint(dc: HDC, client: RECT, app: &mut App) {
     // bottom of the window: a list that overflows should run off against the
     // same margin it started from, not get sliced flush with the frame, which
     // read as the window being broken rather than as there being more below.
-    let previous = canvas.clip_rows(
-        area.top - app.m.s(theme::PAD) + 1,
-        area.bottom + app.m.s(theme::PAD) - 1,
-    );
+    let mut band_top = area.top - app.m.s(theme::PAD) + 1;
+    let mut band_bottom = area.bottom + app.m.s(theme::PAD) - 1;
+    if let Some(d) = damage {
+        band_top = band_top.max(d.top);
+        band_bottom = band_bottom.min(d.bottom);
+    }
+    let previous = canvas.clip_rows(band_top, band_bottom);
     view::paint_shapes(canvas, &app.content);
     canvas.restore_clip(previous);
 
@@ -435,20 +510,16 @@ pub fn paint(dc: HDC, client: RECT, app: &mut App) {
 
     // Text is drawn straight onto the device context afterwards, because GDI's
     // rasteriser is genuinely good and already has the embedded Geist faces.
-    view::paint_text(dc, &app.fonts, &app.chrome);
-    view::paint_text(dc, &app.fonts, &app.footer);
+    view::paint_text_in(dc, &app.fonts, &app.chrome, damage);
+    view::paint_text_in(dc, &app.fonts, &app.footer, damage);
 
     unsafe {
         // Same band as the shapes, expressed as a clip: everything above the
         // content area is excluded so a scrolled row cannot print over the tabs.
-        let _ = IntersectClipRect(
-            dc,
-            0,
-            area.top - app.m.s(theme::PAD) + 1,
-            width,
-            area.bottom + app.m.s(theme::PAD) - 1,
-        );
-        view::paint_text(dc, &app.fonts, &app.content);
+        let _ = IntersectClipRect(dc, 0, band_top, width, band_bottom);
+        view::paint_text_in(dc, &app.fonts, &app.content, damage);
+        view::paint_icons(dc, &app.content, damage);
+        view::paint_inputs(dc, &app.fonts, &app.content, damage);
         let _ = SelectClipRgn(dc, None);
     }
 }
@@ -467,9 +538,14 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
         let class = w!("SwiftTunnelLiteWindow");
         let wc = WNDCLASSW {
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            // Left null, the taskbar and Alt+Tab fall back to a blank default
+            // even though the tray had the real logo all along.
+            hIcon: crate::tray::app_icon(0, 0),
             hInstance: instance.into(),
             lpszClassName: class,
-            style: CS_HREDRAW | CS_VREDRAW,
+            // CS_DBLCLKS or WM_LBUTTONDBLCLK never arrives and a double click
+            // reads as two separate clicks.
+            style: CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
             lpfnWndProc: Some(wndproc),
             // The whole client area is painted every time, so letting Windows
             // erase it first would only flash the wrong colour.
@@ -510,6 +586,27 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
             Some(instance.into()),
             Some(Box::into_raw(app) as *const c_void),
         )?;
+
+        // The class icon covers most shells, but the taskbar reads ICON_BIG and
+        // the title bar ICON_SMALL, and asking for each at its real metric gets
+        // the right image out of the .ico instead of a scaled one.
+        let big = crate::tray::app_icon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+        let small = crate::tray::app_icon(
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+        );
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(big.0 as isize)),
+        );
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(small.0 as isize)),
+        );
 
         let dark: i32 = 1;
         let _ = DwmSetWindowAttribute(
@@ -688,6 +785,8 @@ pub fn new_app(engine: Engine, dpi: i32) -> Box<App> {
         tray: None,
         quitting: false,
         content_area: RECT::default(),
+        hot_rect: None,
+        items: Vec::new(),
     });
     let client = rect(0, 0, m.s(theme::WINDOW_W), m.s(theme::WINDOW_H));
     app.rebuild(client);
@@ -706,6 +805,10 @@ pub fn render_preview(
     screen: Screen,
     push: Push,
     connected: bool,
+    // Render one of the full-window lockout screens instead. Reaching these
+    // for real means signing out, getting banned or spending the whole free
+    // allowance, none of which is a feedback loop for laying them out.
+    lockout: Option<crate::state::Lockout>,
     // Repaint many times and report the per-frame cost, for checking that a
     // slow machine can still afford this window.
     bench: bool,
@@ -720,6 +823,10 @@ pub fn render_preview(
     let mut app = new_app(engine, dpi);
     app.state.screen = screen;
     app.state.push = push;
+    if let Some(lockout) = lockout {
+        app.state.signed_in = !matches!(lockout, crate::state::Lockout::SignedOut);
+        app.state.lockout = Some(lockout);
+    }
     if connected {
         app.state.tunnel.status = Status::Connected;
         app.state.tunnel.elapsed = 1_337;
@@ -770,6 +877,55 @@ fn client_of(hwnd: HWND) -> RECT {
     r
 }
 
+/// Invalidate one band rather than the window.
+fn repaint_rect(hwnd: HWND, r: RECT) {
+    // SAFETY: invalidating a live window; the paint itself happens later.
+    unsafe {
+        let _ = InvalidateRect(Some(hwnd), Some(&r), false);
+    }
+}
+
+/// The band covering both rects, grown a little so an antialiased edge on the
+/// boundary is repainted rather than left half drawn.
+fn union(a: Option<RECT>, b: Option<RECT>) -> Option<RECT> {
+    let joined = match (a, b) {
+        (Some(a), Some(b)) => RECT {
+            left: a.left.min(b.left),
+            top: a.top.min(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+        },
+        (Some(only), None) | (None, Some(only)) => only,
+        (None, None) => return None,
+    };
+    Some(RECT {
+        top: joined.top - 2,
+        bottom: joined.bottom + 2,
+        ..joined
+    })
+}
+
+/// Which sign-in field the keys are going to.
+fn login_field(app: &mut App, email: bool) -> &mut crate::state::TextField {
+    if email {
+        &mut app.state.login.email
+    } else {
+        &mut app.state.login.password
+    }
+}
+
+/// Modifier state right now. Reading it per keystroke is cheaper than tracking
+/// key-up and key-down and cannot drift out of sync with the real keyboard.
+fn ctrl_held() -> bool {
+    // SAFETY: reading keyboard state takes no handles and cannot fail.
+    unsafe { GetKeyState(0x11) < 0 }
+}
+
+fn shift_held() -> bool {
+    // SAFETY: as above.
+    unsafe { GetKeyState(0x10) < 0 }
+}
+
 fn repaint(hwnd: HWND) {
     // SAFETY: invalidating a live window; the paint itself happens later.
     unsafe {
@@ -778,8 +934,24 @@ fn repaint(hwnd: HWND) {
 }
 
 /// Arm or disarm the heartbeat so an idle window costs nothing.
-fn sync_timer(hwnd: HWND, app: &mut App) {
-    let wanted = app.wants_tick();
+/// Whether the window is actually on screen.
+///
+/// Hidden to the tray or minimised both count as not: there is nothing to
+/// redraw and nobody to see it.
+fn on_screen(hwnd: HWND) -> bool {
+    // SAFETY: querying a live window.
+    unsafe { IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() }
+}
+
+/// `visible` is passed rather than queried because WM_SHOWWINDOW and WM_SIZE
+/// arrive while the change is still happening, so the window would report its
+/// old state.
+fn sync_timer(hwnd: HWND, app: &mut App, visible: bool) {
+    // The heartbeat exists to move a session timer on screen. With a game
+    // fullscreen and Lite in the tray there is no screen to move it on, and
+    // ticking anyway costs a rebuild every second for nothing. The tunnel runs
+    // on the engine's own threads and does not go through here.
+    let wanted = app.wants_tick() && visible;
     if wanted == app.ticking {
         return;
     }
@@ -805,7 +977,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.m = Metrics::new(app.dpi);
                     app.fonts = Fonts::new(&app.m);
                     app.rebuild(client_of(hwnd));
-                    sync_timer(hwnd, app);
+                    sync_timer(hwnd, app, on_screen(hwnd));
                     app.tray = Some(Tray::new(hwnd));
                 }
                 LRESULT(0)
@@ -879,7 +1051,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if let Some(app) = app_of(hwnd) {
                     let mut ps = PAINTSTRUCT::default();
                     let dc = BeginPaint(hwnd, &mut ps);
-                    paint(dc, client_of(hwnd), app);
+                    paint_in(dc, client_of(hwnd), app, Some(ps.rcPaint));
                     let _ = EndPaint(hwnd, &ps);
                 }
                 LRESULT(0)
@@ -916,9 +1088,17 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
                     let next = app.action_at(x, y);
                     if next != app.hot {
+                        let was = app.hot_rect;
                         app.hot = next;
-                        app.rebuild(client_of(hwnd));
-                        repaint(hwnd);
+                        app.rehover(client_of(hwnd));
+                        // Only the row that lost the highlight and the one that
+                        // gained it changed. Repainting the whole window for
+                        // that is what made dragging the pointer down a list
+                        // stutter on a slow machine.
+                        match union(was, app.hot_rect) {
+                            Some(damage) => repaint_rect(hwnd, damage),
+                            None => repaint(hwnd),
+                        }
                     }
                 }
                 LRESULT(0)
@@ -928,9 +1108,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if let Some(app) = app_of(hwnd)
                     && app.hot.is_some()
                 {
+                    let was = app.hot_rect;
                     app.hot = None;
-                    app.rebuild(client_of(hwnd));
-                    repaint(hwnd);
+                    app.rehover(client_of(hwnd));
+                    match was {
+                        Some(damage) => repaint_rect(hwnd, damage),
+                        None => repaint(hwnd),
+                    }
                 }
                 LRESULT(0)
             }
@@ -958,7 +1142,142 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // than validating them out afterwards. What is typed is still
             // checked before it can be applied, since "999999" is all digits
             // and still not a frame rate.
+            // Caret movement, selection and paste. None of this can be done in
+            // WM_CHAR: the arrows never arrive there, and ctrl-A shows up as a
+            // bare control code indistinguishable from anything else.
+            WM_KEYDOWN => {
+                if let Some(app) = app_of(hwnd)
+                    && matches!(
+                        app.state.focus,
+                        Some(FieldId::Email) | Some(FieldId::Password)
+                    )
+                {
+                    let email = app.state.focus == Some(FieldId::Email);
+                    let ctrl = ctrl_held();
+                    let shift = shift_held();
+                    let key = wparam.0 as u32;
+                    let mut changed = true;
+                    let field = login_field(app, email);
+                    match key {
+                        // Left, right, home, end, delete.
+                        0x25 => {
+                            let to = if ctrl {
+                                field.word_left()
+                            } else if field.has_selection() && !shift {
+                                field.selection().0
+                            } else {
+                                field.caret.saturating_sub(1)
+                            };
+                            field.move_to(to, shift);
+                        }
+                        0x27 => {
+                            let to = if ctrl {
+                                field.word_right()
+                            } else if field.has_selection() && !shift {
+                                field.selection().1
+                            } else {
+                                field.caret + 1
+                            };
+                            field.move_to(to, shift);
+                        }
+                        0x24 => field.move_to(0, shift),
+                        0x23 => {
+                            let end = field.len();
+                            field.move_to(end, shift);
+                        }
+                        0x2E => field.delete(),
+                        // Ctrl-A selects everything, ctrl-V pastes.
+                        0x41 if ctrl => field.select_all(),
+                        0x56 if ctrl => {
+                            if let Some(text) = crate::clipboard::text(256) {
+                                let line = text.lines().next().unwrap_or("").trim().to_string();
+                                field.insert(&line, 128);
+                            }
+                        }
+                        _ => changed = false,
+                    }
+                    if changed {
+                        app.state.login.error = None;
+                        app.rebuild(client_of(hwnd));
+                        repaint(hwnd);
+                        return LRESULT(0);
+                    }
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+
+            // Double click selects the whole field, which is the only way to
+            // replace what is in one without holding backspace down.
+            WM_LBUTTONDBLCLK => {
+                if let Some(app) = app_of(hwnd) {
+                    let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                    if let Some(Action::Focus(id)) = app.action_at(x, y)
+                        && matches!(id, FieldId::Email | FieldId::Password)
+                    {
+                        app.state.focus = Some(id);
+                        login_field(app, id == FieldId::Email).select_all();
+                        app.rebuild(client_of(hwnd));
+                        repaint(hwnd);
+                    }
+                }
+                LRESULT(0)
+            }
+
             WM_CHAR => {
+                // The sign-in form takes free text, so it is handled before the
+                // FPS field's digits-only rules. Matched on the code rather
+                // than a char literal so no escape has to survive the edit.
+                if let Some(app) = app_of(hwnd)
+                    && matches!(
+                        app.state.focus,
+                        Some(FieldId::Email) | Some(FieldId::Password)
+                    )
+                {
+                    let email = app.state.focus == Some(FieldId::Email);
+                    let ctrl = ctrl_held();
+                    let mut changed = true;
+                    match wparam.0 as u32 {
+                        // Tab moves on, Enter submits, Escape gives up focus.
+                        9 => {
+                            app.state.focus = Some(if email {
+                                FieldId::Password
+                            } else {
+                                FieldId::Email
+                            });
+                        }
+                        13 => {
+                            if email && app.state.login.password.text.is_empty() {
+                                app.state.focus = Some(FieldId::Password);
+                            } else {
+                                app.state.focus = None;
+                                app.engine.dispatch(Action::SubmitLogin, &mut app.state);
+                            }
+                        }
+                        27 => app.state.focus = None,
+                        8 => {
+                            let field = login_field(app, email);
+                            field.backspace(ctrl);
+                        }
+                        // Every other control code is a ctrl combination, and
+                        // those are dealt with in WM_KEYDOWN where the key is
+                        // still distinguishable.
+                        c if c < 32 => changed = false,
+                        c => match char::from_u32(c) {
+                            Some(ch) => login_field(app, email).insert(&ch.to_string(), 128),
+                            None => changed = false,
+                        },
+                    }
+                    if changed {
+                        // A keystroke clears the last failure: the message was
+                        // about what was typed before, not what is there now.
+                        app.state.login.error = None;
+                        app.rebuild(client_of(hwnd));
+                        repaint(hwnd);
+                    }
+                    return LRESULT(0);
+                }
+
                 if let Some(app) = app_of(hwnd)
                     && app.state.focus == Some(FieldId::FpsCap)
                 {
@@ -1014,7 +1333,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 {
                     app.engine.fill(&mut app.state);
                     app.rebuild(client_of(hwnd));
-                    sync_timer(hwnd, app);
+                    sync_timer(hwnd, app, on_screen(hwnd));
                     repaint(hwnd);
                 }
                 LRESULT(0)
@@ -1026,7 +1345,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if let Some(app) = app_of(hwnd) {
                     app.engine.fill(&mut app.state);
                     app.rebuild(client_of(hwnd));
-                    sync_timer(hwnd, app);
+                    sync_timer(hwnd, app, on_screen(hwnd));
                     repaint(hwnd);
                 }
                 LRESULT(0)
@@ -1058,9 +1377,30 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
             WM_SIZE => {
                 if let Some(app) = app_of(hwnd) {
+                    let visible = wparam.0 as u32 != SIZE_MINIMIZED;
+                    if visible {
+                        // Coming back from the taskbar: catch the session timer
+                        // up before it is drawn, or it shows the value it had
+                        // when the window went away.
+                        app.engine.fill(&mut app.state);
+                    }
                     app.rebuild(client_of(hwnd));
+                    sync_timer(hwnd, app, visible);
                 }
                 LRESULT(0)
+            }
+
+            // Hiding to the tray and coming back out of it.
+            WM_SHOWWINDOW => {
+                if let Some(app) = app_of(hwnd) {
+                    let visible = wparam.0 != 0;
+                    if visible {
+                        app.engine.fill(&mut app.state);
+                        app.rebuild(client_of(hwnd));
+                    }
+                    sync_timer(hwnd, app, visible);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
 
             // Nothing to erase: the whole client area is painted every time.
@@ -1133,6 +1473,6 @@ fn dispatch(hwnd: HWND, app: &mut App, action: Action) {
     app.engine.fill(&mut app.state);
     app.hot = None;
     app.rebuild(client_of(hwnd));
-    sync_timer(hwnd, app);
+    sync_timer(hwnd, app, on_screen(hwnd));
     repaint(hwnd);
 }

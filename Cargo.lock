@@ -4407,6 +4407,7 @@ dependencies = [
  "sha2",
  "simplelog",
  "swifttunnel-core",
+ "swifttunnel-msi-repair",
  "sysinfo",
  "tauri",
  "tauri-build",
@@ -4425,6 +4426,7 @@ version = "3.0.9"
 dependencies = [
  "dirs 5.0.1",
  "embed-manifest",
+ "embed-resource",
  "log",
  "serde",
  "serde_json",

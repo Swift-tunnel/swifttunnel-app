@@ -27,6 +27,9 @@ use windows::Win32::Graphics::Gdi::{
 use crate::canvas::{Canvas, Rgba, RoundRect};
 use crate::gdi::{self, Font};
 use crate::theme;
+use windows::Win32::Graphics::Gdi::{
+    CreateSolidBrush, DeleteObject, FillRect, IntersectClipRect, RestoreDC, SaveDC,
+};
 
 // ── What a screen is made of ────────────────────────────────────────────────
 
@@ -53,6 +56,8 @@ pub enum Action {
     /// Read a custom FFlag payload out of the clipboard and check it.
     PasteFflags,
     SignOut,
+    /// Sign in with whatever is in the email and password fields.
+    SubmitLogin,
     SignIn,
     /// Reinstall the split tunnel driver.
     RepairDriver,
@@ -67,6 +72,8 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldId {
     FpsCap,
+    Email,
+    Password,
 }
 
 /// A boolean setting a row can flip.
@@ -192,7 +199,9 @@ pub enum Item {
     Status {
         headline: String,
         sub: String,
-        dot: Rgba,
+        /// None on a screen that is not reporting tunnel state, so the block
+        /// can be used as a plain heading without a status light next to it.
+        dot: Option<Rgba>,
         sub_ink: COLORREF,
         right: Option<String>,
     },
@@ -204,10 +213,38 @@ pub enum Item {
         variant: Variant,
         disabled: bool,
     },
+    /// The backdrop the sign-in screen sits on: grid, glow, floor shadow.
+    ///
+    /// Takes no vertical space and is emitted first, so everything after it
+    /// draws on top.
+    Atmosphere,
+    /// The centred brand block: logo, tagline, name, one line under it.
+    ///
+    /// Only the sign-in screen uses it, and it deliberately mirrors the full
+    /// app's login screen rather than inventing a second look for the same
+    /// moment.
+    Brand,
     /// A back control at the top of a pushed view.
     Back(String),
     /// Small print under a control.
     Note(String),
+    /// The same, centred, for a screen that is centred.
+    Fine(String),
+    /// A full-width text box, as the sign-in form needs.
+    Input {
+        id: FieldId,
+        placeholder: String,
+        value: String,
+        /// Caret position in characters.
+        caret: usize,
+        /// Selected range in characters, ordered.
+        selection: (usize, usize),
+        /// Draw the value as bullets.
+        masked: bool,
+        focused: bool,
+    },
+    /// A hairline with a word set into it.
+    Divider(String),
     Gap(i32),
 }
 
@@ -258,11 +295,31 @@ pub struct TextRun {
     pub format: DRAW_TEXT_FORMAT,
 }
 
+/// One editable line, waiting to be measured and drawn.
+#[derive(Debug, Clone)]
+pub struct InputRun {
+    pub rect: RECT,
+    /// Already masked if the field is a password: the paint stage draws what
+    /// it is given and never sees the real characters.
+    pub text: String,
+    pub caret: usize,
+    pub selection: (usize, usize),
+    pub focused: bool,
+}
+
+/// The character a masked field shows instead of the real one.
+pub const BULLET: &str = "•";
+
 /// Everything one screen needs, produced in a single walk.
 #[derive(Debug, Default)]
 pub struct Frame {
     pub shapes: Vec<Shape>,
     pub texts: Vec<TextRun>,
+    /// Editable text, drawn at paint time so it can be measured.
+    pub inputs: Vec<InputRun>,
+    /// The app icon, drawn straight onto the device context like the text is.
+    /// The canvas only knows rectangles and circles, and the logo is neither.
+    pub icons: Vec<RECT>,
     pub hots: Vec<(RECT, Action)>,
     /// Full height of the laid-out content, before scrolling.
     pub content_height: i32,
@@ -336,8 +393,23 @@ const RIGHT: DRAW_TEXT_FORMAT =
 const CENTRE: DRAW_TEXT_FORMAT =
     DRAW_TEXT_FORMAT(DT_SINGLELINE.0 | DT_VCENTER.0 | DT_CENTER.0 | DT_NOPREFIX.0);
 const WRAP: DRAW_TEXT_FORMAT = DRAW_TEXT_FORMAT(DT_LEFT.0 | DT_NOPREFIX.0 | DT_WORDBREAK.0);
+const CENTRE_WRAP: DRAW_TEXT_FORMAT =
+    DRAW_TEXT_FORMAT(DT_CENTER.0 | DT_NOPREFIX.0 | DT_WORDBREAK.0);
 
 // ── The walk ────────────────────────────────────────────────────────────────
+
+/// How tall a wrapped note needs to be.
+///
+/// Estimated from the character count rather than measured: layout has no
+/// device context. Deliberately pessimistic about how much fits on a line, so
+/// the error is a little wasted space rather than a sentence cut in half,
+/// which is what a flat two-line reservation gave the longer lockout copy.
+fn note_height(text: &str, width: i32, m: &Metrics) -> i32 {
+    let per_line = m.s(14);
+    let columns = (width / m.s(6)).max(16) as usize;
+    let lines = text.chars().count().div_ceil(columns).clamp(1, 8);
+    per_line * lines as i32 + m.s(6)
+}
 
 /// Lay a screen out inside `area`, offset upward by `scroll`.
 ///
@@ -386,9 +458,7 @@ pub fn layout(
             }
 
             Item::Note(text) => {
-                // Two lines is the most any note here runs to, and reserving
-                // for it costs nothing on a one-line note.
-                let h = m.s(28);
+                let h = note_height(text, right - left - m.s(6), m);
                 f.text(
                     rect(left + m.s(3), y, right - m.s(3), y + h),
                     text,
@@ -399,9 +469,248 @@ pub fn layout(
                 y += h;
             }
 
+            Item::Input {
+                id,
+                placeholder,
+                value,
+                caret,
+                selection,
+                masked,
+                focused,
+            } => {
+                let h = m.s(34);
+                let box_rect = rect(left, y, right, y + h);
+                f.round(
+                    box_rect,
+                    m.s(theme::RADIUS_BTN),
+                    Some(theme::BG),
+                    Some(if *focused {
+                        theme::BORDER_FOCUS
+                    } else {
+                        theme::BORDER_STRONG
+                    }),
+                );
+
+                let pad_x = m.s(10);
+                let shown = if *masked {
+                    BULLET.repeat(value.chars().count())
+                } else {
+                    value.clone()
+                };
+                if shown.is_empty() && !*focused {
+                    f.text(
+                        rect(box_rect.left + pad_x, box_rect.top, box_rect.right - pad_x, box_rect.bottom),
+                        placeholder,
+                        Face::Body,
+                        theme::TEXT_DIMMED,
+                        LEFT,
+                    );
+                } else {
+                    // Handed to the paint stage rather than drawn here: placing
+                    // a caret and a selection needs the real width of the text
+                    // before them, and layout has no device context to measure
+                    // with. It was estimating seven pixels a character, which
+                    // drifted badly on anything proportional.
+                    f.inputs.push(InputRun {
+                        rect: rect(
+                            box_rect.left + pad_x,
+                            box_rect.top,
+                            box_rect.right - pad_x,
+                            box_rect.bottom,
+                        ),
+                        text: shown,
+                        caret: *caret,
+                        selection: *selection,
+                        focused: *focused,
+                    });
+                }
+
+                f.hot(box_rect, Action::Focus(*id));
+                y += h + m.s(8);
+            }
+
+            Item::Divider(word) => {
+                let h = m.s(18);
+                let mid = y + h / 2;
+                let cx = left + (right - left) / 2;
+                let gap = m.s(18);
+                f.round(rect(left, mid, cx - gap, mid + 1), 0, Some(theme::BORDER), None);
+                f.round(rect(cx + gap, mid, right, mid + 1), 0, Some(theme::BORDER), None);
+                f.text(
+                    rect(cx - gap, y, cx + gap, y + h),
+                    word,
+                    Face::Caption,
+                    theme::TEXT_DIMMED,
+                    CENTRE,
+                );
+                y += h + m.s(4);
+            }
+
+            Item::Fine(text) => {
+                let h = note_height(text, right - left - m.s(16), m);
+                f.text(
+                    rect(left + m.s(8), y, right - m.s(8), y + h),
+                    text,
+                    Face::Sub,
+                    theme::TEXT_DIMMED,
+                    CENTRE_WRAP,
+                );
+                y += h;
+            }
+
+            Item::Atmosphere => {
+                // The full app's login screen is a masked two-pitch grid with a
+                // glow behind the logo and a shadow along the floor. Lite had a
+                // flat black rectangle, which is most of why the two screens did
+                // not feel like the same product.
+                let w = right - left;
+                let h = area.bottom - area.top;
+                if w <= 0 || h <= 0 {
+                    continue;
+                }
+                let cx = left + w / 2;
+                // The mask in the full app is centred at 45% down, not halfway.
+                let focus_y = area.top + h * 45 / 100;
+                let half_w = (w as f32) * 0.5;
+                let half_h = (h as f32) * 0.5;
+
+                // Drawn in segments rather than as whole lines so the fade is
+                // radial, the way a mask-image is, instead of only horizontal.
+                let mut grid = |pitch: i32, peak: f32| {
+                    let step = m.s(pitch);
+                    if step <= 0 {
+                        return;
+                    }
+                    let seg = step;
+                    let fade = |x: i32, y: i32| -> f32 {
+                        let dx = (x - cx) as f32 / (half_w * 0.95);
+                        let dy = (y - focus_y) as f32 / (half_h * 1.05);
+                        let d = (dx * dx + dy * dy).sqrt();
+                        // Solid to 40% out, gone by the edge, as the radial
+                        // gradient in the web version does.
+                        peak * (1.0 - ((d - 0.4) / 0.6).clamp(0.0, 1.0))
+                    };
+
+                    let mut x = left;
+                    while x < right {
+                        let mut y = area.top;
+                        while y < area.bottom {
+                            let a = fade(x, y + seg / 2);
+                            if a > 0.004 {
+                                f.round(
+                                    rect(x, y, x + 1, (y + seg).min(area.bottom)),
+                                    0,
+                                    Some(Rgba::hexa(0xFFFFFF, a)),
+                                    None,
+                                );
+                            }
+                            y += seg;
+                        }
+                        x += step;
+                    }
+
+                    let mut y = area.top;
+                    while y < area.bottom {
+                        let mut x = left;
+                        while x < right {
+                            let a = fade(x + seg / 2, y);
+                            if a > 0.004 {
+                                f.round(
+                                    rect(x, y, (x + seg).min(right), y + 1),
+                                    0,
+                                    Some(Rgba::hexa(0xFFFFFF, a)),
+                                    None,
+                                );
+                            }
+                            x += seg;
+                        }
+                        y += step;
+                    }
+                };
+                grid(24, 0.055);
+                grid(96, 0.05);
+
+                // Glow behind the logo: concentric discs, each barely there, so
+                // they stack into a soft falloff without a gradient primitive.
+                let glow_y = area.top + h * 30 / 100;
+                let rings = 16;
+                for i in (1..=rings).rev() {
+                    let r = half_w * 0.85 * (i as f32 / rings as f32);
+                    f.shapes.push(Shape::Circle {
+                        cx: cx as f32,
+                        cy: glow_y as f32,
+                        r,
+                        fill: Rgba::hexa(0xFFFFFF, 0.007),
+                    });
+                }
+
+                // And a shadow along the floor, so the block sits on something.
+                let floor = h / 3;
+                let bands = 18;
+                for i in 0..bands {
+                    let top = area.bottom - floor + floor * i / bands;
+                    let bottom = area.bottom - floor + floor * (i + 1) / bands;
+                    let a = 0.5 * (i as f32 / bands as f32).powi(2);
+                    f.round(
+                        rect(left, top, right, bottom),
+                        0,
+                        Some(Rgba::hexa(0x000000, a)),
+                        None,
+                    );
+                }
+            }
+
+            Item::Brand => {
+                let logo = m.s(96);
+                let cx = left + (right - left) / 2;
+                f.icons.push(rect(cx - logo / 2, y, cx + logo / 2, y + logo));
+                y += logo + m.s(10);
+
+                // A dot the colour of a live tunnel, then the tagline, on one
+                // line. Measured so the pair sits centred as a unit.
+                let tag = "GAMING · RELAY · 14 SERVERS";
+                let tag_w = m.s(178);
+                let dot_x = cx - tag_w / 2;
+                f.shapes.push(Shape::Circle {
+                    cx: dot_x as f32,
+                    cy: (y + m.s(5)) as f32,
+                    r: m.s(2) as f32,
+                    fill: theme::CONNECTED,
+                });
+                f.text(
+                    rect(dot_x + m.s(6), y, cx + tag_w / 2, y + m.s(12)),
+                    tag,
+                    Face::Caption,
+                    theme::TEXT_MUTED,
+                    LEFT,
+                );
+                y += m.s(14);
+
+                f.text(
+                    rect(left, y, right, y + m.s(24)),
+                    "SwiftTunnel",
+                    Face::Title,
+                    theme::TEXT,
+                    CENTRE,
+                );
+                y += m.s(24);
+                f.text(
+                    rect(left, y, right, y + m.s(16)),
+                    "Sign in to deploy the tunnel",
+                    Face::Sub,
+                    theme::TEXT_MUTED,
+                    CENTRE,
+                );
+                y += m.s(16);
+            }
+
             Item::Back(label) => {
                 let h = m.s(22);
-                let r = rect(left, y, left + m.s(90), y + h);
+                // Full row width, for the label and the target both. A fixed
+                // 90 here left the label 77px to live in, which fitted
+                // "Regions" and turned "Network adapter" into "Network ad...".
+                // Nothing else sits on this line to collide with.
+                let r = rect(left, y, right, y + h);
                 // The chevron is drawn as text from the icon face so it sits on
                 // the same baseline as the label without a second measurement.
                 f.text(
@@ -430,14 +739,20 @@ pub fn layout(
                 right: trailing,
             } => {
                 let h = m.s(theme::STATUS_H);
-                let dot_r = m.s(4) as f32;
-                f.shapes.push(Shape::Circle {
-                    cx: (left + m.s(4)) as f32,
-                    cy: (y + m.s(9)) as f32,
-                    r: dot_r,
-                    fill: *dot,
-                });
-                let text_left = left + m.s(15);
+                // Without a dot the text starts at the margin instead of
+                // leaving a hole where the light would have been.
+                let text_left = match dot {
+                    Some(fill) => {
+                        f.shapes.push(Shape::Circle {
+                            cx: (left + m.s(4)) as f32,
+                            cy: (y + m.s(9)) as f32,
+                            r: m.s(4) as f32,
+                            fill: *fill,
+                        });
+                        left + m.s(15)
+                    }
+                    None => left,
+                };
                 let text_right = if trailing.is_some() {
                     right - m.s(48)
                 } else {
@@ -541,14 +856,36 @@ pub fn layout(
                 );
 
                 let mut ry = y;
-                for (row, h) in rows.iter().zip(&heights) {
+                let last = rows.len().saturating_sub(1);
+                for (i, (row, h)) in rows.iter().zip(&heights).enumerate() {
                     let r = rect(left, ry, right, ry + h);
                     let hovered = row.action.is_some()
                         && !row.disabled
                         && hot.is_some()
                         && hot == row.action.as_ref();
                     if hovered {
-                        f.round(r, 0, Some(theme::HOVER), None);
+                        // The card is rounded, so a square hover fill on the
+                        // first or last row paints over its corners and the
+                        // whole card reads as clipped while the pointer is on
+                        // it. Round the corners that sit on the card edge and
+                        // square off the inner side, which is safe to overdraw
+                        // because HOVER is opaque.
+                        let radius = m.s(theme::RADIUS);
+                        let first = i == 0;
+                        let bottom = i == last;
+                        if first || bottom {
+                            f.round(r, radius, Some(theme::HOVER), None);
+                            if !first {
+                                let cap = rect(left, r.top, right, r.top + radius);
+                                f.round(cap, 0, Some(theme::HOVER), None);
+                            }
+                            if !bottom {
+                                let cap = rect(left, r.bottom - radius, right, r.bottom);
+                                f.round(cap, 0, Some(theme::HOVER), None);
+                            }
+                        } else {
+                            f.round(r, 0, Some(theme::HOVER), None);
+                        }
                     }
                     if ry > y {
                         f.round(
@@ -977,8 +1314,142 @@ impl Fonts {
     }
 }
 
-pub fn paint_text(dc: HDC, fonts: &Fonts, frame: &Frame) {
+/// Draw the runs, optionally only those touching `damage`.
+///
+/// GDI would clip them anyway, but every call still selects a font and lays
+/// the string out first. Skipping the ones that cannot show saves that work,
+/// which is most of it when a hover has damaged two rows out of fifteen.
+/// Draw the editable fields: selection, text, caret.
+///
+/// Done here rather than in layout because every part of it needs the real
+/// width of a substring, which needs the font and a device context.
+pub fn paint_inputs(dc: HDC, fonts: &Fonts, frame: &Frame, damage: Option<RECT>) {
+    for run in &frame.inputs {
+        if let Some(d) = damage
+            && (run.rect.bottom <= d.top || run.rect.top >= d.bottom)
+        {
+            continue;
+        }
+        let (font, tracking) = fonts.pick(Face::Body);
+        let upto = |n: usize| {
+            let prefix: String = run.text.chars().take(n).collect();
+            gdi::text_width(dc, &prefix, font, tracking)
+        };
+
+        let width = run.rect.right - run.rect.left;
+        let caret_x = upto(run.caret);
+        let full = upto(run.text.chars().count());
+
+        // Scroll so the caret stays inside the box. Without this, typing past
+        // the right edge carried on invisibly.
+        let mut offset = 0;
+        if full > width {
+            if caret_x > width {
+                offset = caret_x - width + 2;
+            }
+            offset = offset.min(full - width + 2);
+        }
+
+        // SAFETY: drawing into a device context the caller owns, with every
+        // object restored before returning.
+        unsafe {
+            let saved = SaveDC(dc);
+            let _ = IntersectClipRect(
+                dc,
+                run.rect.left,
+                run.rect.top,
+                run.rect.right,
+                run.rect.bottom,
+            );
+
+            let (sel_start, sel_end) = run.selection;
+            if run.focused && sel_start != sel_end {
+                let a = run.rect.left + upto(sel_start) - offset;
+                let b = run.rect.left + upto(sel_end) - offset;
+                let brush = CreateSolidBrush(theme::SELECTION);
+                let band = RECT {
+                    left: a,
+                    top: run.rect.top + 6,
+                    right: b,
+                    bottom: run.rect.bottom - 6,
+                };
+                let _ = FillRect(dc, &band, brush);
+                let _ = DeleteObject(brush.into());
+            }
+
+            gdi::text(
+                dc,
+                &run.text,
+                RECT {
+                    left: run.rect.left - offset,
+                    ..run.rect
+                },
+                font,
+                theme::TEXT,
+                LEFT,
+                tracking,
+            );
+
+            if run.focused && sel_start == sel_end {
+                let x = run.rect.left + caret_x - offset;
+                let brush = CreateSolidBrush(theme::TEXT);
+                let bar = RECT {
+                    left: x,
+                    top: run.rect.top + 7,
+                    right: x + 1,
+                    bottom: run.rect.bottom - 7,
+                };
+                let _ = FillRect(dc, &bar, brush);
+                let _ = DeleteObject(brush.into());
+            }
+
+            let _ = RestoreDC(dc, saved);
+        }
+    }
+}
+
+/// Draw the app icon into any slots this frame asked for.
+pub fn paint_icons(dc: HDC, frame: &Frame, damage: Option<RECT>) {
+    for r in &frame.icons {
+        if let Some(d) = damage
+            && (r.bottom <= d.top || r.top >= d.bottom)
+        {
+            continue;
+        }
+        let size = r.right - r.left;
+        let mut icon = crate::tray::app_icon(size, size);
+        if icon.is_invalid() {
+            icon = crate::tray::app_icon(0, 0);
+        }
+        if icon.is_invalid() {
+            log::warn!("no app icon available to draw on the sign-in screen");
+            continue;
+        }
+        // SAFETY: the icon was just created and is destroyed straight after.
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::DrawIconEx(
+                dc,
+                r.left,
+                r.top,
+                icon,
+                size,
+                size,
+                0,
+                None,
+                windows::Win32::UI::WindowsAndMessaging::DI_NORMAL,
+            );
+            let _ = windows::Win32::UI::WindowsAndMessaging::DestroyIcon(icon);
+        }
+    }
+}
+
+pub fn paint_text_in(dc: HDC, fonts: &Fonts, frame: &Frame, damage: Option<RECT>) {
     for run in &frame.texts {
+        if let Some(d) = damage
+            && (run.rect.bottom <= d.top || run.rect.top >= d.bottom)
+        {
+            continue;
+        }
         let (font, tracking) = fonts.pick(run.face);
         gdi::text(dc, &run.text, run.rect, font, run.ink, run.format, tracking);
     }

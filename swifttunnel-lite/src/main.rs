@@ -80,16 +80,31 @@ fn main() {
         );
 
         let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
+        log::info!(
+            "driver helper: ready={} status={} message={}",
+            health.ready,
+            health.status.as_str(),
+            health.message
+        );
         if health.ready {
             log::info!("driver already ready; installer helper exiting");
             return;
         }
 
+        // Force the reinstall when the health check asks for one, the same
+        // decision the full app installer makes. A package that is staged but
+        // whose filter is not bound to anything installs cleanly and stays
+        // broken, and only the uninstall-first path clears it.
+        let force = health.recommended_action
+            == swifttunnel_core::vpn::DriverRecommendedAction::Reinstall
+            || std::env::args().any(|a| a == "--force");
+        log::info!("driver helper: force={force}");
+
         match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
             None,
             exe_dir.as_deref(),
             &program_files,
-            false,
+            force,
         ) {
             Ok(()) => log::info!("driver installed by the Lite installer"),
             Err(error) => log::error!("Lite installer driver install failed: {error}"),
@@ -147,7 +162,13 @@ fn main() {
             _ => Push::None,
         };
         let bench = args.iter().any(|a| a == "--bench");
-        match ui::render_preview(engine, &path, screen, push, connected, bench) {
+        let lockout = match named("--lockout") {
+            Some("signed-out") => Some(state::Lockout::SignedOut),
+            Some("banned") => Some(state::Lockout::Banned(String::new())),
+            Some("update") => Some(state::Lockout::UpdateRequired(String::new())),
+            _ => None,
+        };
+        match ui::render_preview(engine, &path, screen, push, connected, lockout, bench) {
             Ok(()) => println!("wrote {path}"),
             Err(error) => eprintln!("preview failed: {error}"),
         }

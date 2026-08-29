@@ -44,6 +44,9 @@ pub const BORDER: Rgba = Rgba::hex(0x262628);
 pub const BORDER_STRONG: Rgba = Rgba::hex(0x34343A);
 /// `--color-border-focus`, the outline on a field with the caret in it.
 pub const BORDER_FOCUS: Rgba = Rgba::hex(0xFFFFFF);
+/// Behind selected text. A COLORREF because the selection is filled by GDI at
+/// paint time, alongside the text, rather than composited on the canvas.
+pub const SELECTION: COLORREF = rgb(0x2F4C6B);
 
 // ── Ink ─────────────────────────────────────────────────────────────────────
 

@@ -138,18 +138,56 @@ impl Drop for Tray {
 /// Doing it this way rather than through a resource script keeps Lite a single
 /// self-contained exe and adds no build dependency.
 fn load_icon() -> HICON {
+    app_icon(0, 0)
+}
+
+/// Build the app icon at a given size, 0 for the file's own default.
+///
+/// Public because the window needs it too: the taskbar button, Alt+Tab and the
+/// title bar all read the window's icon, and the window class left it null, so
+/// the tray was the only place the logo appeared.
+pub fn app_icon(cx: i32, cy: i32) -> HICON {
+    // Prefer the exe's own icon group. LoadImageW picks the right image out of
+    // it for the size asked and scales from that, which the raw-bytes path
+    // below does not: it kept handing back a 32px master to be blown up to 96
+    // on the sign-in screen, which is why the logo looked like a mosaic.
+    if cx > 0 && cy > 0 {
+        // SAFETY: resource id 1 is the icon embedded by build.rs, and a null
+        // module handle means this executable.
+        unsafe {
+            if let Ok(module) = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
+                && let Ok(handle) = windows::Win32::UI::WindowsAndMessaging::LoadImageW(
+                    Some(module.into()),
+                    windows::core::PCWSTR(1 as *const u16),
+                    windows::Win32::UI::WindowsAndMessaging::IMAGE_ICON,
+                    cx,
+                    cy,
+                    LR_DEFAULTCOLOR,
+                )
+            {
+                return HICON(handle.0);
+            }
+        }
+    }
+
     // SAFETY: ICON is a 'static byte slice from include_bytes!, and both calls
     // are given its length so neither can read past it.
     unsafe {
-        let offset = LookupIconIdFromDirectoryEx(ICON.as_ptr(), true, 0, 0, LR_DEFAULTCOLOR);
+        // Ask the directory for an image at least as big as the one wanted, so
+        // a 96px logo is a 256px master scaled down rather than a 32px one
+        // scaled up. Windows picks the nearest, and nearest-below on an upscale
+        // is what made the sign-in logo look pixelated.
+        let (want_x, want_y) = if cx > 32 { (256, 256) } else { (cx, cy) };
+        let offset =
+            LookupIconIdFromDirectoryEx(ICON.as_ptr(), true, want_x, want_y, LR_DEFAULTCOLOR);
         if offset <= 0 || offset as usize >= ICON.len() {
             log::warn!("the embedded icon has no usable image");
             return HICON(std::ptr::null_mut());
         }
         let image = &ICON[offset as usize..];
-        CreateIconFromResourceEx(image, true, 0x0003_0000, 0, 0, LR_DEFAULTCOLOR)
+        CreateIconFromResourceEx(image, true, 0x0003_0000, cx, cy, LR_DEFAULTCOLOR)
         .unwrap_or_else(|error| {
-            log::warn!("could not build the tray icon: {error}");
+            log::warn!("could not build the app icon: {error}");
             HICON(std::ptr::null_mut())
         })
     }

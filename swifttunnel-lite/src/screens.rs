@@ -14,6 +14,11 @@ pub fn build(state: &State) -> Vec<Item> {
     // useful behind them, and there is not: the account or the build is the
     // problem and nothing on the other screens changes that.
     if let Some(lockout) = &state.lockout {
+        // Signing out is not a failure, so it does not get the red dot and the
+        // apologetic copy the ban and update screens use.
+        if matches!(lockout, Lockout::SignedOut) {
+            return sign_in_screen(state);
+        }
         return locked_out(state, lockout);
     }
 
@@ -47,6 +52,8 @@ fn locked_out(state: &State, lockout: &Lockout) -> Vec<Item> {
                 message.clone()
             },
         ),
+        // SignedOut never reaches here: build() sends it to sign_in_screen.
+        Lockout::SignedOut => ("Sign in", String::new()),
     };
 
     let mut items = vec![
@@ -54,7 +61,7 @@ fn locked_out(state: &State, lockout: &Lockout) -> Vec<Item> {
         Item::Status {
             headline: headline.to_string(),
             sub: String::new(),
-            dot: theme::ERROR,
+            dot: Some(theme::ERROR),
             sub_ink: theme::TEXT_MUTED,
             right: None,
         },
@@ -68,6 +75,74 @@ fn locked_out(state: &State, lockout: &Lockout) -> Vec<Item> {
         ]));
     }
 
+
+    items
+}
+
+/// The whole window when nobody is signed in.
+///
+/// The full app swaps its UI for a login screen on any auth state that is not
+/// logged in, and Lite showed the tabs regardless, so signing out left every
+/// control sitting there looking usable. This is that screen: no tabs behind
+/// it, no status light, one thing to do.
+fn sign_in_screen(state: &State) -> Vec<Item> {
+    let form = &state.login;
+    let ready = !form.email.text.trim().is_empty() && !form.password.text.is_empty();
+
+    let mut items = vec![
+        Item::Atmosphere,
+        Item::Gap(26),
+        Item::Brand,
+        Item::Gap(18),
+        Item::Input {
+            id: FieldId::Email,
+            placeholder: "Email".to_string(),
+            value: form.email.text.clone(),
+            caret: form.email.caret,
+            selection: form.email.selection(),
+            masked: false,
+            focused: state.focus == Some(FieldId::Email),
+        },
+        Item::Input {
+            id: FieldId::Password,
+            placeholder: "Password".to_string(),
+            value: form.password.text.clone(),
+            caret: form.password.caret,
+            selection: form.password.selection(),
+            masked: true,
+            focused: state.focus == Some(FieldId::Password),
+        },
+        Item::Gap(2),
+        Item::Button {
+            label: if form.busy {
+                "Signing in".to_string()
+            } else {
+                "Sign in".to_string()
+            },
+            action: Action::SubmitLogin,
+            variant: Variant::Solid,
+            disabled: !ready || form.busy,
+        },
+    ];
+
+    if let Some(error) = &form.error {
+        items.push(Item::Gap(4));
+        items.push(Item::Fine(error.clone()));
+    }
+
+    items.push(Item::Gap(8));
+    items.push(Item::Divider("OR".to_string()));
+    items.push(Item::Button {
+        label: "Continue with Google".to_string(),
+        action: Action::SignIn,
+        variant: Variant::Outline,
+        disabled: form.busy,
+    });
+    items.push(Item::Gap(8));
+    items.push(Item::Fine(
+        "Same account as the desktop app: free hours are per account, not per device."
+            .to_string(),
+    ));
     items
 }
 
@@ -96,6 +171,8 @@ fn connect(state: &State) -> Vec<Item> {
 
     let sub = if connected {
         "Roblox traffic is tunneled".to_string()
+    } else if state.free_tier_spent {
+        "Free hours used up".to_string()
     } else if t.detail.is_empty() {
         "Ready to connect".to_string()
     } else {
@@ -105,19 +182,26 @@ fn connect(state: &State) -> Vec<Item> {
     let mut items = vec![Item::Status {
         headline,
         sub,
-        dot: match t.status {
+        dot: Some(match t.status {
             Status::Connected => theme::CONNECTED,
             Status::Working => theme::WARNING,
             Status::Error => theme::ERROR,
             Status::Disconnected => theme::INACTIVE,
-        },
-        sub_ink: if t.status == Status::Error {
+        }),
+        sub_ink: if t.status == Status::Error || (!connected && state.free_tier_spent) {
             theme::ERROR_TEXT
         } else {
             theme::TEXT_MUTED
         },
         right: connected.then(|| elapsed(t.elapsed)),
     }];
+
+    // The advice half of a failure sits under the status and above the button
+    // that retries it, so the order reads: what happened, what to do, try again.
+    if !t.hint.is_empty() {
+        items.push(Item::Gap(6));
+        items.push(Item::Note(t.hint.clone()));
+    }
 
     items.push(Item::Gap(8));
     items.push(Item::Button {
@@ -128,8 +212,15 @@ fn connect(state: &State) -> Vec<Item> {
         } else {
             Variant::Solid
         },
-        disabled: t.status == Status::Working,
+        disabled: t.status == Status::Working || (!connected && state.free_tier_spent),
     });
+
+    if !connected && state.free_tier_spent {
+        items.push(Item::Note(
+            "Free hours reset on their own. The limit is per account, not per device, so signing in on another PC will not add more."
+                .to_string(),
+        ));
+    }
     items.push(Item::Gap(12));
 
     if connected {

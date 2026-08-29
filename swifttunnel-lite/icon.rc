@@ -1,0 +1,4 @@
+/* The exe's own icon: Explorer, the Start Menu and a pinned taskbar button
+   read this, which the window's WM_SETICON does not cover. Id 1 so it is the
+   first icon resource, which is the one the shell picks. */
+1 ICON "resources/icon.ico"

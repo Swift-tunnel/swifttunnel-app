@@ -36,7 +36,7 @@ use swifttunnel_core::vpn::split_tunnel::{GamePreset, get_apps_for_preset_set};
 use swifttunnel_core::vpn::{ConnectionState, SplitTunnelDriver, VpnConnection};
 
 use crate::state::{AdapterRow, Driver, Lockout, RegionRow, Roblox, State, Status, Tunnel};
-use crate::view::{Action, Flag};
+use crate::view::{FieldId,Action, Flag};
 
 /// Posted when a background job lands, so a finished connect or a fresh ping
 /// shows up without waiting for the one-second heartbeat.
@@ -71,6 +71,11 @@ struct Snapshot {
     email: Option<String>,
     signed_in: bool,
     free_tier_secs: Option<u32>,
+    free_tier_spent: bool,
+    /// A sign-in is in flight, and why the last one failed. Owned by the
+    /// snapshot so the async result has somewhere to land.
+    login_busy: bool,
+    login_error: Option<String>,
 }
 
 struct Shared {
@@ -165,6 +170,9 @@ impl Engine {
                 adapters: Vec::new(),
                 tunnel: Tunnel::default(),
                 free_tier_secs: None,
+                free_tier_spent: false,
+                login_busy: false,
+                login_error: None,
             }),
             hwnd: AtomicIsize::new(0),
             stop: AtomicBool::new(false),
@@ -226,6 +234,11 @@ impl Engine {
             state.email = snapshot.email.clone();
             state.signed_in = snapshot.signed_in;
             state.free_tier_secs = snapshot.free_tier_secs;
+            state.free_tier_spent = snapshot.free_tier_spent;
+            // The text stays whatever is being typed; only the result of a
+            // submit comes back from the engine.
+            state.login.busy = snapshot.login_busy;
+            state.login.error = snapshot.login_error.clone();
         }
         if let Ok(s) = self.shared.settings.read() {
             state.selected_region = s.selected_region.clone();
@@ -282,7 +295,22 @@ impl Engine {
 
             Action::Toggle(flag) => self.toggle(flag, state),
             Action::SetQuality(level) => state.edit_roblox(|d| d.quality = level),
-            Action::Focus(id) => state.focus = Some(id),
+            Action::Focus(id) => {
+                state.focus = Some(id);
+                // Land the caret at the end, which is where clicking into a
+                // text box puts it everywhere else.
+                match id {
+                    FieldId::Email => {
+                        let end = state.login.email.len();
+                        state.login.email.move_to(end, false);
+                    }
+                    FieldId::Password => {
+                        let end = state.login.password.len();
+                        state.login.password.move_to(end, false);
+                    }
+                    FieldId::FpsCap => {}
+                }
+            }
             Action::PasteFflags => paste_fflags(state),
             Action::ApplyRoblox => self.apply_roblox(state),
 
@@ -294,15 +322,29 @@ impl Engine {
                         let auth = shared.auth.lock().await;
                         let _ = auth.logout();
                         drop(auth);
-                        shared.edit(|s| {
-                            s.signed_in = false;
-                            s.email = None;
-                        });
+                        if let Ok(mut discord) = shared.discord.lock() {
+                            discord.clear();
+                        }
+                        // Same as the full app's auth_logout: a signed-out
+                        // client must not bring the tunnel back on its own.
+                        if let Ok(mut settings) = shared.settings.write() {
+                            settings.auto_reconnect = false;
+                            settings.resume_vpn_on_startup = false;
+                            let snapshot = settings.clone();
+                            drop(settings);
+                            if let Err(error) =
+                                swifttunnel_core::settings::save_settings(&snapshot)
+                            {
+                                log::warn!("could not persist logout settings: {error}");
+                            }
+                        }
+                        refresh_auth(&shared).await;
                         shared.notify();
                     }
                 });
             }
             Action::SignIn => self.sign_in(),
+            Action::SubmitLogin => self.submit_login(state),
             Action::RepairDriver => self.repair_driver(),
             Action::OpenLogs => open_logs(),
 
@@ -321,6 +363,12 @@ impl Engine {
 
     /// Connect, or disconnect if already up.
     fn primary(&self, state: &State) {
+        // A connect with no allowance left would be refused by the server
+        // anyway; refusing it here saves a pointless round trip and gives a
+        // reason instead of a generic failure.
+        if state.free_tier_spent && state.tunnel.status != Status::Connected {
+            return;
+        }
         if self.shared.busy.load(Ordering::Relaxed) || state.lockout.is_some() {
             return;
         }
@@ -556,6 +604,51 @@ impl Engine {
     ///
     /// Core owns all of it, including the loopback server the callback lands
     /// on. This starts the flow, waits for the token, and completes it.
+    /// Sign in with the email and password in the form.
+    ///
+    /// The same core call the full app's auth_login makes, so the two clients
+    /// cannot drift on what counts as a valid sign-in.
+    fn submit_login(&self, state: &mut State) {
+        if state.login.busy {
+            return;
+        }
+        let email = state.login.email.text.trim().to_string();
+        let password = state.login.password.text.clone();
+        if email.is_empty() || password.is_empty() {
+            return;
+        }
+
+        state.login.busy = true;
+        state.login.error = None;
+        state.focus = None;
+        self.shared.edit(|s| {
+            s.login_busy = true;
+            s.login_error = None;
+        });
+
+        let shared = self.shared.clone();
+        shared.runtime.spawn({
+            let shared = shared.clone();
+            async move {
+                let result = {
+                    let auth = shared.auth.lock().await;
+                    auth.sign_in(&email, &password).await
+                };
+                if result.is_ok() {
+                    refresh_auth(&shared).await;
+                }
+                shared.edit(|s| {
+                    s.login_busy = false;
+                    s.login_error = match &result {
+                        Ok(()) => None,
+                        Err(error) => Some(friendly_auth_error(error)),
+                    };
+                });
+                shared.notify();
+            }
+        });
+    }
+
     fn sign_in(&self) {
         let shared = self.shared.clone();
         shared.runtime.spawn({
@@ -601,17 +694,8 @@ impl Engine {
                     log::warn!("sign-in failed: {error}");
                     return;
                 }
-                let signed_in = auth.is_logged_in();
-                let email = auth.get_user().map(|u| u.email);
-                let auth_state = auth.get_state();
-                let reason = auth.get_user().and_then(|u| u.banned_reason);
                 drop(auth);
-
-                shared.edit(|s| {
-                    s.signed_in = signed_in;
-                    s.email = email;
-                    s.lockout = lockout_of(&auth_state, reason);
-                });
+                refresh_auth(&shared).await;
                 shared.notify();
             }
         });
@@ -870,7 +954,9 @@ fn spawn_poller(shared: Arc<Shared>) {
                     ConnectionState::Error(message) => {
                         since = None;
                         tunnel.status = Status::Error;
-                        tunnel.detail = message.clone();
+                        let (detail, hint) = split_message(message);
+                        tunnel.detail = detail;
+                        tunnel.hint = hint;
                     }
                     ConnectionState::Connected {
                         since: started,
@@ -905,6 +991,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                 // limit is actually enforced, so this is a readout of the
                 // server's decision rather than a second opinion about it.
                 let locked = update_required_message().map(Lockout::UpdateRequired);
+                let spent = free_tier_spent();
 
                 let free_tier = match free_tier_grace_seconds() {
                     Some(grace) => Some(grace.max(0) as u32),
@@ -965,6 +1052,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                         if let Some(locked) = locked.clone() {
                             s.lockout = Some(locked);
                         }
+                        s.free_tier_spent = spent;
                         s.roblox.running = running;
                         if refresh {
                             let fresh = read_roblox(&roblox_intent);
@@ -1001,6 +1089,27 @@ fn spawn_poller(shared: Arc<Shared>) {
 }
 
 // ── Reading the machine ─────────────────────────────────────────────────────
+
+/// Split one of core's messages into a status line and the advice under it.
+///
+/// Core writes failures for a dialog: a short first paragraph, a blank line,
+/// then what to do. Drawn as one line those ran together into "Couldn't
+/// connect.Check your internet connection" with the advice cut off at the
+/// window edge. The first paragraph is the what and fits on the status line;
+/// the remainder is the what-to-do and goes to a note that wraps.
+fn split_message(message: &str) -> (String, String) {
+    let mut parts = message.splitn(2, "
+
+");
+    let head = parts.next().unwrap_or_default();
+    let rest = parts.next().unwrap_or_default();
+    (flatten(head), flatten(rest))
+}
+
+/// Collapse every run of whitespace, newlines included, into one space.
+fn flatten(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 /// Keep Rich Presence in step with the tunnel.
 ///
@@ -1124,7 +1233,75 @@ fn lockout_of(state: &AuthState, banned_reason: Option<String>) -> Option<Lockou
     }
     match state {
         AuthState::Banned(_) => Some(Lockout::Banned(banned_reason.unwrap_or_default())),
-        _ => None,
+        AuthState::LoggedIn { .. } => None,
+        // Everything else means no usable session, which the full app treats as
+        // "show the login screen and nothing else".
+        _ => Some(Lockout::SignedOut),
+    }
+}
+
+/// Whether the free-tier allowance, and any grace after it, is spent.
+///
+/// `free_tier_grace_seconds` is `Some` only once the allowance has run out, so
+/// grace being present is itself the signal that it has; the number only says
+/// how much borrowed time is left. With no grace recorded, a remaining count of
+/// zero means the same thing.
+fn free_tier_spent() -> bool {
+    match free_tier_grace_seconds() {
+        Some(grace) => grace <= 0,
+        None => matches!(free_tier_quota().0, Some(0)),
+    }
+}
+
+/// Copy the auth manager's view of the world into the snapshot.
+///
+/// Every path that changes who is signed in has to call this. Nothing else
+/// refreshes `signed_in` or the lockout: the poller does not read auth state,
+/// so a sign-in that skipped this left a valid session sitting behind a login
+/// screen, and a sign-out left the app fully usable until it was restarted.
+async fn refresh_auth(shared: &Arc<Shared>) {
+    let auth = shared.auth.lock().await;
+    let signed_in = auth.is_logged_in();
+    let email = auth.get_user().map(|u| u.email);
+    let auth_state = auth.get_state();
+    let reason = auth.get_user().and_then(|u| u.banned_reason);
+    drop(auth);
+
+    shared.edit(|s| {
+        s.signed_in = signed_in;
+        s.email = email;
+        s.lockout = lockout_of(&auth_state, reason);
+    });
+}
+
+/// Turn a core auth error into something worth showing on the sign-in screen.
+///
+/// The raw Display of these leaks HTTP wording, and "error sending request for
+/// url" is not a thing to tell somebody whose password was wrong.
+fn friendly_auth_error(error: &swifttunnel_core::auth::AuthError) -> String {
+    use swifttunnel_core::auth::AuthError;
+    match error {
+        // A wrong password comes back as a 400 from the API, so the text is
+        // the only thing that separates it from a real server fault.
+        AuthError::ApiError(message) => {
+            let lowered = message.to_lowercase();
+            if lowered.contains("invalid")
+                || lowered.contains("credential")
+                || lowered.contains("password")
+            {
+                "Wrong email or password.".to_string()
+            } else {
+                message.clone()
+            }
+        }
+        AuthError::NetworkError(_) => {
+            "Could not reach SwiftTunnel. Check your connection.".to_string()
+        }
+        AuthError::UserBanned(_) => "This account cannot use SwiftTunnel.".to_string(),
+        AuthError::RateLimited(secs) => {
+            format!("Too many attempts. Try again in {secs}s.")
+        }
+        other => other.to_string(),
     }
 }
 
@@ -1293,8 +1470,28 @@ fn open_logs() {
         .spawn();
 }
 
+/// Hand a URL to the default browser.
+///
+/// ShellExecuteW rather than `cmd /C start`: cmd.exe is a console program, so
+/// spawning it flashes a console window on screen every time sign-in opens the
+/// browser. This is the same thing without the window.
 fn open_in_browser(url: &str) {
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
-        .spawn();
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::HSTRING;
+
+    let verb = HSTRING::from("open");
+    let target = HSTRING::from(url);
+    // SAFETY: both strings outlive the call, and a null hwnd/parameters/dir is
+    // what the API expects for "just open this".
+    unsafe {
+        ShellExecuteW(
+            None,
+            &verb,
+            &target,
+            None,
+            None,
+            SW_SHOWNORMAL,
+        );
+    }
 }

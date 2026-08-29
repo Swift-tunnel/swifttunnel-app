@@ -64,3 +64,4 @@ windows = { version = "0.62", features = [
 
 [build-dependencies]
 embed-manifest = "1"
+embed-resource = "3"

@@ -35,6 +35,12 @@ pub struct Tunnel {
     pub status: Status,
     /// Core's own description of what it is doing, or why it failed.
     pub detail: String,
+    /// The advice half of a failure: what to do about it.
+    ///
+    /// Core writes failures for a dialog, so they arrive as two paragraphs.
+    /// The status line here is one line, so it takes the first and this
+    /// carries the remainder to a note that wraps.
+    pub hint: String,
     /// Region actually connected to, which auto-routing can make different
     /// from the one that was asked for.
     pub region: Option<String>,
@@ -43,6 +49,152 @@ pub struct Tunnel {
     pub bytes_down: u64,
     /// Seconds since the tunnel came up.
     pub elapsed: u64,
+}
+
+/// One editable line of text.
+///
+/// The first version of the sign-in form appended and popped characters and
+/// nothing else, which meant no caret to move, nothing to select, and no way
+/// to fix a typo except to delete back to it. Positions are in characters, not
+/// bytes, so an accented letter counts once and cannot land mid-codepoint.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TextField {
+    pub text: String,
+    /// Where the caret sits, counted in characters from the start.
+    pub caret: usize,
+    /// The other end of the selection. Equal to the caret when nothing is
+    /// selected, which is the only thing that distinguishes the two states.
+    pub anchor: usize,
+}
+
+impl TextField {
+    pub fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    /// The selection as an ordered pair, since the anchor may be either side.
+    pub fn selection(&self) -> (usize, usize) {
+        (self.caret.min(self.anchor), self.caret.max(self.anchor))
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.caret != self.anchor
+    }
+
+    fn byte_of(&self, chars: usize) -> usize {
+        self.text
+            .char_indices()
+            .nth(chars)
+            .map(|(i, _)| i)
+            .unwrap_or(self.text.len())
+    }
+
+    /// Put the caret somewhere, dragging the selection with it or collapsing it.
+    pub fn move_to(&mut self, pos: usize, extend: bool) {
+        self.caret = pos.min(self.len());
+        if !extend {
+            self.anchor = self.caret;
+        }
+    }
+
+    pub fn select_all(&mut self) {
+        self.anchor = 0;
+        self.caret = self.len();
+    }
+
+    /// Where the previous or next word boundary is, for ctrl-arrow and
+    /// ctrl-backspace. A word ends where a run of non-spaces meets a space.
+    pub fn word_left(&self) -> usize {
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut i = self.caret;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        i
+    }
+
+    pub fn word_right(&self) -> usize {
+        let chars: Vec<char> = self.text.chars().collect();
+        let mut i = self.caret;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < chars.len() && chars[i].is_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    /// Drop whatever is selected. Returns whether anything went.
+    pub fn delete_selection(&mut self) -> bool {
+        if !self.has_selection() {
+            return false;
+        }
+        let (start, end) = self.selection();
+        let (a, b) = (self.byte_of(start), self.byte_of(end));
+        self.text.replace_range(a..b, "");
+        self.caret = start;
+        self.anchor = start;
+        true
+    }
+
+    /// Type something, replacing the selection the way every other field does.
+    pub fn insert(&mut self, value: &str, limit: usize) {
+        self.delete_selection();
+        let room = limit.saturating_sub(self.len());
+        if room == 0 {
+            return;
+        }
+        let value: String = value.chars().filter(|c| !c.is_control()).take(room).collect();
+        if value.is_empty() {
+            return;
+        }
+        let at = self.byte_of(self.caret);
+        self.text.insert_str(at, &value);
+        self.caret += value.chars().count();
+        self.anchor = self.caret;
+    }
+
+    pub fn backspace(&mut self, word: bool) {
+        if self.delete_selection() {
+            return;
+        }
+        if self.caret == 0 {
+            return;
+        }
+        let from = if word { self.word_left() } else { self.caret - 1 };
+        let (a, b) = (self.byte_of(from), self.byte_of(self.caret));
+        self.text.replace_range(a..b, "");
+        self.caret = from;
+        self.anchor = from;
+    }
+
+    pub fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
+        if self.caret >= self.len() {
+            return;
+        }
+        let (a, b) = (self.byte_of(self.caret), self.byte_of(self.caret + 1));
+        self.text.replace_range(a..b, "");
+    }
+}
+
+/// What the sign-in form is holding.
+///
+/// Kept in the window's state rather than the engine snapshot: it is text
+/// somebody is typing, and the poller has no business overwriting it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Login {
+    pub email: TextField,
+    pub password: TextField,
+    pub error: Option<String>,
+    /// A sign-in is in flight, so the button says so and cannot be pressed twice.
+    pub busy: bool,
 }
 
 /// One row of the region list.
@@ -91,6 +243,12 @@ pub struct Driver {
 pub enum Lockout {
     Banned(String),
     UpdateRequired(String),
+    /// Nobody is signed in.
+    ///
+    /// The full app swaps its whole UI for a login screen when the auth state
+    /// is anything but logged in. Lite showed the tabs regardless, so signing
+    /// out left every control sitting there looking usable.
+    SignedOut,
 }
 
 /// Roblox's own settings, read from its file rather than remembered here, so
@@ -127,6 +285,8 @@ pub struct State {
     pub roblox_draft: Option<RobloxDraft>,
     /// Which field has the caret, if any.
     pub focus: Option<FieldId>,
+    /// The sign-in form.
+    pub login: Login,
     pub driver: Driver,
     /// Set when this client must not connect at all.
     pub lockout: Option<Lockout>,
@@ -148,6 +308,12 @@ pub struct State {
     pub signed_in: bool,
     /// Seconds of free tunnel time left, when the server is enforcing a limit.
     pub free_tier_secs: Option<u32>,
+    /// The allowance and its grace are spent, so a connect would be refused.
+    ///
+    /// Deliberately not a lockout: the full app keeps its whole interface
+    /// usable and simply lets the connect fail, and there is plenty here worth
+    /// reaching without a tunnel, Roblox settings and the log among it.
+    pub free_tier_spent: bool,
 }
 
 impl Default for Screen {
