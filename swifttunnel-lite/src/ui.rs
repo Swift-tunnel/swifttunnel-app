@@ -76,6 +76,8 @@ pub struct App {
     /// Where the lit row is, so a hover change can repaint just the rows that
     /// gained and lost the highlight instead of the whole window.
     hot_rect: Option<RECT>,
+    /// Where the focused text field is, for the same reason while typing.
+    focus_rect: Option<RECT>,
     /// The current screen's item tree, kept between frames.
     ///
     /// Hovering cannot change it, so rebuilding it on every mouse move was
@@ -84,6 +86,9 @@ pub struct App {
     /// Reused across repaints rather than rebuilt, so a slow machine is not
     /// allocating and zeroing 1.5MB to redraw a hover.
     canvas: Canvas,
+    /// Everything is drawn here first and presented in one operation, so the
+    /// window never shows shapes without their text.
+    buffer: crate::surface::Buffer,
     /// `None` until the window exists, since the icon needs its handle.
     tray: Option<Tray>,
     /// Set by the tray's Quit item, so WM_CLOSE stops hiding and closes.
@@ -140,16 +145,25 @@ impl App {
 
         if rebuild_items {
             self.items = crate::screens::build(&self.state);
-
-            // Laid out once at the top to find its height, so the scroll can be
-            // clamped before the frame that gets painted is built.
-            let probe = view::layout(&self.items, area, &self.m, 0, None);
-            let viewport = area.bottom - area.top;
-            self.max_scroll = (probe.content_height - viewport).max(0);
-            self.scroll = self.scroll.clamp(0, self.max_scroll);
         }
 
+        // Laid out once, then corrected only if that scroll turned out to be
+        // past the end. This used to run a throwaway pass first purely to learn
+        // the content height, which doubled the cost of every rebuild and never
+        // changed the answer on a screen that does not scroll. The height does
+        // not depend on the offset, so the real pass can report it just as well.
         self.content = view::layout(&self.items, area, &self.m, self.scroll, self.hot.as_ref());
+
+        if rebuild_items {
+            let viewport = area.bottom - area.top;
+            self.max_scroll = (self.content.content_height - viewport).max(0);
+            let clamped = self.scroll.clamp(0, self.max_scroll);
+            if clamped != self.scroll {
+                self.scroll = clamped;
+                self.content =
+                    view::layout(&self.items, area, &self.m, self.scroll, self.hot.as_ref());
+            }
+        }
 
         if self.max_scroll > 0 {
             add_scrollbar(&mut self.content, area, &self.m, self.scroll, self.max_scroll);
@@ -160,6 +174,15 @@ impl App {
         // recomputed, so it cannot drift from what was actually drawn, and
         // unioned because the fill is applied to every row carrying the action,
         // not just the first one found.
+        self.focus_rect = self.state.focus.and_then(|id| {
+            let wanted = Action::Focus(id);
+            self.content
+                .hots
+                .iter()
+                .find(|(_, action)| *action == wanted)
+                .map(|(r, _)| *r)
+        });
+
         self.hot_rect = self.hot.as_ref().and_then(|wanted| {
             let zones = self
                 .chrome
@@ -477,12 +500,17 @@ pub fn paint(dc: HDC, client: RECT, app: &mut App) {
 ///
 /// None means the whole window, which is what a first paint, a resize and
 /// WM_PRINTCLIENT all need.
-pub fn paint_in(dc: HDC, client: RECT, app: &mut App, damage: Option<RECT>) {
+pub fn paint_in(target: HDC, client: RECT, app: &mut App, damage: Option<RECT>) {
     let width = client.right - client.left;
     let height = client.bottom - client.top;
     if width <= 0 || height <= 0 {
         return;
     }
+
+    // Everything below draws into the offscreen surface, never the window.
+    let Some(dc) = app.buffer.begin(target, width, height) else {
+        return;
+    };
 
     app.canvas.reset(width, height, theme::BG);
     let canvas = &mut app.canvas;
@@ -506,7 +534,7 @@ pub fn paint_in(dc: HDC, client: RECT, app: &mut App, damage: Option<RECT>) {
     view::paint_shapes(canvas, &app.content);
     canvas.restore_clip(previous);
 
-    crate::surface::blit(dc, canvas);
+    app.buffer.fill_from(&app.canvas);
 
     // Text is drawn straight onto the device context afterwards, because GDI's
     // rasteriser is genuinely good and already has the embedded Geist faces.
@@ -522,6 +550,10 @@ pub fn paint_in(dc: HDC, client: RECT, app: &mut App, damage: Option<RECT>) {
         view::paint_inputs(dc, &app.fonts, &app.content, damage);
         let _ = SelectClipRgn(dc, None);
     }
+
+    // The finished frame reaches the window in one operation. Windows clips it
+    // to whatever was invalidated, so a partial repaint stays partial.
+    app.buffer.present(target);
 }
 
 // ── Window ──────────────────────────────────────────────────────────────────
@@ -782,10 +814,12 @@ pub fn new_app(engine: Engine, dpi: i32) -> Box<App> {
         dpi,
         ticking: false,
         canvas: Canvas::new(m.s(theme::WINDOW_W), m.s(theme::WINDOW_H), theme::BG),
+        buffer: crate::surface::Buffer::new(),
         tray: None,
         quitting: false,
         content_area: RECT::default(),
         hot_rect: None,
+        focus_rect: None,
         items: Vec::new(),
     });
     let client = rect(0, 0, m.s(theme::WINDOW_W), m.s(theme::WINDOW_H));
@@ -809,6 +843,9 @@ pub fn render_preview(
     // for real means signing out, getting banned or spending the whole free
     // allowance, none of which is a feedback loop for laying them out.
     lockout: Option<crate::state::Lockout>,
+    // Preload the sign-in email, focused, so the cost of a field with more text
+    // than fits can be measured. Add "!" to select it all.
+    login_text: Option<String>,
     // Repaint many times and report the per-frame cost, for checking that a
     // slow machine can still afford this window.
     bench: bool,
@@ -823,6 +860,15 @@ pub fn render_preview(
     let mut app = new_app(engine, dpi);
     app.state.screen = screen;
     app.state.push = push;
+    if let Some(text) = login_text {
+        let select_all = text.ends_with('!');
+        let text = text.trim_end_matches('!').to_string();
+        app.state.login.email.text = text;
+        let end = app.state.login.email.len();
+        app.state.login.email.caret = end;
+        app.state.login.email.anchor = if select_all { 0 } else { end };
+        app.state.focus = Some(FieldId::Email);
+    }
     if let Some(lockout) = lockout {
         app.state.signed_in = !matches!(lockout, crate::state::Lockout::SignedOut);
         app.state.lockout = Some(lockout);
@@ -875,6 +921,28 @@ fn client_of(hwnd: HWND) -> RECT {
         let _ = GetClientRect(hwnd, &mut r);
     }
     r
+}
+
+/// Repaint from the focused field down, after a keystroke.
+///
+/// Typing changes the field, and below it the button's enabled state and
+/// whether an error note is showing. Nothing above the field can move, which
+/// on the sign-in screen is the logo and the whole atmosphere: several hundred
+/// grid segments and sixteen large alpha-blended discs. Redrawing those for
+/// every character is what made typing stutter.
+fn repaint_from_focus(hwnd: HWND, app: &App) {
+    match app.focus_rect {
+        Some(field) => repaint_rect(
+            hwnd,
+            RECT {
+                left: app.content_area.left,
+                top: field.top - 2,
+                right: app.content_area.right,
+                bottom: app.content_area.bottom,
+            },
+        ),
+        None => repaint(hwnd),
+    }
 }
 
 /// Invalidate one band rather than the window.
@@ -1199,7 +1267,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     if changed {
                         app.state.login.error = None;
                         app.rebuild(client_of(hwnd));
-                        repaint(hwnd);
+                        repaint_from_focus(hwnd, app);
                         return LRESULT(0);
                     }
                 }
@@ -1273,7 +1341,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         // about what was typed before, not what is there now.
                         app.state.login.error = None;
                         app.rebuild(client_of(hwnd));
-                        repaint(hwnd);
+                        repaint_from_focus(hwnd, app);
                     }
                     return LRESULT(0);
                 }

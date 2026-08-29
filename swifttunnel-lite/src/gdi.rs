@@ -130,13 +130,22 @@ pub fn text(
 }
 
 /// Measure a single line so it can be positioned relative to other runs.
-#[allow(dead_code)]
+///
+/// Encoded without the terminator `to_wide` adds: DrawTextW measures by slice
+/// length, so including it counts the NUL as a character and every answer comes
+/// back one glyph too wide. An empty string measured a lone NUL rather than
+/// zero, which put a text field's selection a character in from the left and
+/// its caret a character past the end.
 pub fn text_width(dc: HDC, value: &str, font: &Font, tracking: i32) -> i32 {
+    if value.is_empty() {
+        return 0;
+    }
+
     unsafe {
         let old = SelectObject(dc, font.0.into());
         SetTextCharacterExtra(dc, tracking);
 
-        let mut wide = to_wide(value);
+        let mut wide: Vec<u16> = value.encode_utf16().collect();
         let mut r = RECT::default();
         DrawTextW(
             dc,

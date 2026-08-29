@@ -14,71 +14,151 @@ use std::ffi::c_void;
 
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, HDC, HGDIOBJ, SRCCOPY, SelectObject,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ, SRCCOPY, SelectObject,
 };
 
 use crate::canvas::Canvas;
 
 
-/// Copy a finished canvas to the window.
-pub fn blit(dc: HDC, canvas: &Canvas) {
-    if canvas.width <= 0 || canvas.height <= 0 {
-        return;
-    }
+/// An offscreen surface that everything is drawn into before it reaches the
+/// window.
+///
+/// Shapes used to be blitted straight to the window and the text drawn on top
+/// of it afterwards, which put two separate operations on screen for every
+/// repaint: the background first, then the words. A repaint or two is invisible
+/// but typing produces a stream of them, and the gap between the two shows up
+/// as the whole interface flickering.
+///
+/// Kept between paints rather than rebuilt, which also drops a DIB allocation
+/// per frame.
+pub struct Buffer {
+    dc: HDC,
+    bitmap: HBITMAP,
+    bits: *mut u32,
+    width: i32,
+    height: i32,
+}
 
-    let header = BITMAPINFOHEADER {
-        biSize: size_of::<BITMAPINFOHEADER>() as u32,
-        biWidth: canvas.width,
-        // Negative height gives a top-down DIB, so row 0 is the top and the
-        // buffer reads the way the canvas was written.
-        biHeight: -canvas.height,
-        biPlanes: 1,
-        biBitCount: 32,
-        biCompression: BI_RGB.0,
-        ..Default::default()
-    };
-    let info = BITMAPINFO {
-        bmiHeader: header,
-        ..Default::default()
-    };
-
-    let mut bits: *mut c_void = std::ptr::null_mut();
-    let bitmap = unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) };
-    let Ok(bitmap) = bitmap else {
-        return;
-    };
-    if bits.is_null() {
-        unsafe {
-            let _ = DeleteObject(HGDIOBJ(bitmap.0));
+impl Buffer {
+    pub fn new() -> Self {
+        Self {
+            dc: HDC::default(),
+            bitmap: HBITMAP::default(),
+            bits: std::ptr::null_mut(),
+            width: 0,
+            height: 0,
         }
-        return;
     }
 
-    // SAFETY: CreateDIBSection returned a buffer of exactly width * height
-    // 32-bit pixels and nothing else refers to it.
-    let out = unsafe {
-        std::slice::from_raw_parts_mut(bits as *mut u32, (canvas.width * canvas.height) as usize)
-    };
-    canvas.write_bgrx(out);
+    /// Point the buffer at a surface of this size, rebuilding only on a change.
+    fn ensure(&mut self, reference: HDC, width: i32, height: i32) -> bool {
+        if width <= 0 || height <= 0 {
+            return false;
+        }
+        if !self.dc.is_invalid() && self.width == width && self.height == height {
+            return true;
+        }
+        self.release();
 
-    unsafe {
-        let mem = CreateCompatibleDC(Some(dc));
-        if !mem.is_invalid() {
-            let previous = SelectObject(mem, HGDIOBJ(bitmap.0));
+        let header = BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        };
+        let info = BITMAPINFO {
+            bmiHeader: header,
+            ..Default::default()
+        };
+
+        // SAFETY: the bitmap is owned here and released in release()/Drop.
+        unsafe {
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let Ok(bitmap) = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0)
+            else {
+                return false;
+            };
+            if bits.is_null() {
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                return false;
+            }
+            let dc = CreateCompatibleDC(Some(reference));
+            if dc.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                return false;
+            }
+            SelectObject(dc, HGDIOBJ(bitmap.0));
+
+            self.dc = dc;
+            self.bitmap = bitmap;
+            self.bits = bits as *mut u32;
+            self.width = width;
+            self.height = height;
+        }
+        true
+    }
+
+    /// Prepare a surface of this size and hand back the context for it.
+    pub fn begin(&mut self, reference: HDC, width: i32, height: i32) -> Option<HDC> {
+        self.ensure(reference, width, height).then_some(self.dc)
+    }
+
+    /// Copy the composited shapes in, under whatever text is drawn after.
+    pub fn fill_from(&mut self, canvas: &Canvas) {
+        if self.bits.is_null() || canvas.width != self.width || canvas.height != self.height {
+            return;
+        }
+        // SAFETY: the section was created with exactly this many pixels.
+        let out = unsafe {
+            std::slice::from_raw_parts_mut(self.bits, (self.width * self.height) as usize)
+        };
+        canvas.write_bgrx(out);
+    }
+
+    /// One operation, so the window never shows a half-drawn frame.
+    pub fn present(&self, dst: HDC) {
+        if self.dc.is_invalid() {
+            return;
+        }
+        // SAFETY: both contexts are live for the duration of the call.
+        unsafe {
             let _ = BitBlt(
-                dc,
+                dst,
                 0,
                 0,
-                canvas.width,
-                canvas.height,
-                Some(mem),
+                self.width,
+                self.height,
+                Some(self.dc),
                 0,
                 0,
                 SRCCOPY,
             );
-            SelectObject(mem, previous);
-            let _ = DeleteDC(mem);
         }
-        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+    }
+
+    fn release(&mut self) {
+        // SAFETY: each handle is deleted once and then cleared.
+        unsafe {
+            if !self.dc.is_invalid() {
+                let _ = DeleteDC(self.dc);
+                self.dc = HDC::default();
+            }
+            if !self.bitmap.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(self.bitmap.0));
+                self.bitmap = HBITMAP::default();
+            }
+        }
+        self.bits = std::ptr::null_mut();
+        self.width = 0;
+        self.height = 0;
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        self.release();
     }
 }

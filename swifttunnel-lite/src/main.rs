@@ -168,7 +168,17 @@ fn main() {
             Some("update") => Some(state::Lockout::UpdateRequired(String::new())),
             _ => None,
         };
-        match ui::render_preview(engine, &path, screen, push, connected, lockout, bench) {
+        let login_text = named("--login-text").map(str::to_string);
+        match ui::render_preview(
+            engine,
+            &path,
+            screen,
+            push,
+            connected,
+            lockout,
+            login_text,
+            bench,
+        ) {
             Ok(()) => println!("wrote {path}"),
             Err(error) => eprintln!("preview failed: {error}"),
         }
