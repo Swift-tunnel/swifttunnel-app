@@ -396,9 +396,10 @@ fn roblox(state: &State) -> Vec<Item> {
                 .sub(custom_hint(&draft))
                 .right(Right::Switch(draft.custom_fflags))
                 .action(Action::Toggle(Flag::CustomFflags)),
-            Row::new("Paste from clipboard")
+            Row::new("Import from file")
+                .sub("A .json or .txt file of flags")
                 .right(Right::Chevron)
-                .action(Action::PasteFflags)
+                .action(Action::ImportFflags)
                 .disabled(!draft.custom_fflags),
         ]),
         Item::Gap(10),

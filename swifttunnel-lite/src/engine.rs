@@ -104,6 +104,14 @@ struct Shared {
 }
 
 impl Shared {
+    /// The window, for anything that needs an owner.
+    ///
+    /// Null until `attach`, which a modal dialog reads as "no owner" and shows
+    /// itself anyway rather than failing.
+    fn hwnd(&self) -> HWND {
+        HWND(self.hwnd.load(Ordering::Relaxed) as *mut std::ffi::c_void)
+    }
+
     /// Nudge the window to re-read the snapshot.
     fn notify(&self) {
         let raw = self.hwnd.load(Ordering::Relaxed);
@@ -311,7 +319,7 @@ impl Engine {
                     FieldId::FpsCap => {}
                 }
             }
-            Action::PasteFflags => paste_fflags(state),
+            Action::ImportFflags => self.import_fflags(state),
             Action::ApplyRoblox => self.apply_roblox(state),
 
             Action::SignOut => {
@@ -647,6 +655,28 @@ impl Engine {
                 shared.notify();
             }
         });
+    }
+
+    /// Load custom FFlags from a file the user picks.
+    ///
+    /// A file rather than the clipboard: an exported flag list is a file to
+    /// begin with, and pasting means opening it in something first and hoping
+    /// nothing is trimmed on the way through.
+    ///
+    /// The dialog is modal on purpose. It runs on the UI thread, so nothing
+    /// can repaint underneath it, and the file is small enough that reading it
+    /// is not worth a thread.
+    fn import_fflags(&self, state: &mut State) {
+        let owner = self.shared.hwnd();
+        match crate::picker::read_fflag_file(owner) {
+            // Cancelled. Saying anything here would be noise.
+            Ok(None) => {}
+            Ok(Some(text)) => apply_fflag_text(state, text),
+            Err(reason) => state.edit_roblox(|d| {
+                d.fflag_ok = false;
+                d.fflag_note = Some(reason);
+            }),
+        }
     }
 
     fn sign_in(&self) {
@@ -1410,15 +1440,7 @@ fn read_roblox(intent: &RobloxSettingsConfig) -> Roblox {
 /// happened. The rules are core's, not this window's: valid JSON, a non-empty
 /// object under 8KB, and every key on Roblox's local client allowlist. Nothing
 /// outside that list can be written whatever is pasted.
-fn paste_fflags(state: &mut State) {
-    let Some(text) = crate::clipboard::text(16 * 1024) else {
-        state.edit_roblox(|d| {
-            d.fflag_note = Some("Nothing on the clipboard to paste.".into());
-            d.fflag_ok = false;
-        });
-        return;
-    };
-
+fn apply_fflag_text(state: &mut State, text: String) {
     match RobloxOptimizer::validate_custom_fflags(&text) {
         Ok(count) => state.edit_roblox(|d| {
             d.custom_json = text;

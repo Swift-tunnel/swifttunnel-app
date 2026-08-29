@@ -29,6 +29,7 @@ mod clipboard;
 mod engine;
 mod fonts;
 mod gdi;
+mod picker;
 mod preview;
 mod screens;
 mod single_client;

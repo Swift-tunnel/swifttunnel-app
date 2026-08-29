@@ -54,7 +54,7 @@ pub enum Action {
     /// Write the pending Roblox edits, and restart the game if it is running.
     ApplyRoblox,
     /// Read a custom FFlag payload out of the clipboard and check it.
-    PasteFflags,
+    ImportFflags,
     SignOut,
     /// Sign in with whatever is in the email and password fields.
     SubmitLogin,
