@@ -3208,14 +3208,31 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
         "Stale SwiftTunnel WFP filters cleaned (best-effort).",
     ));
 
-    // Step 6: hosts-file overrides (best-effort, no structured result).
+    // Step 6: hosts file. Clean out anything of ours left behind, then make
+    // sure the file is even there. A missing hosts file is what turned country
+    // ban bypass into "unavailable on this network" with no way for anyone to
+    // work out why, since Windows never complains about its absence.
     swifttunnel_core::roblox_proxy::hosts::recover_stale();
-    steps.push(network_repair_step(
-        "hosts",
-        "Hosts file overrides",
-        "healthy",
-        "Stale SwiftTunnel hosts entries cleaned (best-effort).",
-    ));
+    steps.push(match swifttunnel_core::roblox_proxy::hosts::ensure_exists() {
+        Ok(true) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "fixed",
+            "The Windows hosts file was missing and has been recreated. Something removed it, usually antivirus or a PC cleanup tool.",
+        ),
+        Ok(false) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "healthy",
+            "Hosts file present; stale SwiftTunnel entries cleaned.",
+        ),
+        Err(e) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "failed",
+            format!("The Windows hosts file is missing and could not be recreated: {e}"),
+        ),
+    });
 
     // Step 7: DNS cache, so fixed connectivity takes effect immediately.
     steps.push(

@@ -815,6 +815,45 @@ async fn probe_tcp_reachable(ip: Ipv4Addr, port: u16) -> bool {
     )
 }
 
+/// Make sure the hosts file exists, creating an empty one if it does not.
+///
+/// Returns whether it had to create it. Windows does not need the file to
+/// resolve names, so nothing warns when something deletes it, and the first
+/// symptom is a feature that writes to it failing for no visible reason.
+/// Antivirus, malware cleaners and PC tidying tools all remove it.
+pub fn ensure_exists() -> Result<bool, String> {
+    let path = hosts_path();
+    if path.exists() {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create the hosts directory: {e}"))?;
+    }
+
+    fs::write(&path, "").map_err(|e| format!("could not create the hosts file: {e}"))?;
+    info!("Created a missing hosts file at {}", path.display());
+    Ok(true)
+}
+
+/// Read the hosts file, treating a missing one as empty.
+///
+/// Windows resolves perfectly well without a hosts file: it is an optional
+/// override list, and antivirus, malware cleaners and PC tidying tools all
+/// delete it. Refusing to work in that case turned a machine with no hosts file
+/// into "country ban bypass unavailable on this network", which is wrong and
+/// unfixable by the person reading it, since the wording blamed their network.
+fn read_hosts_or_empty(path: &std::path::Path) -> Result<String, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(format!("Failed to read hosts file: {e}")),
+    }
+}
+
 fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
     if overrides.is_empty() {
         return Err("No hosts overrides to write".to_string());
@@ -822,8 +861,15 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
 
     let path = hosts_path();
 
-    let content =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read hosts file: {e}"))?;
+    // The directory can be missing too on a machine where the file was removed.
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create the hosts directory: {e}"))?;
+    }
+
+    let content = read_hosts_or_empty(&path)?;
 
     let clean = remove_marker_block(&content);
     let block = build_hosts_block(overrides);
@@ -856,8 +902,13 @@ pub fn remove_overrides() -> Result<(), String> {
 fn remove_overrides_inner() -> Result<(), String> {
     let path = hosts_path();
 
-    let content =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read hosts file: {e}"))?;
+    // No file means nothing of ours is in it. Tearing down cleanly is the whole
+    // point of this function, so it must not fail on an absent file.
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let content = read_hosts_or_empty(&path)?;
 
     let clean = remove_marker_block(&content);
 

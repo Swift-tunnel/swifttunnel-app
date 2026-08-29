@@ -1537,7 +1537,7 @@ impl VpnConnection {
                     // Surface it so the UI/support can see why bypass degraded.
                     if enable_country_ban {
                         self.country_ban_bypass_failure = Some(format!(
-                            "Roblox DNS repair failed (your network may be blocking secure DNS): {e}"
+                            "Roblox DNS repair failed: {e}"
                         ));
                     }
                 }
