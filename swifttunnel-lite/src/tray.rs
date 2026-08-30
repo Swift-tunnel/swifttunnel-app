@@ -185,11 +185,12 @@ pub fn app_icon(cx: i32, cy: i32) -> HICON {
             return HICON(std::ptr::null_mut());
         }
         let image = &ICON[offset as usize..];
-        CreateIconFromResourceEx(image, true, 0x0003_0000, cx, cy, LR_DEFAULTCOLOR)
-        .unwrap_or_else(|error| {
-            log::warn!("could not build the app icon: {error}");
-            HICON(std::ptr::null_mut())
-        })
+        CreateIconFromResourceEx(image, true, 0x0003_0000, cx, cy, LR_DEFAULTCOLOR).unwrap_or_else(
+            |error| {
+                log::warn!("could not build the app icon: {error}");
+                HICON(std::ptr::null_mut())
+            },
+        )
     }
 }
 

@@ -3246,7 +3246,9 @@ mod tests {
     fn custom_fflags_name_every_rejected_key() {
         let config = RobloxSettingsConfig {
             custom_fflags_enabled: true,
-            custom_fflags_json: r#" { "FFlagNopeOne": true, "FFlagNopeTwo": true, "FFlagNopeThree": true } "#.to_string(),
+            custom_fflags_json:
+                r#" { "FFlagNopeOne": true, "FFlagNopeTwo": true, "FFlagNopeThree": true } "#
+                    .to_string(),
             ..Default::default()
         };
 

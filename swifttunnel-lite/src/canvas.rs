@@ -322,7 +322,6 @@ impl Canvas {
             }
         }
     }
-
 }
 
 /// Pixel range a shape can touch, clamped to the surface.
@@ -423,10 +422,7 @@ mod tests {
             for x in 0..40 {
                 let a = probe(&fast, x, y)[0];
                 let b = probe(&slow, x, y)[0];
-                assert!(
-                    (a - b).abs() < 0.5,
-                    "pixel {x},{y}: fast {a} vs slow {b}"
-                );
+                assert!((a - b).abs() < 0.5, "pixel {x},{y}: fast {a} vs slow {b}");
             }
         }
     }

@@ -45,8 +45,7 @@ use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
 /// where a per-machine install registers. An install done per-user registers
 /// under that user's own SID instead and was invisible here, so the repair
 /// reported a healthy machine and the upgrade failed anyway.
-const USERDATA: &str =
-    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
+const USERDATA: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
 const CLASSES_PRODUCTS: &str = r"SOFTWARE\Classes\Installer\Products";
 const CLASSES_FEATURES: &str = r"SOFTWARE\Classes\Installer\Features";
 const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";

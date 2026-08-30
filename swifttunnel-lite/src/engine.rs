@@ -20,8 +20,8 @@ use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_APP};
 
 use swifttunnel_core::auth::types::AuthState;
-use swifttunnel_core::autostart::{RUN_VALUE_LITE, sync_run_on_startup};
 use swifttunnel_core::auth::{AuthManager, update_required_message};
+use swifttunnel_core::autostart::{RUN_VALUE_LITE, sync_run_on_startup};
 use swifttunnel_core::discord_rpc::DiscordManager;
 use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
 use swifttunnel_core::settings::{self, AdapterBindingMode, AppSettings};
@@ -36,7 +36,7 @@ use swifttunnel_core::vpn::split_tunnel::{GamePreset, get_apps_for_preset_set};
 use swifttunnel_core::vpn::{ConnectionState, SplitTunnelDriver, VpnConnection};
 
 use crate::state::{AdapterRow, Driver, Lockout, RegionRow, Roblox, State, Status, Tunnel};
-use crate::view::{FieldId,Action, Flag};
+use crate::view::{Action, FieldId, Flag};
 
 /// Posted when a background job lands, so a finished connect or a fresh ping
 /// shows up without waiting for the one-second heartbeat.
@@ -344,8 +344,7 @@ impl Engine {
                             settings.resume_vpn_on_startup = false;
                             let snapshot = settings.clone();
                             drop(settings);
-                            if let Err(error) =
-                                swifttunnel_core::settings::save_settings(&snapshot)
+                            if let Err(error) = swifttunnel_core::settings::save_settings(&snapshot)
                             {
                                 log::warn!("could not persist logout settings: {error}");
                             }
@@ -428,7 +427,9 @@ impl Engine {
 
     fn toggle(&self, flag: Flag, state: &mut State) {
         match flag {
-            Flag::RouteAssist => self.settings(|s| s.enable_api_tunneling = !s.enable_api_tunneling),
+            Flag::RouteAssist => {
+                self.settings(|s| s.enable_api_tunneling = !s.enable_api_tunneling)
+            }
             Flag::CountryBan => self.settings(|s| s.enable_country_ban = !s.enable_country_ban),
             Flag::RunOnStartup => {
                 // Written to the registry, not just to the settings file. This
@@ -533,7 +534,9 @@ impl Engine {
                 let roblox = &mut guard.config.roblox_settings;
                 roblox.ultraboost = config.ultraboost;
                 roblox.custom_fflags_enabled = config.custom_fflags_enabled;
-                roblox.custom_fflags_json.clone_from(&config.custom_fflags_json);
+                roblox
+                    .custom_fflags_json
+                    .clone_from(&config.custom_fflags_json);
                 let snapshot = guard.clone();
                 drop(guard);
                 let _ = settings::save_settings(&snapshot);
@@ -755,9 +758,7 @@ impl Engine {
             }
         });
     }
-
 }
-
 
 impl Drop for Engine {
     fn drop(&mut self) {
@@ -816,8 +817,8 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
 
     // An empty custom relay means "use the fleet", which is what the full app
     // does with the same field.
-    let custom_relay = (!settings.custom_relay_server.is_empty())
-        .then(|| settings.custom_relay_server.clone());
+    let custom_relay =
+        (!settings.custom_relay_server.is_empty()).then(|| settings.custom_relay_server.clone());
     // A custom relay and auto-routing contradict each other; the full app
     // drops auto-routing for the session, so this does too.
     let auto_routing = settings.auto_routing_enabled && custom_relay.is_none();
@@ -1133,9 +1134,11 @@ fn spawn_poller(shared: Arc<Shared>) {
 /// window edge. The first paragraph is the what and fits on the status line;
 /// the remainder is the what-to-do and goes to a note that wraps.
 fn split_message(message: &str) -> (String, String) {
-    let mut parts = message.splitn(2, "
+    let mut parts = message.splitn(
+        2, "
 
-");
+",
+    );
     let head = parts.next().unwrap_or_default();
     let rest = parts.next().unwrap_or_default();
     (flatten(head), flatten(rest))
@@ -1348,7 +1351,6 @@ fn describe(state: &ConnectionState) -> String {
     }
 }
 
-
 fn quality_of(level: u32) -> GraphicsQuality {
     match level {
         0 => GraphicsQuality::Automatic,
@@ -1484,32 +1486,31 @@ fn list_adapters() -> Vec<AdapterRow> {
 }
 
 impl Engine {
-/// Hand over to Lite's own uninstaller.
-///
-/// Disconnects first. Pulling the tunnel down after the driver bindings have
-/// been removed leaves a machine that looks like it only has internet when
-/// SwiftTunnel is installed, which is the state people uninstall to escape.
-fn uninstall(&self, state: &mut State) {
-    let crate::uninstall::Installed::Standalone(product_code) =
-        crate::uninstall::how_installed()
-    else {
-        state.uninstall_note =
-            Some("Lite came with SwiftTunnel. Uninstall SwiftTunnel to remove it.".into());
-        return;
-    };
+    /// Hand over to Lite's own uninstaller.
+    ///
+    /// Disconnects first. Pulling the tunnel down after the driver bindings have
+    /// been removed leaves a machine that looks like it only has internet when
+    /// SwiftTunnel is installed, which is the state people uninstall to escape.
+    fn uninstall(&self, state: &mut State) {
+        let crate::uninstall::Installed::Standalone(product_code) =
+            crate::uninstall::how_installed()
+        else {
+            state.uninstall_note =
+                Some("Lite came with SwiftTunnel. Uninstall SwiftTunnel to remove it.".into());
+            return;
+        };
 
-    // Drop the tunnel before the driver bindings go. Removing them under a
-    // live session leaves a machine that looks like it only has internet when
-    // SwiftTunnel is installed, which is the state people uninstall to escape.
-    if state.tunnel.status == Status::Connected {
-        self.primary(state);
+        // Drop the tunnel before the driver bindings go. Removing them under a
+        // live session leaves a machine that looks like it only has internet when
+        // SwiftTunnel is installed, which is the state people uninstall to escape.
+        if state.tunnel.status == Status::Connected {
+            self.primary(state);
+        }
+
+        if let Err(error) = crate::uninstall::start(product_code) {
+            state.uninstall_note = Some(error);
+        }
     }
-
-    if let Err(error) = crate::uninstall::start(product_code) {
-        state.uninstall_note = Some(error);
-    }
-}
-
 }
 
 /// Show the log file in Explorer, selected.
@@ -1541,13 +1542,6 @@ fn open_in_browser(url: &str) {
     // SAFETY: both strings outlive the call, and a null hwnd/parameters/dir is
     // what the API expects for "just open this".
     unsafe {
-        ShellExecuteW(
-            None,
-            &verb,
-            &target,
-            None,
-            None,
-            SW_SHOWNORMAL,
-        );
+        ShellExecuteW(None, &verb, &target, None, None, SW_SHOWNORMAL);
     }
 }

@@ -148,7 +148,11 @@ impl TextField {
         if room == 0 {
             return;
         }
-        let value: String = value.chars().filter(|c| !c.is_control()).take(room).collect();
+        let value: String = value
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(room)
+            .collect();
         if value.is_empty() {
             return;
         }
@@ -165,7 +169,11 @@ impl TextField {
         if self.caret == 0 {
             return;
         }
-        let from = if word { self.word_left() } else { self.caret - 1 };
+        let from = if word {
+            self.word_left()
+        } else {
+            self.caret - 1
+        };
         let (a, b) = (self.byte_of(from), self.byte_of(self.caret));
         self.text.replace_range(a..b, "");
         self.caret = from;

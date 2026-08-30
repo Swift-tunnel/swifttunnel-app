@@ -4391,7 +4391,7 @@ dependencies = [
 
 [[package]]
 name = "swifttunnel-desktop"
-version = "3.0.9"
+version = "3.1.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4422,7 +4422,7 @@ dependencies = [
 
 [[package]]
 name = "swifttunnel-lite"
-version = "3.0.9"
+version = "3.1.0"
 dependencies = [
  "dirs 5.0.1",
  "embed-manifest",
@@ -4434,6 +4434,7 @@ dependencies = [
  "swifttunnel-core",
  "tokio",
  "windows 0.62.2",
+ "windows-registry 0.6.1",
 ]
 
 [[package]]

@@ -1536,9 +1536,8 @@ impl VpnConnection {
                     // go to bogus endpoints (Studio/installer SslConnectFail).
                     // Surface it so the UI/support can see why bypass degraded.
                     if enable_country_ban {
-                        self.country_ban_bypass_failure = Some(format!(
-                            "Roblox DNS repair failed: {e}"
-                        ));
+                        self.country_ban_bypass_failure =
+                            Some(format!("Roblox DNS repair failed: {e}"));
                     }
                 }
             }

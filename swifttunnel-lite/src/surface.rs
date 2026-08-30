@@ -19,7 +19,6 @@ use windows::Win32::Graphics::Gdi::{
 
 use crate::canvas::Canvas;
 
-
 /// An offscreen surface that everything is drawn into before it reaches the
 /// window.
 ///

@@ -39,7 +39,8 @@ fn locked_out(state: &State, lockout: &Lockout) -> Vec<Item> {
         Lockout::Banned(reason) => (
             "Account suspended",
             if reason.trim().is_empty() {
-                "This account cannot use SwiftTunnel. Contact support if you think this is wrong.".to_string()
+                "This account cannot use SwiftTunnel. Contact support if you think this is wrong."
+                    .to_string()
             } else {
                 reason.clone()
             },
@@ -74,7 +75,6 @@ fn locked_out(state: &State, lockout: &Lockout) -> Vec<Item> {
             Row::new("Sign out").action(Action::SignOut).danger_if(true),
         ]));
     }
-
 
     items
 }
@@ -140,8 +140,7 @@ fn sign_in_screen(state: &State) -> Vec<Item> {
     });
     items.push(Item::Gap(8));
     items.push(Item::Fine(
-        "Same account as the desktop app: free hours are per account, not per device."
-            .to_string(),
+        "Same account as the desktop app: free hours are per account, not per device.".to_string(),
     ));
     items
 }
@@ -444,7 +443,11 @@ pub fn footer(state: &State) -> Option<Item> {
             "Apply".into()
         },
         action: Action::ApplyRoblox,
-        variant: if dirty { Variant::Solid } else { Variant::Outline },
+        variant: if dirty {
+            Variant::Solid
+        } else {
+            Variant::Outline
+        },
         disabled: !dirty || !draft.ready(),
     })
 }
@@ -561,13 +564,17 @@ fn settings(state: &State) -> Vec<Item> {
         },
         Item::Group(vec![
             Row::new(state.email.clone().unwrap_or_else(|| "Signed out".into())),
-            Row::new(if state.signed_in { "Sign out" } else { "Sign in" })
-                .action(if state.signed_in {
-                    Action::SignOut
-                } else {
-                    Action::SignIn
-                })
-                .danger_if(state.signed_in),
+            Row::new(if state.signed_in {
+                "Sign out"
+            } else {
+                "Sign in"
+            })
+            .action(if state.signed_in {
+                Action::SignOut
+            } else {
+                Action::SignIn
+            })
+            .danger_if(state.signed_in),
         ]),
     ]
 }

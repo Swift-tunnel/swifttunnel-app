@@ -9,8 +9,8 @@ use tauri::AppHandle;
 
 // Re-exported under the names this crate already used, so the uninstall and
 // driver-install paths that snapshot the entry keep working unchanged.
-pub use swifttunnel_core::autostart::{RUN_KEY_PATH, launched_from_startup_flag};
 pub(crate) use swifttunnel_core::autostart::RUN_VALUE_APP as RUN_VALUE_NAME;
+pub use swifttunnel_core::autostart::{RUN_KEY_PATH, launched_from_startup_flag};
 use swifttunnel_core::autostart::{RUN_VALUE_APP, sync_run_on_startup as sync};
 
 pub fn sync_run_on_startup(_app: &AppHandle, enabled: bool) -> Result<(), String> {

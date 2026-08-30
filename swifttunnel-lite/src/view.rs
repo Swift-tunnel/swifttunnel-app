@@ -337,7 +337,14 @@ impl Frame {
         });
     }
 
-    fn text(&mut self, rect: RECT, text: &str, face: Face, ink: COLORREF, format: DRAW_TEXT_FORMAT) {
+    fn text(
+        &mut self,
+        rect: RECT,
+        text: &str,
+        face: Face,
+        ink: COLORREF,
+        format: DRAW_TEXT_FORMAT,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -424,13 +431,7 @@ fn note_height(text: &str, width: i32, m: &Metrics) -> i32 {
 ///
 /// `hot` is the action currently under the pointer, so the row it belongs to
 /// can be drawn highlighted without the caller having to find it again.
-pub fn layout(
-    items: &[Item],
-    area: RECT,
-    m: &Metrics,
-    scroll: i32,
-    hot: Option<&Action>,
-) -> Frame {
+pub fn layout(items: &[Item], area: RECT, m: &Metrics, scroll: i32, hot: Option<&Action>) -> Frame {
     let mut f = Frame::default();
     let left = area.left;
     let right = area.right;
@@ -508,7 +509,12 @@ pub fn layout(
                 };
                 if shown.is_empty() && !*focused {
                     f.text(
-                        rect(box_rect.left + pad_x, box_rect.top, box_rect.right - pad_x, box_rect.bottom),
+                        rect(
+                            box_rect.left + pad_x,
+                            box_rect.top,
+                            box_rect.right - pad_x,
+                            box_rect.bottom,
+                        ),
                         placeholder,
                         Face::Body,
                         theme::TEXT_DIMMED,
@@ -543,8 +549,18 @@ pub fn layout(
                 let mid = y + h / 2;
                 let cx = left + (right - left) / 2;
                 let gap = m.s(18);
-                f.round(rect(left, mid, cx - gap, mid + 1), 0, Some(theme::BORDER), None);
-                f.round(rect(cx + gap, mid, right, mid + 1), 0, Some(theme::BORDER), None);
+                f.round(
+                    rect(left, mid, cx - gap, mid + 1),
+                    0,
+                    Some(theme::BORDER),
+                    None,
+                );
+                f.round(
+                    rect(cx + gap, mid, right, mid + 1),
+                    0,
+                    Some(theme::BORDER),
+                    None,
+                );
                 f.text(
                     rect(cx - gap, y, cx + gap, y + h),
                     word,
@@ -672,7 +688,8 @@ pub fn layout(
             Item::Brand => {
                 let logo = m.s(96);
                 let cx = left + (right - left) / 2;
-                f.icons.push(rect(cx - logo / 2, y, cx + logo / 2, y + logo));
+                f.icons
+                    .push(rect(cx - logo / 2, y, cx + logo / 2, y + logo));
                 y += logo + m.s(10);
 
                 // A dot the colour of a live tunnel, then the tagline, on one
@@ -796,7 +813,12 @@ pub fn layout(
             Item::Stats(cells) => {
                 let h = m.s(theme::STATS_H);
                 let box_rect = rect(left, y, right, y + h);
-                f.round(box_rect, m.s(theme::RADIUS), Some(theme::CARD), Some(theme::BORDER));
+                f.round(
+                    box_rect,
+                    m.s(theme::RADIUS),
+                    Some(theme::CARD),
+                    Some(theme::BORDER),
+                );
                 let width = (right - left) / 3;
                 for (i, (label, value)) in cells.iter().enumerate() {
                     let x = left + width * i as i32;
@@ -897,12 +919,7 @@ pub fn layout(
                         }
                     }
                     if ry > y {
-                        f.round(
-                            rect(left, ry, right, ry + 1),
-                            0,
-                            Some(theme::BORDER),
-                            None,
-                        );
+                        f.round(rect(left, ry, right, ry + 1), 0, Some(theme::BORDER), None);
                     }
                     layout_row(&mut f, row, r, m);
                     if let Some(action) = &row.action
@@ -1008,9 +1025,7 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
             // one short run at the far right and holding the second line to
             // the same stop truncated copy that had room to spare.
             let sub_right = match &row.right {
-                Right::Text(_) | Right::TextChevron(_) => {
-                    text_right.max(r.right - pad - m.s(58))
-                }
+                Right::Text(_) | Right::TextChevron(_) => text_right.max(r.right - pad - m.s(58)),
                 _ => text_right,
             };
             f.text(
@@ -1069,7 +1084,6 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
             );
         }
 
-
         Right::Field {
             text,
             focused,
@@ -1099,10 +1113,19 @@ fn layout_row(f: &mut Frame, row: &Row, r: RECT, m: &Metrics) {
             let pad_x = m.s(7);
             let caret = if *focused { m.s(5) } else { 0 };
             f.text(
-                rect(box_rect.left + pad_x, box_rect.top, box_rect.right - pad_x - caret, box_rect.bottom),
+                rect(
+                    box_rect.left + pad_x,
+                    box_rect.top,
+                    box_rect.right - pad_x - caret,
+                    box_rect.bottom,
+                ),
                 text,
                 Face::Value,
-                if *valid { theme::TEXT } else { theme::ERROR_TEXT },
+                if *valid {
+                    theme::TEXT
+                } else {
+                    theme::ERROR_TEXT
+                },
                 RIGHT,
             );
             if *focused {

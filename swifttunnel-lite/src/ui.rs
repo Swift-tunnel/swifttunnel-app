@@ -18,18 +18,17 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{
-    ScreenToClient,
     BeginPaint, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, EndPaint,
-    GetMonitorInfoW, IntersectClipRect, HDC, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, HDC, IntersectClipRect, InvalidateRect, MONITOR_DEFAULTTONEAREST,
     MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
-    SelectClipRgn,
-};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    ScreenToClient, SelectClipRgn,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, GetDpiForWindow,
     MDT_EFFECTIVE_DPI, SetProcessDpiAwarenessContext,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
@@ -166,7 +165,13 @@ impl App {
         }
 
         if self.max_scroll > 0 {
-            add_scrollbar(&mut self.content, area, &self.m, self.scroll, self.max_scroll);
+            add_scrollbar(
+                &mut self.content,
+                area,
+                &self.m,
+                self.scroll,
+                self.max_scroll,
+            );
         }
         self.content_area = area;
 
@@ -209,7 +214,10 @@ impl App {
 
     /// Whether the window needs a heartbeat right now.
     fn wants_tick(&self) -> bool {
-        matches!(self.state.tunnel.status, Status::Connected | Status::Working)
+        matches!(
+            self.state.tunnel.status,
+            Status::Connected | Status::Working
+        )
     }
 
     fn action_at(&self, x: i32, y: i32) -> Option<Action> {
@@ -623,10 +631,8 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
         // the title bar ICON_SMALL, and asking for each at its real metric gets
         // the right image out of the .ico instead of a scaled one.
         let big = crate::tray::app_icon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
-        let small = crate::tray::app_icon(
-            GetSystemMetrics(SM_CXSMICON),
-            GetSystemMetrics(SM_CYSMICON),
-        );
+        let small =
+            crate::tray::app_icon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
         SendMessageW(
             hwnd,
             WM_SETICON,
@@ -678,7 +684,6 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
         // is correct the moment the window is visible, which is late enough to
         // cost one frame of resize and early enough that nobody sees it.
         sync_window_dpi(hwnd);
-
 
         // Published now rather than in WM_CREATE: the engine's threads
         // are already running and a ping that lands before this point
@@ -748,15 +753,7 @@ fn sync_window_dpi(hwnd: HWND) {
 
     // SAFETY: resizing a live window this process owns.
     unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            want_w,
-            want_h,
-            SWP_NOMOVE | SWP_NOZORDER,
-        );
+        let _ = SetWindowPos(hwnd, None, 0, 0, want_w, want_h, SWP_NOMOVE | SWP_NOZORDER);
     }
     centre(hwnd);
     app.rebuild(client_of(hwnd));
@@ -1107,9 +1104,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 };
                 let _ = ScreenToClient(hwnd, &mut point);
                 let bar = rect(0, 0, client_of(hwnd).right, app.m.s(theme::TITLE_H));
-                if contains(bar, point.x, point.y)
-                    && app.action_at(point.x, point.y).is_none()
-                {
+                if contains(bar, point.x, point.y) && app.action_at(point.x, point.y).is_none() {
                     return LRESULT(HTCAPTION as isize);
                 }
                 LRESULT(HTCLIENT as isize)
