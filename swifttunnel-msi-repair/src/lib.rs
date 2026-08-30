@@ -36,17 +36,25 @@
 
 use std::path::Path;
 
-use windows_registry::LOCAL_MACHINE;
+use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
 
 /// Where Windows records per-machine installed products.
-const USERDATA_PRODUCTS: &str =
-    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products";
+/// Every account's installed-product list, not just the machine account's.
+///
+/// This used to point straight at `S-1-5-18`, the machine account, which is
+/// where a per-machine install registers. An install done per-user registers
+/// under that user's own SID instead and was invisible here, so the repair
+/// reported a healthy machine and the upgrade failed anyway.
+const USERDATA: &str =
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
 const CLASSES_PRODUCTS: &str = r"SOFTWARE\Classes\Installer\Products";
 const CLASSES_FEATURES: &str = r"SOFTWARE\Classes\Installer\Features";
 const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 
 #[derive(Debug, Clone)]
 pub struct Orphan {
+    /// Which account's product list this was found under.
+    pub sid: String,
     /// Registry-form (packed) product id, as used by the Installer keys.
     pub packed: String,
     /// Human product code, `{XXXXXXXX-....}`, as used by the Uninstall key.
@@ -61,45 +69,90 @@ pub struct Orphan {
 /// A registration whose package is still on disk is healthy and is skipped, so
 /// running this on a working machine finds nothing and changes nothing.
 pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
-    let products = LOCAL_MACHINE.open(USERDATA_PRODUCTS)?;
+    let userdata = LOCAL_MACHINE.open(USERDATA)?;
     let mut out = Vec::new();
 
-    for packed in products.keys()? {
-        let Ok(props) = products.open(format!(r"{packed}\InstallProperties")) else {
+    for sid in userdata.keys()? {
+        let Ok(products) = userdata.open(format!(r"{sid}\Products")) else {
+            continue;
+        };
+        let Ok(packed_keys) = products.keys() else {
             continue;
         };
 
-        let display_name = props.get_string("DisplayName").unwrap_or_default();
-        if !display_name.to_lowercase().contains("swifttunnel") {
-            continue;
-        }
+        for packed in packed_keys {
+            let Ok(props) = products.open(format!(r"{packed}\InstallProperties")) else {
+                continue;
+            };
 
-        let local_package = props.get_string("LocalPackage").unwrap_or_default();
-        if !local_package.is_empty() && Path::new(&local_package).exists() {
-            continue;
-        }
+            let display_name = props.get_string("DisplayName").unwrap_or_default();
+            if !display_name.to_lowercase().contains("swifttunnel") {
+                continue;
+            }
 
-        out.push(Orphan {
-            product_code: unpack_guid(&packed),
-            packed,
-            display_name,
-            display_version: props.get_string("DisplayVersion").unwrap_or_default(),
-            local_package,
-        });
+            let local_package = props.get_string("LocalPackage").unwrap_or_default();
+            if package_is_usable(&local_package) {
+                continue;
+            }
+
+            out.push(Orphan {
+                sid: sid.clone(),
+                product_code: unpack_guid(&packed),
+                packed,
+                display_name,
+                display_version: props.get_string("DisplayVersion").unwrap_or_default(),
+                local_package,
+            });
+        }
     }
 
     Ok(out)
+}
+
+/// Whether the cached package is one Windows Installer could actually use.
+///
+/// Existing is not the same as usable. Cleanup tools truncate files as often as
+/// they delete them, and a zero-length or half-written package passes a plain
+/// existence check while Windows still refuses it and asks for the original,
+/// which is the failure this whole crate exists to prevent.
+///
+/// An MSI is an OLE compound document, so the first eight bytes are a fixed
+/// signature. Checking them costs one short read and rules out both an empty
+/// file and something that is not a package at all.
+fn package_is_usable(path: &str) -> bool {
+    if path.is_empty() || !Path::new(path).exists() {
+        return false;
+    }
+
+    const OLE_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    match std::fs::File::open(path) {
+        Ok(mut file) => {
+            use std::io::Read;
+            let mut head = [0u8; 8];
+            // A file too short to hold the signature cannot be a package.
+            file.read_exact(&mut head).is_ok() && head == OLE_SIGNATURE
+        }
+        // Unreadable is as good as missing: the installer will not manage it
+        // either.
+        Err(_) => false,
+    }
 }
 
 /// Remove every key that makes Windows believe the product is installed.
 pub fn clear_registration(orphan: &Orphan) -> Result<(), String> {
     // Each delete is independent and a missing key is not worth aborting on:
     // a half-cleaned machine should still end up fully cleaned.
-    let _ = LOCAL_MACHINE.remove_tree(format!(r"{USERDATA_PRODUCTS}\{}", orphan.packed));
+    let _ = LOCAL_MACHINE.remove_tree(format!(
+        r"{USERDATA}\{}\Products\{}",
+        orphan.sid, orphan.packed
+    ));
     let _ = LOCAL_MACHINE.remove_tree(format!(r"{CLASSES_PRODUCTS}\{}", orphan.packed));
     let _ = LOCAL_MACHINE.remove_tree(format!(r"{CLASSES_FEATURES}\{}", orphan.packed));
     if !orphan.product_code.is_empty() {
         let _ = LOCAL_MACHINE.remove_tree(format!(r"{UNINSTALL}\{}", orphan.product_code));
+        // A per-user install lists itself under the user's own hive, and
+        // leaving that behind keeps a dead entry in Add/Remove Programs.
+        let _ = CURRENT_USER.remove_tree(format!(r"{UNINSTALL}\{}", orphan.product_code));
     }
 
     // Verify the one that actually gates upgrades is gone. The rest is
@@ -107,7 +160,10 @@ pub fn clear_registration(orphan: &Orphan) -> Result<(), String> {
     // reporting success while it survives would send the user round the same
     // loop again.
     if LOCAL_MACHINE
-        .open(format!(r"{USERDATA_PRODUCTS}\{}", orphan.packed))
+        .open(format!(
+            r"{USERDATA}\{}\Products\{}",
+            orphan.sid, orphan.packed
+        ))
         .is_ok()
     {
         return Err("the registration key could not be removed".to_string());
@@ -161,7 +217,7 @@ pub fn unpack_guid(packed: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::unpack_guid;
+    use super::{package_is_usable, unpack_guid};
 
     /// Taken from a real SwiftTunnel 3.0.4 install, so the transformation is
     /// pinned against an actual Windows-generated key rather than my reading of
@@ -180,5 +236,56 @@ mod tests {
         assert_eq!(unpack_guid("not-a-guid"), "");
         // Right length, wrong alphabet.
         assert_eq!(unpack_guid("Z128028F38FA27944BA0B4B4D4359AE2"), "");
+    }
+
+    const OLE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+
+    fn temp_file(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("swifttunnel-repair-test-{name}"));
+        let mut file = std::fs::File::create(&path).expect("create temp file");
+        file.write_all(bytes).expect("write temp file");
+        path
+    }
+
+    #[test]
+    fn a_real_package_is_usable() {
+        let mut bytes = OLE.to_vec();
+        bytes.extend_from_slice(&[0u8; 512]);
+        let path = temp_file("good.msi", &bytes);
+        assert!(package_is_usable(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_truncated_package_is_not() {
+        // The case that made this necessary. Cleanup tools truncate as often
+        // as they delete, and the old check only asked whether the path
+        // existed, so a nine byte file counted as a healthy install while
+        // Windows still refused it and demanded the original.
+        let path = temp_file("truncated.msi", b"broken");
+        assert!(!package_is_usable(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_empty_package_is_not() {
+        let path = temp_file("empty.msi", b"");
+        assert!(!package_is_usable(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn something_that_is_not_a_package_is_not() {
+        // Right length, wrong contents.
+        let path = temp_file("wrong.msi", &[0u8; 4096]);
+        assert!(!package_is_usable(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_missing_or_unnamed_package_is_not() {
+        assert!(!package_is_usable(""));
+        assert!(!package_is_usable("C:/definitely/not/here/nope.msi"));
     }
 }
