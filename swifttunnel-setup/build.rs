@@ -22,6 +22,16 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=SWIFTTUNNEL_SETUP_MSI");
+
+    // The filename the payload is written under before msiexec runs. Windows
+    // records that path as the product's installation source, so two products
+    // sharing one name would each claim the other's source and one of them
+    // would be wrong. Defaults to the full app's, since that is the launcher
+    // this crate was written for.
+    let name = std::env::var("SWIFTTUNNEL_SETUP_NAME")
+        .unwrap_or_else(|_| "SwiftTunnel-Installer.msi".to_string());
+    println!("cargo:rustc-env=SWIFTTUNNEL_SETUP_NAME={name}");
+    println!("cargo:rerun-if-env-changed=SWIFTTUNNEL_SETUP_NAME");
 }
 
 /// Copy the MSI this launcher wraps into OUT_DIR so `include_bytes!` can find

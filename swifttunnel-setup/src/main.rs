@@ -30,7 +30,7 @@ const MSI_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.msi")
 /// Name used for the unpacked copy. Windows records the path it installed from
 /// as the source, so this deliberately looks like a real installer name rather
 /// than a random temporary file.
-const MSI_NAME: &str = "SwiftTunnel-Installer.msi";
+const MSI_NAME: &str = env!("SWIFTTUNNEL_SETUP_NAME");
 
 fn main() {
     std::process::exit(run());

@@ -756,6 +756,20 @@ jobs:
           if ($msi.Length -lt 2MB) { throw "Lite MSI is $($msi.Length) bytes; the driver is probably missing" }
           Write-Host "::notice::built $($msi.Name) ($($msi.Length) bytes)"
           gh release upload "$env:GITHUB_REF_NAME" $msi.FullName --clobber
+
+          # And a launcher around it. A bare MSI cannot repair an installation
+          # whose cached package Windows has lost, because the repair has to run
+          # before msiexec starts. Shipping only the MSI is how the full app
+          # ended up with users who could neither upgrade nor uninstall.
+          $env:SWIFTTUNNEL_SETUP_MSI = $msi.FullName
+          $env:SWIFTTUNNEL_SETUP_NAME = "SwiftTunnelLite-Installer.msi"
+          cargo build -p swifttunnel-setup --release --target x86_64-pc-windows-msvc
+          $stub = "target/x86_64-pc-windows-msvc/release/swifttunnel-setup.exe"
+          if (-not (Test-Path $stub)) { throw "the Lite launcher was not produced" }
+          $out = "SwiftTunnelLite-Setup-$($env:GITHUB_REF_NAME.TrimStart('v')).exe"
+          Copy-Item $stub $out -Force
+          Write-Host "::notice::built $out ($((Get-Item $out).Length) bytes)"
+          gh release upload "$env:GITHUB_REF_NAME" $out --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish ARM64 release
