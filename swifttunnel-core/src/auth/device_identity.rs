@@ -5,30 +5,14 @@
 //! without receiving registry values, serial numbers, or anything that
 //! identifies the hardware off-device.
 //!
-//! # Why several signals rather than one
+//! Several independent signals are collected and reported separately, so the
+//! server decides what constitutes the same device. Which of them it weighs,
+//! and how many must agree, is not decided here.
 //!
-//! v1 sent a single hash of `MachineGuid`. That is one `regedit` away from a
-//! fresh identity, which makes a per-device free-tier allowance trivial to
-//! farm: change the value, make a new account, start the clock again.
-//!
-//! v2 collects several independent signals and reports them separately so the
-//! server can treat a device as "the same one" when most of them still match.
-//! Changing one no longer produces a new device. The signals were chosen to
-//! fail differently from each other:
-//!
-//! - `MachineGuid` survives hardware changes but is user-writable.
-//! - The Windows install identity survives hardware changes and registry edits
-//!   to `MachineGuid`, but not an OS reinstall.
-//! - The firmware signals live under `HKLM\HARDWARE`, a **volatile hive Windows
-//!   rebuilds from firmware on every boot**. Editing them does not survive a
-//!   restart, which is what makes them the most tamper-resistant of the set.
-//! - The volume serial survives everything except reformatting that volume.
-//! - The hardware profile GUID is per-install and rarely touched.
-//!
-//! None of this is unspoofable. The client is open source, so anyone willing to
-//! patch it can send whatever they like. The goal is narrower and achievable:
-//! make casual farming (edit one registry key, sign up again) stop working, and
-//! make what remains rare enough to handle case by case.
+//! None of this is unspoofable. The client runs on hardware the user controls,
+//! so anything it reports is a claim rather than a fact. The goal is narrower
+//! and achievable: make casual farming stop working and leave the rest rare
+//! enough to handle case by case.
 //!
 //! Everything here uses the registry or a direct Win32 call. Nothing shells out,
 //! so no console window can flash on a user's screen.
@@ -75,12 +59,6 @@ fn hash_signal(domain: &str, raw: &str) -> Option<String> {
     Some(full[..COMPONENT_HEX_LEN].to_string())
 }
 
-/// Values that are present but carry no information.
-///
-/// OEMs ship an enormous number of boards reading "to be filled by o.e.m.", and
-/// virtual machines default to a handful of fixed strings. Treating those as a
-/// real signal would collapse thousands of unrelated devices onto one
-/// fingerprint, which is worse than having no signal at all.
 fn is_useless_value(value: &str) -> bool {
     const PLACEHOLDERS: &[&str] = &[
         "",
@@ -142,11 +120,6 @@ fn read_machine_guid() -> Option<String> {
     None
 }
 
-/// Serial number of the volume the OS is installed on.
-///
-/// Assigned at format time, so it survives reinstalling the app, changing
-/// `MachineGuid`, and swapping non-boot hardware. Reformatting C: clears it,
-/// which is a far higher bar than editing a registry value.
 #[cfg(windows)]
 fn read_boot_volume_serial() -> Option<String> {
     use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
@@ -182,8 +155,6 @@ fn read_boot_volume_serial() -> Option<String> {
 /// Collect every available signal, skipping ones this machine cannot supply.
 #[cfg(windows)]
 fn collect_signals() -> Vec<DeviceSignal> {
-    // `HKLM\HARDWARE\DESCRIPTION\System\BIOS` is volatile: Windows repopulates
-    // it from firmware on each boot, so edits there do not persist.
     const BIOS: &str = "HARDWARE\\DESCRIPTION\\System\\BIOS";
     const WINDOWS_NT: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion";
     const HW_PROFILE: &str =
@@ -198,9 +169,6 @@ fn collect_signals() -> Vec<DeviceSignal> {
 
     push("mg", "machine-guid", read_machine_guid());
 
-    // Windows install identity: unaffected by MachineGuid edits, reset by an
-    // OS reinstall. Combining the product id with the install timestamp
-    // separates two machines that happen to share a volume-licence product id.
     let install = match (
         read_registry_string(WINDOWS_NT, "ProductId"),
         read_registry_u32(WINDOWS_NT, "InstallDate"),
@@ -212,7 +180,6 @@ fn collect_signals() -> Vec<DeviceSignal> {
     };
     push("wi", "windows-install", install);
 
-    // Firmware identity, from the volatile hive.
     let board = match (
         read_registry_string(BIOS, "BaseBoardManufacturer"),
         read_registry_string(BIOS, "BaseBoardProduct"),
