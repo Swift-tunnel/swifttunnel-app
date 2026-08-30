@@ -287,6 +287,10 @@ pub struct State {
     pub focus: Option<FieldId>,
     /// The sign-in form.
     pub login: Login,
+    /// Whether Lite has its own uninstaller, or arrived with the full app.
+    pub standalone: bool,
+    /// What the last uninstall attempt had to say, if anything.
+    pub uninstall_note: Option<String>,
     pub driver: Driver,
     /// Set when this client must not connect at all.
     pub lockout: Option<Lockout>,

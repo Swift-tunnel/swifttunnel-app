@@ -527,8 +527,31 @@ fn settings(state: &State) -> Vec<Item> {
                 .sub("Send this when reporting a problem")
                 .right(Right::Chevron)
                 .action(Action::OpenLogs),
+            // Only offered when Lite has its own uninstaller. Installed
+            // alongside the full app there is no separate product to remove,
+            // and a button that silently does nothing is worse than none.
+            Row::new(if state.standalone {
+                "Uninstall SwiftTunnel Lite"
+            } else {
+                "Installed with SwiftTunnel"
+            })
+            .sub(if state.standalone {
+                "Undoes every system change first"
+            } else {
+                "Remove SwiftTunnel to remove Lite"
+            })
+            .right(if state.standalone {
+                Right::Chevron
+            } else {
+                Right::None
+            })
+            .action(Action::Uninstall)
+            .danger_if(state.standalone)
+            .disabled(!state.standalone),
         ]),
         Item::Gap(12),
+        // Whatever the last attempt had to say, if it had anything.
+        Item::Note(state.uninstall_note.clone().unwrap_or_default()),
         // No update check. Lite ships inside the same installer as the full app
         // and is replaced when it is, so a button offering to look for one
         // would be a button that does nothing.

@@ -63,6 +63,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Ole",
 ] }
 
+# Reading the uninstall entries, to find how Lite was installed.
+windows-registry = "0.6"
+
 [build-dependencies]
 embed-manifest = "1"
 embed-resource = "3"

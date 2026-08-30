@@ -63,6 +63,8 @@ pub enum Action {
     RepairDriver,
     /// Show the log file in Explorer.
     OpenLogs,
+    /// Remove Lite from the machine.
+    Uninstall,
 }
 
 /// A value the user can type into.
@@ -405,6 +407,13 @@ const CENTRE_WRAP: DRAW_TEXT_FORMAT =
 /// the error is a little wasted space rather than a sentence cut in half,
 /// which is what a flat two-line reservation gave the longer lockout copy.
 fn note_height(text: &str, width: i32, m: &Metrics) -> i32 {
+    // Nothing to say takes no room. A screen that conditionally has a note is
+    // easier to write as an always-present item with empty text than as a
+    // conditional push, and this makes that free.
+    if text.is_empty() {
+        return 0;
+    }
+
     let per_line = m.s(14);
     let columns = (width / m.s(6)).max(16) as usize;
     let lines = text.chars().count().div_ceil(columns).clamp(1, 8);

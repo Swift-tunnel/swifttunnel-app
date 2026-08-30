@@ -258,6 +258,10 @@ impl Engine {
             state.auto_reconnect = s.auto_reconnect;
             state.adapter_guid = s.preferred_physical_adapter_guid.clone();
             state.discord_rpc = s.enable_discord_rpc;
+            state.standalone = matches!(
+                crate::uninstall::how_installed(),
+                crate::uninstall::Installed::Standalone(_)
+            );
         }
     }
 
@@ -355,6 +359,7 @@ impl Engine {
             Action::SubmitLogin => self.submit_login(state),
             Action::RepairDriver => self.repair_driver(),
             Action::OpenLogs => open_logs(),
+            Action::Uninstall => self.uninstall(state),
 
             // Handled by the window: they change what is on screen, not what
             // the machine is doing.
@@ -1476,6 +1481,35 @@ fn list_adapters() -> Vec<AdapterRow> {
             guid: a.guid,
         })
         .collect()
+}
+
+impl Engine {
+/// Hand over to Lite's own uninstaller.
+///
+/// Disconnects first. Pulling the tunnel down after the driver bindings have
+/// been removed leaves a machine that looks like it only has internet when
+/// SwiftTunnel is installed, which is the state people uninstall to escape.
+fn uninstall(&self, state: &mut State) {
+    let crate::uninstall::Installed::Standalone(product_code) =
+        crate::uninstall::how_installed()
+    else {
+        state.uninstall_note =
+            Some("Lite came with SwiftTunnel. Uninstall SwiftTunnel to remove it.".into());
+        return;
+    };
+
+    // Drop the tunnel before the driver bindings go. Removing them under a
+    // live session leaves a machine that looks like it only has internet when
+    // SwiftTunnel is installed, which is the state people uninstall to escape.
+    if state.tunnel.status == Status::Connected {
+        self.primary(state);
+    }
+
+    if let Err(error) = crate::uninstall::start(product_code) {
+        state.uninstall_note = Some(error);
+    }
+}
+
 }
 
 /// Show the log file in Explorer, selected.

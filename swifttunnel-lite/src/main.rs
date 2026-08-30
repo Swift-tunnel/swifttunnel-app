@@ -37,6 +37,7 @@ mod state;
 mod surface;
 mod theme;
 mod tray;
+mod uninstall;
 mod ui;
 mod view;
 
