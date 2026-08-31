@@ -1134,14 +1134,38 @@ fn spawn_poller(shared: Arc<Shared>) {
 /// window edge. The first paragraph is the what and fits on the status line;
 /// the remainder is the what-to-do and goes to a note that wraps.
 fn split_message(message: &str) -> (String, String) {
-    let mut parts = message.splitn(
-        2, "
+    // Core writes failures as two paragraphs for a dialog, so a blank line is
+    // the intended break.
+    if let Some((head, rest)) = message.split_once("\n\n") {
+        return (flatten(head), flatten(rest));
+    }
 
-",
-    );
-    let head = parts.next().unwrap_or_default();
-    let rest = parts.next().unwrap_or_default();
-    (flatten(head), flatten(rest))
+    // The API's own messages arrive as one long paragraph, and the free-tier
+    // one is the longest of them. Put the first sentence on the status line
+    // and let the rest wrap, or the reader gets "...free SwiftTunnel time for
+    // today, plu" and never learns it refills in a day.
+    let flat = flatten(message);
+
+    // What fits on the status line at this width. A head longer than this is
+    // not shortened, it is cut, and the reader loses the end of a sentence
+    // rather than the end of a paragraph.
+    const FITS: usize = 46;
+
+    if flat.chars().count() <= FITS {
+        return (flat, String::new());
+    }
+
+    // Prefer the first sentence, when there is one and it fits.
+    if let Some(at) = flat.find(". ")
+        && flat[..=at].chars().count() <= FITS
+    {
+        let (head, rest) = flat.split_at(at + 1);
+        return (head.trim().to_string(), rest.trim().to_string());
+    }
+
+    // Nothing short enough to lead with, so say the plain thing and let the
+    // whole message wrap underneath, where there is room for it.
+    ("Couldn't connect".to_string(), flat)
 }
 
 /// Collapse every run of whitespace, newlines included, into one space.
@@ -1543,5 +1567,77 @@ fn open_in_browser(url: &str) {
     // what the API expects for "just open this".
     unsafe {
         ShellExecuteW(None, &verb, &target, None, None, SW_SHOWNORMAL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_message;
+
+    // The status line is one line and it clips. Every case below is really the
+    // same assertion: whatever lands there has to fit, and nothing the reader
+    // needs may be dropped on the way.
+    const FITS: usize = 46;
+
+    #[test]
+    fn keeps_the_paragraph_break_core_intended() {
+        let (head, hint) = split_message("Couldn't connect.\n\nCheck your adapter.");
+        assert_eq!(head, "Couldn't connect.");
+        assert_eq!(hint, "Check your adapter.");
+    }
+
+    #[test]
+    fn short_message_stays_whole() {
+        let (head, hint) = split_message("Adapter is offline.");
+        assert_eq!(head, "Adapter is offline.");
+        assert!(hint.is_empty());
+    }
+
+    #[test]
+    fn leads_with_the_first_sentence_when_it_fits() {
+        let (head, hint) = split_message(
+            "Connection refused. The relay is at capacity right now, so try another region.",
+        );
+        assert_eq!(head, "Connection refused.");
+        assert!(hint.starts_with("The relay is at capacity"));
+    }
+
+    #[test]
+    fn long_first_sentence_is_not_cut_onto_the_status_line() {
+        // The real free-tier body. Its first sentence is 85 characters, so
+        // leading with it clipped at "...time for today, plu" and the reader
+        // never learned the allowance refills.
+        let body = "You've used your 3 hours of free SwiftTunnel time for today, plus \
+                    the extra 20 minutes. It refills in about 24 hours.";
+        let (head, hint) = split_message(body);
+        assert_eq!(head, "Couldn't connect");
+        assert!(hint.contains("refills in about 24 hours"));
+        assert!(hint.contains("3 hours of free"));
+    }
+
+    #[test]
+    fn nothing_ever_overflows_the_status_line() {
+        let cases = [
+            "Couldn't connect.\n\nCheck your adapter.",
+            "Adapter is offline.",
+            "Connection refused. The relay is at capacity, so try another region.",
+            "You've used your 3 hours of free SwiftTunnel time for today, plus the \
+             extra 20 minutes. It refills in about 24 hours.",
+            "A single sentence with no full stop that runs well past the width of the line",
+        ];
+        for case in cases {
+            let (head, _) = split_message(case);
+            assert!(
+                head.chars().count() <= FITS,
+                "head of {head:?} is {} chars",
+                head.chars().count()
+            );
+        }
+    }
+
+    #[test]
+    fn collapses_the_newlines_core_wraps_at() {
+        let (head, _) = split_message("Adapter\nis\noffline.");
+        assert_eq!(head, "Adapter is offline.");
     }
 }
