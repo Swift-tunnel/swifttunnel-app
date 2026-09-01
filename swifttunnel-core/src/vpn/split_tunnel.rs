@@ -304,6 +304,23 @@ impl StaleCleanupReport {
 //  SPLIT TUNNEL DRIVER (ndisapi-based)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// The display name of the client that is *not* the one running `exe_name`.
+///
+/// Split out from the registry lookup so the one thing that can silently
+/// invert this whole guard is testable: "SwiftTunnel" is a prefix of
+/// "SwiftTunnel Lite". Match those loosely and each client finds itself,
+/// concludes the other is installed, and neither ever removes the driver.
+fn other_client_name(exe_name: &str) -> &'static str {
+    const FULL_APP: &str = "SwiftTunnel";
+    const LITE: &str = "SwiftTunnel Lite";
+
+    if exe_name.to_ascii_lowercase().contains("swifttunnel-lite") {
+        FULL_APP
+    } else {
+        LITE
+    }
+}
+
 /// Split tunnel driver using Windows Packet Filter (ndisapi)
 ///
 /// Uses ParallelInterceptor for per-CPU packet processing with <0.1ms latency.
@@ -1251,7 +1268,85 @@ impl SplitTunnelDriver {
         }
     }
 
+    /// The other SwiftTunnel client, if it is still registered here.
+    ///
+    /// Which client is "other" comes from the running binary, not from
+    /// counting registrations. During an uninstall our own entry may or may
+    /// not still exist depending on where in the sequence this runs, so a
+    /// count would flip the answer for reasons that have nothing to do with
+    /// whether the other client is present.
+    #[cfg(windows)]
+    fn other_client_still_installed() -> Option<&'static str> {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .unwrap_or_default();
+
+        let other = other_client_name(&exe);
+        Self::product_is_registered(other).then_some(other)
+    }
+
+    /// Whether a product with exactly this display name is registered.
+    ///
+    /// Exact, case-insensitive comparison on purpose: "SwiftTunnel" is a
+    /// prefix of "SwiftTunnel Lite", and a `contains` here would have each
+    /// client find itself and conclude the other one is installed, so neither
+    /// would ever remove the driver.
+    #[cfg(windows)]
+    fn product_is_registered(display_name: &str) -> bool {
+        use winreg::RegKey;
+        use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+        const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+        // A 32-bit install lands under WOW6432Node, and a per-user one under
+        // HKCU. Missing either would remove a driver the survivor needs.
+        const UNINSTALL_WOW: &str =
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
+
+        for (root, path) in [
+            (HKEY_LOCAL_MACHINE, UNINSTALL),
+            (HKEY_LOCAL_MACHINE, UNINSTALL_WOW),
+            (HKEY_CURRENT_USER, UNINSTALL),
+        ] {
+            let Ok(key) = RegKey::predef(root).open_subkey(path) else {
+                continue;
+            };
+            for entry in key.enum_keys().flatten() {
+                let Ok(product) = key.open_subkey(&entry) else {
+                    continue;
+                };
+                let name: String = product.get_value("DisplayName").unwrap_or_default();
+                if name.trim().eq_ignore_ascii_case(display_name) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn remove_driver_for_uninstall() -> Result<(), String> {
+        // The packet filter is shared between the full app and Lite, and one
+        // machine can have both. Taking it out while the other client is still
+        // installed leaves that client unable to connect at all, and nothing
+        // says why: the uninstall reports success, the surviving app still
+        // launches and looks healthy, and the failure only appears later at
+        // connect as "could not start its Windows Packet Filter driver". The
+        // cause is by then several steps back and looks unrelated.
+        //
+        // Whichever client is removed last takes the driver with it, so
+        // stopping here costs nothing permanent.
+        #[cfg(windows)]
+        if let Some(other) = Self::other_client_still_installed() {
+            log::info!(
+                "Leaving the packet filter driver installed: {other} is still on this machine \
+                 and shares it. It will be removed when the last client is."
+            );
+            return Ok(());
+        }
+
         let mut issues = Vec::new();
         let mut any_msi_found = false;
 
@@ -2068,6 +2163,49 @@ impl Drop for SplitTunnelDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each client must look for the *other* one, never itself.
+    ///
+    /// The driver is shared, so the guard only works if Lite asks whether the
+    /// full app is installed and the full app asks about Lite. Get this
+    /// backwards and each finds its own registration, decides the other is
+    /// present, and the driver is never removed by anything.
+    #[test]
+    fn each_client_looks_for_the_other_one() {
+        assert_eq!(other_client_name("swifttunnel-lite.exe"), "SwiftTunnel");
+        assert_eq!(
+            other_client_name("swifttunnel-desktop.exe"),
+            "SwiftTunnel Lite"
+        );
+        // Casing and full paths are both real: the exe name comes from
+        // current_exe(), and Windows is not consistent about either.
+        assert_eq!(
+            other_client_name(r"C:\Program Files\SwiftTunnel Lite\SwiftTunnel-Lite.EXE"),
+            "SwiftTunnel"
+        );
+        // Anything unrecognised is treated as the full app, so the fallback
+        // guards Lite. Lite is the newer product and the likelier survivor.
+        assert_eq!(other_client_name("msiexec.exe"), "SwiftTunnel Lite");
+    }
+
+    /// "SwiftTunnel" is a prefix of "SwiftTunnel Lite".
+    ///
+    /// The registry lookup compares display names exactly for this reason. A
+    /// `contains` would make the full app match Lite's entry and conclude a
+    /// second client is installed when only one is, leaving a shared driver
+    /// on a machine that no longer has anything using it.
+    #[test]
+    fn the_two_display_names_are_never_confused() {
+        let full = other_client_name("swifttunnel-lite.exe");
+        let lite = other_client_name("swifttunnel-desktop.exe");
+        assert_ne!(full, lite);
+        assert!(
+            lite.starts_with(full),
+            "the prefix relationship is the whole hazard; if this stops being \
+             true the exact-match requirement should be revisited"
+        );
+        assert!(!full.eq_ignore_ascii_case(lite));
+    }
 
     /// The exact pair from the report that led here. The service was healthy;
     /// only the comparison was wrong, and every check rewrote the service
