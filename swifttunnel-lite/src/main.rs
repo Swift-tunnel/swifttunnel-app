@@ -47,6 +47,15 @@ use view::Screen;
 fn main() {
     init_logging();
 
+    // Report this build's version, before anything can make a request.
+    //
+    // Core defaults to its own crate version when nobody sets one, and that
+    // number tracks the library rather than the product, so it reads as
+    // ancient next to any release. Only the Tauri shell used to set it, which
+    // left Lite claiming core's version: the server saw 1.0.40 from a 3.1.0
+    // client and answered "no longer supported".
+    swifttunnel_core::auth::set_client_version(env!("CARGO_PKG_VERSION"));
+
     // Before any window or font is created: the whole UI is set in these, and
     // GDI substitutes silently rather than failing if they are missing.
     fonts::install();
