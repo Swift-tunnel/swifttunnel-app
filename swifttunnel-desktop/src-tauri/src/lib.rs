@@ -673,6 +673,39 @@ pub fn run() {
             // (X-SwiftTunnel-Version). Set before any auth/relay-ticket call.
             swifttunnel_core::auth::set_client_version(app.package_info().version.to_string());
 
+            // Clear an orphaned registration now, while the machine is healthy.
+            //
+            // A registration whose cached package has gone cannot be upgraded
+            // or uninstalled: the major upgrade has to remove the old version
+            // first, asks for a package that is not there, and dies on "the
+            // feature you are trying to use is on a network resource that is
+            // unavailable". The updater and the setup launcher both repair
+            // this, but neither is on the path most people take, which is
+            // downloading the .msi from the site and double-clicking it. That
+            // path runs no repair at all, and by then the app cannot help
+            // because the failure happens before it is replaced.
+            //
+            // Doing it at startup is what makes the fix reach that path: any
+            // launch of the working version leaves the registration sound, so
+            // the next upgrade has nothing to trip over however it is started.
+            //
+            // Off the main thread and best effort. It reads the registry and
+            // touches nothing when there is no orphan, but it must never delay
+            // a window appearing or stop the app starting if it fails.
+            std::thread::spawn(|| match swifttunnel_msi_repair::repair() {
+                Ok(cleared) if !cleared.is_empty() => {
+                    log::warn!(
+                        "cleared {} orphaned SwiftTunnel registration(s) at startup; \
+                         upgrading and uninstalling will work again",
+                        cleared.len()
+                    );
+                }
+                Ok(_) => log::debug!("no orphaned SwiftTunnel registration"),
+                Err(error) => {
+                    log::warn!("could not check for an orphaned registration: {error}")
+                }
+            });
+
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_icon(APP_ICON.clone());
             }
