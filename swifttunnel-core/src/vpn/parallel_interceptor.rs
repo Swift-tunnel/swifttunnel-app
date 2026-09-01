@@ -656,6 +656,51 @@ pub struct WorkerStats {
     pub packets_bypassed: AtomicU64,
     pub bytes_tunneled: AtomicU64,
     pub bytes_bypassed: AtomicU64,
+    /// This worker's total CPU time, kernel plus user, in 100ns units.
+    ///
+    /// Here to answer one question from a user's log: how much of a core each
+    /// worker is actually taking. Workers are pinned one per core, so on a
+    /// small machine they can occupy every core the game also wants, and
+    /// reports of a large frame rate drop on connect have no other evidence
+    /// to weigh. Sampled on a timer, not per packet.
+    pub cpu_time_100ns: AtomicU64,
+}
+
+/// This thread's CPU time so far, kernel plus user, in 100ns units.
+///
+/// `None` off Windows, or if the call fails, so a diagnostic can never take
+/// the tunnel down with it.
+fn thread_cpu_time_100ns() -> Option<u64> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: all four are live locals, and the pseudo-handle from
+        // GetCurrentThread needs no closing.
+        let ok = unsafe {
+            GetThreadTimes(
+                GetCurrentThread(),
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+        };
+        if ok.is_err() {
+            return None;
+        }
+        let as_u64 = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | (t.dwLowDateTime as u64);
+        Some(as_u64(kernel) + as_u64(user))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
 }
 
 /// Shared network throughput stats (readable from GUI)
@@ -1000,11 +1045,28 @@ impl ParallelInterceptor {
         let physical_cores = num_cpus::get_physical();
         let num_workers = physical_cores.clamp(1, 4);
 
+        // Spell out the machine, because the workers are pinned one per core
+        // and what that costs depends entirely on how many cores exist. On a
+        // four core machine every core gets a worker and the game shares none
+        // of them; on sixteen it is a quarter of the box. A frame rate report
+        // is unreadable without this line.
         log::info!(
-            "Creating parallel interceptor with {} workers (CPUs: {})",
+            "Creating parallel interceptor with {} workers ({} physical cores, {} logical), \
+             each pinned to one core: the game shares {} of {} physical cores",
             num_workers,
+            physical_cores,
             num_cpus::get(),
+            physical_cores.saturating_sub(num_workers),
+            physical_cores,
         );
+        if physical_cores <= num_workers {
+            log::warn!(
+                "Every physical core has a pinned packet worker on it ({} cores, {} workers); \
+                 a game on this machine has no uncontended core",
+                physical_cores,
+                num_workers,
+            );
+        }
 
         let worker_stats: Vec<Arc<WorkerStats>> = (0..num_workers)
             .map(|_| Arc::new(WorkerStats::default()))
@@ -5222,11 +5284,21 @@ impl Drop for ParallelInterceptor {
 }
 
 /// Set thread affinity to specific CPU core
+///
+/// Logs the outcome. The return value is the *previous* mask, and zero means
+/// the call failed, so a worker that silently stayed unpinned is otherwise
+/// indistinguishable in a log from one that took a core to itself.
 fn set_thread_affinity(core_id: usize) {
     #[cfg(target_os = "windows")]
     unsafe {
         let mask = 1usize << core_id;
-        let _ = SetThreadAffinityMask(windows::Win32::System::Threading::GetCurrentThread(), mask);
+        let previous =
+            SetThreadAffinityMask(windows::Win32::System::Threading::GetCurrentThread(), mask);
+        if previous == 0 {
+            log::warn!("Worker {core_id}: could not pin to core {core_id}, left unpinned");
+        } else {
+            log::info!("Worker {core_id}: pinned to core {core_id} (was mask {previous:#x})");
+        }
     }
 }
 
@@ -6137,6 +6209,13 @@ fn run_packet_worker(
     // Diagnostic logging
     let mut diagnostic_counter = 0u64;
 
+    // CPU sampling, so a frame rate complaint can be checked rather than
+    // guessed at. Wall clock, not packet count: what matters is the share of a
+    // core this worker holds, and a packet-rate cadence would report far more
+    // often exactly when the machine is busiest.
+    let mut cpu_sampled_at = std::time::Instant::now();
+    let mut cpu_at_last_sample = thread_cpu_time_100ns().unwrap_or(0);
+
     // Open driver for this worker (each worker needs own handle for sending bypass packets)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
         Ok(d) => d,
@@ -6200,6 +6279,30 @@ fn run_packet_worker(
         stats.packets_processed.fetch_add(1, Ordering::Relaxed);
         let packet_len = work.data.len() as u64;
         diagnostic_counter += 1;
+
+        // Read the clock rarely: this is the innermost loop in the product.
+        if diagnostic_counter.is_multiple_of(512) {
+            let now = std::time::Instant::now();
+            let elapsed = now.duration_since(cpu_sampled_at);
+            if elapsed >= std::time::Duration::from_secs(60) {
+                if let Some(cpu_now) = thread_cpu_time_100ns() {
+                    let used = cpu_now.saturating_sub(cpu_at_last_sample);
+                    stats.cpu_time_100ns.store(cpu_now, Ordering::Relaxed);
+                    // 100ns units, so one fully busy second is 10_000_000.
+                    let share = (used as f64 * 100.0) / (elapsed.as_secs_f64() * 10_000_000.0);
+                    log::info!(
+                        "Worker {} (core {}): {:.1}% of one core over {:.0}s, {} packets total",
+                        worker_id,
+                        worker_id,
+                        share,
+                        elapsed.as_secs_f64(),
+                        stats.packets_processed.load(Ordering::Relaxed),
+                    );
+                    cpu_at_last_sample = cpu_now;
+                }
+                cpu_sampled_at = now;
+            }
+        }
 
         if work.is_outbound {
             // Routing decision is computed in the reader thread so bypass traffic
@@ -9220,6 +9323,44 @@ mod tests {
     // Shared with hosts.rs tests: every test touching the process-global
     // bootstrap IP sets must serialize on the same lock, across modules.
     use crate::roblox_proxy::hosts::BOOTSTRAP_IP_TEST_LOCK as BOOTSTRAP_ROUTE_IP_TEST_LOCK;
+
+    #[cfg(windows)]
+    #[test]
+    fn thread_cpu_time_advances_only_when_the_thread_works() {
+        // The number this reports is what a frame rate complaint will be
+        // judged on, so it has to measure this thread's own work: not wall
+        // clock, and not the whole machine.
+        let start = thread_cpu_time_100ns().expect("windows reports thread CPU time");
+
+        let idle_before = thread_cpu_time_100ns().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let idle_after = thread_cpu_time_100ns().unwrap();
+        let idle_cost = idle_after - idle_before;
+        // 120ms asleep is 1_200_000 units of wall clock. Sleeping must not
+        // read as busy, or every worker would look pinned at 100%.
+        assert!(
+            idle_cost < 600_000,
+            "sleeping charged {idle_cost} units of CPU, so this is measuring wall clock"
+        );
+
+        let busy_before = thread_cpu_time_100ns().unwrap();
+        let spin_until = std::time::Instant::now() + std::time::Duration::from_millis(120);
+        let mut sink = 0u64;
+        while std::time::Instant::now() < spin_until {
+            sink = sink.wrapping_add(1);
+        }
+        std::hint::black_box(sink);
+        let busy_cost = thread_cpu_time_100ns().unwrap() - busy_before;
+
+        assert!(
+            busy_cost > idle_cost,
+            "spinning ({busy_cost}) must cost more CPU than sleeping ({idle_cost})"
+        );
+        assert!(
+            thread_cpu_time_100ns().unwrap() >= start,
+            "thread CPU time must not go backwards"
+        );
+    }
 
     #[cfg(windows)]
     #[test]
