@@ -118,9 +118,27 @@ pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
 /// An MSI is an OLE compound document, so the first eight bytes are a fixed
 /// signature. Checking them costs one short read and rules out both an empty
 /// file and something that is not a package at all.
+///
+/// Only a package we can prove is bad counts as bad. Saying "not usable" gets a
+/// registration deleted, and this now runs on every launch rather than only
+/// when someone is already installing, so the cost of being wrong changed. A
+/// file we cannot read is not evidence of anything: `C:\Windows\Installer` is
+/// readable only by SYSTEM and administrators, and antivirus holds a package
+/// open often enough to deny a share. Both look identical to a deleted file
+/// through `exists()`, which reports false when metadata is denied. Treating
+/// either as missing would unregister a perfectly healthy install, silently, on
+/// a machine where nothing was ever wrong.
 fn package_is_usable(path: &str) -> bool {
-    if path.is_empty() || !Path::new(path).exists() {
+    if path.is_empty() {
         return false;
+    }
+
+    // Absent is the one thing worth acting on. Anything else that stops us
+    // looking is unknown, and unknown must leave the registration alone.
+    match std::fs::metadata(Path::new(path)) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
     }
 
     const OLE_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
@@ -131,9 +149,9 @@ fn package_is_usable(path: &str) -> bool {
             // A file too short to hold the signature cannot be a package.
             file.read_exact(&mut head).is_ok() && head == OLE_SIGNATURE
         }
-        // Unreadable is as good as missing: the installer will not manage it
-        // either.
-        Err(_) => false,
+        // It is there but we cannot open it. That is a lock or an ACL, not a
+        // missing package, so assume the installer will manage.
+        Err(_) => true,
     }
 }
 
@@ -253,6 +271,40 @@ mod tests {
         bytes.extend_from_slice(&[0u8; 512]);
         let path = temp_file("good.msi", &bytes);
         assert!(package_is_usable(path.to_str().unwrap()));
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A package we are not allowed to read must not be called missing.
+    ///
+    /// This decides whether a registration gets deleted, and it now runs on
+    /// every launch rather than only when someone is installing. The real
+    /// cached packages live in `C:\Windows\Installer`, which only SYSTEM and
+    /// administrators can read, and antivirus takes an exclusive handle on
+    /// them often enough to matter. Answering "missing" to either would
+    /// unregister a healthy install on a machine where nothing was wrong.
+    #[cfg(windows)]
+    #[test]
+    fn a_package_we_cannot_open_is_left_alone() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let mut bytes = OLE.to_vec();
+        bytes.extend_from_slice(&[0u8; 512]);
+        let path = temp_file("locked.msi", &bytes);
+
+        // share_mode(0) denies every other open, which is exactly the
+        // sharing violation a scanner produces.
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .expect("take an exclusive handle");
+
+        assert!(
+            package_is_usable(path.to_str().unwrap()),
+            "a locked package must be treated as present, not deleted"
+        );
+
+        drop(locked);
         let _ = std::fs::remove_file(path);
     }
 
