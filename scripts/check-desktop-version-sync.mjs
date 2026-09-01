@@ -16,12 +16,16 @@ const tauriPath = path.join(
   "src-tauri",
   "tauri.conf.json",
 );
+// Lite is a second client of the same product and reports its own crate
+// version to the API. Left out of this check it drifted, and the version gate
+// then refused the newest build in the product as too old to connect.
+const litePath = path.join(repoRoot, "swifttunnel-lite", "Cargo.toml");
 
-function readCargoVersion() {
-  const cargoToml = fs.readFileSync(cargoPath, "utf8");
+function readCargoVersion(file = cargoPath) {
+  const cargoToml = fs.readFileSync(file, "utf8");
   const match = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
   if (!match) {
-    throw new Error(`Could not read version from ${cargoPath}`);
+    throw new Error(`Could not read version from ${file}`);
   }
   return match[1].trim();
 }
@@ -37,10 +41,18 @@ function readTauriVersion() {
 const expectedVersion = process.argv[2]?.trim();
 const cargoVersion = readCargoVersion();
 const tauriVersion = readTauriVersion();
+const liteVersion = readCargoVersion(litePath);
 
 if (cargoVersion !== tauriVersion) {
   throw new Error(
     `Desktop version mismatch: Cargo.toml=${cargoVersion} tauri.conf.json=${tauriVersion}`,
+  );
+}
+
+if (liteVersion !== cargoVersion) {
+  throw new Error(
+    `Lite version mismatch: swifttunnel-lite/Cargo.toml=${liteVersion} desktop=${cargoVersion}. ` +
+      `Lite reports its crate version to the API, so a stale one here is refused by the client version gate.`,
   );
 }
 
@@ -50,4 +62,4 @@ if (expectedVersion && cargoVersion !== expectedVersion) {
   );
 }
 
-console.log(`Desktop versions are in sync at ${cargoVersion}`);
+console.log(`Desktop and Lite versions are in sync at ${cargoVersion}`);
