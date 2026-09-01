@@ -815,14 +815,6 @@ pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
     use std::io::Read;
     use std::time::Instant;
 
-    fn drain<R: Read>(pipe: Option<R>) -> String {
-        let mut out = String::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_string(&mut out);
-        }
-        out
-    }
-
     let mut child = match hidden_command(program)
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -841,6 +833,38 @@ pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
         }
     };
 
+    // Read both pipes on their own threads, starting now.
+    //
+    // A pipe holds only a few kilobytes. Waiting for the child first and
+    // reading afterwards works until the child writes more than that: it then
+    // blocks on write, cannot reach its own exit, and the wait here can only
+    // end at the timeout. `pnputil /enum-drivers` prints about 1800 lines and
+    // deadlocked exactly this way, taking the full 180 seconds and returning
+    // nothing, on a machine where the same command finishes in 0.2s by hand.
+    // Every caller with more than a bufferful of output had the same flaw.
+    let stdout_reader = child.stdout.take().map(|pipe| {
+        std::thread::spawn(move || {
+            let mut out = String::new();
+            let mut pipe = pipe;
+            let _ = pipe.read_to_string(&mut out);
+            out
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|pipe| {
+        std::thread::spawn(move || {
+            let mut out = String::new();
+            let mut pipe = pipe;
+            let _ = pipe.read_to_string(&mut out);
+            out
+        })
+    });
+
+    // Both readers end on their own once the pipe closes, which happens when
+    // the child exits or is killed, so neither join can outlive the child.
+    let collect = |handle: Option<std::thread::JoinHandle<String>>| -> String {
+        handle.and_then(|h| h.join().ok()).unwrap_or_default()
+    };
+
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -849,25 +873,31 @@ pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
                     success: status.success(),
                     timed_out: false,
                     exit_code: status.code(),
-                    stdout: drain(child.stdout.take()),
-                    stderr: drain(child.stderr.take()),
+                    stdout: collect(stdout_reader),
+                    stderr: collect(stderr_reader),
                 };
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    // Kill before draining: a live child holds its pipes open,
-                    // so reading first would block until the timeout we are
-                    // already past, defeating the point of having one.
                     let _ = child.kill();
                     let _ = child.wait();
+                    // Whatever it managed to say before being stopped is worth
+                    // keeping: on a timeout it is the only clue available.
+                    let partial_stdout = collect(stdout_reader);
+                    let partial_stderr = collect(stderr_reader);
                     return BoundedCommandOutput {
                         success: false,
                         timed_out: true,
                         exit_code: None,
-                        stdout: String::new(),
+                        stdout: partial_stdout,
                         stderr: format!(
-                            "{program} did not finish within {}s and was stopped",
-                            timeout.as_secs()
+                            "{program} did not finish within {}s and was stopped{}",
+                            timeout.as_secs(),
+                            if partial_stderr.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {partial_stderr}")
+                            }
                         ),
                     };
                 }
@@ -878,7 +908,7 @@ pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
                     success: false,
                     timed_out: false,
                     exit_code: None,
-                    stdout: String::new(),
+                    stdout: collect(stdout_reader),
                     stderr: format!("Failed while waiting for {program}: {e}"),
                 };
             }
@@ -897,6 +927,51 @@ mod tests {
         let cmd = hidden_command("echo");
         // Just verify it creates a command without panicking
         assert!(format!("{:?}", cmd).contains("echo"));
+    }
+
+    /// A command that says more than a pipe holds must still finish.
+    ///
+    /// This is the exact shape that hung: the runner waited for the child and
+    /// only read the pipes afterwards, so a child writing past the buffer
+    /// blocked on write, could never reach its own exit, and the wait ended
+    /// only at the timeout. `pnputil /enum-drivers` prints ~1800 lines and
+    /// took the whole 180 second budget during uninstall while finishing in
+    /// 0.2s by hand.
+    ///
+    /// The timeout here is generous on purpose. The assertion is not about
+    /// speed, it is that a large output does not by itself cause a timeout.
+    #[cfg(windows)]
+    #[test]
+    fn a_chatty_command_does_not_deadlock_on_its_own_output() {
+        let script = std::env::temp_dir().join("swifttunnel-chatty-test.bat");
+        // ~4000 lines of 64 characters is roughly 256KB, many times any pipe
+        // buffer, and small enough to stay quick.
+        fs::write(
+            &script,
+            "@echo off\r\nfor /L %%i in (1,1,4000) do @echo \
+             0123456789012345678901234567890123456789012345678901234567890123\r\n",
+        )
+        .expect("write the test script");
+
+        let started = std::time::Instant::now();
+        let output = run_hidden_command_with_timeout(
+            "cmd",
+            &["/c", script.to_str().expect("utf-8 temp path")],
+            Duration::from_secs(60),
+        );
+        let elapsed = started.elapsed();
+        let _ = fs::remove_file(&script);
+
+        assert!(
+            !output.timed_out,
+            "a chatty command timed out after {elapsed:?}, so its output deadlocked it"
+        );
+        assert!(
+            output.stdout.len() > 200_000,
+            "expected the full output, got {} bytes",
+            output.stdout.len()
+        );
+        assert!(output.success, "stderr was: {}", output.stderr);
     }
 
     #[cfg(windows)]

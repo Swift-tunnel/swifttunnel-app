@@ -1366,9 +1366,14 @@ impl SplitTunnelDriver {
             issues.push(format!("network component removal failed: {}", e));
         }
 
-        // Try to uninstall all known MSI variants (handles machines that may
-        // have had either or both architectures installed at some point).
-        for pkg in super::winpkfilter::ALL_MSI_PACKAGES {
+        // Uninstall the MSI variants this machine could actually be carrying.
+        // ARM64 still gets both, because Windows on ARM runs x64 installers
+        // under emulation and an older build could have left an x64
+        // registration. x64 gets only x64: a driver is not emulated, so the
+        // ARM64 package was never installable there, and attempting it cost
+        // three minutes of an uninstall that looked frozen to reach a failure
+        // that was certain before it started.
+        for pkg in super::winpkfilter::removable_msi_packages() {
             if let Some(msi_path) = Self::find_driver_msi_by_name(pkg.msi_name) {
                 any_msi_found = true;
                 log::info!(

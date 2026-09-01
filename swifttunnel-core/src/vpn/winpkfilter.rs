@@ -57,6 +57,39 @@ pub const MSI_PACKAGE_ARM64: WinpkFilterMsiPackage = WinpkFilterMsiPackage {
 /// All known MSI packages. Used during uninstall to clean up any variant.
 pub const ALL_MSI_PACKAGES: &[&WinpkFilterMsiPackage] = &[&MSI_PACKAGE_X64, &MSI_PACKAGE_ARM64];
 
+/// An x64 machine can only ever have had the x64 package.
+const X64_REMOVABLE: &[&WinpkFilterMsiPackage] = &[&MSI_PACKAGE_X64];
+
+/// An ARM64 machine is worth trying both on, native first. Windows on ARM
+/// runs x64 installers under emulation, so a machine can carry an x64
+/// registration from an older build that did not pick by architecture.
+const ARM64_REMOVABLE: &[&WinpkFilterMsiPackage] = &[&MSI_PACKAGE_ARM64, &MSI_PACKAGE_X64];
+
+/// The packages worth trying to uninstall on a machine of this architecture.
+///
+/// Uninstall used to walk [`ALL_MSI_PACKAGES`] unconditionally, which meant an
+/// x64 machine always attempted the ARM64 package. msiexec answers 1633, "not
+/// supported by this processor type", and the driver-store sweep that follows
+/// then spent its full 180 second timeout. Three minutes of an uninstall that
+/// looks frozen, to reach a failure that was certain before it started.
+///
+/// A driver is not emulated, so an ARM64 package cannot be installed on x64
+/// and there is nothing there to remove. The reverse is not true, which is why
+/// ARM64 still tries both.
+pub fn removable_msi_packages_for_arch(
+    arch: WinpkFilterMsiArch,
+) -> &'static [&'static WinpkFilterMsiPackage] {
+    match arch {
+        WinpkFilterMsiArch::X64 => X64_REMOVABLE,
+        WinpkFilterMsiArch::Arm64 => ARM64_REMOVABLE,
+    }
+}
+
+/// [`removable_msi_packages_for_arch`] for the machine we are running on.
+pub fn removable_msi_packages() -> &'static [&'static WinpkFilterMsiPackage] {
+    removable_msi_packages_for_arch(detect_native_arch())
+}
+
 /// Minimum Windows Packet Filter driver version SwiftTunnel requires at runtime.
 ///
 /// 3.6.2 fixes the `ERROR_INVALID_PARAMETER` regression that made the reader
@@ -1128,5 +1161,59 @@ Provider Name:      NDISAPI
         let arch = detect_native_arch();
         let pkg = native_msi_package();
         assert_eq!(pkg.arch, arch);
+    }
+
+    /// x64 must never attempt the ARM64 package.
+    ///
+    /// Measured on a real uninstall: msiexec answers 1633, and the
+    /// driver-store sweep after it then burned its entire 180 second timeout,
+    /// so the uninstall sat there looking frozen for three minutes to reach a
+    /// failure that could not have gone any other way.
+    #[test]
+    fn x64_does_not_try_to_remove_an_arm64_driver() {
+        let packages = removable_msi_packages_for_arch(WinpkFilterMsiArch::X64);
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].arch, WinpkFilterMsiArch::X64);
+        assert!(
+            !packages.iter().any(|p| p.arch == WinpkFilterMsiArch::Arm64),
+            "a driver is not emulated, so an ARM64 package was never installable on x64"
+        );
+    }
+
+    /// ARM64 keeps trying both, and native first.
+    ///
+    /// Windows on ARM runs x64 installers under emulation, so one of these
+    /// machines really can carry an x64 registration left by an older build
+    /// that did not choose by architecture. Narrowing this to native only
+    /// would strand that driver with nothing able to remove it.
+    #[test]
+    fn arm64_still_removes_an_emulated_x64_install() {
+        let packages = removable_msi_packages_for_arch(WinpkFilterMsiArch::Arm64);
+        assert_eq!(packages.len(), 2);
+        assert_eq!(
+            packages[0].arch,
+            WinpkFilterMsiArch::Arm64,
+            "the native package should be attempted first"
+        );
+        assert!(packages.iter().any(|p| p.arch == WinpkFilterMsiArch::X64));
+    }
+
+    /// Nothing here may quietly drop a package from the known set.
+    #[test]
+    fn every_package_is_still_removable_on_some_architecture() {
+        for pkg in ALL_MSI_PACKAGES {
+            let reachable = [WinpkFilterMsiArch::X64, WinpkFilterMsiArch::Arm64]
+                .into_iter()
+                .any(|arch| {
+                    removable_msi_packages_for_arch(arch)
+                        .iter()
+                        .any(|candidate| candidate.msi_name == pkg.msi_name)
+                });
+            assert!(
+                reachable,
+                "{} can no longer be uninstalled on any machine",
+                pkg.msi_name
+            );
+        }
     }
 }
