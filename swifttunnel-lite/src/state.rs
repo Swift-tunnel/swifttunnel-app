@@ -247,6 +247,21 @@ pub struct Driver {
 /// banned account is refused a relay ticket, and a locked-out build is refused
 /// by the API with a 426. This is here so the window says which of the two it
 /// is, rather than leaving somebody to interpret a connect that keeps failing.
+/// How far along the in-app update is.
+///
+/// Lite has no other way to update itself, and the screen that offers it
+/// replaces the whole window, so this is the only progress the user will see.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum UpdateState {
+    #[default]
+    Idle,
+    /// What it is doing, phrased for the button it is written on.
+    Working(String),
+    /// Why it stopped. Kept so the screen can offer the manual download
+    /// instead of leaving somebody stuck on a button that does nothing.
+    Failed(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Lockout {
     Banned(String),
@@ -302,6 +317,8 @@ pub struct State {
     pub driver: Driver,
     /// Set when this client must not connect at all.
     pub lockout: Option<Lockout>,
+    /// Progress of the in-app update offered on the update-required screen.
+    pub update: UpdateState,
 
     // ── From the shared settings file ──
     pub selected_region: String,

@@ -4,7 +4,7 @@
 //! clicked lives in `view`, so what is left here is what the screen actually
 //! says, which is the part worth being able to read and change quickly.
 
-use crate::state::{Lockout, Push, Roblox, RobloxDraft, State, Status};
+use crate::state::{Lockout, Push, Roblox, RobloxDraft, State, Status, UpdateState};
 use crate::theme;
 use crate::view::{Action, Chip, FieldId, Flag, Item, Right, Row, Screen, Tone, Variant};
 
@@ -69,6 +69,26 @@ fn locked_out(state: &State, lockout: &Lockout) -> Vec<Item> {
         Item::Note(detail),
         Item::Gap(8),
     ];
+
+    // The update screen used to offer nothing, so it named the problem and
+    // left the reader to go and find the download. Lite cannot be updated from
+    // anywhere else in the window, because this screen replaces the window.
+    if matches!(lockout, Lockout::UpdateRequired(_)) {
+        items.push(Item::Group(vec![
+            Row::new(match &state.update {
+                UpdateState::Idle => "Update now",
+                UpdateState::Working(step) => step.as_str(),
+                UpdateState::Failed(_) => "Try again",
+            })
+            .action(Action::UpdateNow),
+        ]));
+
+        if let UpdateState::Failed(why) = &state.update {
+            items.push(Item::Note(format!(
+                "{why} You can also download SwiftTunnel Lite again from swifttunnel.net."
+            )));
+        }
+    }
 
     if matches!(lockout, Lockout::Banned(_)) && state.signed_in {
         items.push(Item::Group(vec![

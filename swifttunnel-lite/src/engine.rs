@@ -35,7 +35,9 @@ use swifttunnel_core::vpn::servers::{self, DynamicServerList, ServerListSource};
 use swifttunnel_core::vpn::split_tunnel::{GamePreset, get_apps_for_preset_set};
 use swifttunnel_core::vpn::{ConnectionState, SplitTunnelDriver, VpnConnection};
 
-use crate::state::{AdapterRow, Driver, Lockout, RegionRow, Roblox, State, Status, Tunnel};
+use crate::state::{
+    AdapterRow, Driver, Lockout, RegionRow, Roblox, State, Status, Tunnel, UpdateState,
+};
 use crate::view::{Action, FieldId, Flag};
 
 /// Posted when a background job lands, so a finished connect or a fresh ping
@@ -67,6 +69,8 @@ struct Snapshot {
     roblox: Roblox,
     driver: Driver,
     lockout: Option<Lockout>,
+    /// Progress of the in-app update, shown on the update-required screen.
+    update: UpdateState,
     tunnel: Tunnel,
     email: Option<String>,
     signed_in: bool,
@@ -173,6 +177,7 @@ impl Engine {
                 roblox: read_roblox(&roblox_intent),
                 driver: read_driver(),
                 lockout: lockout_of(&auth_state, banned_reason.clone()),
+                update: UpdateState::default(),
                 server_list: DynamicServerList::new_empty(),
                 regions: Vec::new(),
                 adapters: Vec::new(),
@@ -237,6 +242,7 @@ impl Engine {
             state.adapters = snapshot.adapters.clone();
             state.roblox = snapshot.roblox.clone();
             state.lockout = snapshot.lockout.clone();
+            state.update = snapshot.update.clone();
             state.driver = snapshot.driver.clone();
             state.tunnel = snapshot.tunnel.clone();
             state.email = snapshot.email.clone();
@@ -357,6 +363,7 @@ impl Engine {
             Action::SignIn => self.sign_in(),
             Action::SubmitLogin => self.submit_login(state),
             Action::RepairDriver => self.repair_driver(),
+            Action::UpdateNow => self.update_now(),
             Action::OpenLogs => open_logs(),
             Action::Uninstall => self.uninstall(state),
 
@@ -569,6 +576,89 @@ impl Engine {
     /// worth having a button for are the ones where something is present and
     /// wrong, which a conditional install would skip. Needs admin, which this
     /// build already has from its manifest.
+    /// Fetch, verify and run the newest Lite.
+    ///
+    /// The only route out of the update-required screen, which replaces the
+    /// whole window, so every failure has to end somewhere the user can act on
+    /// rather than a button that silently does nothing.
+    ///
+    /// Nothing here decides whether the download is genuine. Core verifies the
+    /// signed manifest and then the installer's hash against it, and returns an
+    /// error if either fails; this only reports what happened.
+    fn update_now(&self) {
+        let already_working = self
+            .shared
+            .snapshot
+            .read()
+            .map(|s| matches!(s.update, UpdateState::Working(_)))
+            .unwrap_or(false);
+        if already_working {
+            return;
+        }
+
+        let shared = self.shared.clone();
+        shared.edit(|s| s.update = UpdateState::Working("Checking...".to_string()));
+        shared.notify();
+
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    log::error!("update: could not start a runtime: {error}");
+                    shared.edit(|s| {
+                        s.update = UpdateState::Failed("Could not start the update.".to_string())
+                    });
+                    shared.notify();
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(async {
+                let update =
+                    swifttunnel_core::lite_update::check_for_update(env!("CARGO_PKG_VERSION"))
+                        .await?
+                        .ok_or_else(|| {
+                            // The server refused this build but the newest release is
+                            // not newer than it. Nothing here can fix that, and saying
+                            // so is better than a spinner that never resolves.
+                            "This is already the newest SwiftTunnel Lite.".to_string()
+                        })?;
+
+                log::info!(
+                    "update: {} available ({} bytes)",
+                    update.version,
+                    update.size()
+                );
+                shared.edit(|s| s.update = UpdateState::Working("Downloading...".to_string()));
+                shared.notify();
+
+                let path = swifttunnel_core::lite_update::download_verified(&update).await?;
+                shared
+                    .edit(|s| s.update = UpdateState::Working("Starting installer...".to_string()));
+                shared.notify();
+
+                swifttunnel_core::lite_update::launch_installer(&path)
+            });
+
+            match outcome {
+                Ok(()) => {
+                    // msiexec cannot replace files this process is holding
+                    // open, so it has to be the last thing we do.
+                    log::info!("update: installer started, closing so it can replace this build");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    log::error!("update failed: {error}");
+                    shared.edit(|s| s.update = UpdateState::Failed(error));
+                    shared.notify();
+                }
+            }
+        });
+    }
+
     fn repair_driver(&self) {
         if self
             .shared

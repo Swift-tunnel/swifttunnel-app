@@ -772,6 +772,10 @@ jobs:
           gh release upload "$env:GITHUB_REF_NAME" $out --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Compiled into the build so Lite can verify the signed update
+          # manifest. Without it Lite refuses to update rather than trusting
+          # an unverified download.
+          SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
       - name: Build and publish ARM64 release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
@@ -825,6 +829,10 @@ jobs:
           gh release upload "$env:GITHUB_REF_NAME" $msi.FullName --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Compiled into the build so Lite can verify the signed update
+          # manifest. Without it Lite refuses to update rather than trusting
+          # an unverified download.
+          SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
       - name: Merge ARM64 updater metadata
         shell: powershell
         env:

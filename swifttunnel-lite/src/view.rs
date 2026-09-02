@@ -65,6 +65,13 @@ pub enum Action {
     OpenLogs,
     /// Remove Lite from the machine.
     Uninstall,
+    /// Download and run the newest Lite.
+    ///
+    /// Only reachable from the update-required screen, which replaces the whole
+    /// window. That screen used to offer nothing at all: it said the build was
+    /// too old and left the reader to work out that finding the download
+    /// themselves was the fix.
+    UpdateNow,
 }
 
 /// A value the user can type into.
