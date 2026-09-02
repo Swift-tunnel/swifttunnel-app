@@ -72,10 +72,10 @@
         NOT REMOVE
       </Custom>
       <Custom Action="SetCleanupExePath" Before="RunCleanupOnUninstall">
-        Installed AND REMOVE="ALL"
+        Installed AND REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
       </Custom>
       <Custom Action="RunCleanupOnUninstall" Before="RemoveFiles">
-        Installed AND REMOVE="ALL"
+        Installed AND REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
       </Custom>
     </InstallExecuteSequence>
   </Fragment>

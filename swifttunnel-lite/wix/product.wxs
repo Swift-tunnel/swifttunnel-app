@@ -165,10 +165,10 @@
         NOT REMOVE
       </Custom>
       <Custom Action="SetLiteCleanupPath" Before="CleanupOnUninstall">
-        Installed AND REMOVE="ALL"
+        Installed AND REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
       </Custom>
       <Custom Action="CleanupOnUninstall" Before="RemoveFiles">
-        Installed AND REMOVE="ALL"
+        Installed AND REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE
       </Custom>
     </InstallExecuteSequence>
   </Product>
