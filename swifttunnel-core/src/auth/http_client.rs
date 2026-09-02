@@ -70,14 +70,44 @@ fn client_version() -> &'static str {
         .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
-/// Set the first time the server rejects this build as too old (old-build
-/// lockout). Once set, the app shows the forced-update gate until the user
-/// updates and restarts.
-static UPDATE_REQUIRED_MESSAGE: OnceLock<String> = OnceLock::new();
+/// Set when the server rejects this build as too old, and cleared again the
+/// moment it serves us anything.
+///
+/// This was a `OnceLock`, which cannot be cleared at all, so a single 426
+/// locked the client out for the life of the process with no way back. That is
+/// only correct if the server's answer can never change, and it can: the floor
+/// is an environment variable, so lowering it, or setting it by mistake for
+/// half a minute, left every client that happened to ask during that window
+/// showing a forced-update gate against a server perfectly willing to serve
+/// them. In Lite the gate also disables the connect button, so the app sat
+/// there dead until it was restarted.
+static UPDATE_REQUIRED_MESSAGE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 /// The "please update" message if the server has locked this build out, else None.
 pub fn update_required_message() -> Option<String> {
-    UPDATE_REQUIRED_MESSAGE.get().cloned()
+    UPDATE_REQUIRED_MESSAGE
+        .read()
+        .ok()
+        .and_then(|held| held.clone())
+}
+
+/// Note that the server just served this build, so any lockout is stale.
+///
+/// A success is unambiguous: whatever the server thought of our version a
+/// moment ago, it is answering us now.
+fn note_server_served_us() {
+    // Cheap read first. This runs on every successful request and the lock is
+    // almost always already empty.
+    if UPDATE_REQUIRED_MESSAGE
+        .read()
+        .is_ok_and(|held| held.is_none())
+    {
+        return;
+    }
+    if let Ok(mut held) = UPDATE_REQUIRED_MESSAGE.write() {
+        log::info!("server accepted this build again; clearing the update-required gate");
+        *held = None;
+    }
 }
 
 /// HTTP client for authentication API calls
@@ -152,16 +182,29 @@ impl AuthClient {
         F: Fn(&Client) -> reqwest::RequestBuilder,
     {
         match build_request(&self.client).send().await {
-            Ok(response) => Ok(response),
+            Ok(response) => {
+                if response.status().is_success() {
+                    note_server_served_us();
+                }
+                Ok(response)
+            }
             Err(primary_error) => {
                 warn!(
                     "{} request failed through the system network path: {}. Retrying direct.",
                     label, primary_error
                 );
 
+                // Same treatment on the fallback path. A machine behind a proxy
+                // reaches the API only this way, so leaving it out would mean
+                // the update gate could never lift for those users.
                 build_request(&self.direct_client)
                     .send()
                     .await
+                    .inspect(|response| {
+                        if response.status().is_success() {
+                            note_server_served_us();
+                        }
+                    })
                     .map_err(|direct_error| {
                         AuthError::NetworkError(format!(
                             "{}. Direct retry also failed: {}",
@@ -834,7 +877,9 @@ fn update_required_error(status: reqwest::StatusCode, body: &str) -> Option<Auth
     });
     // Latch it so the app can show a forced-update gate even if this particular
     // request's error is otherwise swallowed upstream.
-    let _ = UPDATE_REQUIRED_MESSAGE.set(message.clone());
+    if let Ok(mut held) = UPDATE_REQUIRED_MESSAGE.write() {
+        *held = Some(message.clone());
+    }
     Some(AuthError::UpdateRequired(message))
 }
 
@@ -1092,6 +1137,51 @@ mod tests {
     }
 
     #[test]
+    /// The lockout has to be liftable.
+    ///
+    /// It was a OnceLock, so one 426 held the client in a forced-update gate
+    /// for the life of the process even after the server started serving it
+    /// again. The floor is an environment variable and can be lowered, or set
+    /// by mistake, so "the server rejected us once" is not a permanent truth.
+    /// In Lite the gate also disables the connect button, which made this a
+    /// dead app rather than a wrong message.
+    #[test]
+    fn the_update_gate_lifts_once_the_server_serves_us_again() {
+        let _guard = UPDATE_GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let _ = update_required_error(
+            reqwest::StatusCode::UPGRADE_REQUIRED,
+            r#"{"code":"update_required","error":"Please update."}"#,
+        );
+        assert_eq!(update_required_message().as_deref(), Some("Please update."));
+
+        note_server_served_us();
+        assert_eq!(
+            update_required_message(),
+            None,
+            "a server that answers us has not locked this build out"
+        );
+    }
+
+    /// Clearing when nothing is set must not be a special case.
+    #[test]
+    fn clearing_an_unset_gate_is_harmless() {
+        let _guard = UPDATE_GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Ok(mut held) = UPDATE_REQUIRED_MESSAGE.write() {
+            *held = None;
+        }
+        note_server_served_us();
+        assert_eq!(update_required_message(), None);
+    }
+
+    /// Process-wide state, so these two must not overlap with each other or
+    /// with the detection tests that also set it.
+    static UPDATE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn update_required_detected_by_status_426() {
         let err = update_required_error(
             reqwest::StatusCode::from_u16(426).unwrap(),
