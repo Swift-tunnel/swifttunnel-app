@@ -187,6 +187,19 @@ pub struct RelayTicketResponse {
     pub limit_seconds: Option<i64>,
     #[serde(default)]
     pub remaining_seconds: Option<i64>,
+    /// When the allowance refills, as the server sees it.
+    ///
+    /// The budget above is only refreshed while a ticket is being fetched, so
+    /// a client sitting disconnected keeps reporting whatever it last heard.
+    /// Overnight that is yesterday's exhausted figure, and Lite refuses to
+    /// even attempt a connection when the allowance reads as spent, so the
+    /// button went dead until the app was restarted.
+    ///
+    /// Knowing when the server will refill removes the guesswork: past this
+    /// instant the recorded budget is simply out of date and the full
+    /// allowance is assumed until the next ticket says otherwise.
+    #[serde(default)]
+    pub resets_at: Option<DateTime<Utc>>,
     /// Seconds of grace left after the allowance ran out, or `None` when not in
     /// grace. The backend keeps issuing leases through this window, so the
     /// session is still live and the client must NOT hang up — it warns and

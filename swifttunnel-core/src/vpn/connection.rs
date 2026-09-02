@@ -99,11 +99,36 @@ static FREE_TIER_LIMIT_SECS: AtomicI64 = AtomicI64::new(-1);
 /// session up and only warn.
 static FREE_TIER_GRACE_SECS: AtomicI64 = AtomicI64::new(-1);
 
+/// When the server said the allowance refills, as a unix timestamp. `-1` when
+/// it did not say.
+///
+/// The figures above are only written while a ticket is being fetched, which
+/// only happens while connecting or connected. A client left sitting
+/// disconnected therefore keeps reporting whatever it last heard, and after an
+/// exhausted evening that is "no allowance left" until the app is restarted.
+/// Lite will not even attempt a connection in that state, so the button did
+/// nothing the following day.
+static FREE_TIER_RESETS_AT_UNIX: AtomicI64 = AtomicI64::new(-1);
+
 /// Record the budget carried on a freshly fetched ticket.
 fn record_free_tier_quota(ticket: &crate::auth::types::RelayTicketResponse) {
     FREE_TIER_REMAINING_SECS.store(ticket.remaining_seconds.unwrap_or(-1), Ordering::Relaxed);
     FREE_TIER_LIMIT_SECS.store(ticket.limit_seconds.unwrap_or(-1), Ordering::Relaxed);
     FREE_TIER_GRACE_SECS.store(ticket.grace_seconds.unwrap_or(-1), Ordering::Relaxed);
+    FREE_TIER_RESETS_AT_UNIX.store(
+        ticket.resets_at.map(|at| at.timestamp()).unwrap_or(-1),
+        Ordering::Relaxed,
+    );
+}
+
+/// Whether the recorded budget is for a window that has already refilled.
+///
+/// Compared against the server's own reset time rather than a guess, and only
+/// ever answers yes when the server actually supplied one. A server that says
+/// nothing leaves the figures exactly as they were.
+fn recorded_quota_has_expired() -> bool {
+    let resets_at = FREE_TIER_RESETS_AT_UNIX.load(Ordering::Relaxed);
+    resets_at > 0 && chrono::Utc::now().timestamp() >= resets_at
 }
 
 /// Whether the crowded-relay notice has already been shown for the relay we are
@@ -154,17 +179,31 @@ fn notify_if_relay_crowded(region: &str, ticket: &crate::auth::types::RelayTicke
 }
 
 /// `(remaining_seconds, limit_seconds)`, each `None` when no limit applies.
+///
+/// Past the server's stated refill time the recorded remainder is simply old
+/// news, so the full allowance is reported until the next ticket replaces it
+/// with a real figure. Erring towards "you have time" is the right way round:
+/// the server refuses a connection that genuinely has none, whereas erring the
+/// other way leaves the user staring at a button that does nothing.
 pub fn free_tier_quota() -> (Option<i64>, Option<i64>) {
-    let remaining = FREE_TIER_REMAINING_SECS.load(Ordering::Relaxed);
     let limit = FREE_TIER_LIMIT_SECS.load(Ordering::Relaxed);
-    (
-        if remaining < 0 { None } else { Some(remaining) },
-        if limit <= 0 { None } else { Some(limit) },
-    )
+    let limit = if limit <= 0 { None } else { Some(limit) };
+
+    if recorded_quota_has_expired() {
+        return (limit, limit);
+    }
+
+    let remaining = FREE_TIER_REMAINING_SECS.load(Ordering::Relaxed);
+    (if remaining < 0 { None } else { Some(remaining) }, limit)
 }
 
 /// Grace seconds left, or `None` when the allowance has not run out.
 pub fn free_tier_grace_seconds() -> Option<i64> {
+    // A refilled window is not in grace: grace only means "over the allowance
+    // but still being let through", and the allowance is no longer over.
+    if recorded_quota_has_expired() {
+        return None;
+    }
     let grace = FREE_TIER_GRACE_SECS.load(Ordering::Relaxed);
     if grace < 0 { None } else { Some(grace) }
 }
@@ -3443,6 +3482,64 @@ impl Drop for VpnConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These are process-wide statics, so the quota tests must not overlap.
+    static QUOTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn set_recorded_quota(remaining: i64, limit: i64, grace: i64, resets_at: i64) {
+        FREE_TIER_REMAINING_SECS.store(remaining, Ordering::Relaxed);
+        FREE_TIER_LIMIT_SECS.store(limit, Ordering::Relaxed);
+        FREE_TIER_GRACE_SECS.store(grace, Ordering::Relaxed);
+        FREE_TIER_RESETS_AT_UNIX.store(resets_at, Ordering::Relaxed);
+    }
+
+    /// The reported figure is only refreshed while a ticket is being fetched,
+    /// which happens only while connecting or connected. Left disconnected
+    /// overnight a client kept reporting an exhausted allowance, and Lite
+    /// refuses to attempt a connection in that state, so the button did
+    /// nothing the next day until the app was restarted.
+    #[test]
+    fn a_refilled_window_reports_the_full_allowance_again() {
+        let _guard = QUOTA_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let an_hour_ago = chrono::Utc::now().timestamp() - 3600;
+
+        // Yesterday: nothing left, and in grace.
+        set_recorded_quota(0, 10800, 300, an_hour_ago);
+
+        assert_eq!(
+            free_tier_quota(),
+            (Some(10800), Some(10800)),
+            "past the refill time the recorded remainder is out of date"
+        );
+        assert_eq!(
+            free_tier_grace_seconds(),
+            None,
+            "a refilled window is not in grace: the allowance is no longer over"
+        );
+    }
+
+    /// Before the refill the recorded figure is current and must be believed,
+    /// or the limit would never apply to anyone.
+    #[test]
+    fn an_unexpired_window_still_reports_what_the_server_said() {
+        let _guard = QUOTA_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let in_an_hour = chrono::Utc::now().timestamp() + 3600;
+
+        set_recorded_quota(0, 10800, 300, in_an_hour);
+
+        assert_eq!(free_tier_quota(), (Some(0), Some(10800)));
+        assert_eq!(free_tier_grace_seconds(), Some(300));
+    }
+
+    /// A server that sends no reset time changes nothing.
+    #[test]
+    fn without_a_reset_time_the_recorded_figure_stands() {
+        let _guard = QUOTA_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_recorded_quota(0, 10800, -1, -1);
+
+        assert_eq!(free_tier_quota(), (Some(0), Some(10800)));
+        assert_eq!(free_tier_grace_seconds(), None);
+    }
 
     #[test]
     fn test_default_is_disconnected() {
