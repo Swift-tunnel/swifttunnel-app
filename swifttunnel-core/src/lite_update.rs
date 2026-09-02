@@ -235,6 +235,52 @@ pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
         .map_err(|e| format!("could not start the installer: {e}"))
 }
 
+/// Where the last auto-update attempt is remembered.
+fn attempt_marker() -> Option<std::path::PathBuf> {
+    installers_dir().ok().map(|dir| dir.join("last-attempt"))
+}
+
+/// Remember that an installer was launched for this version.
+///
+/// Written immediately before handing over to msiexec, because the process
+/// exits straight afterwards and gets no chance to write anything later.
+pub fn record_install_attempt(version: &Version) {
+    if let Some(path) = attempt_marker() {
+        let _ = std::fs::write(&path, version.to_string());
+    }
+}
+
+/// Did we already run an installer for this version and end up still on the
+/// old one?
+///
+/// The guard against an update that cannot succeed. The manifest's version
+/// comes from the release, and the installer's from Lite's own crate version;
+/// they are kept equal by a check at build time, but if they ever drifted the
+/// client would install a build that is not the version it was promised,
+/// restart still out of date, see the same update again, and reinstall every
+/// forty-five seconds forever. A CI check is too thin a thing to stand between
+/// a user and that.
+///
+/// Only consulted by the automatic path. Someone who presses the button on the
+/// update screen has asked for it explicitly and is told plainly if it fails,
+/// so refusing them would only leave them stuck.
+pub fn already_attempted(version: &Version) -> bool {
+    let Some(path) = attempt_marker() else {
+        return false;
+    };
+    let Ok(recorded) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    Version::parse(recorded.trim()).is_ok_and(|tried| &tried == version)
+}
+
+/// Forget the last attempt, once this build is the version that was wanted.
+pub fn clear_install_attempt() {
+    if let Some(path) = attempt_marker() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn installers_dir() -> Result<std::path::PathBuf, String> {
     let base = std::env::var_os("ProgramData").ok_or("ProgramData is not set")?;
     let dir = std::path::PathBuf::from(base)
@@ -306,6 +352,48 @@ mod tests {
             x64: x64.map(make),
             arm64: arm64.map(make),
         }
+    }
+
+    /// A version installed once that did not take is not tried again on its
+    /// own.
+    ///
+    /// Without this an update that can never succeed reinstalls itself every
+    /// forty-five seconds forever. The manifest's version comes from the
+    /// release and the installer's from Lite's crate version; a build-time
+    /// check keeps them equal, and this is what stands there if it ever fails.
+    #[test]
+    fn a_version_already_attempted_is_not_retried() {
+        // Needs a writable ProgramData. Nothing to assert if we cannot record.
+        if attempt_marker().is_none() {
+            return;
+        }
+        let wanted = Version::parse("9.9.9").unwrap();
+        let other = Version::parse("9.9.10").unwrap();
+
+        clear_install_attempt();
+        assert!(
+            !already_attempted(&wanted),
+            "nothing recorded, so nothing was attempted"
+        );
+
+        record_install_attempt(&wanted);
+        if attempt_marker().is_some_and(|p| !p.exists()) {
+            // No write permission here; the guard is untestable in this
+            // environment rather than wrong.
+            return;
+        }
+
+        assert!(already_attempted(&wanted), "this one was just attempted");
+        assert!(
+            !already_attempted(&other),
+            "a different version was never attempted and must still install"
+        );
+
+        clear_install_attempt();
+        assert!(
+            !already_attempted(&wanted),
+            "an update that landed is cleared on the next launch"
+        );
     }
 
     /// A build must replace itself with its own architecture.

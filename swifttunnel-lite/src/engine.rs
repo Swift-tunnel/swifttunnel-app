@@ -1014,6 +1014,19 @@ fn spawn_auto_update(shared: Arc<Shared>) {
                 }
             };
 
+            if swifttunnel_core::lite_update::already_attempted(&update.version) {
+                // We installed this once and came back as the old version, so
+                // installing it again would only do the same. Left to the
+                // button on the update screen, which reports what happened
+                // rather than looping in the background.
+                log::warn!(
+                    "auto-update: {} was installed once already and this build is still {};                      not retrying automatically",
+                    update.version,
+                    env!("CARGO_PKG_VERSION")
+                );
+                continue;
+            }
+
             log::info!("auto-update: {} is available, fetching", update.version);
             shared.edit(|s| s.update = UpdateState::Working("Updating...".to_string()));
             shared.notify();
@@ -1049,6 +1062,10 @@ fn spawn_auto_update(shared: Arc<Shared>) {
                 shared.notify();
                 continue;
             }
+
+            // Written before the handover: the process exits straight after
+            // and gets no later chance.
+            swifttunnel_core::lite_update::record_install_attempt(&update.version);
 
             match swifttunnel_core::lite_update::launch_installer(&staged) {
                 Ok(()) => {

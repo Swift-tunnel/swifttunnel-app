@@ -56,6 +56,11 @@ fn main() {
     // client and answered "no longer supported".
     swifttunnel_core::auth::set_client_version(env!("CARGO_PKG_VERSION"));
 
+    // An update that landed is no longer an attempt worth remembering. Clearing
+    // it here means the guard only ever suppresses a retry of something that
+    // genuinely did not take.
+    swifttunnel_core::lite_update::clear_install_attempt();
+
     // Keep this machine upgradeable, off the main thread.
     //
     // Windows falls back to the recorded install source when a cleanup tool
