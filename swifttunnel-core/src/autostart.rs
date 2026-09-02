@@ -114,7 +114,28 @@ pub fn remove_all_run_entries() {
         return;
     };
 
+    // Leave the other client's entry alone while that client is installed.
+    //
+    // This removed both unconditionally, so uninstalling either one stopped
+    // the survivor launching at login. Nothing announced it: the uninstall
+    // succeeded, the remaining app still worked when opened by hand, and it
+    // simply never came back after a restart. Removing a stale entry for a
+    // product that is gone is still worth doing, so only a present client is
+    // spared.
+    let spare = crate::installed_clients::other_client_still_installed().map(|other| {
+        // The display names carry a space, the Run value names do not.
+        if other == crate::installed_clients::FULL_APP {
+            RUN_VALUE_APP
+        } else {
+            RUN_VALUE_LITE
+        }
+    });
+
     for value in [RUN_VALUE_APP, RUN_VALUE_LITE] {
+        if spare == Some(value) {
+            log::info!("leaving the {value} startup entry: that client is still installed");
+            continue;
+        }
         match run_key.delete_value(value) {
             Ok(()) => log::info!("removed the {value} startup entry"),
             Err(e) if e.kind() == ErrorKind::NotFound => {}

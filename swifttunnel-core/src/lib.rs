@@ -10,6 +10,7 @@ pub mod diskless;
 pub mod firewall_fixer;
 pub mod fps_monitor;
 pub mod geolocation;
+pub mod installed_clients;
 pub mod network_analyzer;
 pub mod network_booster;
 pub mod notification;

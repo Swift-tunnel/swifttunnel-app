@@ -902,16 +902,12 @@ pub fn cleanup_all_system_state() -> Result<()> {
     // 14. Remove Roblox FFlag entries from ClientAppSettings.json
     crate::roblox_optimizer::RobloxOptimizer::cleanup_for_uninstall();
 
-    // 15. Delete autostart Run key
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-            "/v",
-            "SwiftTunnel",
-            "/f",
-        ])
-        .output();
+    // Step 7 already removed the startup entries, and it is the only place
+    // that should. A second `reg delete` used to run here naming "SwiftTunnel"
+    // outright, so whichever client was being uninstalled, the full app's
+    // entry went with it. That defeated the check in step 7 silently: the log
+    // said the entry was being kept because the other client is installed, and
+    // it was deleted moments later anyway.
 
     info!("Full system cleanup completed");
     Ok(())
