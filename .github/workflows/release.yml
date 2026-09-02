@@ -938,12 +938,41 @@ jobs:
           $manifestPath = Join-Path $outDir "swifttunnel-update-manifest.json"
           $signaturePath = Join-Path $outDir "swifttunnel-update-manifest.sig"
 
+          # SwiftTunnel Lite ships no per-file signature of its own, so the
+          # only thing vouching for a Lite installer is this manifest, which is
+          # signed below. Without these entries Lite would have to install an
+          # unverified download, which is worse than not updating at all.
+          #
+          # Missing assets are fatal on purpose. A manifest that silently omits
+          # Lite produces clients that never update and never say why.
+          $liteDir = Join-Path $outDir "lite"
+          New-Item -ItemType Directory -Path $liteDir -Force | Out-Null
+          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --pattern "SwiftTunnelLite_*_en-US.msi" --dir $liteDir --clobber
+
+          $lite = [ordered]@{}
+          foreach ($arch in @("x64", "arm64")) {
+            $pattern = "SwiftTunnelLite_*_" + $arch + "_en-US.msi"
+            $file = Get-ChildItem $liteDir -Filter $pattern |
+                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $file) {
+              throw "No SwiftTunnel Lite installer for $arch in the release assets; Lite could not update from this release."
+            }
+            $lite[$arch] = [ordered]@{
+              file = $file.Name
+              url = "https://github.com/Swift-tunnel/swifttunnel-app/releases/download/$env:TAG/$($file.Name)"
+              sha256 = (Get-FileHash -Path $file.FullName -Algorithm SHA256).Hash.ToLower()
+              size = $file.Length
+            }
+            Write-Host "::notice::manifest covers $($file.Name) ($($file.Length) bytes)"
+          }
+
           $manifest = [ordered]@{
             version = $env:VERSION
             tag = $env:TAG
             channel_class = $env:CHANNEL_CLASS
             latest_json_url = $latestUrl
             latest_json_sha256 = $latestSha
+            lite = $lite
           } | ConvertTo-Json -Depth 8
 
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
