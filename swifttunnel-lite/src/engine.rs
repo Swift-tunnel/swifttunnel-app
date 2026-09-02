@@ -196,6 +196,7 @@ impl Engine {
 
         spawn_regions(shared.clone());
         spawn_poller(shared.clone());
+        spawn_auto_update(shared.clone());
 
         // The profile is re-fetched once at startup, because a ban applied
         // since the last session is only visible on the server until
@@ -936,6 +937,134 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
 // ── Background threads ──────────────────────────────────────────────────────
 
 /// Fetch the fleet once, then keep its round trips fresh.
+/// Keep Lite current on its own, and never in the middle of a game.
+///
+/// Lite is used while playing, and an installer cannot replace files this
+/// process is holding, so applying an update means closing. Doing that during
+/// a session would drop somebody's tunnel mid-match to save them a click,
+/// which is a worse bargain than being a version behind for another hour. So
+/// the rule is simple: only ever while disconnected.
+///
+/// This runs whether or not the server has refused the build. The forced
+/// update screen is the recovery path for a client that is already locked out;
+/// this is what stops most people reaching it at all.
+fn spawn_auto_update(shared: Arc<Shared>) {
+    // Long enough that a launch is not competing with a download, short enough
+    // that somebody who opens Lite, updates, and plays is covered.
+    const FIRST_CHECK_AFTER: Duration = Duration::from_secs(45);
+    // A session left open for days should not stay on an old build.
+    const THEN_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+
+    std::thread::spawn(move || {
+        let mut wait = FIRST_CHECK_AFTER;
+
+        loop {
+            // Wake often so a close is noticed promptly rather than after
+            // hours.
+            let deadline = Instant::now() + wait;
+            while Instant::now() < deadline {
+                if shared.stop.load(Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            wait = THEN_EVERY;
+
+            if shared.stop.load(Ordering::Relaxed) {
+                return;
+            }
+
+            // Connected, or busy connecting: leave it alone and come back.
+            let in_use = shared
+                .snapshot
+                .read()
+                .map(|s| s.tunnel.status != Status::Disconnected)
+                .unwrap_or(true);
+            if in_use || shared.busy.load(Ordering::Relaxed) {
+                log::debug!("auto-update: in use, deferring");
+                continue;
+            }
+
+            // Someone is already updating by hand from the block screen.
+            let already = shared
+                .snapshot
+                .read()
+                .map(|s| matches!(s.update, UpdateState::Working(_)))
+                .unwrap_or(false);
+            if already {
+                continue;
+            }
+
+            let found = shared.runtime.block_on(async {
+                swifttunnel_core::lite_update::check_for_update(env!("CARGO_PKG_VERSION")).await
+            });
+
+            let update = match found {
+                Ok(Some(update)) => update,
+                Ok(None) => {
+                    log::debug!("auto-update: already current");
+                    continue;
+                }
+                // Offline, GitHub down, a release without Lite assets. None of
+                // it is worth telling the user about, and all of it is worth
+                // trying again later.
+                Err(error) => {
+                    log::info!("auto-update: could not check ({error})");
+                    continue;
+                }
+            };
+
+            log::info!("auto-update: {} is available, fetching", update.version);
+            shared.edit(|s| s.update = UpdateState::Working("Updating...".to_string()));
+            shared.notify();
+
+            let staged = shared.runtime.block_on(async {
+                swifttunnel_core::lite_update::download_verified(&update).await
+            });
+
+            let staged = match staged {
+                Ok(path) => path,
+                Err(error) => {
+                    // Includes a failed signature or hash. Deliberately quiet:
+                    // the build still works, and the update screen is there if
+                    // the server ever refuses it.
+                    log::warn!("auto-update: not applying it ({error})");
+                    shared.edit(|s| s.update = UpdateState::Idle);
+                    shared.notify();
+                    continue;
+                }
+            };
+
+            // Re-check rather than trusting the state from before the
+            // download: a connect can start while several megabytes are in
+            // flight, and closing then is exactly what this avoids.
+            let started_playing = shared
+                .snapshot
+                .read()
+                .map(|s| s.tunnel.status != Status::Disconnected)
+                .unwrap_or(true);
+            if started_playing || shared.busy.load(Ordering::Relaxed) {
+                log::info!("auto-update: connected while downloading, leaving it for next time");
+                shared.edit(|s| s.update = UpdateState::Idle);
+                shared.notify();
+                continue;
+            }
+
+            match swifttunnel_core::lite_update::launch_installer(&staged) {
+                Ok(()) => {
+                    log::info!("auto-update: installer started, closing so it can replace us");
+                    std::process::exit(0);
+                }
+                Err(error) => {
+                    log::warn!("auto-update: could not start the installer ({error})");
+                    shared.edit(|s| s.update = UpdateState::Idle);
+                    shared.notify();
+                }
+            }
+        }
+    });
+}
+
 fn spawn_regions(shared: Arc<Shared>) {
     std::thread::Builder::new()
         .name("lite-regions".into())
