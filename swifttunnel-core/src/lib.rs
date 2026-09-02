@@ -25,6 +25,7 @@ pub mod roblox_watcher;
 pub mod settings;
 pub mod structs;
 pub mod system_optimizer;
+pub mod update_verify;
 pub mod updater;
 pub mod utils;
 pub mod vpn;

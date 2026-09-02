@@ -1,9 +1,7 @@
 use base64::Engine as _;
 use reqwest::header::{ACCEPT, USER_AGENT};
-use ring::signature::{ED25519, UnparsedPublicKey};
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
@@ -136,16 +134,6 @@ fn normalize_tag_version(tag_name: &str) -> Option<Version> {
     Version::parse(candidate).ok()
 }
 
-fn normalize_sha256(value: &str) -> String {
-    let trimmed = value.trim();
-    let without_prefix = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("sha256:") {
-        &trimmed[7..]
-    } else {
-        trimmed
-    };
-    without_prefix.to_ascii_lowercase()
-}
-
 fn latest_json_url_for_tag(tag_name: &str) -> String {
     format!("{GITHUB_RELEASES_DOWNLOAD_BASE_URL}/{tag_name}/latest.json")
 }
@@ -187,34 +175,23 @@ fn verify_manifest_signature(manifest_bytes: &[u8], signature_b64: &str) -> Resu
     verify_manifest_signature_with_public_key(manifest_bytes, signature_b64, &public_key_bytes)
 }
 
+/// Delegates to core so both clients check signatures with one
+/// implementation. Lite needs the same check, and a second copy of security
+/// code is how two copies drift until only one of them is right.
 fn verify_manifest_signature_with_public_key(
     manifest_bytes: &[u8],
     signature_b64: &str,
     public_key_bytes: &[u8],
 ) -> Result<(), String> {
-    let signature_bytes = base64::engine::general_purpose::STANDARD
-        .decode(signature_b64.trim())
-        .map_err(|e| format!("Invalid updater manifest signature encoding: {}", e))?;
-
-    UnparsedPublicKey::new(&ED25519, &public_key_bytes)
-        .verify(manifest_bytes, &signature_bytes)
-        .map_err(|e| format!("Updater manifest signature verification failed: {}", e))
+    swifttunnel_core::update_verify::verify_manifest_signature_with_public_key(
+        manifest_bytes,
+        signature_b64,
+        public_key_bytes,
+    )
 }
 
 fn verify_bytes_sha256(bytes: &[u8], expected_sha256: &str) -> Result<(), String> {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let actual_hash = format!("{:x}", hasher.finalize());
-    let expected_hash = normalize_sha256(expected_sha256);
-
-    if actual_hash != expected_hash {
-        return Err(format!(
-            "latest.json SHA256 mismatch: expected '{}', got '{}'",
-            expected_hash, actual_hash
-        ));
-    }
-
-    Ok(())
+    swifttunnel_core::update_verify::verify_bytes_sha256(bytes, expected_sha256, "latest.json")
 }
 
 fn verify_manifest_payload(
@@ -741,8 +718,10 @@ pub async fn updater_install_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Hashing here is only to build expected values for the tests below.
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
+    use sha2::{Digest, Sha256};
 
     fn release(tag: &str, prerelease: bool) -> GithubRelease {
         GithubRelease {
@@ -882,12 +861,6 @@ mod tests {
         );
 
         assert!(selected.is_none());
-    }
-
-    #[test]
-    fn normalize_sha256_strips_prefix_and_lowercases() {
-        let normalized = normalize_sha256("SHA256:ABCDEF1234");
-        assert_eq!(normalized, "abcdef1234");
     }
 
     #[test]
