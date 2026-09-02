@@ -63,11 +63,12 @@ pub struct Orphan {
     pub local_package: String,
 }
 
-/// SwiftTunnel registrations whose cached installer package no longer exists.
+/// Every SwiftTunnel registration on the machine, healthy or not.
 ///
-/// A registration whose package is still on disk is healthy and is skipped, so
-/// running this on a working machine finds nothing and changes nothing.
-pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
+/// Shared by the two halves of this crate: the repair wants the ones whose
+/// package has gone, and the source preservation wants the ones whose package
+/// is still there.
+fn all_registrations() -> windows_registry::Result<Vec<(Orphan, bool)>> {
     let userdata = LOCAL_MACHINE.open(USERDATA)?;
     let mut out = Vec::new();
 
@@ -90,22 +91,35 @@ pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
             }
 
             let local_package = props.get_string("LocalPackage").unwrap_or_default();
-            if package_is_usable(&local_package) {
-                continue;
-            }
+            let usable = package_is_usable(&local_package);
 
-            out.push(Orphan {
-                sid: sid.clone(),
-                product_code: unpack_guid(&packed),
-                packed,
-                display_name,
-                display_version: props.get_string("DisplayVersion").unwrap_or_default(),
-                local_package,
-            });
+            out.push((
+                Orphan {
+                    sid: sid.clone(),
+                    product_code: unpack_guid(&packed),
+                    packed,
+                    display_name,
+                    display_version: props.get_string("DisplayVersion").unwrap_or_default(),
+                    local_package,
+                },
+                usable,
+            ));
         }
     }
 
     Ok(out)
+}
+
+/// SwiftTunnel registrations whose cached installer package no longer exists.
+///
+/// A registration whose package is still on disk is healthy and is skipped, so
+/// running this on a working machine finds nothing and changes nothing.
+pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
+    Ok(all_registrations()?
+        .into_iter()
+        .filter(|(_, usable)| !usable)
+        .map(|(orphan, _)| orphan)
+        .collect())
 }
 
 /// Whether the cached package is one Windows Installer could actually use.
@@ -339,4 +353,115 @@ mod tests {
         assert!(!package_is_usable(""));
         assert!(!package_is_usable("C:/definitely/not/here/nope.msi"));
     }
+}
+
+/// Where our own copies of the installer packages live.
+///
+/// `%ProgramData%`, because it survives everything that empties `%TEMP%` or a
+/// Downloads folder, and because a user will never find it to tidy it away.
+fn installers_dir() -> Result<std::path::PathBuf, String> {
+    let base = std::env::var_os("ProgramData").ok_or("ProgramData is not set")?;
+    let dir = std::path::PathBuf::from(base)
+        .join("SwiftTunnel")
+        .join("installers");
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Keep a copy of every installed product's package, and point Windows at it.
+///
+/// This is the prevention that makes the repair rarely needed. Windows keeps
+/// the package under `C:\Windows\Installer` and falls back to the recorded
+/// install source when that copy is deleted, which is exactly what PC cleanup
+/// tools do. The fallback then decides whether an upgrade works, and it usually
+/// points at a Downloads folder the user has since tidied or a temp directory
+/// Windows itself wiped.
+///
+/// So while the cached package is still healthy, copy it somewhere durable and
+/// repoint the source at that copy. A later cleanup then costs nothing: the
+/// fallback resolves, the upgrade proceeds, and the user never sees "the
+/// feature you are trying to use is on a network resource that is unavailable".
+///
+/// Unlike the staging in `swifttunnel-setup`, this does not care how the
+/// product was installed. It runs after the fact, so it covers the .msi
+/// downloaded straight from the site just as well as the launcher.
+///
+/// Best effort throughout, and deliberately timid: a source that already works
+/// is only ever replaced by a copy that has been verified as a real package.
+/// Pointing Windows at a bad file breaks upgrades exactly as thoroughly as
+/// pointing it at a missing one, so a failure here leaves the registry alone.
+pub fn preserve_installer_sources() -> Result<Vec<String>, String> {
+    let dir = installers_dir()?;
+    let mut preserved = Vec::new();
+
+    for (product, usable) in all_registrations().map_err(|e| e.to_string())? {
+        // Nothing to copy from. This one is the repair's problem, not ours.
+        if !usable || product.product_code.is_empty() {
+            continue;
+        }
+
+        // The product code changes with every release, so each version's
+        // package gets its own name and no upgrade overwrites the package an
+        // older product still points at.
+        let file_name = format!(
+            "{}.msi",
+            product.product_code.trim_matches(|c| c == '{' || c == '}')
+        );
+        let destination = dir.join(&file_name);
+
+        let source_len = std::fs::metadata(&product.local_package)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        let already_copied = source_len > 0
+            && std::fs::metadata(&destination).is_ok_and(|meta| meta.len() == source_len);
+
+        if !already_copied && std::fs::copy(&product.local_package, &destination).is_err() {
+            continue;
+        }
+
+        // Verify before repointing. An interrupted copy would otherwise become
+        // the source Windows trusts, turning a healthy machine into the exact
+        // failure this is meant to prevent.
+        if !package_is_usable(&destination.to_string_lossy()) {
+            let _ = std::fs::remove_file(&destination);
+            continue;
+        }
+
+        if point_source_at(&product.packed, &dir, &file_name).is_ok() {
+            preserved.push(format!(
+                "{} {}",
+                product.display_name, product.display_version
+            ));
+        }
+    }
+
+    Ok(preserved)
+}
+
+/// Record `dir\file_name` as where this product was installed from.
+///
+/// Three values, because Windows consults them in order and a half-written
+/// source list is worse than none: `PackageName` is the file to look for,
+/// `Net\1` is the directory to look in, and `LastUsedSource` is the one it
+/// tries first.
+fn point_source_at(
+    packed: &str,
+    dir: &std::path::Path,
+    file_name: &str,
+) -> windows_registry::Result<()> {
+    let mut directory = dir.to_string_lossy().to_string();
+    if !directory.ends_with('\\') {
+        directory.push('\\');
+    }
+
+    let source_list = LOCAL_MACHINE.create(format!(r"{CLASSES_PRODUCTS}\{packed}\SourceList"))?;
+    source_list.set_string("PackageName", file_name)?;
+    // "n" for a network/normal source, then the index into the list below.
+    source_list.set_string("LastUsedSource", format!("n;1;{directory}"))?;
+
+    let net = LOCAL_MACHINE.create(format!(r"{CLASSES_PRODUCTS}\{packed}\SourceList\Net"))?;
+    net.set_string("1", &directory)?;
+
+    Ok(())
 }

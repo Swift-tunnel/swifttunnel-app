@@ -28,6 +28,10 @@ path = "src/main.rs"
 
 [dependencies]
 swifttunnel-core = { path = "../swifttunnel-core" }
+# Lite installs standalone, so it has a registration of its own to keep a
+# durable installer source for. A Lite-only machine never runs the full app,
+# which is the other place this happens.
+swifttunnel-msi-repair = { path = "../swifttunnel-msi-repair" }
 
 # The window is painted by hand with GDI rather than built from stock Win32
 # controls. Stock controls cannot be themed to match the product: the first

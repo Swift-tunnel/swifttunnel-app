@@ -4432,6 +4432,7 @@ dependencies = [
  "serde_json",
  "simplelog",
  "swifttunnel-core",
+ "swifttunnel-msi-repair",
  "tokio",
  "windows 0.62.2",
  "windows-registry 0.6.1",

@@ -5,13 +5,29 @@
 //! (`swifttunnel-setup`) does the same thing automatically before installing,
 //! so most people should never need to run this.
 
-use swifttunnel_msi_repair::{clear_registration, find_orphans};
+use swifttunnel_msi_repair::{clear_registration, find_orphans, preserve_installer_sources};
 
 fn main() {
     let dry_run = std::env::args().any(|a| a == "--dry-run");
 
     println!("SwiftTunnel MSI repair");
     println!("======================");
+
+    // Prevention before cure. A machine whose package is still cached gets a
+    // durable copy now, so a cleanup tool later costs it nothing. Nothing to
+    // do on a machine that is already broken, which the repair below handles.
+    if !dry_run {
+        match preserve_installer_sources() {
+            Ok(kept) if !kept.is_empty() => {
+                println!();
+                for product in &kept {
+                    println!("Kept a durable installer copy for {product}.");
+                }
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("Could not preserve the installer source: {error}"),
+        }
+    }
 
     let orphans = match find_orphans() {
         Ok(o) => o,

@@ -56,6 +56,33 @@ fn main() {
     // client and answered "no longer supported".
     swifttunnel_core::auth::set_client_version(env!("CARGO_PKG_VERSION"));
 
+    // Keep this machine upgradeable, off the main thread.
+    //
+    // Windows falls back to the recorded install source when a cleanup tool
+    // deletes its cached copy of a package, and without a source that still
+    // exists an upgrade dies on "the feature you are trying to use is on a
+    // network resource that is unavailable", with the product then impossible
+    // to upgrade or remove. The repair clears a registration already in that
+    // state; preserving the source stops the next one reaching it.
+    //
+    // Lite does this itself because it installs standalone, and a machine
+    // with only Lite on it never runs the full app, which is the other place
+    // this happens.
+    std::thread::spawn(|| {
+        if let Ok(cleared) = swifttunnel_msi_repair::repair()
+            && !cleared.is_empty()
+        {
+            log::warn!("cleared {} orphaned registration(s)", cleared.len());
+        }
+        match swifttunnel_msi_repair::preserve_installer_sources() {
+            Ok(kept) if !kept.is_empty() => {
+                log::info!("installer source preserved for: {}", kept.join(", "))
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("could not preserve the installer source: {error}"),
+        }
+    });
+
     // Before any window or font is created: the whole UI is set in these, and
     // GDI substitutes silently rather than failing if they are missing.
     fonts::install();

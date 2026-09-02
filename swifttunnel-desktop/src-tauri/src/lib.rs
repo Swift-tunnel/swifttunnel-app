@@ -692,17 +692,40 @@ pub fn run() {
             // Off the main thread and best effort. It reads the registry and
             // touches nothing when there is no orphan, but it must never delay
             // a window appearing or stop the app starting if it fails.
-            std::thread::spawn(|| match swifttunnel_msi_repair::repair() {
-                Ok(cleared) if !cleared.is_empty() => {
-                    log::warn!(
-                        "cleared {} orphaned SwiftTunnel registration(s) at startup; \
-                         upgrading and uninstalling will work again",
-                        cleared.len()
-                    );
+            std::thread::spawn(|| {
+                match swifttunnel_msi_repair::repair() {
+                    Ok(cleared) if !cleared.is_empty() => {
+                        log::warn!(
+                            "cleared {} orphaned SwiftTunnel registration(s) at startup; \
+                             upgrading and uninstalling will work again",
+                            cleared.len()
+                        );
+                    }
+                    Ok(_) => log::debug!("no orphaned SwiftTunnel registration"),
+                    Err(error) => {
+                        log::warn!("could not check for an orphaned registration: {error}")
+                    }
                 }
-                Ok(_) => log::debug!("no orphaned SwiftTunnel registration"),
-                Err(error) => {
-                    log::warn!("could not check for an orphaned registration: {error}")
+
+                // Then stop the next one happening. The repair above is the
+                // cure; this is the prevention, and it is the half that
+                // reaches everybody. Windows falls back to the recorded
+                // install source when a cleanup tool deletes its cached
+                // package, and that source is usually a Downloads folder
+                // since tidied or a temp directory Windows wiped itself.
+                // Copying the package somewhere durable and pointing the
+                // source at it costs one file and means the fallback
+                // actually resolves.
+                //
+                // This runs after the fact, so unlike the launcher's own
+                // staging it covers an install done straight from the .msi
+                // as well.
+                match swifttunnel_msi_repair::preserve_installer_sources() {
+                    Ok(kept) if !kept.is_empty() => {
+                        log::info!("installer source preserved for: {}", kept.join(", "));
+                    }
+                    Ok(_) => log::debug!("no installer source needed preserving"),
+                    Err(error) => log::warn!("could not preserve the installer source: {error}"),
                 }
             });
 
