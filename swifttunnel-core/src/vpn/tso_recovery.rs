@@ -153,6 +153,32 @@ fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32>
     }
 }
 
+/// Whether this adapter currently has large-send offload switched off.
+///
+/// `None` when the adapter cannot be queried or does not expose the setting.
+///
+/// Reported rather than acted on. Recovery here is entirely marker driven, so
+/// an adapter that an older build left with offload disabled stays that way
+/// forever once the marker is gone, which happens when the user clears
+/// %APPDATA%, reinstalls, or an uninstall tidies it away. The machine then does
+/// packet segmentation in software permanently, with SwiftTunnel not even
+/// running, and the only symptom is that everything feels slightly worse than
+/// it used to. Putting the real state in the log is how that becomes visible
+/// instead of a guess.
+///
+/// Restoring it automatically is deliberately not done here: a user may have
+/// turned offload off themselves, and silently changing a network adapter
+/// setting we did not set is worse than reporting it.
+pub fn large_send_offload_is_disabled(adapter_name: &str) -> Option<bool> {
+    let v4 = query_adapter_offload_value(adapter_name, "*LsoV2IPv4");
+    let v6 = query_adapter_offload_value(adapter_name, "*LsoV2IPv6");
+    match (v4, v6) {
+        (None, None) => None,
+        // 0 means the offload is off. Either family being off costs CPU.
+        (a, b) => Some(a == Some(0) || b == Some(0)),
+    }
+}
+
 fn capture_tso_marker(adapter_name: &str) -> TsoMarker {
     // We only capture/restore LSO. Checksum-offload toggles are no longer
     // performed on connect (they triggered repeated NIC resets that dropped

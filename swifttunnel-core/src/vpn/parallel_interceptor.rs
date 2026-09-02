@@ -4769,7 +4769,12 @@ impl ParallelInterceptor {
                 .clone()
                 .or_else(|| self.physical_adapter_kind.clone())
                 .unwrap_or_else(|| "unknown adapter".to_string());
-            let offload_off = self.tso_was_disabled;
+            // Ask the adapter, do not trust our own flag. We no longer switch
+            // offload off on connect, so the flag is always false and would
+            // have hidden the case that matters: a machine an older build left
+            // with it disabled, whose marker has since been lost, doing packet
+            // segmentation in software permanently.
+            let offload_adapter = self.physical_adapter_friendly_name.clone();
 
             self.monitor_handle = Some(thread::spawn(move || {
                 const EVERY: Duration = Duration::from_secs(60);
@@ -4788,6 +4793,18 @@ impl ParallelInterceptor {
                 // Only runs while Roblox is actually running: no game means no
                 // frames to count and no reason to pay for an ETW session, and
                 // it keeps the measurement off machines that are not playing.
+                // Once, at the top. The query spawns PowerShell and the answer
+                // does not change under us during a session.
+                let offload_off = offload_adapter
+                    .as_deref()
+                    .and_then(super::tso_recovery::large_send_offload_is_disabled)
+                    .unwrap_or(false);
+                if offload_off {
+                    log::warn!(
+                        "large-send offload is disabled on this adapter, so the CPU is doing                          packet segmentation in software. SwiftTunnel no longer turns this off;                          an older build may have, and lost the marker that would have restored it."
+                    );
+                }
+
                 let fps_monitor = crate::fps_monitor::FpsMonitor::new();
                 let mut process_lookup = crate::performance_monitor::PerformanceMonitor::new();
 
