@@ -666,6 +666,38 @@ pub struct WorkerStats {
     pub cpu_time_100ns: AtomicU64,
 }
 
+/// The whole machine's busy and total CPU time so far, in 100ns units.
+///
+/// Our own worker figures mean little alone. A worker holding 70% of a core
+/// is unremarkable on an idle machine and is the whole story on one that is
+/// already saturated, and a frame rate complaint cannot be read without
+/// knowing which of those it is.
+///
+/// Windows counts idle time inside the kernel figure, so busy is total minus
+/// idle rather than kernel plus user.
+fn system_cpu_time_100ns() -> Option<(u64, u64)> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::Threading::GetSystemTimes;
+
+        let mut idle = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: three live locals, written by the call.
+        if unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.is_err() {
+            return None;
+        }
+        let as_u64 = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | (t.dwLowDateTime as u64);
+        let total = as_u64(kernel) + as_u64(user);
+        Some((total.saturating_sub(as_u64(idle)), total))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 /// This thread's CPU time so far, kernel plus user, in 100ns units.
 ///
 /// `None` off Windows, or if the call fails, so a diagnostic can never take
@@ -934,6 +966,9 @@ pub struct ParallelInterceptor {
     worker_handles: Vec<JoinHandle<()>>,
     /// Reader thread handle
     reader_handle: Option<JoinHandle<()>>,
+    /// Periodic "what is this costing the machine" reporter. See its spawn
+    /// site: it only logs, so losing it costs a diagnostic and nothing else.
+    monitor_handle: Option<JoinHandle<()>>,
     /// Cache refresher thread handle
     refresher_handle: Option<JoinHandle<()>>,
     /// Background TSO-disable thread handle. The disable runs off the main
@@ -1078,6 +1113,7 @@ impl ParallelInterceptor {
             stop_flag: Arc::new(AtomicBool::new(false)),
             worker_handles: Vec::new(),
             reader_handle: None,
+            monitor_handle: None,
             tso_disable_handle: None,
             refresher_handle: None,
             physical_adapter_idx: None,
@@ -4709,6 +4745,122 @@ impl ParallelInterceptor {
             self.worker_handles.push(handle);
         }
 
+        // One line a minute describing what the tunnel is costing this
+        // machine.
+        //
+        // Frame rate complaints arrive with no evidence attached and the
+        // per-worker lines alone cannot settle them: a worker at 70% of a core
+        // is nothing on an idle machine and everything on a saturated one, and
+        // the cost depends on things no report ever mentions. Whether the
+        // adapter's segmentation offload is off, which moves that work onto the
+        // CPU. Whether it is Wi-Fi. How much traffic is actually flowing. How
+        // many cores there are to share.
+        //
+        // All of it in one grep-able line so a user's log answers the question
+        // without a round trip.
+        {
+            let stop = Arc::clone(&self.stop_flag);
+            let stats = self.worker_stats.clone();
+            let throughput = self.throughput_stats.clone();
+            let workers = self.num_workers;
+            let cores = num_cpus::get_physical();
+            let adapter = self
+                .physical_adapter_friendly_name
+                .clone()
+                .or_else(|| self.physical_adapter_kind.clone())
+                .unwrap_or_else(|| "unknown adapter".to_string());
+            let offload_off = self.tso_was_disabled;
+
+            self.monitor_handle = Some(thread::spawn(move || {
+                const EVERY: Duration = Duration::from_secs(60);
+
+                let mut last_cpu: Vec<u64> = vec![0; stats.len()];
+                let mut last_packets = 0u64;
+                let mut last_bytes = 0u64;
+                let mut last_system = system_cpu_time_100ns();
+                let mut last_at = Instant::now();
+
+                loop {
+                    // Wake often enough to notice a disconnect, report rarely.
+                    for _ in 0..(EVERY.as_secs() * 2) {
+                        if stop.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(500));
+                    }
+                    if stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+
+                    let now = Instant::now();
+                    let elapsed = now.duration_since(last_at).as_secs_f64();
+                    last_at = now;
+                    if elapsed <= 0.0 {
+                        continue;
+                    }
+
+                    // Workers store their own CPU total on a timer, so this
+                    // reads what they last published rather than sampling
+                    // threads it does not own.
+                    let mut ours_100ns = 0u64;
+                    for (index, worker) in stats.iter().enumerate() {
+                        let total = worker.cpu_time_100ns.load(Ordering::Relaxed);
+                        ours_100ns += total.saturating_sub(last_cpu[index]);
+                        last_cpu[index] = total;
+                    }
+                    let ours_cores = ours_100ns as f64 / (elapsed * 10_000_000.0);
+
+                    let packets: u64 = stats
+                        .iter()
+                        .map(|w| w.packets_processed.load(Ordering::Relaxed))
+                        .sum();
+                    let bytes = throughput.bytes_tx.load(Ordering::Relaxed)
+                        + throughput.bytes_rx.load(Ordering::Relaxed);
+                    let packet_rate = packets.saturating_sub(last_packets) as f64 / elapsed;
+                    let byte_rate = bytes.saturating_sub(last_bytes) as f64 / elapsed;
+                    last_packets = packets;
+                    last_bytes = bytes;
+
+                    let system = match (last_system, system_cpu_time_100ns()) {
+                        (Some((busy_before, total_before)), Some((busy, total))) => {
+                            last_system = Some((busy, total));
+                            let spent = total.saturating_sub(total_before);
+                            if spent > 0 {
+                                format!(
+                                    "{:.0}%",
+                                    busy.saturating_sub(busy_before) as f64 * 100.0 / spent as f64
+                                )
+                            } else {
+                                "?".to_string()
+                            }
+                        }
+                        (_, current) => {
+                            last_system = current;
+                            "?".to_string()
+                        }
+                    };
+
+                    log::info!(
+                        "load: tunnel using {:.0}% of one core ({:.0}% of {} cores, {} workers), \
+                         machine {} busy, {:.0} pkt/s, {:.2} MB/s, on {}{}",
+                        ours_cores * 100.0,
+                        ours_cores * 100.0 / cores.max(1) as f64,
+                        cores,
+                        workers,
+                        system,
+                        packet_rate,
+                        byte_rate / (1024.0 * 1024.0),
+                        adapter,
+                        if offload_off {
+                            " with segmentation offload OFF, so the CPU is doing that work"
+                        } else {
+                            ""
+                        },
+                    );
+                }
+            }));
+        }
+
         // Start packet reader/dispatcher thread
         let reader_stop = Arc::clone(&self.stop_flag);
         let num_workers = self.num_workers;
@@ -4866,6 +5018,12 @@ impl ParallelInterceptor {
         self.stop_flag.store(true, Ordering::Release);
 
         // Wait for threads with timeout to prevent hanging on stuck threads
+        // Logging only, and it wakes twice a second to notice the stop flag,
+        // so this joins quickly and nothing depends on the result.
+        if let Some(handle) = self.monitor_handle.take() {
+            let _ = handle.join();
+        }
+
         if let Some(handle) = self.reader_handle.take()
             && !join_with_timeout(handle, "Reader")
         {
@@ -9323,6 +9481,41 @@ mod tests {
     // Shared with hosts.rs tests: every test touching the process-global
     // bootstrap IP sets must serialize on the same lock, across modules.
     use crate::roblox_proxy::hosts::BOOTSTRAP_IP_TEST_LOCK as BOOTSTRAP_ROUTE_IP_TEST_LOCK;
+
+    /// Machine-wide CPU must be busy-out-of-total, not kernel plus user.
+    ///
+    /// Windows counts idle time inside the kernel figure, so adding kernel to
+    /// user and calling it busy reports a machine as permanently pegged, which
+    /// would make every frame rate report look like saturation.
+    #[cfg(windows)]
+    #[test]
+    fn system_cpu_is_busy_out_of_total() {
+        let (busy, total) = system_cpu_time_100ns().expect("windows reports system times");
+        // Strictly less: every machine has accumulated some idle since boot,
+        // so equality means idle is being charged as work. This is exactly
+        // what kernel+user would produce, which is the mistake to catch.
+        assert!(
+            busy < total,
+            "busy {busy} is not below total {total}, so idle is being counted as work"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let (busy_later, total_later) = system_cpu_time_100ns().unwrap();
+
+        assert!(
+            total_later > total,
+            "total CPU time must advance with wall clock"
+        );
+        assert!(busy_later >= busy, "busy time must never go backwards");
+        // Idle counts toward total, so a mostly idle machine still accumulates
+        // total far faster than busy. If these advanced in lockstep, idle is
+        // being charged as work.
+        let busy_share = (busy_later - busy) as f64 / (total_later - total).max(1) as f64;
+        assert!(
+            (0.0..=1.0).contains(&busy_share),
+            "busy share of {busy_share} is not a fraction, the arithmetic is wrong"
+        );
+    }
 
     #[cfg(windows)]
     #[test]
