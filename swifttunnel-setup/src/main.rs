@@ -48,7 +48,14 @@ fn run() -> i32 {
     if MSI_BYTES.is_empty() {
         // A debug build carries no installer. Refuse rather than write a
         // zero byte file and hand msiexec something meaningless.
-        return 2;
+        return fail(
+            concat!(
+                "This copy of the installer is incomplete, so there is nothing to install.",
+                "\n\n",
+                "Download SwiftTunnel again from swifttunnel.net."
+            ),
+            2,
+        );
     }
 
     // Best effort, and never fatal. A machine that is not broken finds nothing
@@ -58,7 +65,16 @@ fn run() -> i32 {
     let _ = swifttunnel_msi_repair::repair();
 
     let Some(msi_path) = stage_payload() else {
-        return 1;
+        return fail(
+            concat!(
+                "SwiftTunnel could not unpack its installer.",
+                "\n\n",
+                "Antivirus software removing the file is the usual cause. Check its ",
+                "quarantine or protection history and allow SwiftTunnel, then download ",
+                "it again from swifttunnel.net."
+            ),
+            1,
+        );
     };
 
     let status = Command::new("msiexec").arg("/i").arg(&msi_path).status();
@@ -68,8 +84,81 @@ fn run() -> i32 {
 
     match status {
         Ok(s) => s.code().unwrap_or(1),
-        Err(_) => 1,
+        Err(error) => fail(
+            &format!(
+                "SwiftTunnel could not start Windows Installer.\n\n{error}\n\nRestart the PC and try again."
+            ),
+            1,
+        ),
     }
+}
+
+/// Tell the user, then return the exit code.
+///
+/// Every way this launcher can fail used to fail in silence. It asks for
+/// administrator, so Windows shows a prompt, and then nothing happens at all:
+/// no window, no console, no error. Somebody who accepted that prompt and saw
+/// nothing has no way to tell a blocked download from a broken one, and the
+/// ticket that follows says only "it just didn't open".
+///
+/// A message box is the whole fix. There is no console to print to, because a
+/// flashing console window is exactly the impression an unsigned installer does
+/// not need.
+fn fail(message: &str, code: i32) -> i32 {
+    // Recorded before the box, not after. MessageBoxW blocks until somebody
+    // dismisses it, and a user who force-closes the dialog would otherwise
+    // leave nothing behind for the ticket that follows.
+    log_failure(message);
+
+    #[cfg(windows)]
+    {
+        // Declared here rather than pulling in a Windows crate: one function,
+        // and this binary is deliberately tiny.
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxW(
+                hwnd: *mut core::ffi::c_void,
+                text: *const u16,
+                caption: *const u16,
+                utype: u32,
+            ) -> i32;
+        }
+        const MB_OK: u32 = 0x0000_0000;
+        const MB_ICONERROR: u32 = 0x0000_0010;
+        const MB_SETFOREGROUND: u32 = 0x0001_0000;
+
+        let wide = |s: &str| {
+            s.encode_utf16()
+                .chain(std::iter::once(0))
+                .collect::<Vec<u16>>()
+        };
+        let text = wide(message);
+        let caption = wide("SwiftTunnel Setup");
+        // SAFETY: both strings are NUL terminated and outlive the call.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                caption.as_ptr(),
+                MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+            );
+        }
+    }
+    code
+}
+
+/// Leave a note beside the installer too, for a ticket that arrives after the
+/// box has been dismissed.
+fn log_failure(message: &str) {
+    let Some(dir) = std::env::var_os("ProgramData").map(|base| {
+        std::path::PathBuf::from(base)
+            .join("SwiftTunnel")
+            .join("installers")
+    }) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::fs::write(dir.join("setup-error.txt"), message);
 }
 
 /// Where the payload is unpacked before msiexec runs.
