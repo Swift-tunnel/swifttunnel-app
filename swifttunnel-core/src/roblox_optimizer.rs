@@ -2143,10 +2143,18 @@ impl RobloxOptimizer {
     }
 
     fn find_roblox_version_folders() -> Vec<PathBuf> {
-        let Some(local_app_data) = std::env::var("LOCALAPPDATA").ok() else {
-            return Vec::new();
-        };
-        Self::find_roblox_version_folders_in(&PathBuf::from(local_app_data))
+        let mut versions: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
+
+        // Every launcher root, wherever it was actually installed to.
+        for root in Self::launcher_roots() {
+            let versions_dir = root.join("Versions");
+            if versions_dir.exists() {
+                Self::collect_version_folders(&versions_dir, &mut versions);
+            }
+        }
+
+        versions.sort_by(|(_, left), (_, right)| right.cmp(left));
+        versions.into_iter().map(|(path, _)| path).collect()
     }
 
     /// Every place a Roblox client is installed, not just Roblox's own folder.
@@ -2172,6 +2180,59 @@ impl RobloxOptimizer {
         "Voidstrap",
         "Voidstrap-QA",
     ];
+
+    /// Where a launcher actually put itself, if it recorded a location.
+    ///
+    /// `%LOCALAPPDATA%\<Name>` is only the default. Both Bloxstrap and
+    /// Fishstrap let you install anywhere and record the choice in their own
+    /// uninstall key, which their source reads back the same way:
+    ///
+    /// ```text
+    /// HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\<Name>
+    ///     InstallLocation = D:\Fishstrap
+    /// ```
+    ///
+    /// Assuming the default misses anyone who moved it, and misses them in the
+    /// worst way: we find their untouched `%LOCALAPPDATA%\Roblox`, write real
+    /// files into it, and report success while the game they launch from
+    /// another drive reads none of it.
+    #[cfg(windows)]
+    fn bootstrapper_install_location(project: &str) -> Option<PathBuf> {
+        use winreg::RegKey;
+        use winreg::enums::HKEY_CURRENT_USER;
+
+        let key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(format!(
+                r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{project}"
+            ))
+            .ok()?;
+        let location: String = key.get_value("InstallLocation").ok()?;
+        let path = PathBuf::from(location.trim());
+        path.is_dir().then_some(path)
+    }
+
+    #[cfg(not(windows))]
+    fn bootstrapper_install_location(_project: &str) -> Option<PathBuf> {
+        None
+    }
+
+    /// Every launcher root on this machine: the recorded location where there
+    /// is one, the default underneath LOCALAPPDATA otherwise.
+    fn launcher_roots() -> Vec<PathBuf> {
+        let local_app_data = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
+        let mut roots = Vec::new();
+
+        for project in Self::ROBLOX_INSTALL_ROOTS {
+            if let Some(recorded) = Self::bootstrapper_install_location(project) {
+                roots.push(recorded);
+                continue;
+            }
+            if let Some(base) = &local_app_data {
+                roots.push(base.join(project));
+            }
+        }
+        roots
+    }
 
     fn find_roblox_version_folders_in(local_app_data: &Path) -> Vec<PathBuf> {
         let mut versions: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
@@ -2230,7 +2291,49 @@ impl RobloxOptimizer {
         let Some(local_app_data) = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from) else {
             return Ok(Vec::new());
         };
-        Self::get_client_settings_paths_for_local_app_data(&local_app_data, create_missing)
+        let mut paths =
+            Self::get_client_settings_paths_for_local_app_data(&local_app_data, create_missing)?;
+
+        // Launchers installed somewhere other than the default. Both Bloxstrap
+        // and Fishstrap let you choose, and record the choice in their own
+        // uninstall key; someone who put one on another drive would otherwise
+        // have every flag written into a Roblox they never launch.
+        //
+        // Only here, never in the function above: that one takes the directory
+        // to search so tests can point it at a temporary one, and reading the
+        // real registry inside it would let this machine leak into them.
+        for (project, relative_segments) in Self::BOOTSTRAPPER_CLIENT_SETTINGS_LOCATIONS {
+            // Only a launcher that recorded a location, which means it is both
+            // installed and somewhere other than the default the call above
+            // already covered. Looping the whole list unconditionally creates
+            // settings folders for software the machine has never had.
+            let Some(root) = Self::bootstrapper_install_location(project) else {
+                continue;
+            };
+
+            // Each launcher's own subpath, from the table. Froststrap keeps its
+            // settings directly under ClientSettings and Voidstrap under
+            // VoidstrapMods, so one hardcoded subpath writes to the wrong place
+            // for both of them.
+            let settings = relative_segments
+                .iter()
+                .fold(root, |path, segment| path.join(segment));
+
+            match Self::get_bootstrapper_client_settings_path_checked(
+                project,
+                &settings,
+                create_missing,
+            ) {
+                Ok(Some(path)) => paths.push(path),
+                Ok(None) => {}
+                Err(error) => warn!(
+                    "Skipping launcher settings path {}: {error}",
+                    settings.display()
+                ),
+            }
+        }
+
+        Ok(Self::dedupe_paths(paths))
     }
 
     #[cfg(test)]
@@ -2305,6 +2408,7 @@ impl RobloxOptimizer {
                 create_missing,
             ),
         );
+
         Ok(Self::dedupe_paths(paths))
     }
 
