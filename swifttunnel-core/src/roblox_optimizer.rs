@@ -2149,37 +2149,71 @@ impl RobloxOptimizer {
         Self::find_roblox_version_folders_in(&PathBuf::from(local_app_data))
     }
 
+    /// Every place a Roblox client is installed, not just Roblox's own folder.
+    ///
+    /// Bootstrappers install their own copy of Roblox under their own
+    /// directory and launch that. A player using one still has a perfectly
+    /// normal `%LOCALAPPDATA%\Roblox\Versions` full of older builds nobody
+    /// runs any more, so looking only there finds real folders, writes real
+    /// files, and changes nothing about the game that actually starts. Every
+    /// symptom of that is silent: the settings apply, the app says so, and the
+    /// frame rate does not move.
+    ///
+    /// Roblox is first so a plain install behaves exactly as it always has.
+    const ROBLOX_INSTALL_ROOTS: &[&str] = &[
+        "Roblox",
+        "Bloxstrap",
+        "Bloxstrap-QA",
+        "Fishstrap",
+        "Fishstrap-QA",
+        "Bubblestrap",
+        "Froststrap",
+        "Froststrap-QA",
+        "Voidstrap",
+        "Voidstrap-QA",
+    ];
+
     fn find_roblox_version_folders_in(local_app_data: &Path) -> Vec<PathBuf> {
-        let versions_dir = local_app_data.join("Roblox").join("Versions");
-
-        if !versions_dir.exists() {
-            return Vec::new();
-        }
-
         let mut versions: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
 
-        if let Ok(entries) = fs::read_dir(&versions_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    let Some(name) = path.file_name().map(|value| value.to_string_lossy()) else {
-                        continue;
-                    };
-                    if name.starts_with("version-")
-                        && path.join("RobloxPlayerBeta.exe").exists()
-                        && let Ok(metadata) = entry.metadata()
-                    {
-                        let modified = metadata
-                            .modified()
-                            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                        versions.push((path, modified));
-                    }
-                }
+        for root in Self::ROBLOX_INSTALL_ROOTS {
+            let versions_dir = local_app_data.join(root).join("Versions");
+            if versions_dir.exists() {
+                Self::collect_version_folders(&versions_dir, &mut versions);
             }
         }
 
+        // Newest first across every root, so the build the player actually
+        // launched wins over one left behind by a launcher they stopped using.
         versions.sort_by(|(_, left), (_, right)| right.cmp(left));
         versions.into_iter().map(|(path, _)| path).collect()
+    }
+
+    fn collect_version_folders(
+        versions_dir: &Path,
+        versions: &mut Vec<(PathBuf, std::time::SystemTime)>,
+    ) {
+        let Ok(entries) = fs::read_dir(versions_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|value| value.to_string_lossy()) else {
+                continue;
+            };
+            if name.starts_with("version-")
+                && path.join("RobloxPlayerBeta.exe").exists()
+                && let Ok(metadata) = entry.metadata()
+            {
+                let modified = metadata
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                versions.push((path, modified));
+            }
+        }
     }
 
     /// Get the ClientSettings folder path (creates it if needed).
@@ -2738,6 +2772,88 @@ impl RobloxOptimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Bloxstrap player's Roblox must be found.
+    ///
+    /// From a real ticket: "fps not increased". Their log showed us creating
+    /// ClientSettings under three `\Roblox\Versions\` folders while the game
+    /// they launched lived under `\Bloxstrap\Versions\`. Every write landed
+    /// somewhere their Roblox never reads, and nothing reported a problem
+    /// because nothing had failed.
+    #[test]
+    fn a_bootstrapper_install_is_found() {
+        let base = std::env::temp_dir().join(format!(
+            "swifttunnel-roots-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let make = |root: &str, version: &str| {
+            let dir = base.join(root).join("Versions").join(version);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("RobloxPlayerBeta.exe"), b"stub").unwrap();
+            dir
+        };
+
+        let bloxstrap = make("Bloxstrap", "version-aaaa");
+        let found = RobloxOptimizer::find_roblox_version_folders_in(&base);
+
+        assert!(
+            found.contains(&bloxstrap),
+            "a Bloxstrap install must be found, got {found:?}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A plain install still works, and both are found when both exist.
+    #[test]
+    fn a_plain_install_is_still_found_alongside_a_launcher() {
+        let base = std::env::temp_dir().join(format!(
+            "swifttunnel-roots-both-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let make = |root: &str, version: &str| {
+            let dir = base.join(root).join("Versions").join(version);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("RobloxPlayerBeta.exe"), b"stub").unwrap();
+            dir
+        };
+
+        let vanilla = make("Roblox", "version-bbbb");
+        let fishstrap = make("Fishstrap", "version-cccc");
+
+        let found = RobloxOptimizer::find_roblox_version_folders_in(&base);
+        assert!(
+            found.contains(&vanilla),
+            "the plain install must still count"
+        );
+        assert!(found.contains(&fishstrap), "Fishstrap must count too");
+        assert_eq!(found.len(), 2);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A directory without the executable is not a Roblox install.
+    #[test]
+    fn a_version_folder_without_roblox_is_ignored() {
+        let base = std::env::temp_dir().join(format!(
+            "swifttunnel-roots-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(base.join("Bloxstrap").join("Versions").join("version-dddd")).unwrap();
+
+        assert!(
+            RobloxOptimizer::find_roblox_version_folders_in(&base).is_empty(),
+            "a version folder with no RobloxPlayerBeta.exe is not an install"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
     use std::fs;
 
     /// Helper: create a RobloxOptimizer pointing at a specific path
