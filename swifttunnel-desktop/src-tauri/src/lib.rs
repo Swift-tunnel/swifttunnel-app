@@ -953,9 +953,33 @@ pub fn run() {
                 } else {
                     // Recover network booster state from persisted snapshot
                     // (crash recovery), then reapply what the user had on.
-                    state.network_booster.lock().recover_from_snapshot();
-                    reapply_saved_network_boosts(&state);
-                    reapply_saved_roblox_fflags(&state);
+                    //
+                    // All three block, so they belong on a blocking thread and
+                    // not on a runtime worker. They ran inline here while they
+                    // were cheap, and v3.1.3 made the last one roughly ten
+                    // times heavier: reapplying FFlags went from reading one
+                    // directory to walking ten launcher roots, each with a
+                    // registry lookup, a read_dir, and a settings file written
+                    // per version folder found, all under the optimizer mutex.
+                    //
+                    // Starving a worker here does not look like a slow startup.
+                    // The server list fetch shares this runtime, so it never
+                    // resolves and the Connect tab renders "Could not load
+                    // regions", and Tauri commands stop returning so Windows
+                    // marks the window "not responding". Both were reported
+                    // within hours of 3.1.3, and neither reproduces on a fast
+                    // disk with only %LOCALAPPDATA%\Roblox present, which is
+                    // why it looked machine-specific rather than like a bug.
+                    let handle = app_handle.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let Some(state) = handle.try_state::<AppState>() else {
+                            return;
+                        };
+                        state.network_booster.lock().recover_from_snapshot();
+                        reapply_saved_network_boosts(&state);
+                        reapply_saved_roblox_fflags(&state);
+                    })
+                    .await;
                 }
             });
 
