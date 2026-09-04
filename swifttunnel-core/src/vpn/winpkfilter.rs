@@ -1216,4 +1216,63 @@ Provider Name:      NDISAPI
             );
         }
     }
+
+    /// The Lite installer must lay the driver out where core looks for it.
+    ///
+    /// Core builds every candidate as `<dir>/drivers/` joined with the relative
+    /// dir, and that relative dir begins with `winpkfilter`. The Lite MSI
+    /// declared `drivers/<arch>/win10` instead, one level short of all of them,
+    /// so a machine with only Lite installed found no driver and could never
+    /// connect: the connect screen showed "could not start its Windows Packet
+    /// Filter driver" and the repair loop retried forever against a service
+    /// whose file was never on disk.
+    ///
+    /// It survived testing because the last candidate core tries is the full
+    /// app's own `ProgramFiles/SwiftTunnel/resources/drivers/winpkfilter/...`,
+    /// so any machine with both products installed resolved the driver anyway.
+    /// Only Lite-alone machines broke, which is exactly the configuration a
+    /// developer never has. Hence a test rather than a careful reading.
+    #[test]
+    fn the_lite_installer_declares_the_layout_core_searches() {
+        let wxs = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("swifttunnel-lite")
+            .join("wix")
+            .join("product.wxs");
+
+        // Core is also built from checkouts without the Lite crate beside it.
+        // A missing installer is not a layout error.
+        let Ok(xml) = fs::read_to_string(&wxs) else {
+            return;
+        };
+
+        let drivers = xml
+            .find(r#"Id="DriversDir""#)
+            .expect("the Lite installer must declare a drivers directory");
+        let arch = xml
+            .find(r#"Name="$(var.DriverArch)""#)
+            .expect("the Lite installer must declare a per-arch directory");
+        let package = xml
+            .find(&format!(r#"Name="{DRIVER_PACKAGE_ROOT_RELATIVE_DIR}""#))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the Lite installer must nest the driver under a \
+                     '{DRIVER_PACKAGE_ROOT_RELATIVE_DIR}' directory: core only ever looks in \
+                     drivers/{DRIVER_PACKAGE_ROOT_RELATIVE_DIR}/<arch>/{DRIVER_PACKAGE_WIN10_DIR}, \
+                     so files installed anywhere else are invisible to it"
+                )
+            });
+
+        assert!(
+            drivers < package && package < arch,
+            "the Lite installer must order these as \
+             drivers/{DRIVER_PACKAGE_ROOT_RELATIVE_DIR}/<arch>/{DRIVER_PACKAGE_WIN10_DIR}"
+        );
+
+        assert!(
+            xml.contains(&format!(r#"Name="{DRIVER_PACKAGE_WIN10_DIR}""#)),
+            "the Lite installer must place the files in a \
+             '{DRIVER_PACKAGE_WIN10_DIR}' directory"
+        );
+    }
 }

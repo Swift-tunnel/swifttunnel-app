@@ -73,19 +73,32 @@
           </Component>
 
           <!-- The driver package, in the layout core searches for:
-               drivers/<arch>/win10/. -->
+               drivers/winpkfilter/<arch>/win10/.
+
+               The `winpkfilter` level is not decoration. Core builds its search
+               paths as exe_dir + "drivers" + native_driver_package_relative_dir(),
+               and that relative dir starts with DRIVER_PACKAGE_ROOT_RELATIVE_DIR
+               ("winpkfilter"). Installing to drivers/<arch>/win10 instead put the
+               files one level off every candidate path, so a Lite-only machine
+               found no driver at all and could never connect. It looked fine in
+               testing because the last candidate is
+               ProgramFiles/SwiftTunnel/resources/drivers/winpkfilter/<arch>/win10,
+               which the full app populates, so any machine with both installed
+               masked it. -->
           <Directory Id="DriversDir" Name="drivers">
-            <Directory Id="DriverArchDir" Name="$(var.DriverArch)">
-              <Directory Id="DriverWin10Dir" Name="win10">
-                <Component Id="DriverInf" Guid="*" Win64="$(var.Win64)">
-                  <File Id="DriverInfFile" Source="$(var.DriverDir)\ndisrd_lwf.inf" KeyPath="yes" />
-                </Component>
-                <Component Id="DriverSys" Guid="*" Win64="$(var.Win64)">
-                  <File Id="DriverSysFile" Source="$(var.DriverDir)\ndisrd.sys" KeyPath="yes" />
-                </Component>
-                <Component Id="DriverCat" Guid="*" Win64="$(var.Win64)">
-                  <File Id="DriverCatFile" Source="$(var.DriverDir)\ndisrd.cat" KeyPath="yes" />
-                </Component>
+            <Directory Id="DriverPackageDir" Name="winpkfilter">
+              <Directory Id="DriverArchDir" Name="$(var.DriverArch)">
+                <Directory Id="DriverWin10Dir" Name="win10">
+                  <Component Id="DriverInf" Guid="*" Win64="$(var.Win64)">
+                    <File Id="DriverInfFile" Source="$(var.DriverDir)\ndisrd_lwf.inf" KeyPath="yes" />
+                  </Component>
+                  <Component Id="DriverSys" Guid="*" Win64="$(var.Win64)">
+                    <File Id="DriverSysFile" Source="$(var.DriverDir)\ndisrd.sys" KeyPath="yes" />
+                  </Component>
+                  <Component Id="DriverCat" Guid="*" Win64="$(var.Win64)">
+                    <File Id="DriverCatFile" Source="$(var.DriverDir)\ndisrd.cat" KeyPath="yes" />
+                  </Component>
+                </Directory>
               </Directory>
             </Directory>
           </Directory>
