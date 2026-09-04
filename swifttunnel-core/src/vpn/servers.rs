@@ -17,9 +17,21 @@ const SERVERS_API_URL: &str = "https://www.swifttunnel.net/api/vpn/servers";
 
 /// Cache TTL in seconds (1 hour)
 const CACHE_TTL_SECONDS: i64 = 3600;
-/// Hard max stale cache age (24h). Older cached endpoints are treated as unsafe.
+/// Hard max stale cache age (24h). Past this the entries are old enough that
+/// some may name relays which have left the fleet, so a refresh is strongly
+/// preferred. It is not a hard refusal: see `load_server_list` for why serving
+/// an expired cache beats showing no regions at all when the API is
+/// unreachable.
 const MAX_STALE_CACHE_AGE_SECONDS: i64 = 24 * 3600;
-const STALE_CACHE_REJECT_REASON: &str = "ST_STALE_CACHE_REJECTED";
+
+/// Logged when an expired cache is served because the refresh failed.
+///
+/// Deliberately a different token from the `ST_STALE_CACHE_REJECTED` this
+/// replaced. Support logs from before this change say "rejected" and mean the
+/// app showed nothing; logs after it say "served" and mean the app carried on
+/// with old entries. Reusing one token would have made those two behaviours
+/// indistinguishable in exactly the reports where the difference matters.
+const STALE_CACHE_SERVED_EXPIRED_REASON: &str = "ST_STALE_CACHE_SERVED_EXPIRED";
 
 fn build_server_http_client(use_system_proxy: bool) -> Result<reqwest::Client, reqwest::Error> {
     let mut builder = reqwest::Client::builder()
@@ -460,20 +472,37 @@ pub async fn load_server_list() -> Result<
             }
             Err(e) => {
                 if cached.exceeds_hard_stale_limit() {
-                    let age = cached.age_seconds();
-                    log::error!(
-                        "{}: cache age {}s exceeds hard limit {}s and API refresh failed ({})",
-                        STALE_CACHE_REJECT_REASON,
-                        age,
+                    // Past the hard limit, but the refresh failed, so there is
+                    // nothing newer to serve. Returning an error here left the
+                    // app with no regions at all and no route out of it: a user
+                    // whose network could not reach the API for a day was locked
+                    // out permanently from then on, holding a cached list that
+                    // would almost certainly still have worked. In the field it
+                    // presented as "it worked before and died after an update",
+                    // because nothing had changed except the cache ageing past
+                    // a day while the API stayed unreachable.
+                    //
+                    // The limit is not paranoia. An endpoint that has left the
+                    // fleet can have its address reassigned, and five GCP
+                    // addresses were released on 2026-09-04. But the exposure is
+                    // bounded: the relay handshake is cryptographically
+                    // authenticated, so whoever holds a recycled address cannot
+                    // answer for the relay. A stale entry fails to connect. It
+                    // does not connect to the wrong party.
+                    //
+                    // A bounded risk of a failed connection beats a certain
+                    // outage, so serve it and say so loudly.
+                    log::warn!(
+                        "{}: cache age {}s exceeds hard limit {}s and API refresh failed ({}). \
+                         Serving the expired cache: some entries may name relays that have left the fleet.",
+                        STALE_CACHE_SERVED_EXPIRED_REASON,
+                        cached.age_seconds(),
                         MAX_STALE_CACHE_AGE_SECONDS,
                         e
                     );
-                    return Err(format!(
-                        "{}: cached server list is too old ({}s > {}s) and API refresh failed ({})",
-                        STALE_CACHE_REJECT_REASON, age, MAX_STALE_CACHE_AGE_SECONDS, e
-                    ));
+                } else {
+                    log::warn!("Failed to fetch from API, using stale cache: {}", e);
                 }
-                log::warn!("Failed to fetch from API, using stale cache: {}", e);
                 return Ok((
                     cached.data.servers,
                     cached.data.regions,
