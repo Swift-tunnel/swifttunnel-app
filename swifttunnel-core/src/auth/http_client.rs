@@ -1136,7 +1136,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// The lockout has to be liftable.
     ///
     /// It was a OnceLock, so one 426 held the client in a forced-update gate
@@ -1147,9 +1146,7 @@ mod tests {
     /// dead app rather than a wrong message.
     #[test]
     fn the_update_gate_lifts_once_the_server_serves_us_again() {
-        let _guard = UPDATE_GATE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = gate_lock();
 
         let _ = update_required_error(
             reqwest::StatusCode::UPGRADE_REQUIRED,
@@ -1168,9 +1165,7 @@ mod tests {
     /// Clearing when nothing is set must not be a special case.
     #[test]
     fn clearing_an_unset_gate_is_harmless() {
-        let _guard = UPDATE_GATE_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = gate_lock();
         if let Ok(mut held) = UPDATE_REQUIRED_MESSAGE.write() {
             *held = None;
         }
@@ -1178,11 +1173,34 @@ mod tests {
         assert_eq!(update_required_message(), None);
     }
 
-    /// Process-wide state, so these two must not overlap with each other or
-    /// with the detection tests that also set it.
+    /// Process-wide state, so every test that touches the gate has to hold
+    /// this, not just the two that read it back.
+    ///
+    /// `update_required_error` latches the message into UPDATE_REQUIRED_MESSAGE
+    /// whenever it detects one, so the detection tests below are writers too.
+    /// They did not take the lock, and one of them landing between the "set it"
+    /// and "clear it" halves of `the_update_gate_lifts_once_the_server_serves_us_again`
+    /// left the gate set and failed it. It only failed under parallelism, which
+    /// is why it read as flaky rather than as a missing lock.
     static UPDATE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Take the gate lock, ignoring poisoning.
+    ///
+    /// A failing test panics while holding it, and a poisoned mutex would then
+    /// turn one real failure into a cascade of unrelated ones.
+    fn gate_lock() -> std::sync::MutexGuard<'static, ()> {
+        UPDATE_GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// This one had lost its `#[test]` to a stray duplicate attribute on the
+    /// test above, so it had not run at all: 426 is the status the server
+    /// actually sends for a version lockout, and nothing was checking it.
+    #[test]
     fn update_required_detected_by_status_426() {
+        let _guard = gate_lock();
+
         let err = update_required_error(
             reqwest::StatusCode::from_u16(426).unwrap(),
             r#"{"error":"Please update.","code":"update_required","min_version":"2.6.0"}"#,
@@ -1194,6 +1212,8 @@ mod tests {
 
     #[test]
     fn update_required_detected_by_code_without_426() {
+        let _guard = gate_lock();
+
         let err = update_required_error(
             reqwest::StatusCode::FORBIDDEN,
             r#"{"error":"Old build.","code":"update_required"}"#,
@@ -1204,6 +1224,8 @@ mod tests {
 
     #[test]
     fn update_required_falls_back_to_default_message_on_bare_426() {
+        let _guard = gate_lock();
+
         let err = update_required_error(
             reqwest::StatusCode::from_u16(426).unwrap(),
             "upgrade required",
