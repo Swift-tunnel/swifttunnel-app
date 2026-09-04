@@ -446,7 +446,28 @@ fn select_candidate_after_preflight(
         ));
     }
 
-    let fallback = attempts.first().ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
+    // Before the policy check below, which uses `all()` and is therefore
+    // vacuously true on an empty list. An empty list means there was nothing to
+    // try, not that a policy was missing, and the two want different errors.
+    if attempts.is_empty() {
+        return Err(CONNECT_FAIL_CANDIDATE_EXHAUSTED);
+    }
+
+    // No ticket reached us for any candidate, so we know nothing about what the
+    // server would have allowed. Both guards below read fields that are only
+    // populated from a ticket we actually received, so an unreachable API left
+    // them at their permissive defaults and the connection went ahead
+    // unauthenticated.
+    //
+    // That failed open, and the free-tier allowance is enforced on
+    // /api/vpn/relay-ticket. Blocking that one host locally was therefore
+    // enough to tunnel without a ticket, an account check, or a quota, for as
+    // long as a cached server list survived.
+    //
+    // Absence of a policy is not permission. Refuse, and let the caller say so.
+    if attempts.iter().all(|attempt| !attempt.policy_known) {
+        return Err(CONNECT_FAIL_POLICY_UNAVAILABLE);
+    }
 
     if attempts.iter().any(|attempt| attempt.auth_required) {
         return Err(CONNECT_FAIL_AUTH_REQUIRED);
@@ -458,6 +479,16 @@ fn select_candidate_after_preflight(
     {
         return Err(CONNECT_FAIL_PREFLIGHT_ENFORCED);
     }
+
+    // Prefer a candidate whose policy we actually read. Taking `first()` blindly
+    // could fall back onto a candidate we never got a ticket for while a
+    // properly answered one sat further down the list, which is the same
+    // assumption in miniature.
+    let fallback = attempts
+        .iter()
+        .find(|attempt| attempt.policy_known)
+        .or_else(|| attempts.first())
+        .ok_or(CONNECT_FAIL_CANDIDATE_EXHAUSTED)?;
 
     Ok((
         fallback.region.clone(),
@@ -5091,8 +5122,26 @@ mod tests {
         assert_eq!(error, CONNECT_FAIL_AUTH_REQUIRED);
     }
 
+    /// No ticket for any candidate means no connection.
+    ///
+    /// This asserted the opposite, that unknown policy alone should not block
+    /// the legacy fallback, added in e4e1cfa "tolerate unavailable relay policy
+    /// fallback" so a briefly unreachable API would not fail a connect. The
+    /// tolerance is understandable and the consequence was not spotted: the
+    /// free-tier allowance is enforced on /api/vpn/relay-ticket, and both
+    /// guards in the selector read fields that only exist on a ticket we
+    /// received. An unreachable API therefore left them at permissive defaults
+    /// and the connection proceeded unauthenticated and unmetered.
+    ///
+    /// Blocking one hostname locally was enough to tunnel indefinitely without
+    /// an account check or a quota. Only the 24h cache limit bounded it, and
+    /// then only by starving the client of a server list.
+    ///
+    /// Absence of a policy is not permission, so this now refuses. A user whose
+    /// network genuinely cannot reach the API gets a clear failure instead of
+    /// silent free access, which is the honest outcome for both sides.
     #[test]
-    fn test_select_candidate_after_preflight_all_unknown_policy_allows_marked_fallback() {
+    fn test_select_candidate_after_preflight_unknown_policy_refuses_fallback() {
         let attempts = vec![RelayCandidateAttempt {
             region: "germany-01".to_string(),
             addr: parse_addr("10.0.0.1:51821"),
@@ -5103,15 +5152,47 @@ mod tests {
             queue_full_mode: RelayQueueFullMode::Bypass,
         }];
 
+        let error = select_candidate_after_preflight(&attempts)
+            .expect_err("a candidate we never got a ticket for must not be used unauthenticated");
+        assert_eq!(error, CONNECT_FAIL_POLICY_UNAVAILABLE);
+    }
+
+    /// A candidate whose policy we did read still works, so this only closes
+    /// the no-ticket case rather than disabling legacy fallback generally.
+    #[test]
+    fn test_select_candidate_after_preflight_prefers_the_candidate_we_have_policy_for() {
+        let attempts = vec![
+            RelayCandidateAttempt {
+                region: "germany-01".to_string(),
+                addr: parse_addr("10.0.0.1:51821"),
+                authenticated: false,
+                policy_known: false,
+                auth_required: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Bypass,
+            },
+            RelayCandidateAttempt {
+                region: "germany-03".to_string(),
+                addr: parse_addr("10.0.0.3:51821"),
+                authenticated: false,
+                policy_known: true,
+                auth_required: false,
+                preflight_mode: RelayPreflightMode::Legacy,
+                queue_full_mode: RelayQueueFullMode::Drop,
+            },
+        ];
+
         let selected = select_candidate_after_preflight(&attempts)
-            .expect("unknown policy alone should not block legacy fallback");
+            .expect("a candidate with a known policy permits the fallback");
         assert_eq!(
             selected,
             (
-                "germany-01".to_string(),
-                parse_addr("10.0.0.1:51821"),
-                RelayQueueFullMode::Bypass
-            )
+                "germany-03".to_string(),
+                parse_addr("10.0.0.3:51821"),
+                RelayQueueFullMode::Drop
+            ),
+            "the fallback must be the candidate whose policy we actually read, \
+             not whichever happened to be first"
         );
     }
 
