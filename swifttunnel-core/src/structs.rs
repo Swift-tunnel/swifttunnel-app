@@ -193,8 +193,17 @@ impl Default for RobloxSettingsConfig {
     fn default() -> Self {
         Self {
             graphics_quality: GraphicsQuality::Automatic,
-            unlock_fps: false,
-            target_fps: 144,
+            // On by default, because the frame cap is a latency setting here
+            // and not just a graphics one. DFIntTaskSchedulerTargetFps sets the
+            // client's task scheduler rate, and the scheduler is what services
+            // network jobs: at 60 the client picks packets up every ~16.7ms, at
+            // 300 every ~3.3ms. That client-side delay is inside the round trip
+            // Roblox reports, so raising the cap lowers the ping a player sees.
+            //
+            // Shipping that off by default in a product whose whole job is
+            // lowering ping meant most people never got it.
+            unlock_fps: true,
+            target_fps: 300,
             window_width: default_roblox_window_width(),
             window_height: default_roblox_window_height(),
             window_fullscreen: default_roblox_window_fullscreen(),
@@ -667,8 +676,10 @@ mod tests {
     fn test_roblox_settings_config_default() {
         let cfg = RobloxSettingsConfig::default();
         assert_eq!(cfg.graphics_quality, GraphicsQuality::Automatic);
-        assert!(!cfg.unlock_fps);
-        assert_eq!(cfg.target_fps, 144);
+        // On by default: the cap drives the task scheduler, which services
+        // network jobs, so it moves the reported ping and not just frames.
+        assert!(cfg.unlock_fps);
+        assert_eq!(cfg.target_fps, 300);
         assert_eq!(cfg.window_width, 1280);
         assert_eq!(cfg.window_height, 720);
         assert!(!cfg.window_fullscreen);

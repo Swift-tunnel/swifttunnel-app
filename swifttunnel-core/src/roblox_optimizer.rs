@@ -2073,9 +2073,37 @@ impl RobloxOptimizer {
             info!("Custom allowlisted FFlags applied");
         }
 
-        // FPS unlock is driven by GlobalBasicSettings `FramerateCap`; the old
-        // scheduler FFlag is retired and always stripped from existing files.
-        settings.remove(Self::FPS_UNLOCK_FFLAG);
+        // The frame cap is a latency control, not only a graphics one, so
+        // SwiftTunnel writes the scheduler flag rather than relying on
+        // GlobalBasicSettings `FramerateCap` alone.
+        //
+        // DFIntTaskSchedulerTargetFps sets the client's task scheduler rate,
+        // and the scheduler services network jobs: at 60 the client picks
+        // packets up every ~16.7ms, at 300 every ~3.3ms. That delay sits inside
+        // the round trip Roblox reports, so the cap moves the ping a player
+        // sees, not just the frame rate.
+        //
+        // 12e55d6 retired this flag and stripped it unconditionally, leaving
+        // only FramerateCap. Two things followed. The reserved-key message in
+        // `describe_rejected` still told people SwiftTunnel writes this itself,
+        // which stopped being true, so anyone who set it was told to remove it
+        // and got nothing back. And once v3.1.3 started writing into launcher
+        // directories, the strip reached `Bloxstrap\Modifications\ClientSettings`,
+        // which is the file a launcher copies into the game at every launch.
+        // Deleting the key there removes an FPS unlock the user configured with
+        // another tool entirely, which is what "SwiftTunnel cost me fps" meant.
+        //
+        // Written when the switch is on, removed only when it is off, so the
+        // key follows SwiftTunnel's own control instead of being pruned
+        // regardless of who set it.
+        if config.unlock_fps {
+            settings.insert(
+                Self::FPS_UNLOCK_FFLAG.to_string(),
+                serde_json::json!(config.target_fps),
+            );
+        } else {
+            settings.remove(Self::FPS_UNLOCK_FFLAG);
+        }
 
         // Write or delete the file
         if settings.is_empty() {
@@ -2959,10 +2987,17 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// The frame cap follows the switch, and nothing else in the file moves.
+    ///
+    /// This asserted the opposite, that the flag must be stripped on apply, and
+    /// it was written against a Bloxstrap `Modifications\ClientSettings` path,
+    /// so it described the exact file a launcher copies into the game at every
+    /// launch and asserted that SwiftTunnel should delete the player's frame cap
+    /// out of it. A user with FPS unlocked in Bloxstrap lost it the first time
+    /// SwiftTunnel applied anything, which is what "SwiftTunnel cost me fps"
+    /// meant, and the test agreed with the bug rather than catching it.
     #[test]
-    fn fflag_apply_strips_retired_fps_flag_but_keeps_user_flags() {
-        // Positive + negative: applying Ultraboost must remove a pre-existing
-        // retired FPS scheduler flag, while leaving unrelated user flags intact.
+    fn fflag_apply_writes_the_fps_flag_and_keeps_user_flags() {
         let dir = std::env::temp_dir().join("roblox_opt_test_fflag_retired_fps");
         let _ = fs::remove_dir_all(&dir);
         let client_settings = dir
@@ -2992,9 +3027,10 @@ mod tests {
 
         let content = fs::read_to_string(client_settings.join("ClientAppSettings.json")).unwrap();
         let settings: HashMap<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
-        assert!(
-            !settings.contains_key(RobloxOptimizer::FPS_UNLOCK_FFLAG),
-            "retired FPS scheduler flag must be stripped on apply"
+        assert_eq!(
+            settings.get(RobloxOptimizer::FPS_UNLOCK_FFLAG),
+            Some(&serde_json::json!(240)),
+            "the switch is on, so the cap must be written, not deleted"
         );
         assert_eq!(
             settings.get("FStringUserOwnedFlag"),
@@ -3004,6 +3040,52 @@ mod tests {
         assert_eq!(
             settings.get("FFlagDebugGraphicsPreferD3D11"),
             Some(&serde_json::json!("True"))
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other direction, so the key tracks the switch rather than being
+    /// written once and left behind. Turning the cap off has to take it out
+    /// again, or a player who disables it stays capped with no way back.
+    #[test]
+    fn fflag_apply_removes_the_fps_flag_when_the_switch_is_off() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fflag_fps_off");
+        let _ = fs::remove_dir_all(&dir);
+        let client_settings = dir
+            .join("Bloxstrap")
+            .join("Modifications")
+            .join("ClientSettings");
+        fs::create_dir_all(&client_settings).unwrap();
+        fs::write(
+            client_settings.join("ClientAppSettings.json"),
+            r#"{
+  "DFIntTaskSchedulerTargetFps": 240,
+  "FStringUserOwnedFlag": "keep-me"
+}"#,
+        )
+        .unwrap();
+
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            ultraboost: true,
+            unlock_fps: false,
+            ..Default::default()
+        };
+
+        opt.apply_client_fflags_for_local_app_data(&config, &dir)
+            .unwrap();
+
+        let content = fs::read_to_string(client_settings.join("ClientAppSettings.json")).unwrap();
+        let settings: HashMap<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
+        assert!(
+            !settings.contains_key(RobloxOptimizer::FPS_UNLOCK_FFLAG),
+            "the switch is off, so the cap must be taken back out"
+        );
+        assert_eq!(
+            settings.get("FStringUserOwnedFlag"),
+            Some(&serde_json::json!("keep-me")),
+            "unrelated user flags survive either way"
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -3037,9 +3119,11 @@ mod tests {
             settings.get("FFlagDebugGraphicsPreferD3D11"),
             Some(&serde_json::json!("True"))
         );
-        assert!(
-            !settings.contains_key(RobloxOptimizer::FPS_UNLOCK_FFLAG),
-            "retired FPS scheduler flag must not be written"
+        assert_eq!(
+            settings.get(RobloxOptimizer::FPS_UNLOCK_FFLAG),
+            Some(&serde_json::json!(165)),
+            "the cap goes into the launcher's persistent file, which is the copy \
+             it puts into the game at launch"
         );
 
         let _ = fs::remove_dir_all(&dir);
