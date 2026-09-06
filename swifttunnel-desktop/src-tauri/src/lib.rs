@@ -149,15 +149,6 @@ fn sync_runtime_assets(app: &tauri::App) {
         ]);
     }
 
-    targets.push((
-        "nvidiaProfileInspector",
-        first_existing(vec![
-            resource_dir.join("tools").join("nvidiaProfileInspector"),
-            resource_dir.join("nvidiaProfileInspector"),
-        ]),
-        exe_dir.join("tools").join("nvidiaProfileInspector"),
-    ));
-
     for (name, source, destination) in targets {
         let Some(source) = source else {
             if name.starts_with("WinpkFilter-") {

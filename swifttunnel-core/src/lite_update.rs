@@ -377,7 +377,17 @@ mod tests {
         );
 
         record_install_attempt(&wanted);
-        if attempt_marker().is_some_and(|p| !p.exists()) {
+        // Read our own write back rather than checking that *a* file exists.
+        //
+        // The marker is a real machine path under %ProgramData%, not a
+        // temporary one, so a genuine update leaves a real marker there. This
+        // checked `!path.exists()` and therefore passed whenever any marker was
+        // present, including one this test did not write: without admin the
+        // write silently fails, the stranger's file satisfies the existence
+        // check, and the assertion below then runs against somebody else's
+        // version. That is exactly what happened once Lite auto-updated on a
+        // dev machine and left "3.1.4" behind.
+        if !already_attempted(&wanted) {
             // No write permission here; the guard is untestable in this
             // environment rather than wrong.
             return;

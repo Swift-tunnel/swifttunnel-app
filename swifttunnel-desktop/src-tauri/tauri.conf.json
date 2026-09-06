@@ -74,7 +74,6 @@
     "resources": [
       "resources/drivers",
       "resources/lite",
-      "resources/tools/nvidiaProfileInspector",
       "resources/swifty.png"
     ],
     "icon": [

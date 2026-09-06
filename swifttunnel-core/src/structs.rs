@@ -487,7 +487,7 @@ pub mod boost_info {
         id: "ultraboost",
         title: "Ultraboost",
         short_desc: "Max performance Roblox preset",
-        long_desc: "Applies curated Roblox-allowlisted performance FFlags for maximum FPS. Forces D3D11 with minimum texture quality, 1x anti-aliasing, lowest render quality, gray sky, and zero grass distance while avoiding high-DPI sharpness flags that can cost frames. On NVIDIA GPUs, also applies a reversible NVIDIA Profile Inspector texture-filtering profile for extra potato graphics.",
+        long_desc: "Applies curated Roblox-allowlisted performance FFlags for maximum FPS. Forces D3D11 with minimum texture quality, 1x anti-aliasing, lowest render quality, gray sky, and zero grass distance while avoiding high-DPI sharpness flags that can cost frames.",
         impact: "Maximum FPS preset",
         risk_level: RiskLevel::Safe,
         requires_admin: true,
@@ -808,11 +808,16 @@ mod tests {
         );
     }
 
+    /// This cited the NVIDIA Profile Inspector import, which was the original
+    /// reason and has been removed. The flag still stands on its own: Ultraboost
+    /// writes ClientAppSettings.json into every Roblox and launcher install it
+    /// finds, and a launcher records its own install location, so those paths
+    /// are not guaranteed to sit inside the user's profile.
     #[test]
-    fn test_ultraboost_requires_admin_for_nvidia_profile_import() {
+    fn test_ultraboost_requires_admin_to_write_launcher_install_dirs() {
         assert!(
             boost_info::ULTRABOOST.requires_admin,
-            "Ultraboost imports an NVIDIA Profile Inspector profile on NVIDIA GPUs"
+            "Ultraboost writes into Roblox and launcher install directories, which can live outside the user profile"
         );
     }
 }

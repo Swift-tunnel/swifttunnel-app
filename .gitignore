@@ -57,9 +57,6 @@ cargo-core.log
 # Local build copies would go stale and ship unverifiable binaries.
 swifttunnel-desktop/src-tauri/resources/drivers/winpkfilter/
 swifttunnel-desktop/src-tauri/resources/tools/goodbyedpi/
-swifttunnel-desktop/src-tauri/resources/tools/nvidiaProfileInspector/Reference.xml
-swifttunnel-desktop/src-tauri/resources/tools/nvidiaProfileInspector/nvidiaProfileInspector.exe.config
-swifttunnel-desktop/src-tauri/resources/tools/nvidiaProfileInspector/nvidiaProfileInspector.pdb
 
 swifttunnel-lite/target-msi/
 
