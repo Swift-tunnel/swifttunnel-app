@@ -193,8 +193,12 @@ impl Default for RobloxSettingsConfig {
     fn default() -> Self {
         Self {
             graphics_quality: GraphicsQuality::Automatic,
-            unlock_fps: false,
-            target_fps: 144,
+            // On by default, so a fresh install lifts Roblox's stock 60 cap
+            // without anyone having to find the switch. Safe to default on
+            // because `apply_xml_settings` only ever raises FramerateCap, never
+            // lowers it, so a player who has already set a higher cap keeps it.
+            unlock_fps: true,
+            target_fps: 300,
             window_width: default_roblox_window_width(),
             window_height: default_roblox_window_height(),
             window_fullscreen: default_roblox_window_fullscreen(),
@@ -667,8 +671,11 @@ mod tests {
     fn test_roblox_settings_config_default() {
         let cfg = RobloxSettingsConfig::default();
         assert_eq!(cfg.graphics_quality, GraphicsQuality::Automatic);
-        assert!(!cfg.unlock_fps);
-        assert_eq!(cfg.target_fps, 144);
+        // On by default, so a fresh install lifts Roblox's stock 60 cap without
+        // anyone having to find the switch. Safe because apply_xml_settings only
+        // raises FramerateCap and never lowers it.
+        assert!(cfg.unlock_fps);
+        assert_eq!(cfg.target_fps, 300);
         assert_eq!(cfg.window_width, 1280);
         assert_eq!(cfg.window_height, 720);
         assert!(!cfg.window_fullscreen);

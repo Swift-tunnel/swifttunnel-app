@@ -130,6 +130,17 @@ impl AppState {
                 settings.config.roblox_settings.window_width = width;
                 settings.config.roblox_settings.window_height = height;
             }
+            // Adopt the player's graphics level too.
+            //
+            // `read_current_settings` has always returned this and it was
+            // dropped on the floor here, so the config kept its default of
+            // Automatic while the window fields round-tripped correctly. That
+            // matters because `apply_xml_settings` writes GraphicsQualityLevel
+            // unconditionally: someone who had chosen a level in Roblox had it
+            // reset to auto the first time SwiftTunnel applied anything, having
+            // never touched a graphics setting in this app.
+            settings.config.roblox_settings.graphics_quality =
+                swifttunnel_core::structs::GraphicsQuality::from_level(current.graphics_quality);
         }
     }
 }

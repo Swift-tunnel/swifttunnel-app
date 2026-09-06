@@ -852,10 +852,31 @@ impl RobloxOptimizer {
         // Read current content
         let mut content = fs::read_to_string(settings_path)?;
 
-        // Apply FPS cap
+        // Apply FPS cap, raising it but never lowering it.
+        //
+        // This wrote the configured value straight over whatever was there. A
+        // player who had already set a high cap, in Roblox's own settings or
+        // through Fishstrap's Global Basic Settings editor, lost it the moment
+        // SwiftTunnel applied anything: a machine sitting at 650 and drawing
+        // 500-600 frames would be pulled down to the app's default. Turning the
+        // switch on by default would have made that everyone's first
+        // experience, which is the opposite of the point.
+        //
+        // The cap only ever moves up now, so defaulting it on can raise the
+        // stock 60 without ever taking frames away from someone who had already
+        // sorted it out for themselves.
         if config.unlock_fps {
-            content = self.set_xml_int_value(&content, "FramerateCap", config.target_fps as i32);
-            info!("Set FPS cap to: {}", config.target_fps);
+            let current = Self::extract_int_value(&content, "FramerateCap").unwrap_or(0);
+            let target = config.target_fps as i32;
+            if target > current {
+                content = self.set_xml_int_value(&content, "FramerateCap", target);
+                info!("Raised FPS cap from {} to {}", current, target);
+            } else {
+                info!(
+                    "Left FPS cap at {}, which already exceeds the configured {}",
+                    current, target
+                );
+            }
         }
 
         // Apply graphics quality
@@ -2459,6 +2480,61 @@ mod tests {
     }
 
     // ── set_xml_int_value ───────────────────────────────────────────
+
+    /// The frame cap only ever goes up.
+    ///
+    /// This wrote the configured value straight over whatever was there, so a
+    /// machine already sitting at 650 and drawing 500-600 frames was pulled
+    /// down to the app's default the first time anything was applied. Turning
+    /// the cap on by default, which is now the case, would have made that
+    /// everyone's first experience of installing SwiftTunnel.
+    #[test]
+    fn applying_the_frame_cap_never_lowers_an_existing_higher_one() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fps_never_lowers");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let settings_path = dir.join("GlobalBasicSettings_13.xml");
+
+        // Stock 60: the cap must be raised.
+        fs::write(
+            &settings_path,
+            r#"<roblox><int name="FramerateCap">60</int></roblox>"#,
+        )
+        .unwrap();
+        let opt = optimizer_with_path(settings_path.clone());
+        let config = RobloxSettingsConfig {
+            unlock_fps: true,
+            target_fps: 300,
+            ..Default::default()
+        };
+        opt.apply_xml_settings(&settings_path, &config).unwrap();
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(
+                &fs::read_to_string(&settings_path).unwrap(),
+                "FramerateCap"
+            ),
+            Some(300),
+            "a stock 60 cap must be raised to the target"
+        );
+
+        // Already higher than the target: it must be left alone.
+        fs::write(
+            &settings_path,
+            r#"<roblox><int name="FramerateCap">650</int></roblox>"#,
+        )
+        .unwrap();
+        opt.apply_xml_settings(&settings_path, &config).unwrap();
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(
+                &fs::read_to_string(&settings_path).unwrap(),
+                "FramerateCap"
+            ),
+            Some(650),
+            "650 is already above the target, so it must survive untouched"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn set_xml_int_value_replaces_existing() {

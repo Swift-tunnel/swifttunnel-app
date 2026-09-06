@@ -118,6 +118,18 @@ pub struct AppSettings {
     /// Expanded boost info panel IDs (user preference to show detailed info)
     #[serde(default)]
     pub expanded_boost_info: Vec<String>,
+    /// Whether the one-time frame cap migration has run.
+    ///
+    /// The frame cap shipped off by default, so most existing installs sit at
+    /// Roblox's stock 60 having never found the switch. Turning it on for them
+    /// needs to happen exactly once: the other migrations in
+    /// `sanitize_in_place` simply force a value on every load, which would mean
+    /// nobody could ever turn the cap back off again.
+    ///
+    /// Absent in files written before this existed, so serde defaults it to
+    /// false and those installs get migrated on their next launch.
+    #[serde(default)]
+    pub fps_unlock_migrated: bool,
     /// Selected game presets for split tunneling (stored as strings: "roblox")
     #[serde(default = "default_game_presets")]
     pub selected_game_presets: Vec<String>,
@@ -303,6 +315,9 @@ impl Default for AppSettings {
             resume_vpn_on_startup: false,
             last_connected_region: None,
             expanded_boost_info: Vec::new(),
+            // A fresh install already gets the cap on from
+            // RobloxSettingsConfig::default, so there is nothing to migrate.
+            fps_unlock_migrated: true,
             selected_game_presets: default_game_presets(),
             network_test_results: NetworkTestResultsCache::default(),
             forced_servers: HashMap::new(),
@@ -341,6 +356,23 @@ impl AppSettings {
             })
             .collect();
         self.config.network_settings.normalize_legacy_master_boost();
+
+        // One-time: turn the frame cap on for people who installed before it
+        // defaulted on. It shipped off, so most existing installs sit at
+        // Roblox's stock 60 having never found the switch.
+        //
+        // Guarded by a marker rather than forced like the two rules below,
+        // because forcing it would re-enable the cap on every launch and there
+        // would be no way to turn it off. Raises the target rather than setting
+        // it, so anyone who already picked something higher keeps it, and
+        // `apply_xml_settings` will not lower their FramerateCap either.
+        if !self.fps_unlock_migrated {
+            self.config.roblox_settings.unlock_fps = true;
+            self.config.roblox_settings.target_fps =
+                self.config.roblox_settings.target_fps.max(300);
+            self.fps_unlock_migrated = true;
+        }
+
         self.selected_game_presets = default_game_presets();
         // Older releases serialized false as the default even though the app has
         // no user-facing toggle. Keep app-close safe for shared/cafe PCs.
@@ -650,6 +682,61 @@ mod tests {
         settings.sanitize_in_place();
 
         assert!(settings.minimize_to_tray);
+    }
+
+    /// An install from before the cap defaulted on gets it turned on, once.
+    ///
+    /// The marker is absent from those files, so serde leaves it false and the
+    /// migration runs on next launch.
+    #[test]
+    fn the_frame_cap_migration_turns_it_on_for_an_existing_install() {
+        let json = r#"{"theme":"dark","config":{"roblox_settings":{"graphics_quality":"Automatic","unlock_fps":false,"target_fps":144}},"optimizations_active":false}"#;
+        let mut settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(
+            !settings.fps_unlock_migrated,
+            "a file written before the marker existed must read as unmigrated"
+        );
+
+        settings.sanitize_in_place();
+
+        assert!(settings.config.roblox_settings.unlock_fps);
+        assert_eq!(settings.config.roblox_settings.target_fps, 300);
+        assert!(settings.fps_unlock_migrated);
+    }
+
+    /// It raises the target, never lowers it, so somebody who already asked for
+    /// more than the migration's floor keeps what they chose.
+    #[test]
+    fn the_frame_cap_migration_never_lowers_a_higher_target() {
+        let mut settings = AppSettings::default();
+        settings.fps_unlock_migrated = false;
+        settings.config.roblox_settings.unlock_fps = false;
+        settings.config.roblox_settings.target_fps = 600;
+
+        settings.sanitize_in_place();
+
+        assert!(settings.config.roblox_settings.unlock_fps);
+        assert_eq!(
+            settings.config.roblox_settings.target_fps, 600,
+            "600 is above the floor, so it must survive"
+        );
+    }
+
+    /// Once is once. Forcing this the way `minimize_to_tray` is forced would
+    /// re-enable the cap on every launch and leave no way to turn it off.
+    #[test]
+    fn the_frame_cap_migration_does_not_run_twice() {
+        let mut settings = AppSettings::default();
+        settings.sanitize_in_place();
+
+        // The player turns it off afterwards.
+        settings.config.roblox_settings.unlock_fps = false;
+        settings.sanitize_in_place();
+
+        assert!(
+            !settings.config.roblox_settings.unlock_fps,
+            "a migration that already ran must not override a later choice"
+        );
     }
 
     #[test]
