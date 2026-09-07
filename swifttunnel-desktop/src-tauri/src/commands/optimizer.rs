@@ -396,6 +396,41 @@ pub async fn boost_reset_roblox_settings(state: State<'_, AppState>) -> Result<(
     .map_err(|e| format!("Reset Roblox task failed: {}", e))?
 }
 
+/// Put the Roblox client back to stock, whoever changed it.
+///
+/// Wider than `boost_reset_roblox_settings`, which only takes our own keys
+/// out. This deletes every `ClientAppSettings.json` on the machine, including
+/// the one a bootstrapper keeps in its modifications folder and copies into the
+/// game at every launch. That copy is why resetting Roblox's own files never
+/// fixes a stuck flag, and why this exists as a separate, clearly destructive
+/// action rather than something folded into the ordinary reset.
+#[tauri::command]
+pub async fn boost_reset_roblox_client(
+    state: State<'_, AppState>,
+) -> Result<swifttunnel_core::roblox_optimizer::RobloxResetReport, String> {
+    let settings = state.settings.clone();
+    let roblox_optimizer = state.roblox_optimizer.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = {
+            let ro = roblox_optimizer.lock();
+            ro.reset_client_to_default()
+        };
+
+        // The saved config has to follow the client, or the app goes on showing
+        // Ultraboost as on over a Roblox that no longer has a single flag in it.
+        {
+            let mut s = settings.lock();
+            s.config.roblox_settings = swifttunnel_core::structs::RobloxSettingsConfig::default();
+            swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
+        }
+
+        Ok(report)
+    })
+    .await
+    .map_err(|e| format!("Reset Roblox client task failed: {}", e))?
+}
+
 #[tauri::command]
 pub async fn boost_clean_ram(
     state: State<'_, AppState>,

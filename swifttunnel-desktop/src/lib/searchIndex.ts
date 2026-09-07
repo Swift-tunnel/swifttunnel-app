@@ -130,6 +130,12 @@ const BOOST_SETTINGS: { anchor: string; label: string; keywords: string }[] = [
       "ultraboost ultra boost ffs fps flags fastflags fast flags fflags fflag curated roblox fps boost graphics",
   },
   {
+    anchor: "reset_roblox",
+    label: "Reset Roblox to default",
+    keywords:
+      "reset roblox default undo remove fflags flags bloxstrap fishstrap froststrap voidstrap strap bootstrapper render distance graphics stuck revert clean vanilla",
+  },
+  {
     anchor: "custom_fflags",
     label: "Custom FFlag Import",
     keywords: "custom fflags fflag flags json import advanced client flags",

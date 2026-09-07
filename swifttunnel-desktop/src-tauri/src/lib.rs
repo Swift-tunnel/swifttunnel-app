@@ -681,6 +681,7 @@ pub fn run() {
             commands::optimizer::boost_restart_roblox,
             commands::optimizer::boost_close_roblox,
             commands::optimizer::boost_reset_roblox_settings,
+            commands::optimizer::boost_reset_roblox_client,
             // Network
             commands::network::network_start_stability_test,
             commands::network::network_start_speed_test,

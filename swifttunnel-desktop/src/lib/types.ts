@@ -188,6 +188,14 @@ export interface ModifiedFlushResult {
   skipped_reason: string | null;
 }
 
+/** What a full Roblox client reset cleared. Mirrors core's RobloxResetReport. */
+export interface RobloxResetReportResponse {
+  flag_files_removed: number;
+  sources: string[];
+  settings_restored: boolean;
+  failures: string[];
+}
+
 export interface RamCleanResultResponse {
   before: SystemMemorySnapshot;
   after: SystemMemorySnapshot;
@@ -208,10 +216,7 @@ export interface BoostUpdateResult {
 
 export type OptimizationProfile = "LowEnd" | "Balanced" | "HighEnd" | "Custom";
 export type PowerPlan =
-  | "Balanced"
-  | "HighPerformance"
-  | "Ultimate"
-  | "SwiftTunnel";
+  "Balanced" | "HighPerformance" | "Ultimate" | "SwiftTunnel";
 export type GraphicsQuality =
   | "Automatic"
   | "Manual"
@@ -475,12 +480,7 @@ export interface DriverCheckResponse {
   message: string;
   reboot_required: boolean;
   recommended_action:
-    | "none"
-    | "install"
-    | "reset_service"
-    | "reinstall"
-    | "reboot"
-    | string;
+    "none" | "install" | "reset_service" | "reinstall" | "reboot" | string;
 }
 
 export interface WindowsFirewallServiceStatus {

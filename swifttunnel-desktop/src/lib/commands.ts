@@ -15,6 +15,7 @@ import type {
   SystemInfoResponse,
   SystemMemorySnapshot,
   RamCleanResultResponse,
+  RobloxResetReportResponse,
   StabilityResultResponse,
   SpeedResultResponse,
   BufferbloatResultResponse,
@@ -30,29 +31,23 @@ import type {
 
 // ── Auth ──
 
-export const authGetState = () =>
-  invoke<AuthStateResponse>("auth_get_state");
+export const authGetState = () => invoke<AuthStateResponse>("auth_get_state");
 
 export const authLogin = (email: string, password: string) =>
   invoke<void>("auth_login", { email, password });
 
-export const authStartOAuth = () =>
-  invoke<string>("auth_start_oauth");
+export const authStartOAuth = () => invoke<string>("auth_start_oauth");
 
-export const authPollOAuth = () =>
-  invoke<OAuthPollResult>("auth_poll_oauth");
+export const authPollOAuth = () => invoke<OAuthPollResult>("auth_poll_oauth");
 
-export const authCancelOAuth = () =>
-  invoke<void>("auth_cancel_oauth");
+export const authCancelOAuth = () => invoke<void>("auth_cancel_oauth");
 
 export const authCompleteOAuth = (token: string, callbackState: string) =>
   invoke<void>("auth_complete_oauth", { token, callbackState });
 
-export const authLogout = () =>
-  invoke<void>("auth_logout");
+export const authLogout = () => invoke<void>("auth_logout");
 
-export const authRefreshProfile = () =>
-  invoke<void>("auth_refresh_profile");
+export const authRefreshProfile = () => invoke<void>("auth_refresh_profile");
 
 // Forced-update gate: returns the server's "please update" message when this
 // build has been locked out (old-build lockout), else null.
@@ -60,28 +55,27 @@ export const authUpdateRequired = () =>
   invoke<string | null>("auth_update_required");
 
 // Retire the boot splash window once the main window is up.
-export const closeSplash = () =>
-  invoke<void>("close_splash");
+export const closeSplash = () => invoke<void>("close_splash");
 
 // ── VPN ──
 
-export const vpnGetState = () =>
-  invoke<VpnStateResponse>("vpn_get_state");
+export const vpnGetState = () => invoke<VpnStateResponse>("vpn_get_state");
 
 export const vpnPreflightBinding = (region: string, gamePresets: string[]) =>
-  invoke<BindingPreflightInfo>("vpn_preflight_binding", { region, gamePresets });
+  invoke<BindingPreflightInfo>("vpn_preflight_binding", {
+    region,
+    gamePresets,
+  });
 
 export const vpnConnect = (region: string, gamePresets: string[]) =>
   invoke<void>("vpn_connect", { region, gamePresets });
 
-export const vpnDisconnect = () =>
-  invoke<void>("vpn_disconnect");
+export const vpnDisconnect = () => invoke<void>("vpn_disconnect");
 
 export const vpnGetThroughput = () =>
   invoke<ThroughputResponse | null>("vpn_get_throughput");
 
-export const vpnGetPing = () =>
-  invoke<number | null>("vpn_get_ping");
+export const vpnGetPing = () => invoke<number | null>("vpn_get_ping");
 
 export interface FreeTierQuota {
   /** Seconds of free relay time left, or null when no limit applies. */
@@ -95,8 +89,7 @@ export interface FreeTierQuota {
   grace_seconds: number | null;
 }
 
-export const vpnGetFreeTier = () =>
-  invoke<FreeTierQuota>("vpn_get_free_tier");
+export const vpnGetFreeTier = () => invoke<FreeTierQuota>("vpn_get_free_tier");
 
 export const vpnGetDiagnostics = () =>
   invoke<DiagnosticsResponse | null>("vpn_get_diagnostics");
@@ -112,8 +105,7 @@ export const serverGetList = () =>
 export const serverGetLatencies = () =>
   invoke<LatencyEntry[]>("server_get_latencies");
 
-export const serverRefresh = () =>
-  invoke<string>("server_refresh");
+export const serverRefresh = () => invoke<string>("server_refresh");
 
 export const serverSmartSelect = (regionId: string) =>
   invoke<string | null>("server_smart_select", { regionId });
@@ -149,14 +141,21 @@ export const boostCleanRam = () =>
 export const boostGetSystemInfo = () =>
   invoke<SystemInfoResponse>("boost_get_system_info");
 
-export const boostRestartRoblox = () =>
-  invoke<void>("boost_restart_roblox");
+export const boostRestartRoblox = () => invoke<void>("boost_restart_roblox");
 
-export const boostCloseRoblox = () =>
-  invoke<void>("boost_close_roblox");
+export const boostCloseRoblox = () => invoke<void>("boost_close_roblox");
 
 export const boostResetRobloxSettings = () =>
   invoke<void>("boost_reset_roblox_settings");
+
+/**
+ * Delete every FFlag file on the machine, ours and any launcher's.
+ *
+ * Wider than boostResetRobloxSettings, which only removes SwiftTunnel's own
+ * keys. Needs the user to have agreed to lose a bootstrapper's flag setup.
+ */
+export const boostResetRobloxClient = () =>
+  invoke<RobloxResetReportResponse>("boost_reset_roblox_client");
 
 // ── Network Tests ──
 
@@ -173,8 +172,7 @@ export const networkStartBufferbloatTest = () =>
 
 // ── Settings ──
 
-export const settingsLoad = () =>
-  invoke<AppSettings>("settings_load");
+export const settingsLoad = () => invoke<AppSettings>("settings_load");
 
 export const settingsSave = (settings: AppSettings) =>
   invoke<void>("settings_save", { settings });
@@ -237,8 +235,7 @@ export const systemReinstallDriver = () =>
 export const systemRepairWindowsFirewall = () =>
   invoke<WindowsFirewallRepairResponse>("system_repair_windows_firewall");
 
-export const systemCleanup = () =>
-  invoke<void>("system_cleanup");
+export const systemCleanup = () => invoke<void>("system_cleanup");
 
 export const systemCleanupTunnelState = () =>
   invoke<void>("system_cleanup_tunnel_state");
@@ -276,8 +273,7 @@ export const systemRepairNetwork = () =>
  * restart so a failed reset still surfaces a useful error instead of the UI
  * claiming success.
  */
-export const systemResetDriver = () =>
-  invoke<void>("system_reset_driver");
+export const systemResetDriver = () => invoke<void>("system_reset_driver");
 
 export interface StartupRegistrationSnapshot {
   exists: boolean;
@@ -308,8 +304,7 @@ export const systemOpenUrl = (url: string) =>
 export const systemRestartAsAdmin = () =>
   invoke<void>("system_restart_as_admin");
 
-export const systemUninstall = () =>
-  invoke<void>("system_uninstall");
+export const systemUninstall = () => invoke<void>("system_uninstall");
 
 export interface CopyLogFileResponse {
   file_path: string;

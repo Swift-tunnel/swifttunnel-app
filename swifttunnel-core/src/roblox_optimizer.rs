@@ -27,6 +27,25 @@ pub struct RobloxOptimizer {
     backup_path: PathBuf,
 }
 
+/// What a full client reset actually did, for the line shown afterwards.
+///
+/// A reset that says nothing is indistinguishable from one that silently found
+/// nothing, and the second is common: someone runs it twice, or runs it on a
+/// machine whose flags were already gone. Counting the files and naming the
+/// launchers turns "done" into something the player can check against what they
+/// installed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RobloxResetReport {
+    /// `ClientAppSettings.json` files deleted, across every location.
+    pub flag_files_removed: usize,
+    /// Which launchers those came from, e.g. `Roblox`, `Bloxstrap`.
+    pub sources: Vec<String>,
+    /// Whether GlobalBasicSettings was put back (graphics level, frame cap).
+    pub settings_restored: bool,
+    /// Paths that could not be cleared, usually locked by a running client.
+    pub failures: Vec<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum FFlagApplyOutcome {
     Applied,
@@ -1122,6 +1141,138 @@ impl RobloxOptimizer {
 
         let _ = Self::sync_gpu_preference(false);
         Ok(())
+    }
+
+    /// Put the Roblox client back to stock, whoever changed it.
+    ///
+    /// `reset_swifttunnel_changes` removes our own keys and leaves everything
+    /// else alone, which is right for undoing an app people still have. It is
+    /// not enough for the thing people actually ask for, which is a Roblox that
+    /// renders normally again after some combination of SwiftTunnel, a
+    /// bootstrapper and a copied flag list has been through it. Nobody can tell
+    /// which flag came from where, and the one that ruins render distance looks
+    /// exactly like the one that unlocks frames.
+    ///
+    /// So this deletes `ClientAppSettings.json` outright, everywhere one is
+    /// found: every Roblox version folder, and every launcher's modifications
+    /// folder. The second half is the part that cannot be skipped. A launcher
+    /// copies its own `ClientAppSettings.json` into the version folder at every
+    /// single launch, so clearing only the version folder looks like it worked
+    /// and is undone by the next time the game opens. That is why resetting
+    /// Roblox's own files never fixes this: the master copy is not in Roblox.
+    ///
+    /// GlobalBasicSettings holds the other half, graphics level and frame cap,
+    /// and lives above the version folders where nothing else clears it. The
+    /// backup goes back when there is one; otherwise the three values anything
+    /// forces are put back to Roblox's defaults, rather than deleting a file
+    /// that also holds volume, sensitivity and keybinds the player chose.
+    ///
+    /// Destructive by design and by request: a launcher's own flag setup is
+    /// removed too. The caller has to have said so.
+    pub fn reset_client_to_default(&self) -> RobloxResetReport {
+        let mut report = RobloxResetReport::default();
+
+        for client_settings in Self::get_client_settings_paths_for_removal() {
+            let settings_path = client_settings.join("ClientAppSettings.json");
+            if !settings_path.exists() {
+                continue;
+            }
+
+            if Self::is_readonly_path(&settings_path) {
+                let _ = Self::remove_readonly_path(&settings_path);
+            }
+
+            match fs::remove_file(&settings_path) {
+                Ok(()) => {
+                    report.flag_files_removed += 1;
+                    if let Some(source) = Self::describe_client_settings_source(&client_settings)
+                        && !report.sources.contains(&source)
+                    {
+                        report.sources.push(source);
+                    }
+                    let _ = Self::remove_empty_bootstrapper_client_settings_dir(&client_settings);
+                }
+                Err(e) => {
+                    warn!("Reset: could not delete {}: {e}", settings_path.display());
+                    report
+                        .failures
+                        .push(format!("{}: {e}", settings_path.display()));
+                }
+            }
+        }
+
+        report.settings_restored = self.restore_global_basic_settings();
+
+        if let Err(e) = Self::sync_gpu_preference(false) {
+            warn!("Reset: could not clear the Roblox GPU preference: {e}");
+        }
+
+        info!(
+            "Reset Roblox to default: {} flag file(s) removed, settings restored: {}",
+            report.flag_files_removed, report.settings_restored
+        );
+        report
+    }
+
+    /// Which launcher a ClientSettings folder belongs to, for the report.
+    ///
+    /// Named so the person reading it recognises the thing on their machine.
+    /// "Bloxstrap" means something to them; the full path does not, and putting
+    /// one on screen invites them to go and check it by hand.
+    fn describe_client_settings_source(client_settings: &Path) -> Option<String> {
+        for (project, _) in Self::BOOTSTRAPPER_CLIENT_SETTINGS_LOCATIONS {
+            if client_settings
+                .components()
+                .any(|part| part.as_os_str().eq_ignore_ascii_case(project))
+            {
+                return Some((*project).to_string());
+            }
+        }
+        Some("Roblox".to_string())
+    }
+
+    /// Put GlobalBasicSettings back, and say whether anything was done.
+    ///
+    /// The backup is preferred because it is the player's own file from before
+    /// SwiftTunnel touched anything. Without one, only the three values a
+    /// performance preset forces are reset: the file also holds volume, camera
+    /// sensitivity and keybinds, and deleting it to be thorough would take
+    /// those with it for no reason.
+    fn restore_global_basic_settings(&self) -> bool {
+        let settings_path = self.resolve_settings_path();
+        if Self::is_readonly_path(&settings_path) {
+            let _ = Self::remove_readonly_path(&settings_path);
+        }
+
+        if self.backup_path.exists() {
+            match fs::copy(&self.backup_path, &settings_path) {
+                Ok(_) => return true,
+                Err(e) => warn!("Reset: could not restore the settings backup: {e}"),
+            }
+        }
+
+        if !settings_path.exists() {
+            return false;
+        }
+
+        let Ok(content) = fs::read_to_string(&settings_path) else {
+            return false;
+        };
+        let content = Self::reset_forced_xml_values(&content, self);
+        fs::write(&settings_path, content).is_ok()
+    }
+
+    /// Roblox's own defaults for the values a performance preset overrides.
+    ///
+    /// Free function shape (taking the optimizer for the setters) so the
+    /// substitution can be tested without a settings file on disk.
+    fn reset_forced_xml_values(content: &str, optimizer: &Self) -> String {
+        // 60 rather than removing the tag: Roblox treats a missing cap as 60
+        // anyway, and writing it keeps the file valid for a client that is
+        // mid-launch while this runs.
+        let content = optimizer.set_xml_int_value(content, "FramerateCap", 60);
+        let content = optimizer.set_xml_int_value(&content, "GraphicsQualityLevel", 0);
+        optimizer.set_xml_token_value(&content, "SavedQualityLevel", 0)
     }
 
     /// Whether SwiftTunnel's Ultraboost FFlags are actually present in the live
@@ -2654,6 +2805,57 @@ mod tests {
             "the second apply must not overwrite the original with its own output"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A full reset puts the forced values back to Roblox's own defaults.
+    ///
+    /// Without a backup there is nothing to restore, and the file still holds
+    /// a graphics level something forced down. These three are the ones any
+    /// performance preset writes, so these three are the ones that go back.
+    #[test]
+    fn a_reset_puts_the_forced_values_back_to_roblox_defaults() {
+        let optimizer = optimizer_with_path(PathBuf::from("unused.xml"));
+        let forced = r#"<roblox><int name="FramerateCap">650</int><int name="GraphicsQualityLevel">1</int><token name="SavedQualityLevel">1</token><int name="MasterVolume">3</int></roblox>"#;
+
+        let reset = RobloxOptimizer::reset_forced_xml_values(forced, &optimizer);
+
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(&reset, "FramerateCap"),
+            Some(60)
+        );
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(&reset, "GraphicsQualityLevel"),
+            Some(0)
+        );
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(&reset, "SavedQualityLevel"),
+            Some(0)
+        );
+        // Volume, sensitivity and keybinds live in the same file and are none
+        // of our business. Deleting the file to be thorough would take them.
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(&reset, "MasterVolume"),
+            Some(3),
+            "a reset must not touch settings nothing forced"
+        );
+    }
+
+    /// The report names the launcher, because that is what the player installed.
+    #[test]
+    fn a_reset_names_the_launcher_each_file_came_from() {
+        assert_eq!(
+            RobloxOptimizer::describe_client_settings_source(&PathBuf::from(
+                r"C:\Users\evelyn\AppData\Local\Bloxstrap\Modifications\ClientSettings"
+            )),
+            Some("Bloxstrap".to_string())
+        );
+        assert_eq!(
+            RobloxOptimizer::describe_client_settings_source(&PathBuf::from(
+                r"C:\Users\evelyn\AppData\Local\Roblox\Versions\version-aaa\ClientSettings"
+            )),
+            Some("Roblox".to_string()),
+            "a plain install is still worth naming"
+        );
     }
 
     // ── extract_int_value ───────────────────────────────────────────

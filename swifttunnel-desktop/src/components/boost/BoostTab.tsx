@@ -3,7 +3,11 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
-import { boostCloseRoblox, boostGetMetrics } from "../../lib/commands";
+import {
+  boostCloseRoblox,
+  boostGetMetrics,
+  boostResetRobloxClient,
+} from "../../lib/commands";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
 import {
   Toggle,
@@ -186,6 +190,8 @@ export function BoostTab() {
   const [fullBanDialogOpen, setFullBanDialogOpen] = useState(false);
   const [fullBanChecking, setFullBanChecking] = useState(false);
   const [fullBanClosing, setFullBanClosing] = useState(false);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
 
   useEffect(() => {
     setDraftGPP(savedGPP);
@@ -401,6 +407,53 @@ export function BoostTab() {
     isRestarting,
     isApplying,
   ]);
+
+  /**
+   * Put Roblox back to stock, whoever changed it.
+   *
+   * Deliberately not the same thing as turning our settings off. A player
+   * asking for this has a Roblox that renders wrong and no idea which of
+   * SwiftTunnel, a bootstrapper or a flag list they were handed is responsible,
+   * and the flag that ruins render distance is indistinguishable from the one
+   * that unlocks frames. So it clears all of them and says how many it found.
+   */
+  const resetRobloxClient = useCallback(async () => {
+    setIsResetting(true);
+    try {
+      const report = await boostResetRobloxClient();
+      setResetDialogOpen(false);
+
+      // Reload rather than patch the draft: the command resets the saved
+      // Roblox config too, and anything still showing Ultraboost as on over a
+      // client with no flags left in it would be a lie.
+      await useSettingsStore.getState().load();
+
+      if (report.failures.length > 0) {
+        addToast({
+          type: "warning",
+          message: "Some files could not be cleared. Close Roblox and retry.",
+        });
+      } else if (report.flag_files_removed === 0) {
+        addToast({
+          type: "success",
+          message: "Roblox was already clean. Nothing to remove.",
+        });
+      } else {
+        const where =
+          report.sources.length > 0 ? ` from ${report.sources.join(", ")}` : "";
+        addToast({
+          type: "success",
+          message: `Removed ${report.flag_files_removed} flag file${
+            report.flag_files_removed === 1 ? "" : "s"
+          }${where}. Restart Roblox.`,
+        });
+      }
+    } catch {
+      addToast({ type: "warning", message: "Could not reset Roblox" });
+    } finally {
+      setIsResetting(false);
+    }
+  }, [addToast]);
 
   const discardChanges = useCallback(() => {
     setDraft(savedConfig);
@@ -703,6 +756,21 @@ export function BoostTab() {
           onChange={(v) => updateRblxOpt({ window_fullscreen: v })}
           disabled={robloxControlsLocked}
         />
+        <Row
+          label="Reset Roblox to default"
+          desc="Remove every FFlag on this PC, including a bootstrapper's, and put graphics back"
+          anchorId="reset_roblox"
+        >
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setResetDialogOpen(true)}
+            disabled={robloxControlsLocked || isResetting}
+            loading={isResetting}
+          >
+            Reset
+          </Button>
+        </Row>
       </Section>
 
       {/* ── System + Network side-by-side ── */}
@@ -906,6 +974,53 @@ export function BoostTab() {
               loading={fullBanClosing}
             >
               Close Roblox & Enable
+            </Button>
+          </div>
+        </div>
+      </Dialog>
+      <Dialog
+        open={resetDialogOpen}
+        onClose={() => {
+          if (!isResetting) setResetDialogOpen(false);
+        }}
+        title="Reset Roblox to default"
+        description="Clears every FFlag on this PC, not only SwiftTunnel's."
+      >
+        <div className="flex flex-col gap-4">
+          <p className="text-[12px] leading-relaxed text-text-secondary">
+            This deletes every ClientAppSettings.json on this machine, including
+            the one Bloxstrap, Fishstrap or any other launcher keeps in its
+            modifications folder. That copy is the one that matters: a launcher
+            writes it back into Roblox at every launch, which is why resetting
+            Roblox's own files never clears a stuck flag.
+          </p>
+          <p className="text-[12px] leading-relaxed text-text-secondary">
+            Graphics quality and the frame cap go back to Roblox's defaults.
+            Your account, saved games and keybinds are untouched.
+          </p>
+          <p className="text-[11px] leading-relaxed text-text-muted">
+            If you set up your own flags in a launcher, you will lose them and
+            will need to add them again. Close Roblox first.
+          </p>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setResetDialogOpen(false)}
+              disabled={isResetting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={() => {
+                void resetRobloxClient();
+              }}
+              disabled={isResetting}
+              loading={isResetting}
+            >
+              Reset Roblox
             </Button>
           </div>
         </div>

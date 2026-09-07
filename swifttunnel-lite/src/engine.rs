@@ -36,7 +36,7 @@ use swifttunnel_core::vpn::split_tunnel::{GamePreset, get_apps_for_preset_set};
 use swifttunnel_core::vpn::{ConnectionState, SplitTunnelDriver, VpnConnection};
 
 use crate::state::{
-    AdapterRow, Driver, Lockout, RegionRow, Roblox, State, Status, Tunnel, UpdateState,
+    AdapterRow, Driver, Lockout, RegionRow, ResetState, Roblox, State, Status, Tunnel, UpdateState,
 };
 use crate::view::{Action, FieldId, Flag};
 
@@ -67,6 +67,14 @@ struct Snapshot {
     server_list: DynamicServerList,
     adapters: Vec<AdapterRow>,
     roblox: Roblox,
+    /// The reset row's two-press flow, and what the last reset found.
+    ///
+    /// Here rather than only in the window's own `State` because `fill` copies
+    /// this way at the end of every dispatch, so anything the window sets
+    /// directly is overwritten a moment later, and because the worker thread
+    /// finishing has nowhere else to report to.
+    roblox_reset: ResetState,
+    roblox_reset_note: Option<String>,
     driver: Driver,
     lockout: Option<Lockout>,
     /// Progress of the in-app update, shown on the update-required screen.
@@ -175,6 +183,8 @@ impl Engine {
                 signed_in,
                 email,
                 roblox: read_roblox(&roblox_intent),
+                roblox_reset: ResetState::default(),
+                roblox_reset_note: None,
                 driver: read_driver(),
                 lockout: lockout_of(&auth_state, banned_reason.clone()),
                 update: UpdateState::default(),
@@ -242,6 +252,8 @@ impl Engine {
             state.regions = snapshot.regions.clone();
             state.adapters = snapshot.adapters.clone();
             state.roblox = snapshot.roblox.clone();
+            state.roblox_reset = snapshot.roblox_reset;
+            state.roblox_reset_note = snapshot.roblox_reset_note.clone();
             state.lockout = snapshot.lockout.clone();
             state.update = snapshot.update.clone();
             state.driver = snapshot.driver.clone();
@@ -289,6 +301,13 @@ impl Engine {
 
     /// Carry out one action from the window.
     pub fn dispatch(&self, action: Action, state: &mut State) {
+        // Doing anything else disarms the reset row. A half-pressed destructive
+        // control must not sit there waiting behind a screen change, so that
+        // coming back to Roblox and tapping the row once wipes the flags.
+        if state.roblox_reset == ResetState::Armed && action != Action::ResetRoblox {
+            self.shared.edit(|s| s.roblox_reset = ResetState::Idle);
+        }
+
         match action {
             Action::Primary => self.primary(state),
 
@@ -332,6 +351,7 @@ impl Engine {
             }
             Action::ImportFflags => self.import_fflags(state),
             Action::ApplyRoblox => self.apply_roblox(state),
+            Action::ResetRoblox => self.reset_roblox(state),
 
             Action::SignOut => {
                 let shared = self.shared.clone();
@@ -505,6 +525,82 @@ impl Engine {
     /// Write the pending Roblox edits, then restart the game if it is up.
     ///
     /// The only path in this client that touches Roblox's files.
+    /// Put Roblox back to stock, whoever changed it.
+    ///
+    /// Wider than turning our own switches off, on purpose. Somebody reaching
+    /// for this has a Roblox that renders wrong and no way to tell which of
+    /// SwiftTunnel, a bootstrapper or a flag list they copied is responsible,
+    /// and the flag that ruins render distance looks exactly like the one that
+    /// unlocks frames. Core deletes all of them, and the important half is the
+    /// launcher's own copy: a strap writes it back into the game at every
+    /// launch, which is why resetting Roblox's own files never clears anything.
+    ///
+    /// The first press only arms the row. This is the second.
+    fn reset_roblox(&self, state: &mut State) {
+        match state.roblox_reset {
+            ResetState::Running => return,
+            ResetState::Idle => {
+                self.shared.edit(|s| {
+                    s.roblox_reset = ResetState::Armed;
+                    s.roblox_reset_note = None;
+                });
+                return;
+            }
+            ResetState::Armed => {}
+        }
+
+        self.shared.edit(|s| {
+            s.roblox_reset = ResetState::Running;
+            s.roblox_reset_note = None;
+        });
+        // Pending edits describe a client that is about to stop existing.
+        state.roblox_draft = None;
+        state.focus = None;
+
+        let shared = self.shared.clone();
+        std::thread::spawn(move || {
+            let report = RobloxOptimizer::new().reset_client_to_default();
+
+            // The saved intent has to follow the client, or the switches come
+            // straight back on over a Roblox with no flags left in it.
+            if let Ok(mut guard) = shared.settings.write() {
+                guard.config.roblox_settings = RobloxSettingsConfig::default();
+                let snapshot = guard.clone();
+                drop(guard);
+                let _ = settings::save_settings(&snapshot);
+            }
+
+            let note = if !report.failures.is_empty() {
+                "Some files were locked. Close Roblox and try again.".to_string()
+            } else if report.flag_files_removed == 0 {
+                "Roblox was already clean. Nothing to remove.".to_string()
+            } else {
+                format!(
+                    "Removed {} flag file{} from {}. Restart Roblox.",
+                    report.flag_files_removed,
+                    if report.flag_files_removed == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    report.sources.join(", ")
+                )
+            };
+
+            let intent = shared
+                .settings
+                .read()
+                .map(|s| s.config.roblox_settings.clone())
+                .unwrap_or_default();
+            shared.edit(|s| {
+                s.roblox = read_roblox(&intent);
+                s.roblox_reset = ResetState::Idle;
+                s.roblox_reset_note = Some(note);
+            });
+            shared.notify();
+        });
+    }
+
     fn apply_roblox(&self, state: &mut State) {
         let draft = state.roblox_view();
         if !draft.ready() {

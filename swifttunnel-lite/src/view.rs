@@ -55,6 +55,10 @@ pub enum Action {
     ApplyRoblox,
     /// Read a custom FFlag payload out of the clipboard and check it.
     ImportFflags,
+    /// Put Roblox back to stock: delete every FFlag file on the machine,
+    /// including a bootstrapper's, and reset graphics and the frame cap.
+    /// Takes two presses, the first only arming the row.
+    ResetRoblox,
     SignOut,
     /// Sign in with whatever is in the email and password fields.
     SubmitLogin,

@@ -274,6 +274,21 @@ pub enum Lockout {
     SignedOut,
 }
 
+/// Where the "reset Roblox to default" row is in its two-press flow.
+///
+/// Two presses because the row is 34 pixels tall and what is behind it deletes
+/// a flag list somebody may have spent an evening assembling. Lite has no
+/// dialogs and should not grow one for this: arming the row says the same
+/// thing in the place they are already looking.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ResetState {
+    #[default]
+    Idle,
+    /// Pressed once. Any other action puts it back to idle.
+    Armed,
+    Running,
+}
+
 /// Roblox's own settings, read from its file rather than remembered here, so
 /// the switches reflect reality even when the full app or the player changed
 /// them.
@@ -306,6 +321,11 @@ pub struct State {
     pub roblox: Roblox,
     /// Pending Roblox edits. `None` means the screen mirrors the disk.
     pub roblox_draft: Option<RobloxDraft>,
+    /// The reset row's flow, kept out of `roblox` because that is replaced
+    /// wholesale every time the client is read back off disk.
+    pub roblox_reset: ResetState,
+    /// What the last reset found, shown under the group.
+    pub roblox_reset_note: Option<String>,
     /// Which field has the caret, if any.
     pub focus: Option<FieldId>,
     /// The sign-in form.

@@ -4,7 +4,7 @@
 //! clicked lives in `view`, so what is left here is what the screen actually
 //! says, which is the part worth being able to read and change quickly.
 
-use crate::state::{Lockout, Push, Roblox, RobloxDraft, State, Status, UpdateState};
+use crate::state::{Lockout, Push, ResetState, Roblox, RobloxDraft, State, Status, UpdateState};
 use crate::theme;
 use crate::view::{Action, Chip, FieldId, Flag, Item, Right, Row, Screen, Tone, Variant};
 
@@ -421,9 +421,15 @@ fn roblox(state: &State) -> Vec<Item> {
                 .action(Action::ImportFflags)
                 .disabled(!draft.custom_fflags),
         ]),
+        Item::Gap(12),
+        caption("Reset"),
+        Item::Group(vec![reset_row(state)]),
         Item::Gap(10),
     ];
 
+    if let Some(note) = &state.roblox_reset_note {
+        items.push(Item::Note(note.clone()));
+    }
     if let Some(note) = &draft.fflag_note {
         items.push(Item::Note(note.clone()));
     }
@@ -433,6 +439,29 @@ fn roblox(state: &State) -> Vec<Item> {
 
     let _ = dirty;
     items
+}
+
+/// The row that puts Roblox back to stock, in whichever of its three states.
+///
+/// The armed line says what is actually at risk rather than repeating the
+/// question. Someone who imported their own flags through a launcher has to
+/// read that they are about to lose them, and reading it is the only chance
+/// they get.
+fn reset_row(state: &State) -> Row {
+    match state.roblox_reset {
+        ResetState::Running => Row::new("Resetting...")
+            .sub("Clearing every FFlag file on this PC")
+            .disabled(true),
+        ResetState::Armed => Row::new("Press again to reset")
+            .sub("A launcher's own flags go too. Close Roblox first.")
+            .right(Right::Chevron)
+            .action(Action::ResetRoblox)
+            .danger_if(true),
+        ResetState::Idle => Row::new("Reset Roblox to default")
+            .sub("Remove every FFlag on this PC, ours and any strap's")
+            .right(Right::Chevron)
+            .action(Action::ResetRoblox),
+    }
 }
 
 /// The control pinned to the bottom of a screen, outside the scroll.
