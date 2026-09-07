@@ -701,7 +701,7 @@ export function BoostTab() {
         <SettingRow
           title="Ultraboost"
           anchorId="ultraboost"
-          desc="Max FPS, lowest detail. Overrides your in-game graphics quality"
+          desc="Max FPS, lowest detail. Lowers your Roblox graphics quality"
           enabled={draft.roblox_settings.ultraboost}
           onChange={(v) =>
             updateRblxOpt(
@@ -995,8 +995,10 @@ export function BoostTab() {
             Roblox's own files never clears a stuck flag.
           </p>
           <p className="text-[12px] leading-relaxed text-text-secondary">
-            Graphics quality and the frame cap go back to Roblox's defaults.
-            Your account, saved games and keybinds are untouched.
+            Graphics quality goes back to automatic and the frame cap back to
+            Roblox's own 60, unless SwiftTunnel has a backup of your original
+            settings, in which case that goes back instead. Your account, saved
+            games and keybinds are untouched.
           </p>
           <p className="text-[11px] leading-relaxed text-text-muted">
             If you set up your own flags in a launcher, you will lose them and

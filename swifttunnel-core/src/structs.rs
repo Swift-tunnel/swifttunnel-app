@@ -496,11 +496,15 @@ pub mod boost_info {
         // Says what it costs, not just what it buys. The old copy called this a
         // "max performance preset" and buried the price, so players turned it
         // on for frames, watched their world flatten, and reported it as a bug
-        // in Roblox or in SwiftTunnel. The overriding of Roblox's own quality
-        // slider is the part nobody could have guessed: raising graphics in
-        // game does nothing while this is on, which is exactly the report that
-        // led here.
-        long_desc: "Trades how Roblox looks for frames, heavily. Forces D3D11, minimum texture quality, 1x anti-aliasing, a gray sky, no grass and no object detail in the distance. It also overrides Roblox's own graphics quality, so raising the in-game quality slider will not bring detail back while this is on. Turn it off and apply to get normal rendering back.",
+        // in Roblox or in SwiftTunnel.
+        //
+        // It does NOT lock Roblox's graphics slider, whatever
+        // DFIntDebugFRMQualityLevelOverride looks like it should do. Measured
+        // on a real client: with all of these flags applied, raising the
+        // in-game quality slider restored the scene, the setting persisted, and
+        // it survived a relaunch. Saying otherwise sent one support reply down
+        // the wrong path and very nearly shipped here as product copy.
+        long_desc: "Trades how Roblox looks for frames, heavily. Forces D3D11, minimum texture quality, 1x anti-aliasing, a gray sky, no grass and reduced object detail in the distance, and drops Roblox's quality level. Raising the in-game graphics slider afterwards still works and brings detail back. Turn this off and apply to undo it properly.",
         impact: "Maximum FPS, lowest detail",
         risk_level: RiskLevel::Safe,
         requires_admin: true,
