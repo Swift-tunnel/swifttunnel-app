@@ -82,11 +82,7 @@ function validateCustomFflags(enabled: boolean, raw: string): string | null {
     return "Custom FFlags must be valid JSON.";
   }
 
-  if (
-    parsed === null ||
-    Array.isArray(parsed) ||
-    typeof parsed !== "object"
-  ) {
+  if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
     return "Custom FFlags must be a JSON object.";
   }
 
@@ -127,6 +123,42 @@ function validateCustomFflags(enabled: boolean, raw: string): string | null {
   }
 
   return null;
+}
+
+/**
+ * Everything that stops a config being written, for any config.
+ *
+ * Takes the config rather than reading the draft out of the component, because
+ * selecting a profile has to check the config it is about to apply and the
+ * draft state does not exist yet at that point.
+ */
+function configValidationError(config: Config): string | null {
+  const windowError =
+    validateWindowDimension(
+      "Width",
+      config.roblox_settings.window_width,
+      MIN_WINDOW_WIDTH,
+      MAX_WINDOW_WIDTH,
+    ) ??
+    validateWindowDimension(
+      "Height",
+      config.roblox_settings.window_height,
+      MIN_WINDOW_HEIGHT,
+      MAX_WINDOW_HEIGHT,
+    );
+  if (windowError) return windowError;
+
+  if (
+    config.roblox_settings.ultraboost &&
+    config.roblox_settings.custom_fflags_enabled
+  ) {
+    return "Choose either Ultraboost or Custom FFlag Import, not both.";
+  }
+
+  return validateCustomFflags(
+    config.roblox_settings.custom_fflags_enabled,
+    config.roblox_settings.custom_fflags_json,
+  );
 }
 
 export function BoostTab() {
@@ -275,17 +307,13 @@ export function BoostTab() {
     MAX_WINDOW_HEIGHT,
   );
   const windowValidationError = windowWidthError ?? windowHeightError;
+  // The combined check is what gates applying; this one is shown against the
+  // custom FFlag field itself, so it stays specific to that field.
   const customFflagError = validateCustomFflags(
     draft.roblox_settings.custom_fflags_enabled,
     draft.roblox_settings.custom_fflags_json,
   );
-  const fflagModeError =
-    draft.roblox_settings.ultraboost &&
-    draft.roblox_settings.custom_fflags_enabled
-      ? "Choose either Ultraboost or Custom FFlag Import, not both."
-      : null;
-  const validationError =
-    windowValidationError ?? fflagModeError ?? customFflagError;
+  const validationError = configValidationError(draft);
 
   useEffect(() => {
     const id = setInterval(boost.fetchMetrics, 2000);
@@ -380,9 +408,72 @@ export function BoostTab() {
     setDraftCountryBan(savedCountryBan);
   }, [savedConfig, savedGPP, savedCountryBan]);
 
-  function selectProfile(id: OptimizationProfile) {
-    setDraft(getPresetConfig(id, draft));
-  }
+  /**
+   * Choosing a profile applies it.
+   *
+   * It used to only fill the draft, so the button lit up as selected while
+   * nothing had been written to the client. That is how someone ends up
+   * convinced they turned Ultraboost off: they pick Quality, see Quality
+   * selected, and close the app with the flags still on disk. A support ticket
+   * about permanently low render distance was exactly this, and the player
+   * uninstalled to escape a setting they had already tried to switch off.
+   *
+   * Staging is kept for the one case where applying is not possible: a config
+   * the validator rejects still lands in the draft, so the reason shows up in
+   * the bar the way it always did rather than being swallowed here.
+   */
+  const selectProfile = useCallback(
+    async (id: OptimizationProfile) => {
+      if (isApplying || isRestarting) return;
+
+      const next = getPresetConfig(id, draft);
+      setDraft(next);
+
+      if (configValidationError(next)) return;
+      if (configsEqual(next, savedConfig)) return;
+
+      setIsApplying(true);
+      try {
+        const appliedConfig = await boost.updateConfig(JSON.stringify(next));
+        // Only the config. Any staged process or country-ban edits are the
+        // user's own pending work and are not part of picking a profile, so
+        // they stay in the bar waiting for Apply.
+        updateSettings({ config: appliedConfig });
+        setDraft(appliedConfig);
+        await saveSettings();
+
+        const name = PROFILES.find((p) => p.id === id)?.name ?? id;
+        if (useBoostStore.getState().warning) {
+          addToast({
+            type: "warning",
+            message: `${name} applied with warnings`,
+          });
+        } else if (boost.robloxRunning) {
+          // The FFlags live in a file Roblox reads at launch, so a running
+          // client keeps the old ones. Saying so beats letting them conclude
+          // the profile did nothing.
+          addToast({
+            type: "warning",
+            message: `${name} applied. Restart Roblox for it to take effect.`,
+          });
+        } else {
+          addToast({ type: "success", message: `${name} profile applied` });
+        }
+      } finally {
+        setIsApplying(false);
+      }
+    },
+    [
+      draft,
+      savedConfig,
+      boost,
+      updateSettings,
+      saveSettings,
+      addToast,
+      isApplying,
+      isRestarting,
+    ],
+  );
 
   function updateSysOpt(p: Partial<SystemOptimizationConfig>) {
     setDraft((prev) => ({
@@ -493,7 +584,10 @@ export function BoostTab() {
             return (
               <button
                 key={p.id}
-                onClick={() => selectProfile(p.id)}
+                onClick={() => {
+                  void selectProfile(p.id).catch(() => {});
+                }}
+                disabled={robloxControlsLocked}
                 className="rounded-[7px] px-3 py-2 text-left transition-all duration-100"
                 style={{
                   background: sel
@@ -554,7 +648,7 @@ export function BoostTab() {
         <SettingRow
           title="Ultraboost"
           anchorId="ultraboost"
-          desc="Curated FPS-focused Roblox FFlags"
+          desc="Max FPS, lowest detail. Overrides your in-game graphics quality"
           enabled={draft.roblox_settings.ultraboost}
           onChange={(v) =>
             updateRblxOpt(

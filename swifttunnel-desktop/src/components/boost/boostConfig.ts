@@ -65,8 +65,17 @@ export function getPresetConfig(
           ...current.roblox_settings,
           graphics_quality: "Level1",
           unlock_fps: true,
-          target_fps: 360,
+          // The max-FPS preset must never be the thing that lowers someone's
+          // cap. See Balanced for why a preset writing a fixed number became
+          // dangerous once the writer stopped refusing to lower it.
+          target_fps: Math.max(current.roblox_settings.target_fps, 360),
           ultraboost: true,
+          // Ultraboost and a custom FFlag import are mutually exclusive, and
+          // the toggle in the UI already clears one when you pick the other.
+          // Without this the preset produces a config the validator rejects,
+          // which used to be invisible because selecting a profile never
+          // applied anything.
+          custom_fflags_enabled: false,
         },
         network_settings: normalizeNetworkBoostConfig({
           ...current.network_settings,
@@ -93,7 +102,14 @@ export function getPresetConfig(
           ...current.roblox_settings,
           graphics_quality: "Manual",
           unlock_fps: true,
-          target_fps: 144,
+          // Presets differ on how Roblox looks, not on how many frames it is
+          // allowed to draw. These used to set 144 here and 60 under Quality,
+          // which was harmless while the writer refused to lower an existing
+          // cap and stopped being harmless the moment it wrote the configured
+          // value in both directions: picking Quality would have taken a player
+          // at 300 down to 60. The default is 300 and a preset has no business
+          // undoing it.
+          target_fps: Math.max(current.roblox_settings.target_fps, 300),
           ultraboost: false,
         },
         network_settings: normalizeNetworkBoostConfig({
@@ -121,7 +137,8 @@ export function getPresetConfig(
           ...current.roblox_settings,
           graphics_quality: "Level8",
           unlock_fps: true,
-          target_fps: 60,
+          // See Balanced: best visuals is not a reason to cap frames at 60.
+          target_fps: Math.max(current.roblox_settings.target_fps, 300),
           ultraboost: false,
         },
         network_settings: normalizeNetworkBoostConfig({

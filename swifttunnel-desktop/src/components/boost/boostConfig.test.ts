@@ -23,6 +23,66 @@ describe("boost config helpers", () => {
     expect(result.auto_start_with_roblox).toBe(false);
   });
 
+  it("never lowers the frame cap when a preset is chosen", () => {
+    // Presets used to write fixed caps: 144 for Balanced and 60 for Quality.
+    // That was survivable while the writer refused to lower an existing cap
+    // and became a real loss the moment it wrote the configured value in both
+    // directions, which is also when profile selection started applying
+    // immediately. Someone at 650 picking Quality would have lost 590 frames.
+    const fast = {
+      ...DEFAULT_SETTINGS.config,
+      roblox_settings: {
+        ...DEFAULT_SETTINGS.config.roblox_settings,
+        target_fps: 650,
+      },
+    };
+
+    for (const profile of ["LowEnd", "Balanced", "HighEnd"] as const) {
+      expect(getPresetConfig(profile, fast).roblox_settings.target_fps).toBe(
+        650,
+      );
+    }
+  });
+
+  it("raises a low frame cap to at least the default", () => {
+    const slow = {
+      ...DEFAULT_SETTINGS.config,
+      roblox_settings: {
+        ...DEFAULT_SETTINGS.config.roblox_settings,
+        target_fps: 60,
+      },
+    };
+
+    expect(getPresetConfig("Balanced", slow).roblox_settings.target_fps).toBe(
+      300,
+    );
+    expect(getPresetConfig("HighEnd", slow).roblox_settings.target_fps).toBe(
+      300,
+    );
+    expect(getPresetConfig("LowEnd", slow).roblox_settings.target_fps).toBe(
+      360,
+    );
+  });
+
+  it("does not produce a config that cannot be applied", () => {
+    // Ultraboost and a custom FFlag import are mutually exclusive. With a
+    // custom import already on, the performance preset used to hand back a
+    // config with both set, which the validator rejects. Nothing noticed while
+    // selecting a profile only filled a draft.
+    const withCustomFflags = {
+      ...DEFAULT_SETTINGS.config,
+      roblox_settings: {
+        ...DEFAULT_SETTINGS.config.roblox_settings,
+        custom_fflags_enabled: true,
+        custom_fflags_json: '{"FFlagDebugSkyGray":"True"}',
+      },
+    };
+
+    const result = getPresetConfig("LowEnd", withCustomFflags);
+    expect(result.roblox_settings.ultraboost).toBe(true);
+    expect(result.roblox_settings.custom_fflags_enabled).toBe(false);
+  });
+
   it("validates even-numbered window dimensions within bounds", () => {
     expect(validateWindowDimension("Width", 1280, 800, 3840)).toBeNull();
     expect(validateWindowDimension("Height", 719, 600, 2160)).toContain(

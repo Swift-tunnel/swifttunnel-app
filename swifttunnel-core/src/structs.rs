@@ -194,9 +194,11 @@ impl Default for RobloxSettingsConfig {
         Self {
             graphics_quality: GraphicsQuality::Automatic,
             // On by default, so a fresh install lifts Roblox's stock 60 cap
-            // without anyone having to find the switch. Safe to default on
-            // because `apply_xml_settings` only ever raises FramerateCap, never
-            // lowers it, so a player who has already set a higher cap keeps it.
+            // without anyone having to find the switch. A player already
+            // running a higher cap keeps it: `sync_roblox_window_settings`
+            // reads Roblox's current FramerateCap into this config at startup,
+            // the same way it adopts window size and graphics level, so 300
+            // never lands on top of someone's 650.
             unlock_fps: true,
             target_fps: 300,
             window_width: default_roblox_window_width(),
@@ -490,9 +492,16 @@ pub mod boost_info {
     pub const ULTRABOOST: BoostInfo = BoostInfo {
         id: "ultraboost",
         title: "Ultraboost",
-        short_desc: "Max performance Roblox preset",
-        long_desc: "Applies curated Roblox-allowlisted performance FFlags for maximum FPS. Forces D3D11 with minimum texture quality, 1x anti-aliasing, lowest render quality, gray sky, and zero grass distance while avoiding high-DPI sharpness flags that can cost frames.",
-        impact: "Maximum FPS preset",
+        short_desc: "Lowest visual quality for maximum FPS",
+        // Says what it costs, not just what it buys. The old copy called this a
+        // "max performance preset" and buried the price, so players turned it
+        // on for frames, watched their world flatten, and reported it as a bug
+        // in Roblox or in SwiftTunnel. The overriding of Roblox's own quality
+        // slider is the part nobody could have guessed: raising graphics in
+        // game does nothing while this is on, which is exactly the report that
+        // led here.
+        long_desc: "Trades how Roblox looks for frames, heavily. Forces D3D11, minimum texture quality, 1x anti-aliasing, a gray sky, no grass and no object detail in the distance. It also overrides Roblox's own graphics quality, so raising the in-game quality slider will not bring detail back while this is on. Turn it off and apply to get normal rendering back.",
+        impact: "Maximum FPS, lowest detail",
         risk_level: RiskLevel::Safe,
         requires_admin: true,
     };
@@ -672,8 +681,9 @@ mod tests {
         let cfg = RobloxSettingsConfig::default();
         assert_eq!(cfg.graphics_quality, GraphicsQuality::Automatic);
         // On by default, so a fresh install lifts Roblox's stock 60 cap without
-        // anyone having to find the switch. Safe because apply_xml_settings only
-        // raises FramerateCap and never lowers it.
+        // anyone having to find the switch. An existing higher cap is adopted
+        // at startup rather than overwritten, so this default cannot cost
+        // anyone frames.
         assert!(cfg.unlock_fps);
         assert_eq!(cfg.target_fps, 300);
         assert_eq!(cfg.window_width, 1280);

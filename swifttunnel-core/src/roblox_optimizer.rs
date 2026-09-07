@@ -1047,9 +1047,26 @@ impl RobloxOptimizer {
         self.backup_settings_for(&self.settings_path)
     }
 
+    /// Snapshot Roblox's settings the first time, and only the first time.
+    ///
+    /// This used to overwrite the backup on every apply, which quietly made
+    /// "restore original settings" a lie: apply Ultraboost twice and the
+    /// backup holds the first apply's forced quality level, so restoring hands
+    /// the player their own degraded settings back and calls it the original.
+    /// Uninstall restores from this file, so that turned a temporary change
+    /// into a permanent one.
+    ///
+    /// Keeping the first snapshot means the file is what its name says: Roblox
+    /// as it was before SwiftTunnel ever touched it.
     fn backup_settings_for(&self, settings_path: &Path) -> Result<()> {
+        if self.backup_path.exists() {
+            return Ok(());
+        }
         if settings_path.exists() {
             info!("Creating backup of Roblox settings");
+            if let Some(parent) = self.backup_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
             fs::copy(settings_path, &self.backup_path)?;
             info!("Backup created at: {:?}", self.backup_path);
         }
@@ -1781,6 +1798,70 @@ impl RobloxOptimizer {
         Ok(Self::dedupe_paths(paths))
     }
 
+    /// Every ClientSettings folder that could still be holding flags we wrote.
+    ///
+    /// Deliberately wider than the writing path. `get_client_settings_paths`
+    /// counts a `version-` folder as an install only when `RobloxPlayerBeta.exe`
+    /// sits next to it, which is the right test for writing: seeding flags into
+    /// a folder nothing launches is pointless. It is the wrong test for
+    /// removing. Roblox's own "reset installation", an update caught halfway
+    /// and a client the player has since removed all leave the version folder
+    /// and its `ClientSettings` behind with the executable gone, and cleanup
+    /// then walked past the one file it existed to delete, logged "skipping
+    /// FFlag cleanup" and reported success.
+    ///
+    /// What is left behind is not inert. Reinstalling Roblox over that folder
+    /// picks the flags straight back up, and by then SwiftTunnel is gone, so
+    /// there is nothing left on the machine that knows how to undo them. A
+    /// player is left with a permanently degraded client and no way to connect
+    /// it to an app they uninstalled weeks ago.
+    ///
+    /// So removal takes any `version-` folder that still has a `ClientSettings`
+    /// directory, plus every launcher `Modifications` path. Nothing here creates
+    /// a directory that does not already exist.
+    fn get_client_settings_paths_for_removal() -> Vec<PathBuf> {
+        let mut paths = match Self::get_client_settings_paths(false) {
+            Ok(paths) => paths,
+            Err(error) => {
+                warn!("Could not collect the usual ClientSettings paths for removal: {error}");
+                Vec::new()
+            }
+        };
+
+        for root in Self::launcher_roots() {
+            Self::collect_removal_client_settings_in(&root.join("Versions"), &mut paths);
+        }
+
+        Self::dedupe_paths(paths)
+    }
+
+    /// Append every `version-*/ClientSettings` under `versions_dir` that exists.
+    ///
+    /// Split out from the caller so tests can point it at a temporary directory
+    /// instead of the machine's real launcher roots.
+    fn collect_removal_client_settings_in(versions_dir: &Path, paths: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(versions_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let is_version_folder = path
+                .file_name()
+                .map(|name| name.to_string_lossy().starts_with("version-"))
+                .unwrap_or(false);
+            if !is_version_folder {
+                continue;
+            }
+            let client_settings = path.join("ClientSettings");
+            if client_settings.is_dir() {
+                paths.push(client_settings);
+            }
+        }
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     fn get_client_settings_path_for_local_app_data(
@@ -2162,8 +2243,7 @@ impl RobloxOptimizer {
 
     /// Remove all SwiftTunnel FFlag settings from ClientAppSettings.json
     fn remove_all_fflags(&self) -> Result<()> {
-        let client_settings_paths = Self::get_client_settings_paths(false)?;
-        self.remove_all_fflags_in_paths(client_settings_paths)
+        self.remove_all_fflags_in_paths(Self::get_client_settings_paths_for_removal())
     }
 
     fn remove_all_fflags_in_paths(&self, client_settings_paths: Vec<PathBuf>) -> Result<()> {
@@ -2289,21 +2369,25 @@ impl Default for RobloxOptimizer {
 }
 
 impl RobloxOptimizer {
-    /// Remove all SwiftTunnel FFlag entries for uninstall.
+    /// Undo everything SwiftTunnel did to Roblox, on uninstall.
     ///
-    /// Constructs a temporary instance and delegates to the private
-    /// `remove_all_fflags` method. Individual errors are logged but
-    /// never propagate so the rest of uninstall can proceed.
+    /// This used to strip the FFlags and clear the GPU preference and stop
+    /// there, which left the half of our changes that lives in
+    /// GlobalBasicSettings: the graphics quality level and the frame cap. Those
+    /// sit above the version folders, so nothing else ever cleared them, and a
+    /// player who ran Ultraboost kept its forced quality level for good. That is
+    /// the shape of the render-distance reports: uninstalling did not give the
+    /// client back.
+    ///
+    /// `reset_swifttunnel_changes` is the same routine behind the Repair tab's
+    /// reset, so uninstall and that button now do the same thing rather than
+    /// two different partial jobs. Errors are logged and swallowed so the rest
+    /// of uninstall proceeds.
     pub fn cleanup_for_uninstall() {
-        info!("Roblox optimizer: cleaning up FFlags for uninstall");
+        info!("Roblox optimizer: undoing Roblox changes for uninstall");
         let optimizer = Self::new();
-        if let Err(e) = optimizer.remove_all_fflags() {
-            warn!("Failed to remove Roblox FFlags during uninstall: {e}");
-        }
-        // Also drop the per-app dGPU preference entries we may have written.
-        // Best-effort; missing values are not an error.
-        if let Err(e) = Self::sync_gpu_preference(false) {
-            warn!("Failed to clear Roblox GPU preference during uninstall: {e}");
+        if let Err(e) = optimizer.reset_swifttunnel_changes() {
+            warn!("Failed to undo Roblox changes during uninstall: {e}");
         }
         info!("Roblox optimizer: uninstall cleanup completed");
     }
@@ -2431,6 +2515,95 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&base);
     }
+
+    /// Removal must not need a working Roblox to remove from.
+    ///
+    /// From the render-distance ticket: the player reset their Roblox files and
+    /// uninstalled SwiftTunnel, and the flags stayed. Cleanup reused the
+    /// writing path, which only counts a version folder that still has
+    /// `RobloxPlayerBeta.exe` beside it, so it walked past the settings file it
+    /// existed to delete and logged success. The flags then survived into the
+    /// next Roblox install, with the app that wrote them already gone.
+    #[test]
+    fn removal_finds_settings_in_a_version_folder_with_no_executable() {
+        let base = std::env::temp_dir().join(format!(
+            "swifttunnel-removal-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let versions = base.join("Roblox").join("Versions");
+
+        // Gutted by a Roblox reset: settings still there, executable gone.
+        let orphaned = versions.join("version-dead").join("ClientSettings");
+        fs::create_dir_all(&orphaned).unwrap();
+        fs::write(orphaned.join("ClientAppSettings.json"), "{}").unwrap();
+
+        // A live install, which the writing path would also have found.
+        let live_version = versions.join("version-live");
+        let live = live_version.join("ClientSettings");
+        fs::create_dir_all(&live).unwrap();
+        fs::write(live_version.join("RobloxPlayerBeta.exe"), b"stub").unwrap();
+
+        // Not ours, and not a version folder.
+        fs::create_dir_all(versions.join("Downloads").join("ClientSettings")).unwrap();
+
+        let mut found = Vec::new();
+        RobloxOptimizer::collect_removal_client_settings_in(&versions, &mut found);
+
+        assert!(
+            found.contains(&orphaned),
+            "a version folder with no executable must still be cleaned, got {found:?}"
+        );
+        assert!(
+            found.contains(&live),
+            "a live install must still be cleaned"
+        );
+        assert_eq!(found.len(), 2, "only version- folders count, got {found:?}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// No ClientSettings folder means nothing to remove, and nothing to create.
+    ///
+    /// Removal must never bring a settings directory into existence: an empty
+    /// `ClientSettings` in a Roblox install is not harmless, it is a folder the
+    /// player did not ask for in software we are in the middle of uninstalling.
+    #[test]
+    fn removal_does_not_create_missing_settings_folders() {
+        let base = std::env::temp_dir().join(format!(
+            "swifttunnel-removal-empty-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let versions = base.join("Roblox").join("Versions");
+        let version = versions.join("version-bare");
+        fs::create_dir_all(&version).unwrap();
+
+        let mut found = Vec::new();
+        RobloxOptimizer::collect_removal_client_settings_in(&versions, &mut found);
+
+        assert!(found.is_empty(), "nothing to clean, got {found:?}");
+        assert!(
+            !version.join("ClientSettings").exists(),
+            "removal must not create a ClientSettings folder"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// A missing Versions directory is normal, not an error.
+    #[test]
+    fn removal_tolerates_a_launcher_that_is_not_installed() {
+        let mut found = Vec::new();
+        RobloxOptimizer::collect_removal_client_settings_in(
+            &std::env::temp_dir().join("swifttunnel-removal-absent-launcher-root"),
+            &mut found,
+        );
+        assert!(found.is_empty());
+    }
+
     use std::fs;
 
     /// Helper: create a RobloxOptimizer pointing at a specific path
@@ -2440,6 +2613,47 @@ mod tests {
             settings_path,
             backup_path,
         }
+    }
+
+    /// The backup is the original, not the previous apply.
+    ///
+    /// Uninstall restores from this file. While every apply overwrote it, the
+    /// second apply captured the first one's forced quality level, so restoring
+    /// handed the player SwiftTunnel's own settings back and called them their
+    /// originals. Undoing has to reach past everything we did, not just the
+    /// last of it.
+    #[test]
+    fn the_backup_keeps_the_settings_from_before_swifttunnel_touched_them() {
+        let dir = std::env::temp_dir().join(format!(
+            "swifttunnel-backup-once-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("GlobalBasicSettings_13.xml");
+
+        let original = r#"<roblox><token name="SavedQualityLevel">10</token></roblox>"#;
+        fs::write(&settings, original).unwrap();
+
+        let optimizer = optimizer_with_path(settings.clone());
+        optimizer.backup_settings_for(&settings).unwrap();
+
+        // SwiftTunnel forces the quality down, then applies a second time.
+        fs::write(
+            &settings,
+            r#"<roblox><token name="SavedQualityLevel">1</token></roblox>"#,
+        )
+        .unwrap();
+        optimizer.backup_settings_for(&settings).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&optimizer.backup_path).unwrap(),
+            original,
+            "the second apply must not overwrite the original with its own output"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── extract_int_value ───────────────────────────────────────────
