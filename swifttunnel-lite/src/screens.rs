@@ -453,12 +453,12 @@ fn reset_row(state: &State) -> Row {
             .sub("Clearing every FFlag file on this PC")
             .disabled(true),
         ResetState::Armed => Row::new("Press again to reset")
-            .sub("A launcher's own flags go too. Close Roblox first.")
+            .sub("Roblox closes now. A launcher's own flags go too.")
             .right(Right::Chevron)
             .action(Action::ResetRoblox)
             .danger_if(true),
         ResetState::Idle => Row::new("Reset Roblox to default")
-            .sub("Remove every FFlag on this PC, ours and any strap's")
+            .sub("Close Roblox and remove every FFlag on this PC")
             .right(Right::Chevron)
             .action(Action::ResetRoblox),
     }

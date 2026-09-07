@@ -433,20 +433,28 @@ export function BoostTab() {
           type: "warning",
           message: "Some files could not be cleared. Close Roblox and retry.",
         });
-      } else if (report.flag_files_removed === 0) {
-        addToast({
-          type: "success",
-          message: "Roblox was already clean. Nothing to remove.",
-        });
       } else {
-        const where =
-          report.sources.length > 0 ? ` from ${report.sources.join(", ")}` : "";
-        addToast({
-          type: "success",
-          message: `Removed ${report.flag_files_removed} flag file${
-            report.flag_files_removed === 1 ? "" : "s"
-          }${where}. Restart Roblox.`,
-        });
+        // Say that Roblox was ended. On Windows it commonly outlives its own
+        // window, so someone who believes they closed it half an hour ago still
+        // had it running, and a silent kill would read as a crash.
+        const closed = report.roblox_was_running ? "Roblox closed. " : "";
+        if (report.flag_files_removed === 0) {
+          addToast({
+            type: "success",
+            message: `${closed}Roblox was already clean, nothing to remove.`,
+          });
+        } else {
+          const where =
+            report.sources.length > 0
+              ? ` from ${report.sources.join(", ")}`
+              : "";
+          addToast({
+            type: "success",
+            message: `${closed}Removed ${report.flag_files_removed} flag file${
+              report.flag_files_removed === 1 ? "" : "s"
+            }${where}.`,
+          });
+        }
       }
     } catch {
       addToast({ type: "warning", message: "Could not reset Roblox" });
@@ -758,7 +766,7 @@ export function BoostTab() {
         />
         <Row
           label="Reset Roblox to default"
-          desc="Remove every FFlag on this PC, including a bootstrapper's, and put graphics back"
+          desc="Close Roblox, remove every FFlag on this PC including a bootstrapper's, and put graphics back"
           anchorId="reset_roblox"
         >
           <Button
@@ -984,9 +992,15 @@ export function BoostTab() {
           if (!isResetting) setResetDialogOpen(false);
         }}
         title="Reset Roblox to default"
-        description="Clears every FFlag on this PC, not only SwiftTunnel's."
+        description="Closes Roblox and clears every FFlag on this PC, not only SwiftTunnel's."
       >
         <div className="flex flex-col gap-4">
+          <p className="text-[12px] leading-relaxed text-text-secondary">
+            <span className="text-foreground">Roblox will be closed</span>, and
+            any game you are in ends immediately. It has to be: Roblox rewrites
+            its settings when it exits, so a reset done underneath a running
+            client is undone the moment that client closes.
+          </p>
           <p className="text-[12px] leading-relaxed text-text-secondary">
             This deletes every ClientAppSettings.json on this machine, including
             the one Bloxstrap, Fishstrap or any other launcher keeps in its
@@ -1002,7 +1016,7 @@ export function BoostTab() {
           </p>
           <p className="text-[11px] leading-relaxed text-text-muted">
             If you set up your own flags in a launcher, you will lose them and
-            will need to add them again. Close Roblox first.
+            will need to add them again.
           </p>
           <div className="flex flex-wrap justify-end gap-2">
             <Button

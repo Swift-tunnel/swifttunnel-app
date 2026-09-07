@@ -190,6 +190,7 @@ export interface ModifiedFlushResult {
 
 /** What a full Roblox client reset cleared. Mirrors core's RobloxResetReport. */
 export interface RobloxResetReportResponse {
+  roblox_was_running: boolean;
   flag_files_removed: number;
   sources: string[];
   settings_restored: boolean;

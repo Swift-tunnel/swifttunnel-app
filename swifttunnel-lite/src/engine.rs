@@ -570,13 +570,21 @@ impl Engine {
                 let _ = settings::save_settings(&snapshot);
             }
 
+            // Roblox usually outlives its own window, so somebody who believes
+            // they closed it long ago still had it running. Saying it was
+            // closed stops a deliberate kill reading as a crash.
+            let closed = if report.roblox_was_running {
+                "Roblox closed. "
+            } else {
+                ""
+            };
             let note = if !report.failures.is_empty() {
-                "Some files were locked. Close Roblox and try again.".to_string()
+                "Some files were locked. Try again.".to_string()
             } else if report.flag_files_removed == 0 {
-                "Roblox was already clean. Nothing to remove.".to_string()
+                format!("{closed}Roblox was already clean, nothing to remove.")
             } else {
                 format!(
-                    "Removed {} flag file{} from {}. Restart Roblox.",
+                    "{closed}Removed {} flag file{} from {}.",
                     report.flag_files_removed,
                     if report.flag_files_removed == 1 {
                         ""

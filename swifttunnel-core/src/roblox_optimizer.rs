@@ -36,6 +36,12 @@ pub struct RobloxOptimizer {
 /// installed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RobloxResetReport {
+    /// Roblox was alive when the reset started and was ended.
+    ///
+    /// Worth reporting rather than doing silently: the player may not have
+    /// realised it was still running, which on Windows is the normal case
+    /// because Roblox outlives its own window.
+    pub roblox_was_running: bool,
     /// `ClientAppSettings.json` files deleted, across every location.
     pub flag_files_removed: usize,
     /// Which launchers those came from, e.g. `Roblox`, `Bloxstrap`.
@@ -1168,9 +1174,38 @@ impl RobloxOptimizer {
     /// that also holds volume, sensitivity and keybinds the player chose.
     ///
     /// Destructive by design and by request: a launcher's own flag setup is
-    /// removed too. The caller has to have said so.
+    /// removed too, and a running Roblox is killed. The caller has to have said
+    /// so.
     pub fn reset_client_to_default(&self) -> RobloxResetReport {
-        let mut report = RobloxResetReport::default();
+        let mut report = RobloxResetReport {
+            roblox_was_running: self.is_roblox_running(),
+            ..Default::default()
+        };
+
+        // Kill Roblox first, or the reset does not stick.
+        //
+        // Roblox holds GlobalBasicSettings open and writes it back on the way
+        // out, so restoring it under a live client means the client overwrites
+        // the restore the moment it exits. The flag files are worse: Roblox
+        // reads them at launch, so one that is still running keeps the old
+        // behaviour and puts the player straight back where they started.
+        //
+        // Asking them to close it first does not work either. Roblox routinely
+        // stays in the task list long after its window is gone, which is
+        // exactly what happened while this was being tested: three separate
+        // "closed it" attempts and the process was alive every time. Somebody
+        // pressing a reset button has already decided the client is the
+        // problem, so ending it is the honest thing to do rather than a step to
+        // hand back to them.
+        if report.roblox_was_running {
+            match self.close_running_instances() {
+                Ok(()) => info!("Reset: closed the running Roblox client"),
+                Err(e) => {
+                    warn!("Reset: could not close Roblox: {e}");
+                    report.failures.push(format!("could not close Roblox: {e}"));
+                }
+            }
+        }
 
         for client_settings in Self::get_client_settings_paths_for_removal() {
             let settings_path = client_settings.join("ClientAppSettings.json");
@@ -1331,9 +1366,7 @@ impl RobloxOptimizer {
 
     /// Check whether a Roblox client process is currently running.
     pub fn is_roblox_running(&self) -> bool {
-        let process_names = ["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
-
-        process_names.iter().any(|process_name| {
+        Self::ROBLOX_CLIENT_PROCESSES.iter().any(|process_name| {
             hidden_command("tasklist")
                 .args(["/FI", &format!("IMAGENAME eq {}", process_name)])
                 .output()
@@ -1346,10 +1379,15 @@ impl RobloxOptimizer {
     }
 
     /// Force-close running Roblox client processes.
+    ///
+    /// Kills more than [`Self::is_roblox_running`] looks for, deliberately.
+    /// `RobloxCrashHandler.exe` is a helper that outlives the client it was
+    /// watching, so it belongs in the list of things to end but not in the list
+    /// of things that mean "Roblox is open": counting it as the client would
+    /// leave the app offering to restart a game nobody is playing.
     pub fn close_running_instances(&self) -> Result<()> {
-        let process_names = ["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
-
-        for process_name in process_names {
+        for process_name in Self::ROBLOX_PROCESSES_TO_KILL {
+            let process_name = *process_name;
             let output = hidden_command("taskkill")
                 .args(["/F", "/T", "/IM", process_name])
                 .output();
@@ -1692,6 +1730,25 @@ impl RobloxOptimizer {
     /// The normal Roblox version folder is still handled separately. These paths
     /// are for bootstrappers that copy persistent user modifications into the
     /// active Roblox version folder when they launch Roblox.
+    /// Processes whose presence means "Roblox is open".
+    ///
+    /// Only the client itself. Helpers that outlive it do not belong here: one
+    /// of them still running is not a game in progress, and counting it as one
+    /// would leave the app offering to restart something nobody is playing.
+    const ROBLOX_CLIENT_PROCESSES: &[&str] = &["RobloxPlayerBeta.exe", "Windows10Universal.exe"];
+
+    /// Processes to end when closing Roblox.
+    ///
+    /// A superset of the above. `RobloxCrashHandler.exe` routinely sits in the
+    /// task list long after the client is gone, which is a large part of why
+    /// people believe they have closed Roblox when they have not, so ending it
+    /// is part of ending Roblox.
+    const ROBLOX_PROCESSES_TO_KILL: &[&str] = &[
+        "RobloxPlayerBeta.exe",
+        "Windows10Universal.exe",
+        "RobloxCrashHandler.exe",
+    ];
+
     const BOOTSTRAPPER_CLIENT_SETTINGS_LOCATIONS: &[(&str, &[&str])] = &[
         ("Bloxstrap", &["Modifications", "ClientSettings"]),
         ("Bloxstrap-QA", &["Modifications", "ClientSettings"]),
@@ -2837,6 +2894,31 @@ mod tests {
             RobloxOptimizer::extract_int_value(&reset, "MasterVolume"),
             Some(3),
             "a reset must not touch settings nothing forced"
+        );
+    }
+
+    /// Closing Roblox ends more than detecting it looks for.
+    ///
+    /// The crash handler is the reason "I closed Roblox" is so often untrue, so
+    /// a reset has to end it. It must not count as the client though: if
+    /// `is_roblox_running` returned true for a leftover helper, the app would
+    /// offer to restart a game that is not running and the boost bar would
+    /// insist on a restart nobody needs.
+    #[test]
+    fn closing_roblox_ends_the_crash_handler_but_it_is_not_the_client() {
+        for name in RobloxOptimizer::ROBLOX_CLIENT_PROCESSES {
+            assert!(
+                RobloxOptimizer::ROBLOX_PROCESSES_TO_KILL.contains(name),
+                "{name} counts as Roblox running but would be left alive"
+            );
+        }
+        assert!(
+            RobloxOptimizer::ROBLOX_PROCESSES_TO_KILL.contains(&"RobloxCrashHandler.exe"),
+            "the crash handler outlives the client and must be ended with it"
+        );
+        assert!(
+            !RobloxOptimizer::ROBLOX_CLIENT_PROCESSES.contains(&"RobloxCrashHandler.exe"),
+            "a leftover crash handler is not a game in progress"
         );
     }
 
