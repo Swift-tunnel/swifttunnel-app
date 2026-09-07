@@ -1549,6 +1549,44 @@ impl RobloxOptimizer {
             .next()
     }
 
+    /// A fingerprint of every Roblox client install on this machine.
+    ///
+    /// Changes when Roblox updates, because an update lands as a new
+    /// `version-<hash>` folder rather than an edit of the old one. That is the
+    /// event worth reacting to: FFlags live inside the version folder, so an
+    /// update silently discards them, while the frame cap and graphics level
+    /// live in GlobalBasicSettings and survive.
+    ///
+    /// Recovery used to happen only when the app next started, and only if
+    /// Ultraboost was on, so somebody who launched Roblox directly for a few
+    /// weeks lost their flags at the first update and had no way to know.
+    ///
+    /// Deliberately just the folder names: cheap enough to poll, and it changes
+    /// exactly when a client is added or removed.
+    pub fn install_fingerprint() -> String {
+        Self::fingerprint_of(&Self::find_roblox_version_folders())
+    }
+
+    /// The pure half, so it can be tested without a real Roblox install.
+    ///
+    /// Separated because the caller above reads this machine's LOCALAPPDATA,
+    /// and a test that went through it would pass or fail on whatever Roblox
+    /// happens to be installed on the machine running it.
+    fn fingerprint_of(folders: &[PathBuf]) -> String {
+        let mut names: Vec<String> = folders
+            .iter()
+            .filter_map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            })
+            .collect();
+        // Sorted, because the folder listing is ordered by modification time.
+        // Without this an unchanged install could reorder between polls and
+        // trigger a pointless reapply.
+        names.sort();
+        names.join("|")
+    }
+
     fn find_roblox_version_folders() -> Vec<PathBuf> {
         let mut versions: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
 
@@ -2274,6 +2312,43 @@ impl RobloxOptimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fingerprint changes exactly when a client is added or removed.
+    ///
+    /// That is what tells the version watcher a Roblox update landed and threw
+    /// the FFlags away, so it has to be stable for an unchanged install and
+    /// different for a changed one. Order must not matter: the folder listing
+    /// is sorted by modification time, so an untouched install can come back in
+    /// a different order and would otherwise trigger a pointless reapply.
+    #[test]
+    fn the_install_fingerprint_tracks_which_versions_exist() {
+        let a = PathBuf::from(r"C:\x\Roblox\Versions\version-aaa");
+        let b = PathBuf::from(r"C:\x\Roblox\Versions\version-bbb");
+        let c = PathBuf::from(r"C:\x\Bloxstrap\Versions\version-ccc");
+
+        let before = RobloxOptimizer::fingerprint_of(&[a.clone(), b.clone()]);
+
+        assert_eq!(
+            before,
+            RobloxOptimizer::fingerprint_of(&[b.clone(), a.clone()]),
+            "order must not matter, the listing is by modification time"
+        );
+        assert_ne!(
+            before,
+            RobloxOptimizer::fingerprint_of(&[a.clone(), b.clone(), c]),
+            "a new version folder is an update, and must be noticed"
+        );
+        assert_ne!(
+            before,
+            RobloxOptimizer::fingerprint_of(&[a]),
+            "a removed one must be noticed too"
+        );
+        assert_eq!(
+            RobloxOptimizer::fingerprint_of(&[]),
+            "",
+            "no install at all is stable rather than a panic"
+        );
+    }
 
     /// A Bloxstrap player's Roblox must be found.
     ///

@@ -490,6 +490,70 @@ fn apply_webview2_resource_tuning() {}
 ///
 /// Only runs on the falling edge, and only rewrites the window keys, so it is
 /// silent for anyone who never touched the setting.
+/// Put the FFlags back after Roblox updates itself.
+///
+/// A Roblox update arrives as a brand new `version-<hash>` folder, and FFlags
+/// live inside the version folder, so an update throws them away. The frame cap
+/// and graphics level are unaffected: those live in GlobalBasicSettings, which
+/// sits above the version folders.
+///
+/// Recovery used to happen only in `reapply_saved_roblox_fflags` at app
+/// startup, and only when Ultraboost was on. Somebody who turned Ultraboost on
+/// and then launched Roblox directly for a few weeks lost their flags at the
+/// first update, silently, and only got them back if they happened to open
+/// SwiftTunnel before playing again. This is the "it worked and then stopped"
+/// shape of report.
+///
+/// This is what a bootstrapper's own launcher buys, without taking over the
+/// `roblox-player:` protocol handler to get it. Intercepting launches would be
+/// more thorough and can also stop Roblox opening at all when it goes wrong,
+/// which is a far worse failure than stale flags.
+///
+/// Polls, because Roblox writes the folder itself and there is nothing to
+/// subscribe to. A minute is far below how often anyone updates, and the check
+/// is a directory listing.
+fn spawn_roblox_version_watcher(app: tauri::AppHandle) {
+    use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
+
+    let _ = std::thread::Builder::new()
+        .name("roblox-version-watcher".into())
+        .spawn(move || {
+            let mut last_seen = RobloxOptimizer::install_fingerprint();
+
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+
+                let current = RobloxOptimizer::install_fingerprint();
+                if current == last_seen {
+                    continue;
+                }
+                last_seen = current;
+
+                let Some(state) = app.try_state::<AppState>() else {
+                    continue;
+                };
+
+                let config = {
+                    let settings = state.settings.lock();
+                    settings.config.roblox_settings.clone()
+                };
+
+                // Nothing of ours to restore. Custom flags count as well as
+                // Ultraboost: the startup path checks only Ultraboost, so a
+                // custom-flag user was never recovered at all.
+                if !config.ultraboost && !config.custom_fflags_enabled {
+                    continue;
+                }
+
+                info!("Roblox install changed; reapplying saved FFlags");
+                let optimizer = state.roblox_optimizer.lock();
+                if let Err(e) = optimizer.reapply_saved_client_fflags(&config) {
+                    warn!("Could not reapply FFlags after a Roblox update: {e}");
+                }
+            }
+        });
+}
+
 fn spawn_roblox_window_size_watcher(app: tauri::AppHandle) {
     let _ = std::thread::Builder::new()
         .name("roblox-window-size-watcher".into())
@@ -826,6 +890,10 @@ pub fn run() {
             // Background: put the configured Roblox launch window size back
             // after Roblox overwrites it on exit.
             spawn_roblox_window_size_watcher(app.handle().clone());
+
+            // Background: put the FFlags back after Roblox updates itself,
+            // which lands as a new version folder and discards them.
+            spawn_roblox_version_watcher(app.handle().clone());
 
             // Background startup chain: everything slow that used to block
             // setup, in the same order it ran before. Runs on the app's own
