@@ -852,31 +852,23 @@ impl RobloxOptimizer {
         // Read current content
         let mut content = fs::read_to_string(settings_path)?;
 
-        // Apply FPS cap, raising it but never lowering it.
+        // Apply the FPS cap exactly as configured, in both directions.
         //
-        // This wrote the configured value straight over whatever was there. A
-        // player who had already set a high cap, in Roblox's own settings or
-        // through Fishstrap's Global Basic Settings editor, lost it the moment
-        // SwiftTunnel applied anything: a machine sitting at 650 and drawing
-        // 500-600 frames would be pulled down to the app's default. Turning the
-        // switch on by default would have made that everyone's first
-        // experience, which is the opposite of the point.
+        // This briefly refused to lower it, to stop the on-by-default cap
+        // writing its 300 over someone already running 650. That guard was in
+        // the wrong place: it also meant a player who typed 500 into the Cap
+        // field while sitting at 600 was silently ignored, which makes the
+        // control a lie. Whatever is in the config is what the player asked
+        // for, so it is what gets written.
         //
-        // The cap only ever moves up now, so defaulting it on can raise the
-        // stock 60 without ever taking frames away from someone who had already
-        // sorted it out for themselves.
+        // The protection it was reaching for lives in `sync_roblox_window_settings`
+        // instead, which adopts Roblox's existing cap into the config at startup
+        // the same way it adopts window size and graphics level. A machine at
+        // 650 arrives here with 650 already configured, so there is nothing to
+        // overwrite and nothing to guard against.
         if config.unlock_fps {
-            let current = Self::extract_int_value(&content, "FramerateCap").unwrap_or(0);
-            let target = config.target_fps as i32;
-            if target > current {
-                content = self.set_xml_int_value(&content, "FramerateCap", target);
-                info!("Raised FPS cap from {} to {}", current, target);
-            } else {
-                info!(
-                    "Left FPS cap at {}, which already exceeds the configured {}",
-                    current, target
-                );
-            }
+            content = self.set_xml_int_value(&content, "FramerateCap", config.target_fps as i32);
+            info!("Set FPS cap to: {}", config.target_fps);
         }
 
         // Apply graphics quality
@@ -2479,62 +2471,55 @@ mod tests {
         );
     }
 
-    // ── set_xml_int_value ───────────────────────────────────────────
-
-    /// The frame cap only ever goes up.
+    /// The Cap field works in both directions.
     ///
-    /// This wrote the configured value straight over whatever was there, so a
-    /// machine already sitting at 650 and drawing 500-600 frames was pulled
-    /// down to the app's default the first time anything was applied. Turning
-    /// the cap on by default, which is now the case, would have made that
-    /// everyone's first experience of installing SwiftTunnel.
+    /// A version of this asserted the opposite, that applying must never lower
+    /// an existing higher cap. That guard was aimed at the on-by-default cap
+    /// writing its 300 over a machine already running 650, but it also meant
+    /// somebody typing 500 while sitting at 600 was silently ignored, which
+    /// makes the control a lie. Protecting the existing cap is
+    /// `sync_roblox_window_settings`' job, at startup, before anyone has typed
+    /// anything.
     #[test]
-    fn applying_the_frame_cap_never_lowers_an_existing_higher_one() {
-        let dir = std::env::temp_dir().join("roblox_opt_test_fps_never_lowers");
+    fn applying_the_frame_cap_writes_exactly_what_was_asked_for() {
+        let dir = std::env::temp_dir().join("roblox_opt_test_fps_both_ways");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let settings_path = dir.join("GlobalBasicSettings_13.xml");
-
-        // Stock 60: the cap must be raised.
-        fs::write(
-            &settings_path,
-            r#"<roblox><int name="FramerateCap">60</int></roblox>"#,
-        )
-        .unwrap();
         let opt = optimizer_with_path(settings_path.clone());
-        let config = RobloxSettingsConfig {
-            unlock_fps: true,
-            target_fps: 300,
-            ..Default::default()
-        };
-        opt.apply_xml_settings(&settings_path, &config).unwrap();
-        assert_eq!(
-            RobloxOptimizer::extract_int_value(
-                &fs::read_to_string(&settings_path).unwrap(),
-                "FramerateCap"
-            ),
-            Some(300),
-            "a stock 60 cap must be raised to the target"
-        );
 
-        // Already higher than the target: it must be left alone.
-        fs::write(
-            &settings_path,
-            r#"<roblox><int name="FramerateCap">650</int></roblox>"#,
-        )
-        .unwrap();
-        opt.apply_xml_settings(&settings_path, &config).unwrap();
-        assert_eq!(
+        let cap_after = |target: u32| {
+            fs::write(
+                &settings_path,
+                r#"<roblox><int name="FramerateCap">600</int></roblox>"#,
+            )
+            .unwrap();
+            opt.apply_xml_settings(
+                &settings_path,
+                &RobloxSettingsConfig {
+                    unlock_fps: true,
+                    target_fps: target,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
             RobloxOptimizer::extract_int_value(
                 &fs::read_to_string(&settings_path).unwrap(),
-                "FramerateCap"
-            ),
-            Some(650),
-            "650 is already above the target, so it must survive untouched"
+                "FramerateCap",
+            )
+        };
+
+        assert_eq!(cap_after(900), Some(900), "raising must work");
+        assert_eq!(
+            cap_after(500),
+            Some(500),
+            "lowering must work too: 600 down to 500 is a player asking for 500"
         );
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    // ── set_xml_int_value ───────────────────────────────────────────
 
     #[test]
     fn set_xml_int_value_replaces_existing() {

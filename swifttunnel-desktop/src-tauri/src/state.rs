@@ -141,6 +141,22 @@ impl AppState {
             // never touched a graphics setting in this app.
             settings.config.roblox_settings.graphics_quality =
                 swifttunnel_core::structs::GraphicsQuality::from_level(current.graphics_quality);
+
+            // And adopt an existing cap that is higher than ours.
+            //
+            // This is what keeps the on-by-default cap from costing anyone
+            // frames. A machine already running 650 arrives at
+            // `apply_xml_settings` with 650 configured, so the write is a no-op
+            // rather than a downgrade to the app's default.
+            //
+            // Only when it is higher, so the one-time migration's floor still
+            // lifts a stock 60 install rather than being immediately undone by
+            // reading that 60 straight back. And only here, at startup, so it
+            // never second-guesses a number the player has just typed: lowering
+            // the cap in the app has to work, and briefly it did not.
+            if current.fps_cap > settings.config.roblox_settings.target_fps {
+                settings.config.roblox_settings.target_fps = current.fps_cap;
+            }
         }
     }
 }
