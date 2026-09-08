@@ -189,9 +189,13 @@ impl AuthClient {
                 Ok(response)
             }
             Err(primary_error) => {
+                // The chain, not just the wrapper: reqwest's own message names
+                // the URL and nothing else, which is the half support already
+                // knows. See `describe_error_chain`.
                 warn!(
                     "{} request failed through the system network path: {}. Retrying direct.",
-                    label, primary_error
+                    label,
+                    crate::utils::describe_error_chain(&primary_error)
                 );
 
                 // Same treatment on the fallback path. A machine behind a proxy
@@ -208,7 +212,8 @@ impl AuthClient {
                     .map_err(|direct_error| {
                         AuthError::NetworkError(format!(
                             "{}. Direct retry also failed: {}",
-                            primary_error, direct_error
+                            crate::utils::describe_error_chain(&primary_error),
+                            crate::utils::describe_error_chain(&direct_error)
                         ))
                     })
             }

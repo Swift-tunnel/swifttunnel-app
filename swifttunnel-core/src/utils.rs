@@ -916,6 +916,122 @@ pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
     }
 }
 
+/// An error and everything underneath it, on one line.
+///
+/// `reqwest::Error` displays as `error sending request for url (...)` and stops
+/// there. The reason lives in its source chain, and logging with `{}` threw it
+/// away, so every network ticket arrived saying only that a request failed.
+///
+/// The difference is not academic. A player on T-Mobile spent five days and
+/// four tickets on a failure that turned out to be
+/// `SEC_E_INVALID_TOKEN (0x80090308)`, a middlebox answering his TLS handshake
+/// with something that was not TLS. That string names the problem outright, and
+/// we had it in hand every one of those five days and dropped it on the floor.
+///
+/// The chain separates the cases support has to tell apart and previously could
+/// not: `dns error` means a resolver problem and a different DNS fixes it,
+/// `tcp connect error` means refused or reset, and a schannel or certificate
+/// code means something is sitting in the middle of the handshake.
+pub fn describe_error_chain(error: &dyn std::error::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut source = error.source();
+    // Bounded: a cycle in a source chain would otherwise hang the logger, and
+    // nothing useful lives past a handful of levels anyway.
+    while let Some(current) = source {
+        let text = current.to_string();
+        // Chains repeat themselves often, and a line that says the same thing
+        // three times is harder to read than one that says it once.
+        if !parts.iter().any(|seen| seen == &text) {
+            parts.push(text);
+        }
+        if parts.len() >= 6 {
+            break;
+        }
+        source = current.source();
+    }
+    parts.join(": ")
+}
+
+#[cfg(test)]
+mod error_chain_tests {
+    use super::describe_error_chain;
+    use std::error::Error;
+    use std::fmt;
+
+    #[derive(Debug)]
+    struct Layer {
+        text: String,
+        source: Option<Box<Layer>>,
+    }
+
+    impl fmt::Display for Layer {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.text)
+        }
+    }
+
+    impl Error for Layer {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            self.source
+                .as_deref()
+                .map(|inner| inner as &(dyn Error + 'static))
+        }
+    }
+
+    fn chain(texts: &[&str]) -> Layer {
+        let mut current: Option<Box<Layer>> = None;
+        for text in texts.iter().rev() {
+            current = Some(Box::new(Layer {
+                text: (*text).to_string(),
+                source: current,
+            }));
+        }
+        *current.expect("at least one layer")
+    }
+
+    /// The cause is the point. Without it the line says only what the user
+    /// already knew: a request failed.
+    #[test]
+    fn the_cause_survives_into_the_log_line() {
+        let error = chain(&[
+            "error sending request for url (https://www.swifttunnel.net/api/vpn/servers)",
+            "schannel: next InitializeSecurityContext failed: SEC_E_INVALID_TOKEN (0x80090308)",
+        ]);
+        let described = describe_error_chain(&error);
+        assert!(
+            described.contains("SEC_E_INVALID_TOKEN"),
+            "the reason must reach the log, got {described}"
+        );
+        assert!(
+            described.contains("api/vpn/servers"),
+            "and so must the request it belongs to, got {described}"
+        );
+    }
+
+    /// A single error still reads as one sentence.
+    #[test]
+    fn one_layer_is_left_alone() {
+        assert_eq!(describe_error_chain(&chain(&["dns error"])), "dns error");
+    }
+
+    /// Chains repeat themselves, and a line saying the same thing three times
+    /// is harder to read than one saying it once.
+    #[test]
+    fn a_repeated_layer_is_only_said_once() {
+        let described = describe_error_chain(&chain(&["connection reset", "connection reset"]));
+        assert_eq!(described, "connection reset");
+    }
+
+    /// A cycle must not hang the logger.
+    #[test]
+    fn a_long_chain_is_bounded() {
+        let deep: Vec<String> = (0..40).map(|i| format!("layer {i}")).collect();
+        let refs: Vec<&str> = deep.iter().map(String::as_str).collect();
+        let described = describe_error_chain(&chain(&refs));
+        assert_eq!(described.matches(": ").count(), 5, "at most six layers");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

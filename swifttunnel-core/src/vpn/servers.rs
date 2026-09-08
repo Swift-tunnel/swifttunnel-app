@@ -303,9 +303,12 @@ pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
     let response = match client.get(SERVERS_API_URL).send().await {
         Ok(response) => response,
         Err(primary_error) => {
+            // The whole chain. This is the single most reported failure in the
+            // product and its log line used to say only that a request to a URL
+            // failed, which is the part the user could already see on screen.
             log::warn!(
                 "Server list fetch failed through the system network path: {}. Retrying direct.",
-                primary_error
+                crate::utils::describe_error_chain(&primary_error)
             );
             direct_client
                 .get(SERVERS_API_URL)
@@ -314,7 +317,8 @@ pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
                 .map_err(|direct_error| {
                     format!(
                         "Failed to fetch server list: {}. Direct retry also failed: {}",
-                        primary_error, direct_error
+                        crate::utils::describe_error_chain(&primary_error),
+                        crate::utils::describe_error_chain(&direct_error)
                     )
                 })?
         }
