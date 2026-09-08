@@ -16,7 +16,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration as StdDuration;
 use url::form_urlencoded;
 
-const OAUTH_LOGIN_URL: &str = "https://www.swifttunnel.net/login";
+/// Path of the sign-in page opened in the user's browser.
+///
+/// The host comes from `current_api_base` rather than being fixed here. A
+/// filter that kills TLS to our domain kills this page too, so somebody in that
+/// position could not sign in at all: the browser would sit on a failed
+/// handshake with no way to say why. Following whichever host the client found
+/// working means the browser is sent somewhere it can actually reach.
+const OAUTH_LOGIN_PATH: &str = "/login";
 
 /// Maximum number of token refresh retries
 const MAX_REFRESH_RETRIES: u32 = 3;
@@ -698,7 +705,12 @@ impl AuthManager {
             .append_pair("provider", "google")
             .append_pair("redirect_port", &port.to_string())
             .finish();
-        let oauth_url = format!("{}?{}", OAUTH_LOGIN_URL, query);
+        let oauth_url = format!(
+            "{}{}?{}",
+            crate::auth::http_client::current_api_base(),
+            OAUTH_LOGIN_PATH,
+            query
+        );
 
         info!("Opening browser to: {}", oauth_url);
 

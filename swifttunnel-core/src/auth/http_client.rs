@@ -48,7 +48,79 @@ struct ApiErrorResponse {
     message: Option<String>,
 }
 
-const API_BASE_URL: &str = "https://www.swifttunnel.net";
+/// Hosts the desktop API answers on, most preferred first.
+///
+/// More than one because a single hostname is a single point of censorship.
+/// Content filters and national DPI both work the same way: they read the
+/// server name out of the TLS ClientHello, match it against a list, and kill
+/// the handshake. Nothing else about the connection matters, so a request to a
+/// different name over the very same IP goes straight through.
+///
+/// Measured, not assumed. A player on T-Mobile in Denver could complete a TLS
+/// handshake to `cloudflare.com` and not to `swifttunnel.net`, seconds apart,
+/// same machine, both over IPv6, both Cloudflare: DNS resolved, TCP connected,
+/// and the handshake came back `SEC_E_INVALID_TOKEN`. The apex failed exactly
+/// like the `www` name, so this is a match on our domain, not on a prefix.
+///
+/// A second name buys back every user behind that kind of filter until it is
+/// classified too, at which point another name is added here. That is the
+/// normal shape of this problem and there is no permanent version of it: only
+/// Encrypted Client Hello removes the name from the wire, and Windows schannel
+/// cannot do ECH, so it would mean leaving native TLS entirely.
+///
+/// Two rules for anything added here. It must not contain "swifttunnel", or
+/// the same substring match that caught the first name catches it as well. And
+/// it must serve the same origin, because a client that fails over mid-session
+/// has to keep talking to the same database.
+const API_HOSTS: &[&str] = &["https://www.swifttunnel.net"];
+
+/// Index into [`API_HOSTS`] that last completed a request.
+///
+/// Without this, every user behind a filter pays the full failure of host one
+/// on every single call for the life of the session, and every user who is not
+/// pays nothing. Remembering the winner means one bad round trip per app run
+/// rather than one per request.
+static ACTIVE_API_HOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The base URL currently believed to work.
+///
+/// For callers that hand a URL to something other than our HTTP client, like
+/// the OAuth sign-in page which is opened in the user's browser.
+pub fn current_api_base() -> &'static str {
+    let index = ACTIVE_API_HOST.load(std::sync::atomic::Ordering::Relaxed);
+    API_HOSTS.get(index).copied().unwrap_or(API_HOSTS[0])
+}
+
+/// Hosts to try, in order: the one that worked last, then the rest.
+pub fn api_hosts_in_order() -> Vec<&'static str> {
+    let start = ACTIVE_API_HOST.load(std::sync::atomic::Ordering::Relaxed);
+    order_hosts_from(API_HOSTS, start)
+}
+
+/// Remember a host that just answered, so the rest of the run starts there.
+///
+/// Public because the server list keeps its own HTTP client, built with
+/// different timeouts, and shares only the host list and this memory.
+pub fn note_api_host_worked(base: &str) {
+    if let Some(index) = API_HOSTS.iter().position(|candidate| *candidate == base) {
+        ACTIVE_API_HOST.store(index, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Pure half of [`api_hosts_in_order`], so the rotation can be tested without
+/// touching the global.
+fn order_hosts_from<'a>(hosts: &[&'a str], start: usize) -> Vec<&'a str> {
+    if hosts.is_empty() {
+        return Vec::new();
+    }
+    let start = start % hosts.len();
+    hosts[start..]
+        .iter()
+        .chain(&hosts[..start])
+        .copied()
+        .collect()
+}
+
 const SUPABASE_URL: &str = "https://ppwacjpkeonxdblwygqo.supabase.co";
 const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBwd2FjanBrZW9ueGRibHd5Z3FvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4OTY1NTksImV4cCI6MjA5ODQ3MjU1OX0.WSRbDCg2NUJhZ4DiWh8PKbCKoi9oHO5td86HJFK7iBw";
 
@@ -173,7 +245,55 @@ impl AuthClient {
         }
     }
 
+    /// Send a request, trying every network path and every known host.
+    ///
+    /// Two nested fallbacks, for two different failures. The inner one is the
+    /// proxy: a machine behind a corporate proxy reaches us only through the
+    /// system settings, and a machine behind a broken proxy reaches us only
+    /// without them, so both are tried. The outer one is the hostname, for the
+    /// case where the name itself is what a filter objects to. See
+    /// [`API_HOSTS`].
+    ///
+    /// The closure is handed the base URL rather than building a fixed one,
+    /// because the URL is exactly the thing that changes between attempts.
     async fn send_with_network_fallback<F>(
+        &self,
+        label: &str,
+        build_request: F,
+    ) -> Result<reqwest::Response, AuthError>
+    where
+        F: Fn(&Client, &str) -> reqwest::RequestBuilder,
+    {
+        let hosts = api_hosts_in_order();
+        let mut failures: Vec<String> = Vec::new();
+
+        for base in &hosts {
+            match self.send_to_host(label, base, &build_request).await {
+                Ok(response) => {
+                    // Remember the winner so the rest of this run goes straight
+                    // here instead of re-failing the blocked name every time.
+                    note_api_host_worked(base);
+                    return Ok(response);
+                }
+                Err(error) => {
+                    if hosts.len() > 1 {
+                        warn!("{label}: {base} unreachable ({error}); trying the next host");
+                    }
+                    failures.push(format!("{base}: {error}"));
+                }
+            }
+        }
+
+        Err(AuthError::NetworkError(failures.join(" | ")))
+    }
+
+    /// Send to one fixed URL, with the proxy fallback but no host rotation.
+    ///
+    /// For Supabase, which is a different service on a different domain and is
+    /// reachable for exactly the users our own domain is not. Rotating it
+    /// through [`API_HOSTS`] would retry the identical Supabase URL once per
+    /// host and multiply the wait for nothing.
+    async fn send_to_fixed_url<F>(
         &self,
         label: &str,
         build_request: F,
@@ -181,7 +301,22 @@ impl AuthClient {
     where
         F: Fn(&Client) -> reqwest::RequestBuilder,
     {
-        match build_request(&self.client).send().await {
+        self.send_to_host(label, "", &move |client, _base| build_request(client))
+            .await
+            .map_err(AuthError::NetworkError)
+    }
+
+    /// One host, both network paths.
+    async fn send_to_host<F>(
+        &self,
+        label: &str,
+        base: &str,
+        build_request: &F,
+    ) -> Result<reqwest::Response, String>
+    where
+        F: Fn(&Client, &str) -> reqwest::RequestBuilder,
+    {
+        match build_request(&self.client, base).send().await {
             Ok(response) => {
                 if response.status().is_success() {
                     note_server_served_us();
@@ -201,7 +336,7 @@ impl AuthClient {
                 // Same treatment on the fallback path. A machine behind a proxy
                 // reaches the API only this way, so leaving it out would mean
                 // the update gate could never lift for those users.
-                build_request(&self.direct_client)
+                build_request(&self.direct_client, base)
                     .send()
                     .await
                     .inspect(|response| {
@@ -210,11 +345,11 @@ impl AuthClient {
                         }
                     })
                     .map_err(|direct_error| {
-                        AuthError::NetworkError(format!(
+                        format!(
                             "{}. Direct retry also failed: {}",
                             crate::utils::describe_error_chain(&primary_error),
                             crate::utils::describe_error_chain(&direct_error)
-                        ))
+                        )
                     })
             }
         }
@@ -268,9 +403,10 @@ impl AuthClient {
         email: &str,
         password: &str,
     ) -> Result<SupabaseAuthResponse, AuthError> {
-        let url = format!("{}/api/auth/desktop/password", API_BASE_URL);
+        let path = "/api/auth/desktop/password";
         let response = self
-            .send_with_network_fallback("desktop password sign in", |client| {
+            .send_with_network_fallback("desktop password sign in", |client, base| {
+                let url = format!("{base}{path}");
                 self.add_common_headers(
                     client
                         .post(&url)
@@ -290,9 +426,10 @@ impl AuthClient {
         &self,
         refresh_token: &str,
     ) -> Result<SupabaseAuthResponse, AuthError> {
-        let url = format!("{}/api/auth/desktop/refresh", API_BASE_URL);
+        let path = "/api/auth/desktop/refresh";
         let response = self
-            .send_with_network_fallback("desktop token refresh", |client| {
+            .send_with_network_fallback("desktop token refresh", |client, base| {
+                let url = format!("{base}{path}");
                 self.add_common_headers(
                     client
                         .post(&url)
@@ -366,7 +503,7 @@ impl AuthClient {
         let url = format!("{}/auth/v1/token?grant_type=password", SUPABASE_URL);
 
         let response = match self
-            .send_with_network_fallback("sign in", |client| {
+            .send_to_fixed_url("sign in", |client| {
                 client
                     .post(&url)
                     .header("apikey", SUPABASE_ANON_KEY)
@@ -409,7 +546,7 @@ impl AuthClient {
         let url = format!("{}/auth/v1/token?grant_type=refresh_token", SUPABASE_URL);
 
         let response = match self
-            .send_with_network_fallback("refresh token", |client| {
+            .send_to_fixed_url("refresh token", |client| {
                 client
                     .post(&url)
                     .header("apikey", SUPABASE_ANON_KEY)
@@ -461,12 +598,13 @@ impl AuthClient {
         access_token: &str,
         region: &str,
     ) -> Result<VpnConfig, AuthError> {
-        let url = format!("{}/api/vpn/generate-config", API_BASE_URL);
+        let path = "/api/vpn/generate-config";
 
         debug!("Fetching VPN config for region {}", region);
 
         let response = self
-            .send_with_network_fallback("VPN config", |client| {
+            .send_with_network_fallback("VPN config", |client, base| {
+                let url = format!("{base}{path}");
                 self.add_common_headers(client.post(&url))
                     .header("Authorization", format!("Bearer {}", access_token))
                     .json(&json!({
@@ -518,10 +656,11 @@ impl AuthClient {
     /// here is logged and swallowed rather than shown. The cost of a missed
     /// release is the old over-charge, never a broken disconnect.
     pub async fn release_relay_quota(&self, access_token: &str) -> Result<(), AuthError> {
-        let url = format!("{}/api/vpn/relay-release", API_BASE_URL);
+        let path = "/api/vpn/relay-release";
 
         let response = self
-            .send_with_network_fallback("relay release", |client| {
+            .send_with_network_fallback("relay release", |client, base| {
+                let url = format!("{base}{path}");
                 self.add_common_headers(client.post(&url))
                     .header("Authorization", format!("Bearer {}", access_token))
                     .header("X-SwiftTunnel-Relay-Lease", "1")
@@ -551,7 +690,7 @@ impl AuthClient {
         server_region: &str,
         session_id: &str,
     ) -> Result<RelayTicketResponse, AuthError> {
-        let url = format!("{}/api/vpn/relay-ticket", API_BASE_URL);
+        let path = "/api/vpn/relay-ticket";
 
         debug!(
             "Fetching relay ticket for region {} and session {}",
@@ -559,7 +698,8 @@ impl AuthClient {
         );
 
         let response = self
-            .send_with_network_fallback("relay ticket", |client| {
+            .send_with_network_fallback("relay ticket", |client, base| {
+                let url = format!("{base}{path}");
                 self.add_common_headers(client.post(&url))
                     .header("Authorization", format!("Bearer {}", access_token))
                     .header("Content-Type", "application/json")
@@ -625,12 +765,13 @@ impl AuthClient {
         exchange_token: &str,
         state: &str,
     ) -> Result<ExchangeTokenResponse, AuthError> {
-        let url = format!("{}/api/auth/desktop/exchange", API_BASE_URL);
+        let path = "/api/auth/desktop/exchange";
 
         debug!("Exchanging OAuth token for session");
 
         let response = self
-            .send_with_network_fallback("desktop auth exchange", |client| {
+            .send_with_network_fallback("desktop auth exchange", |client, base| {
+                let url = format!("{base}{path}");
                 self.add_common_headers(client.put(&url))
                     .header("Content-Type", "application/json")
                     .json(&self.exchange_oauth_payload(exchange_token, state))
@@ -685,12 +826,13 @@ impl AuthClient {
         &self,
         access_token: &str,
     ) -> Result<UserProfileResponse, AuthError> {
-        let url = format!("{}/api/user/profile", API_BASE_URL);
+        let path = "/api/user/profile";
 
         debug!("Fetching user profile");
 
         let response = self
-            .send_with_network_fallback("user profile", |client| {
+            .send_with_network_fallback("user profile", |client, base| {
+                let url = format!("{base}{path}");
                 self.add_common_headers(client.get(&url))
                     .header("Authorization", format!("Bearer {}", access_token))
             })
@@ -741,7 +883,7 @@ impl AuthClient {
         );
 
         let response = self
-            .send_with_network_fallback("magic link verification", |client| {
+            .send_to_fixed_url("magic link verification", |client| {
                 client
                     .post(&url)
                     .header("apikey", SUPABASE_ANON_KEY)
@@ -952,6 +1094,92 @@ fn ban_reason_suffix(reason: Option<String>) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| format!(": {}", value))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod api_host_tests {
+    use super::{API_HOSTS, order_hosts_from};
+
+    /// Every host gets tried, and the one that worked last goes first.
+    ///
+    /// Both halves matter. Trying them all is what gets a filtered user back;
+    /// starting from the winner is what stops everyone else paying for it, and
+    /// stops the filtered user paying the dead host's failure on every request
+    /// rather than once.
+    #[test]
+    fn the_host_that_worked_last_is_tried_first() {
+        let hosts = [
+            "https://a.example",
+            "https://b.example",
+            "https://c.example",
+        ];
+
+        assert_eq!(
+            order_hosts_from(&hosts, 0),
+            vec![
+                "https://a.example",
+                "https://b.example",
+                "https://c.example"
+            ]
+        );
+        assert_eq!(
+            order_hosts_from(&hosts, 1),
+            vec![
+                "https://b.example",
+                "https://c.example",
+                "https://a.example"
+            ],
+            "the remembered host leads, and the rest still follow"
+        );
+        assert_eq!(
+            order_hosts_from(&hosts, 2),
+            vec![
+                "https://c.example",
+                "https://a.example",
+                "https://b.example"
+            ]
+        );
+    }
+
+    /// A stale index must not drop hosts or panic.
+    ///
+    /// The remembered index outlives the list it points into: shipping a build
+    /// with one fewer host, with the old index still in memory, would otherwise
+    /// index out of bounds.
+    #[test]
+    fn a_stale_index_still_returns_every_host() {
+        let hosts = ["https://a.example", "https://b.example"];
+        assert_eq!(
+            order_hosts_from(&hosts, 7),
+            vec!["https://b.example", "https://a.example"],
+            "an out-of-range index wraps rather than losing a host"
+        );
+        assert!(
+            order_hosts_from(&[], 3).is_empty(),
+            "no hosts is not a panic"
+        );
+    }
+
+    /// A host that carries our own name is caught by the same filter.
+    ///
+    /// The whole point of a second host is to survive a match on the first. One
+    /// containing "swifttunnel" is matched by the substring that caught the
+    /// original, so it would be dead on arrival and nobody would find out until
+    /// the tickets came back.
+    #[test]
+    fn no_fallback_host_repeats_the_blocked_name() {
+        for host in API_HOSTS.iter().skip(1) {
+            assert!(
+                !host.contains("swifttunnel"),
+                "{host} carries the name the filter matches, so it is blocked too"
+            );
+        }
+        assert!(
+            API_HOSTS[0].contains("swifttunnel"),
+            "the primary is still our own domain"
+        );
+        assert!(!API_HOSTS.is_empty(), "there has to be somewhere to go");
+    }
 }
 
 #[cfg(test)]

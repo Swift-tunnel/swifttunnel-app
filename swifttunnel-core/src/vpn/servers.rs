@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// API endpoint for fetching server list
-const SERVERS_API_URL: &str = "https://www.swifttunnel.net/api/vpn/servers";
+/// Path of the server list endpoint. The host comes from `API_HOSTS`.
+const SERVERS_API_PATH: &str = "/api/vpn/servers";
 
 /// Cache TTL in seconds (1 hour)
 const CACHE_TTL_SECONDS: i64 = 3600;
@@ -293,35 +293,62 @@ pub fn save_servers_to_cache(data: &ServerListResponse) -> Result<(), std::io::E
 
 /// Fetch server list from API
 pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
-    log::info!("Fetching server list from API: {}", SERVERS_API_URL);
-
     let client = build_server_http_client(true)
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let direct_client = build_server_http_client(false)
         .map_err(|e| format!("Failed to create direct HTTP client: {}", e))?;
 
-    let response = match client.get(SERVERS_API_URL).send().await {
-        Ok(response) => response,
-        Err(primary_error) => {
-            // The whole chain. This is the single most reported failure in the
-            // product and its log line used to say only that a request to a URL
-            // failed, which is the part the user could already see on screen.
-            log::warn!(
-                "Server list fetch failed through the system network path: {}. Retrying direct.",
-                crate::utils::describe_error_chain(&primary_error)
-            );
-            direct_client
-                .get(SERVERS_API_URL)
-                .send()
-                .await
-                .map_err(|direct_error| {
-                    format!(
-                        "Failed to fetch server list: {}. Direct retry also failed: {}",
-                        crate::utils::describe_error_chain(&primary_error),
-                        crate::utils::describe_error_chain(&direct_error)
-                    )
-                })?
+    // Every host, not just the first. This is the request that decides whether
+    // the app has anything to show at all, so it gets the same treatment as the
+    // auth client: a hostname a filter objects to must not be the only one we
+    // know. See `API_HOSTS` in `auth::http_client`.
+    let mut failures: Vec<String> = Vec::new();
+    let mut response = None;
+
+    for base in crate::auth::http_client::api_hosts_in_order() {
+        let url = format!("{base}{SERVERS_API_PATH}");
+        log::info!("Fetching server list from API: {url}");
+
+        let attempt = match client.get(&url).send().await {
+            Ok(response) => Ok(response),
+            Err(primary_error) => {
+                // The whole chain. This is the single most reported failure in
+                // the product and its log line used to say only that a request
+                // to a URL failed, which is the part the user could already see
+                // on screen.
+                log::warn!(
+                    "Server list fetch failed through the system network path: {}. Retrying direct.",
+                    crate::utils::describe_error_chain(&primary_error)
+                );
+                direct_client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|direct_error| {
+                        format!(
+                            "{}. Direct retry also failed: {}",
+                            crate::utils::describe_error_chain(&primary_error),
+                            crate::utils::describe_error_chain(&direct_error)
+                        )
+                    })
+            }
+        };
+
+        match attempt {
+            Ok(ok) => {
+                crate::auth::http_client::note_api_host_worked(base);
+                response = Some(ok);
+                break;
+            }
+            Err(error) => failures.push(format!("{base}: {error}")),
         }
+    }
+
+    let Some(response) = response else {
+        return Err(format!(
+            "Failed to fetch server list: {}",
+            failures.join(" | ")
+        ));
     };
 
     if !response.status().is_success() {
