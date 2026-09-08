@@ -2379,6 +2379,9 @@ impl ParallelInterceptor {
                 let details = err.to_string();
                 Self::is_winpkfilter_binding_missing_failure(&details)
                     || Self::is_winpkfilter_binding_disabled_failure(&details)
+                    // Unknown is not the same as unusable. See
+                    // `is_binding_check_timeout`.
+                    || Self::is_binding_check_timeout(&details)
             }
         }
     }
@@ -2392,6 +2395,9 @@ impl ParallelInterceptor {
                 let details = err.to_string();
                 Self::is_winpkfilter_binding_missing_failure(&details)
                     || Self::is_winpkfilter_binding_disabled_failure(&details)
+                    // A check that never returned must not be what rules the
+                    // real adapter out. See `is_binding_check_timeout`.
+                    || Self::is_binding_check_timeout(&details)
             }
         }
     }
@@ -3844,6 +3850,25 @@ impl ParallelInterceptor {
             || (details.contains("enable-netadapterbinding") && details.contains("not recognized"))
     }
 
+    /// The binding check never answered, as opposed to answering badly.
+    ///
+    /// The difference decides whether an adapter is usable. Every other failure
+    /// here is a statement about the adapter: the filter is missing, or it is
+    /// disabled. A timeout is a statement about PowerShell, and says nothing at
+    /// all about the adapter, so treating one as a fault condemns hardware that
+    /// was never examined.
+    ///
+    /// That is not theoretical. A machine where every `powershell` invocation
+    /// takes longer than 15 seconds, 183 of them in three days, timed out on
+    /// its real Wi-Fi adapter, had it ruled out on the strength of the timeout,
+    /// and fell through to a Windows virtual adapter that was administratively
+    /// down. The tunnel came up on the dead adapter, noticed, tore itself down
+    /// and started again until the 90 second connect budget ran out. Ten failed
+    /// connects, and nothing wrong with the machine's network at all.
+    fn is_binding_check_timeout(details: &str) -> bool {
+        details.to_ascii_lowercase().contains("timed out after")
+    }
+
     fn is_winpkfilter_binding_missing_failure(details: &str) -> bool {
         let details = details.to_ascii_lowercase();
         details.contains("winpkfilter_binding_missing")
@@ -3858,11 +3883,24 @@ impl ParallelInterceptor {
             || (details.contains("nt_ndisrd") && details.contains("disabled on adapter"))
     }
 
+    /// Whether to carry on despite the binding check failing.
+    ///
+    /// Only when NDISRD has already enumerated the adapter itself, which is a
+    /// better source than PowerShell in both of these cases. If the driver has
+    /// the adapter in its TCP/IP-bound list and PowerShell says the filter is
+    /// missing, the driver is right. If PowerShell never answered, there is
+    /// nothing to weigh against the driver at all.
+    ///
+    /// The timeout case used to be excluded, which had it exactly backwards: a
+    /// contradicted check was survivable and a check that failed to run was
+    /// fatal.
     fn should_soft_accept_binding_validation_failure(
         details: &str,
         adapter_seen_by_ndisrd: bool,
     ) -> bool {
-        adapter_seen_by_ndisrd && Self::is_winpkfilter_binding_missing_failure(details)
+        adapter_seen_by_ndisrd
+            && (Self::is_winpkfilter_binding_missing_failure(details)
+                || Self::is_binding_check_timeout(details))
     }
 
     fn winpkfilter_binding_missing_message(adapter_label: &str) -> String {
@@ -3952,9 +3990,25 @@ impl ParallelInterceptor {
                 return Ok(());
             }
 
-            // Only retry on timeouts or transient failures, not on permanent
-            // binding faults. The driver repair path can re-install the LWF
-            // component and rebind it to the adapter.
+            // A timeout is not retried. Every attempt costs the full 15s, and
+            // the outcome no longer depends on which attempt produced it: a
+            // timeout now means "unknown", and callers proceed on unknown. A
+            // machine slow enough to miss the deadline once misses it three
+            // times, so retrying only spends 45 seconds of a 90 second connect
+            // budget to reach the same answer. That is what exhausted the
+            // budget on the machine this was found on, twice per attempt,
+            // before anything had been connected.
+            if Self::is_binding_check_timeout(&last_details) {
+                log::warn!(
+                    "WinpkFilter binding check on '{}' timed out; treating the binding as unknown rather than faulty and continuing",
+                    adapter_label
+                );
+                break;
+            }
+
+            // Only retry transient failures, not permanent binding faults. The
+            // driver repair path can re-install the LWF component and rebind it
+            // to the adapter.
             if Self::is_winpkfilter_binding_missing_failure(&last_details) {
                 last_details = Self::winpkfilter_binding_missing_message(adapter_label);
                 break;
@@ -9524,6 +9578,81 @@ mod tests {
     // Shared with hosts.rs tests: every test touching the process-global
     // bootstrap IP sets must serialize on the same lock, across modules.
     use crate::roblox_proxy::hosts::BOOTSTRAP_IP_TEST_LOCK as BOOTSTRAP_ROUTE_IP_TEST_LOCK;
+
+    /// A check that never answered must not condemn the adapter.
+    ///
+    /// From a real machine: every `powershell` call took longer than the 15s
+    /// deadline, 183 of them across three days. The pre-enumeration check on
+    /// the user's real Wi-Fi adapter timed out, the timeout was read as a
+    /// binding fault, the route owner was ruled out, and selection fell through
+    /// to a Windows virtual adapter that was administratively down. Ten failed
+    /// connects on a machine whose network was fine.
+    #[test]
+    fn a_timed_out_binding_check_does_not_rule_out_the_adapter() {
+        let timeout = VpnError::SplitTunnel(
+            "Failed to check WinpkFilter binding on adapter 'Wi-Fi': PowerShell timed out after 15s."
+                .to_string(),
+        );
+
+        assert!(
+            ParallelInterceptor::should_try_route_owner_fallback_after_binding_check(Some(
+                &timeout
+            )),
+            "a check that did not run must not veto the adapter carrying the default route"
+        );
+    }
+
+    /// A real fault still rules the adapter out.
+    ///
+    /// The point of the change is to separate "unknown" from "bad", so "bad"
+    /// has to keep behaving like bad or the guard is gone entirely.
+    #[test]
+    fn a_genuine_binding_fault_still_counts() {
+        let unknown_failure =
+            VpnError::SplitTunnel("Get-NetAdapterBinding: Access is denied.".to_string());
+
+        assert!(
+            !ParallelInterceptor::should_try_route_owner_fallback_after_binding_check(Some(
+                &unknown_failure
+            )),
+            "a failure that is not a timeout and not a known binding fault stays fatal"
+        );
+    }
+
+    /// The driver outranks PowerShell, including when PowerShell says nothing.
+    ///
+    /// NDISRD having enumerated the adapter as TCP/IP-bound is first-hand
+    /// evidence. A contradicted check was already survivable; a check that
+    /// failed to run used to be fatal, which was exactly backwards.
+    #[test]
+    fn the_driver_outranks_a_check_that_did_not_answer() {
+        let timeout = "PowerShell timed out after 15s.";
+        let missing = "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter 'Wi-Fi'";
+
+        assert!(ParallelInterceptor::should_soft_accept_binding_validation_failure(timeout, true));
+        assert!(ParallelInterceptor::should_soft_accept_binding_validation_failure(missing, true));
+
+        // Without the driver's own sighting there is nothing to prefer over
+        // the check, so neither is waved through.
+        assert!(
+            !ParallelInterceptor::should_soft_accept_binding_validation_failure(timeout, false)
+        );
+        assert!(
+            !ParallelInterceptor::should_soft_accept_binding_validation_failure(missing, false)
+        );
+    }
+
+    /// Only a timeout reads as a timeout.
+    #[test]
+    fn timeout_detection_does_not_catch_ordinary_failures() {
+        assert!(ParallelInterceptor::is_binding_check_timeout(
+            "PowerShell timed out after 15s."
+        ));
+        assert!(!ParallelInterceptor::is_binding_check_timeout(
+            "nt_ndisrd is not bound to adapter 'Wi-Fi'"
+        ));
+        assert!(!ParallelInterceptor::is_binding_check_timeout(""));
+    }
 
     /// Machine-wide CPU must be busy-out-of-total, not kernel plus user.
     ///
