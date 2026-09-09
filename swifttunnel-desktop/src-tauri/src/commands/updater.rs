@@ -576,6 +576,32 @@ fn installer_cache_dir() -> Result<std::path::PathBuf, String> {
 /// source Windows wants is the one the *currently installed* version came from,
 /// not the one being installed now, so keeping only the newest would recreate
 /// the bug on the following upgrade.
+/// Whether a cached file is one of *our* installers, and so ours to delete.
+///
+/// The pruning matched any `.msi` in the folder, which the desktop app shares
+/// with SwiftTunnel Lite. So updating the desktop app deleted Lite's package.
+/// Windows records that file as Lite's installation source and refuses an
+/// upgrade or repair once it is gone, producing the "network resource
+/// unavailable" orphan this staging exists to prevent in the first place.
+///
+/// `swifttunnel-setup` prunes by stem for exactly this reason and says so in a
+/// comment. The updater simply did not, and the two were never compared.
+///
+/// The hyphen carries the weight: our files are `SwiftTunnel-<version>.msi`,
+/// and Lite's `SwiftTunnelLite_...` fails the match on it. That is subtle
+/// enough to be worth a test rather than a reader's trust.
+fn is_prunable_desktop_installer(path: &std::path::Path) -> bool {
+    const OUR_STEM_PREFIX: &str = "SwiftTunnel-";
+
+    if path.extension().and_then(|x| x.to_str()) != Some("msi") {
+        return false;
+    }
+
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|name| name.starts_with(OUR_STEM_PREFIX))
+}
+
 fn stage_installer(version: &str, package: &[u8]) -> Result<std::path::PathBuf, String> {
     const KEEP: usize = 3;
 
@@ -587,9 +613,7 @@ fn stage_installer(version: &str, package: &[u8]) -> Result<std::path::PathBuf, 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         let mut msis: Vec<_> = entries
             .flatten()
-            .filter(|e| {
-                e.path().extension().and_then(|x| x.to_str()) == Some("msi") && e.path() != path
-            })
+            .filter(|e| is_prunable_desktop_installer(&e.path()) && e.path() != path)
             .collect();
         msis.sort_by_key(|e| {
             e.metadata()
@@ -743,6 +767,41 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use sha2::{Digest, Sha256};
+
+    /// Updating the desktop app must not delete Lite's installer.
+    ///
+    /// They share a cache directory, and the pruning matched every `.msi` in
+    /// it. Windows records that file as Lite's installation source, so removing
+    /// it makes Lite's next upgrade or repair fail with "network resource
+    /// unavailable", the exact orphan this staging exists to avoid.
+    #[test]
+    fn pruning_only_touches_desktop_installers() {
+        use std::path::Path;
+
+        for ours in [
+            "SwiftTunnel-3.1.6.msi",
+            "SwiftTunnel-2.0.0.msi",
+            "SwiftTunnel-10.0.0-beta.1.msi",
+        ] {
+            assert!(
+                is_prunable_desktop_installer(Path::new(ours)),
+                "{ours} is one of ours and should be prunable"
+            );
+        }
+
+        for theirs in [
+            "SwiftTunnelLite_fixture.msi",
+            "SwiftTunnelLite-3.1.6.msi",
+            "WinpkFilter-x64.msi",
+            "SwiftTunnel-3.1.6.msi.bak",
+            "notes.txt",
+        ] {
+            assert!(
+                !is_prunable_desktop_installer(Path::new(theirs)),
+                "{theirs} is not ours and must survive"
+            );
+        }
+    }
 
     fn release(tag: &str, prerelease: bool) -> GithubRelease {
         GithubRelease {

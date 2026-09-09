@@ -203,11 +203,42 @@ fn stage_payload() -> Option<std::path::PathBuf> {
     // Already staged by an earlier run of this same build, and byte for byte
     // the same file, so rewriting it would only risk breaking a source another
     // product is relying on.
-    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() == MSI_BYTES.len() as u64) {
+    //
+    // Byte for byte is meant literally. This compared lengths, which is not the
+    // same claim at all: the directory lives under ProgramData, whose inherited
+    // ACL normally lets an ordinary user create files, and the name is
+    // derivable from the shipped installer because the tag is a hash of the
+    // very bytes anybody can download. So a standard user, or malware running
+    // as one, could plant a package at the exact path, padded to the exact
+    // length, and the next elevated run of setup would hand it to msiexec.
+    // Reading the file is the difference between checking that something is
+    // there and checking that it is ours.
+    if file_matches_payload(&path) {
         return Some(path);
     }
 
+    // Not ours: overwrite it rather than trusting it. If that fails, staging
+    // fails and the install continues without a durable source, which is the
+    // safe direction.
     std::fs::write(&path, MSI_BYTES).ok().map(|()| path)
+}
+
+/// Whether the file at `path` is exactly the payload this build carries.
+///
+/// Length first because it is free and rejects almost everything, then the
+/// contents, which is the part that actually decides it.
+///
+/// This does not close the gap between checking and msiexec opening the file
+/// later. Nothing short of writing to a fresh name every run, or holding the
+/// handle across the call, would, and both cost more than they buy here. What
+/// it does close is a package sitting there in advance being accepted purely
+/// for being the right size.
+fn file_matches_payload(path: &std::path::Path) -> bool {
+    if !std::fs::metadata(path).is_ok_and(|meta| meta.len() == MSI_BYTES.len() as u64) {
+        return false;
+    }
+
+    std::fs::read(path).is_ok_and(|existing| existing == MSI_BYTES)
 }
 
 /// The staged file's name: the installer's name with a payload tag before the
@@ -284,7 +315,57 @@ fn prune_old_payloads(current: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::payload_file_name;
+    use super::{file_matches_payload, payload_file_name, MSI_BYTES};
+
+    /// A staged file is reused only when it really is our package.
+    ///
+    /// This checked the length alone, and the staging directory sits under
+    /// ProgramData where an ordinary user can normally create files, at a name
+    /// derived from a hash of the very bytes anybody can download. So a
+    /// same-length package could be left there in advance and the next elevated
+    /// run would hand it straight to msiexec. Length is a cheap first pass, not
+    /// an identity check.
+    #[test]
+    fn a_same_length_impostor_is_not_reused() {
+        let dir = std::env::temp_dir().join(format!(
+            "swifttunnel-stage-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("payload.msi");
+
+        // The real thing is reused.
+        std::fs::write(&path, MSI_BYTES).unwrap();
+        assert!(
+            file_matches_payload(&path),
+            "our own package must be recognised, or every run rewrites it"
+        );
+
+        // Same length, different bytes: precisely the planted case.
+        let mut impostor = MSI_BYTES.to_vec();
+        if let Some(first) = impostor.first_mut() {
+            *first = first.wrapping_add(1);
+        }
+        assert_eq!(impostor.len(), MSI_BYTES.len());
+        std::fs::write(&path, &impostor).unwrap();
+        assert!(
+            !file_matches_payload(&path),
+            "a same-length impostor must not be accepted as ours"
+        );
+
+        // A short file was already rejected and must stay rejected.
+        std::fs::write(&path, b"nope").unwrap();
+        assert!(!file_matches_payload(&path));
+
+        // A missing file is not a match either.
+        std::fs::remove_file(&path).unwrap();
+        assert!(!file_matches_payload(&path));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Two builds must never stage to the same filename.
     ///
