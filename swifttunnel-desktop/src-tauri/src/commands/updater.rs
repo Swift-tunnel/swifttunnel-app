@@ -795,6 +795,17 @@ mod tests {
             "WinpkFilter-x64.msi",
             "SwiftTunnel-3.1.6.msi.bak",
             "notes.txt",
+            // The important ones. `swifttunnel-msi-repair` shares this exact
+            // directory and copies every installed product's package here named
+            // by product code, then repoints Windows' recorded install source at
+            // the copy. Pruning those deletes the file Windows was told to
+            // depend on, which produces the "network resource unavailable"
+            // failure that crate exists to prevent. The updater was doing this
+            // to its own prevention tool, and only on machines where the
+            // preservation had already run, which is why it never reproduced on
+            // a dev box.
+            "A1B2C3D4-1234-5678-9ABC-DEF012345678.msi",
+            "{A1B2C3D4-1234-5678-9ABC-DEF012345678}.msi",
         ] {
             assert!(
                 !is_prunable_desktop_installer(Path::new(theirs)),
