@@ -79,13 +79,34 @@ struct PreparedUpdate {
     manifest: SignedUpdateManifest,
 }
 
-fn update_manifest_public_key_b64() -> Result<String, String> {
-    let runtime_key = std::env::var("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64")
+/// Runtime override of the manifest verification key. Debug builds only.
+///
+/// This key is the whole of the updater's trust: the manifest it validates
+/// names the installer we download and run elevated. Letting an environment
+/// variable replace it means anything able to set one variable on our process
+/// can sign its own manifest and have us accept it, which turns the update path
+/// into a code execution path.
+///
+/// Useful when testing against a staging signing key, so it stays in debug and
+/// compiles out of release rather than being a runtime check somebody could
+/// later relax.
+#[cfg(debug_assertions)]
+fn update_manifest_key_override() -> Option<String> {
+    std::env::var("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64")
         .ok()
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty())
+}
 
-    let key = runtime_key.unwrap_or_else(|| {
+#[cfg(not(debug_assertions))]
+fn update_manifest_key_override() -> Option<String> {
+    None
+}
+
+fn update_manifest_public_key_b64() -> Result<String, String> {
+    // The compile-time key is baked in at build time and is not attacker
+    // controlled; only the runtime lookup above is.
+    let key = update_manifest_key_override().unwrap_or_else(|| {
         option_env!("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64")
             .unwrap_or(UPDATE_MANIFEST_PUBLIC_KEY_PLACEHOLDER)
             .trim()

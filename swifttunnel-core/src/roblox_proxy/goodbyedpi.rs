@@ -258,13 +258,34 @@ async fn ensure_goodbyedpi_component(arch: GoodbyeDpiNativeArch) -> Result<(), S
         .map_err(|e| e.to_string())
 }
 
+/// Developer override for the helper path. Debug builds only.
+///
+/// This binary runs elevated, and whatever it finds here is launched with that
+/// token. `candidate_executable_paths` puts the override ahead of every
+/// verified location, and `start_for_roblox` skips the install check once any
+/// candidate exists, so the pinned download hashes never come into it. Anything
+/// able to set one environment variable on our process therefore chooses what
+/// runs as administrator.
+///
+/// That is a fine trade while developing against a locally built GoodbyeDPI and
+/// a bad one to ship, so it compiles out of release builds entirely rather than
+/// being guarded at runtime.
+#[cfg(debug_assertions)]
+fn goodbyedpi_path_override() -> Option<PathBuf> {
+    std::env::var_os(GOODBYEDPI_ENV_PATH)
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+#[cfg(not(debug_assertions))]
+fn goodbyedpi_path_override() -> Option<PathBuf> {
+    None
+}
+
 fn locate_goodbyedpi_executable() -> Option<PathBuf> {
     let current_exe = std::env::current_exe().ok();
-    let env_path = std::env::var_os(GOODBYEDPI_ENV_PATH)
-        .map(PathBuf::from)
-        .filter(|path| !path.as_os_str().is_empty());
 
-    candidate_executable_paths(current_exe.as_deref(), env_path)
+    candidate_executable_paths(current_exe.as_deref(), goodbyedpi_path_override())
         .into_iter()
         .find(|path| path.is_file())
 }
