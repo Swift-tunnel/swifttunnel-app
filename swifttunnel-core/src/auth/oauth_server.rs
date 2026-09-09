@@ -121,7 +121,15 @@ impl OAuthServer {
             match server.recv_timeout(Duration::from_millis(100)) {
                 Ok(Some(request)) => {
                     let url_str = request.url();
-                    info!("OAuth server received request: {}", url_str);
+                    // Path only. The query on this callback carries the
+                    // exchange token, which is redeemable for a session, and
+                    // the state that binds it. Logging the whole URL put a live
+                    // credential in a file users routinely attach to support
+                    // tickets.
+                    info!(
+                        "OAuth server received request: {} (query omitted)",
+                        Self::log_safe_path(url_str)
+                    );
 
                     // Parse the callback URL
                     match Self::parse_callback(url_str) {
@@ -154,7 +162,10 @@ impl OAuthServer {
                         }
                         None => {
                             // Invalid request - send error response
-                            warn!("Invalid OAuth callback request: {}", url_str);
+                            warn!(
+                                "Invalid OAuth callback request: {} (query omitted)",
+                                Self::log_safe_path(url_str)
+                            );
                             let html = Self::error_html("Invalid callback parameters");
                             let response = Response::from_string(html)
                                 .with_status_code(StatusCode(400))
@@ -180,6 +191,16 @@ impl OAuthServer {
         }
 
         info!("OAuth server thread exiting");
+    }
+
+    /// The path of a request URL, with the query discarded.
+    ///
+    /// Everything sensitive on this server arrives in the query string: the
+    /// exchange token, which redeems for a session, and the state that binds
+    /// it. The path alone still tells support whether the browser reached us
+    /// and on which route, which is the whole diagnostic value of the line.
+    fn log_safe_path(url_str: &str) -> &str {
+        url_str.split(['?', '#']).next().unwrap_or("/")
     }
 
     /// Parse the callback URL to extract token and state

@@ -712,7 +712,14 @@ impl AuthManager {
             query
         );
 
-        info!("Opening browser to: {}", oauth_url);
+        // Destination only. The query carries `state`, which binds the browser
+        // session to this exchange, and users send these log files to support
+        // as a matter of routine.
+        info!(
+            "Opening browser to: {}{} (query omitted)",
+            crate::auth::http_client::current_api_base(),
+            OAUTH_LOGIN_PATH
+        );
 
         // Open the browser
         crate::utils::open_url(&oauth_url);
