@@ -122,6 +122,51 @@ pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
         .collect())
 }
 
+/// Whether two files hold identical bytes.
+///
+/// Streamed rather than read whole, because installer packages run to tens of
+/// megabytes and this walks every installed product. Length is checked first
+/// since it settles almost every case for free.
+///
+/// Any error is "not the same". Being unable to read one of them is not
+/// evidence they match, and the caller's response to a mismatch is to copy the
+/// real package over the destination, which is the safe direction.
+fn files_have_same_contents(left: &Path, right: &Path) -> bool {
+    use std::io::Read;
+
+    let (Ok(left_meta), Ok(right_meta)) = (std::fs::metadata(left), std::fs::metadata(right))
+    else {
+        return false;
+    };
+    if left_meta.len() != right_meta.len() {
+        return false;
+    }
+
+    let (Ok(left_file), Ok(right_file)) = (std::fs::File::open(left), std::fs::File::open(right))
+    else {
+        return false;
+    };
+
+    let mut left_reader = std::io::BufReader::new(left_file);
+    let mut right_reader = std::io::BufReader::new(right_file);
+    let mut left_chunk = [0u8; 64 * 1024];
+    let mut right_chunk = [0u8; 64 * 1024];
+
+    loop {
+        let read = match left_reader.read(&mut left_chunk) {
+            Ok(0) => return true,
+            Ok(read) => read,
+            Err(_) => return false,
+        };
+        if right_reader.read_exact(&mut right_chunk[..read]).is_err() {
+            return false;
+        }
+        if left_chunk[..read] != right_chunk[..read] {
+            return false;
+        }
+    }
+}
+
 /// Whether the cached package is one Windows Installer could actually use.
 ///
 /// Existing is not the same as usable. Cleanup tools truncate files as often as
@@ -142,6 +187,11 @@ pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
 /// through `exists()`, which reports false when metadata is denied. Treating
 /// either as missing would unregister a perfectly healthy install, silently, on
 /// a machine where nothing was ever wrong.
+///
+/// Note what this does *not* establish: an OLE signature is common to every MSI
+/// ever made, so a valid package that is not ours passes it. Deciding that a
+/// file is the *right* package is `files_have_same_contents`, and
+/// `preserve_installer_sources` needs both for that reason.
 fn package_is_usable(path: &str) -> bool {
     if path.is_empty() {
         return false;
@@ -248,7 +298,90 @@ pub fn unpack_guid(packed: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{package_is_usable, unpack_guid};
+    use super::{files_have_same_contents, package_is_usable, unpack_guid};
+
+    /// A preserved copy is reused only when it really is the same package.
+    ///
+    /// This compared lengths, and the signature check beside it passes for any
+    /// valid MSI, so between them they could not tell this product's package
+    /// from anybody else's. The destination sits under ProgramData, named after
+    /// a product code any user can read from the registry, so a same-length
+    /// package left there in advance would have been kept and then written into
+    /// the registry as the install source Windows trusts for every later repair
+    /// and upgrade.
+    #[test]
+    fn a_same_length_package_is_not_treated_as_the_same_package() {
+        let dir = std::env::temp_dir().join(format!(
+            "swifttunnel-preserve-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.msi");
+        let destination = dir.join("destination.msi");
+
+        std::fs::write(&source, b"the real package").unwrap();
+
+        std::fs::write(&destination, b"the real package").unwrap();
+        assert!(
+            files_have_same_contents(&source, &destination),
+            "an identical copy must be recognised, or every run recopies it"
+        );
+
+        // Same length, different bytes: the planted case.
+        std::fs::write(&destination, b"the fake package").unwrap();
+        assert_eq!(
+            std::fs::metadata(&source).unwrap().len(),
+            std::fs::metadata(&destination).unwrap().len()
+        );
+        assert!(
+            !files_have_same_contents(&source, &destination),
+            "a same-length impostor must not be mistaken for the real package"
+        );
+
+        // Different length, and a missing file, are both mismatches.
+        std::fs::write(&destination, b"short").unwrap();
+        assert!(!files_have_same_contents(&source, &destination));
+        std::fs::remove_file(&destination).unwrap();
+        assert!(!files_have_same_contents(&source, &destination));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Chunked comparison must not stop at the first block.
+    ///
+    /// Packages run to tens of megabytes, so the comparison streams. A
+    /// difference past the first chunk is exactly what a padded impostor would
+    /// rely on.
+    #[test]
+    fn a_difference_after_the_first_chunk_is_still_found() {
+        let dir = std::env::temp_dir().join(format!(
+            "swifttunnel-preserve-chunk-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.msi");
+        let destination = dir.join("destination.msi");
+
+        let mut bytes = vec![0xABu8; 200 * 1024];
+        std::fs::write(&source, &bytes).unwrap();
+
+        // Identical except for one byte well past the 64KB read size.
+        bytes[150 * 1024] = 0xCD;
+        std::fs::write(&destination, &bytes).unwrap();
+
+        assert!(
+            !files_have_same_contents(&source, &destination),
+            "a difference beyond the first chunk must still be caught"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Taken from a real SwiftTunnel 3.0.4 install, so the transformation is
     /// pinned against an actual Windows-generated key rather than my reading of
@@ -410,11 +543,27 @@ pub fn preserve_installer_sources() -> Result<Vec<String>, String> {
         );
         let destination = dir.join(&file_name);
 
+        // Same file, not merely the same size.
+        //
+        // This compared lengths, and what follows is a signature check that
+        // passes for any valid MSI, so together they could not tell this
+        // product's package from somebody else's. The directory is under
+        // ProgramData, whose inherited permissions normally let an ordinary
+        // user create files, and the name here is the product code, which any
+        // user can read out of the registry. A package left at that path at the
+        // right length would therefore be skipped rather than overwritten, pass
+        // the signature check, and be handed to `point_source_at`, which writes
+        // it into the registry as the source Windows trusts for every later
+        // repair and upgrade. That is a lasting elevated execution primitive,
+        // not a one-off.
+        //
+        // Comparing the bytes makes a mismatch a copy instead, which overwrites
+        // the plant with the real package.
         let source_len = std::fs::metadata(&product.local_package)
             .map(|meta| meta.len())
             .unwrap_or(0);
         let already_copied = source_len > 0
-            && std::fs::metadata(&destination).is_ok_and(|meta| meta.len() == source_len);
+            && files_have_same_contents(Path::new(&product.local_package), &destination);
 
         if !already_copied && std::fs::copy(&product.local_package, &destination).is_err() {
             continue;
