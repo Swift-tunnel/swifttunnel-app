@@ -483,58 +483,19 @@ export function BoostTab() {
    * the validator rejects still lands in the draft, so the reason shows up in
    * the bar the way it always did rather than being swallowed here.
    */
-  const selectProfile = useCallback(
-    async (id: OptimizationProfile) => {
-      if (isApplying || isRestarting) return;
-
-      const next = getPresetConfig(id, draft);
-      setDraft(next);
-
-      if (configValidationError(next)) return;
-      if (configsEqual(next, savedConfig)) return;
-
-      setIsApplying(true);
-      try {
-        const appliedConfig = await boost.updateConfig(JSON.stringify(next));
-        // Only the config. Any staged process or country-ban edits are the
-        // user's own pending work and are not part of picking a profile, so
-        // they stay in the bar waiting for Apply.
-        updateSettings({ config: appliedConfig });
-        setDraft(appliedConfig);
-        await saveSettings();
-
-        const name = PROFILES.find((p) => p.id === id)?.name ?? id;
-        if (useBoostStore.getState().warning) {
-          addToast({
-            type: "warning",
-            message: `${name} applied with warnings`,
-          });
-        } else if (boost.robloxRunning) {
-          // The FFlags live in a file Roblox reads at launch, so a running
-          // client keeps the old ones. Saying so beats letting them conclude
-          // the profile did nothing.
-          addToast({
-            type: "warning",
-            message: `${name} applied. Restart Roblox for it to take effect.`,
-          });
-        } else {
-          addToast({ type: "success", message: `${name} profile applied` });
-        }
-      } finally {
-        setIsApplying(false);
-      }
-    },
-    [
-      draft,
-      savedConfig,
-      boost,
-      updateSettings,
-      saveSettings,
-      addToast,
-      isApplying,
-      isRestarting,
-    ],
-  );
+  /// Choosing a profile stages it, like every other control on this page.
+  ///
+  /// It briefly applied on selection instead, to stop somebody picking Quality
+  /// and walking away believing Ultraboost was off. That fixed the wrong thing.
+  /// Selecting a profile already raises the sticky bar with Apply and Discard,
+  /// so nothing was hidden, and applying on selection made one setting behave
+  /// two different ways: the Ultraboost toggle waits for Apply, while a profile
+  /// that sets Ultraboost would not have. Draft and commit is the model here,
+  /// and a preset is a draft like anything else.
+  function selectProfile(id: OptimizationProfile) {
+    if (isApplying || isRestarting) return;
+    setDraft(getPresetConfig(id, draft));
+  }
 
   function updateSysOpt(p: Partial<SystemOptimizationConfig>) {
     setDraft((prev) => ({
@@ -645,9 +606,7 @@ export function BoostTab() {
             return (
               <button
                 key={p.id}
-                onClick={() => {
-                  void selectProfile(p.id).catch(() => {});
-                }}
+                onClick={() => selectProfile(p.id)}
                 disabled={robloxControlsLocked}
                 className="rounded-[7px] px-3 py-2 text-left transition-all duration-100"
                 style={{
