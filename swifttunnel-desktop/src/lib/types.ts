@@ -413,6 +413,7 @@ export interface UpdaterCheckResponse {
 
 export interface UpdaterInstallResponse {
   installed_version: string;
+  reboot_required?: boolean;
   release_tag: string;
 }
 

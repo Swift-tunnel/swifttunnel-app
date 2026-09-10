@@ -132,7 +132,7 @@ describe("stores/updaterStore", () => {
     expect(useUpdaterStore.getState().progressPercent).toBe(100);
     expect(notify).toHaveBeenCalledWith(
       "SwiftTunnel Update",
-      "Update installed. Restarting application...",
+      "Update installed. Reopen SwiftTunnel if it does not restart.",
     );
   });
 

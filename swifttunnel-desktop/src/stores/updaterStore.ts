@@ -171,7 +171,7 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
       });
 
       const { channel, version } = pendingUpdate;
-      await updaterInstallChannel(channel, version);
+      const result = await updaterInstallChannel(channel, version);
 
       pendingUpdate = null;
       set({
@@ -185,7 +185,9 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
 
       await notify(
         "SwiftTunnel Update",
-        "Update installed. Restarting application...",
+        result.reboot_required
+          ? "Update installed. Restart Windows to finish applying it."
+          : "Update installed. Reopen SwiftTunnel if it does not restart.",
       );
     } catch (e) {
       set({

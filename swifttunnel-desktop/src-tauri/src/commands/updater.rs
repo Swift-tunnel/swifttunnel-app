@@ -44,6 +44,7 @@ pub struct UpdaterCheckResponse {
 #[derive(Debug, Serialize)]
 pub struct UpdaterInstallResponse {
     pub installed_version: String,
+    pub reboot_required: bool,
     pub release_tag: String,
 }
 
@@ -635,21 +636,35 @@ fn stage_installer(version: &str, package: &[u8]) -> Result<std::path::PathBuf, 
 /// it did before: /passive for a progress bar only, /promptrestart, and
 /// AUTOLAUNCHAPP so the app comes back up afterwards. The app already runs
 /// elevated, so the child process inherits that and no extra prompt appears.
-fn launch_msi_installer(installer: &std::path::Path) -> Result<(), String> {
+fn installer_exit_result(code: Option<i32>) -> Result<bool, String> {
+    match code {
+        Some(0) => Ok(false),
+        Some(3010 | 1641) => Ok(true),
+        Some(1602) => Err("Update installation was cancelled.".to_string()),
+        Some(code) => Err(format!(
+            "Windows Installer did not complete the update (code {code}). Please retry or use the downloaded installer."
+        )),
+        None => {
+            Err("Windows Installer ended without a completion result. Please retry.".to_string())
+        }
+    }
+}
+
+fn launch_msi_installer(installer: &std::path::Path) -> Result<bool, String> {
     let msiexec = std::env::var("SYSTEMROOT")
         .map(|root| format!(r"{root}\System32\msiexec.exe"))
         .unwrap_or_else(|_| "msiexec.exe".to_string());
 
-    std::process::Command::new(msiexec)
+    let status = std::process::Command::new(msiexec)
         .arg("/i")
         .arg(installer)
         .arg("/passive")
         .arg("/promptrestart")
         .arg("AUTOLAUNCHAPP=True")
-        .spawn()
+        .status()
         .map_err(|e| format!("Failed to start the installer: {e}"))?;
 
-    Ok(())
+    installer_exit_result(status.code())
 }
 
 #[tauri::command]
@@ -747,15 +762,22 @@ pub async fn updater_install_channel(
         Err(error) => log::warn!("could not check for an orphaned registration: {error}"),
     }
 
-    launch_msi_installer(&installer_path)?;
+    // Wait outside the async runtime workers. The MSI may close this process
+    // to replace it, in which case the new app's version is the confirmation.
+    // If this process survives, report success only from the installer's exit.
+    let reboot_required =
+        tauri::async_runtime::spawn_blocking(move || launch_msi_installer(&installer_path))
+            .await
+            .map_err(|error| format!("Could not observe installer completion: {error}"))??;
 
     // Emit `done` only after signature verification + install actually
-    // succeeded — the `on_download_finish` callback fires before the await
+    // succeeded. The `on_download_finish` callback fires before the await
     // resolves, so listeners would otherwise see "done" for failed installs.
     let _ = app.emit(UPDATER_DONE_EVENT, ());
 
     Ok(UpdaterInstallResponse {
         installed_version: update.version,
+        reboot_required,
         release_tag: prepared.selected_release.tag_name,
     })
 }
@@ -763,6 +785,16 @@ pub async fn updater_install_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_completed_installs_report_success() {
+        assert_eq!(installer_exit_result(Some(0)), Ok(false));
+        assert_eq!(installer_exit_result(Some(3010)), Ok(true));
+        assert_eq!(installer_exit_result(Some(1641)), Ok(true));
+        for code in [None, Some(1602), Some(1603), Some(1618)] {
+            assert!(installer_exit_result(code).is_err());
+        }
+    }
     // Hashing here is only to build expected values for the tests below.
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
