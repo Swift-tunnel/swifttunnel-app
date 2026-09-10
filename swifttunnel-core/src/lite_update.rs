@@ -90,20 +90,20 @@ impl AvailableUpdate {
 
 /// The key this build verifies manifests with.
 ///
-/// A runtime variable wins so a release can be tested against a different key
-/// without a rebuild. Absent both, the placeholder is left, and that is treated
-/// as "cannot verify" rather than "no verification needed".
+/// Release builds trust only the build-time key. Runtime overrides are for
+/// debug builds only. A missing build-time key refuses verification.
 fn manifest_public_key_b64() -> Result<String, String> {
-    let key = std::env::var("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            option_env!("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64")
-                .unwrap_or(PUBLIC_KEY_PLACEHOLDER)
-                .trim()
-                .to_string()
-        });
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64") {
+        let value = value.trim();
+        if !value.is_empty() && value != PUBLIC_KEY_PLACEHOLDER {
+            return Ok(value.to_string());
+        }
+    }
+    let key = option_env!("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64")
+        .unwrap_or(PUBLIC_KEY_PLACEHOLDER)
+        .trim()
+        .to_string();
 
     if key.is_empty() || key == PUBLIC_KEY_PLACEHOLDER {
         return Err("this build has no update manifest key, so updates cannot be verified".into());
