@@ -1094,7 +1094,7 @@ fn ban_reason_suffix(reason: Option<String>) -> String {
 
 #[cfg(test)]
 mod api_host_tests {
-    use super::{order_hosts_from, API_HOSTS};
+    use super::{API_HOSTS, order_hosts_from};
 
     /// Every host gets tried, and the one that worked last goes first.
     ///
@@ -1356,11 +1356,13 @@ mod tests {
     fn free_tier_limit_ignores_the_ip_rate_limiter() {
         // The same route answers 429 for per-IP flooding; that one *is* worth
         // retrying, so it must not be mistaken for a spent allowance.
-        assert!(free_tier_limit_error(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            r#"{"error":"rate_limited"}"#,
-        )
-        .is_none());
+        assert!(
+            free_tier_limit_error(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":"rate_limited"}"#,
+            )
+            .is_none()
+        );
     }
 
     /// The lockout has to be liftable.
@@ -1463,10 +1465,12 @@ mod tests {
 
     #[test]
     fn non_update_errors_are_not_update_required() {
-        assert!(update_required_error(
-            reqwest::StatusCode::FORBIDDEN,
-            r#"{"error":"User banned","code":"user_banned"}"#,
-        )
-        .is_none());
+        assert!(
+            update_required_error(
+                reqwest::StatusCode::FORBIDDEN,
+                r#"{"error":"User banned","code":"user_banned"}"#,
+            )
+            .is_none()
+        );
     }
 }
