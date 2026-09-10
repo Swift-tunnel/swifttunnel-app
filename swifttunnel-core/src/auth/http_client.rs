@@ -643,18 +643,8 @@ impl AuthClient {
         Ok(data)
     }
 
-    /// Tell the API this session is over so the free-tier counter is settled
-    /// against time actually spent connected.
-    ///
-    /// Without this the server can only settle a session when the *next* ticket
-    /// is requested, and at that point it cannot tell a 30-second session from
-    /// a full ticket window — it sees a long gap and charges the whole TTL. A
-    /// few short sessions would burn a large slice of the daily allowance for
-    /// time the user never had.
-    ///
-    /// Best effort by design: the caller is already disconnecting, so a failure
-    /// here is logged and swallowed rather than shown. The cost of a missed
-    /// release is the old over-charge, never a broken disconnect.
+    /// Best-effort compatibility notification. Issued lease coverage remains paid
+    /// until expiry; a client release is not evidence that forwarding stopped.
     pub async fn release_relay_quota(&self, access_token: &str) -> Result<(), AuthError> {
         let path = "/api/vpn/relay-release";
 
@@ -679,7 +669,7 @@ impl AuthClient {
             )));
         }
 
-        debug!("Relay quota released for the finished session");
+        debug!("Relay disconnect acknowledged");
         Ok(())
     }
 
@@ -691,6 +681,11 @@ impl AuthClient {
         session_id: &str,
     ) -> Result<RelayTicketResponse, AuthError> {
         let path = "/api/vpn/relay-ticket";
+        // One renewal identity survives all transport retries and fallback hosts.
+        let request_id: String = rand::random::<[u8; 16]>()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
 
         debug!(
             "Fetching relay ticket for region {} and session {}",
@@ -706,6 +701,7 @@ impl AuthClient {
                     .json(&json!({
                         "server_region": server_region,
                         "session_id": session_id,
+                        "request_id": request_id,
                     }))
             })
             .await?;
@@ -1050,7 +1046,7 @@ const MAX_RETRY_AFTER_SECONDS: u64 = 300;
 
 /// Seconds to wait before retrying, from the response's `Retry-After` header.
 ///
-/// Only the delta-seconds form is handled — that is what
+/// Only the delta-seconds form is handled , that is what
 /// `rateLimitResponse` in the web app sends. An HTTP-date value, which the spec
 /// also permits, falls back to the default rather than being misparsed as 0 and
 /// causing an immediate retry.
@@ -1071,7 +1067,7 @@ fn parse_retry_after(raw: Option<&str>) -> u64 {
 }
 
 /// Detect the free-tier quota rejection. `/api/vpn/relay-ticket` answers 429
-/// with `{"error":"free_tier_limit_reached","message":"..."}` — note the code
+/// with `{"error":"free_tier_limit_reached","message":"..."}` , note the code
 /// lands in `error`, not `code`, unlike the ban and update responses.
 fn free_tier_limit_error(status: reqwest::StatusCode, body: &str) -> Option<AuthError> {
     if status.as_u16() != 429 {
@@ -1098,7 +1094,7 @@ fn ban_reason_suffix(reason: Option<String>) -> String {
 
 #[cfg(test)]
 mod api_host_tests {
-    use super::{API_HOSTS, order_hosts_from};
+    use super::{order_hosts_from, API_HOSTS};
 
     /// Every host gets tried, and the one that worked last goes first.
     ///
@@ -1360,13 +1356,11 @@ mod tests {
     fn free_tier_limit_ignores_the_ip_rate_limiter() {
         // The same route answers 429 for per-IP flooding; that one *is* worth
         // retrying, so it must not be mistaken for a spent allowance.
-        assert!(
-            free_tier_limit_error(
-                reqwest::StatusCode::TOO_MANY_REQUESTS,
-                r#"{"error":"rate_limited"}"#,
-            )
-            .is_none()
-        );
+        assert!(free_tier_limit_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"rate_limited"}"#,
+        )
+        .is_none());
     }
 
     /// The lockout has to be liftable.
@@ -1469,12 +1463,10 @@ mod tests {
 
     #[test]
     fn non_update_errors_are_not_update_required() {
-        assert!(
-            update_required_error(
-                reqwest::StatusCode::FORBIDDEN,
-                r#"{"error":"User banned","code":"user_banned"}"#,
-            )
-            .is_none()
-        );
+        assert!(update_required_error(
+            reqwest::StatusCode::FORBIDDEN,
+            r#"{"error":"User banned","code":"user_banned"}"#,
+        )
+        .is_none());
     }
 }
