@@ -348,6 +348,8 @@ pub enum RelayAuthAckStatus {
     /// coerced to `Ok`. See `authenticate_with_ticket` for why a replay cannot
     /// be safely treated as lost-OK-ack recovery client-side.
     Replay = 7,
+    OwnerMismatch = 8,
+    ReauthRequired = 9,
 }
 
 impl RelayAuthAckStatus {
@@ -361,6 +363,8 @@ impl RelayAuthAckStatus {
             5 => Some(Self::ServerMismatch),
             6 => Some(Self::AuthDisabled),
             7 => Some(Self::Replay),
+            8 => Some(Self::OwnerMismatch),
+            9 => Some(Self::ReauthRequired),
             _ => None,
         }
     }
@@ -375,6 +379,8 @@ impl RelayAuthAckStatus {
             Self::ServerMismatch => "server_mismatch",
             Self::AuthDisabled => "auth_disabled",
             Self::Replay => "replay",
+            Self::OwnerMismatch => "owner_mismatch",
+            Self::ReauthRequired => "reauth_required",
         }
     }
 
@@ -597,6 +603,7 @@ pub struct UdpRelay {
     /// address. Mid-session authentication polls this because the inbound
     /// thread owns socket reads once the session is running.
     last_auth_ack: parking_lot::Mutex<Option<(SocketAddr, RelayAuthAckStatus)>>,
+    reauth_requested: tokio::sync::Notify,
     /// Serializes live-session authentication so a lease refresh cannot race
     /// an auto-route relay switch over the shared pending-auth slot.
     auth_handshake_lock: tokio::sync::Mutex<()>,
@@ -714,6 +721,15 @@ fn parse_resolve_response(frame: &[u8], len: usize) -> Option<ResolveResponse> {
 }
 
 impl UdpRelay {
+    /// Wake renewal promptly after NAT port changes. Notifications coalesce;
+    /// the connection task separately bounds how often it requests a ticket.
+    pub async fn wait_for_lease_refresh(&self, delay: Duration) {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {},
+            _ = self.reauth_requested.notified() => {},
+        }
+    }
+
     /// Create a new UDP relay connection to the specified server
     ///
     /// relay_addr should already be resolved (use tokio::net::lookup_host for DNS)
@@ -1012,6 +1028,7 @@ impl UdpRelay {
             switch_time: ArcSwap::from_pointee(None),
             pending_auth_addr: ArcSwap::from_pointee(None),
             last_auth_ack: parking_lot::Mutex::new(None),
+            reauth_requested: tokio::sync::Notify::new(),
             auth_handshake_lock: tokio::sync::Mutex::new(()),
             last_resolve_response: parking_lot::Mutex::new(None),
             session_id,
@@ -1699,7 +1716,9 @@ impl UdpRelay {
                     {
                         let status = RelayAuthAckStatus::from_u8(frame_buffer[SESSION_ID_LEN + 1])
                             .unwrap_or(RelayAuthAckStatus::BadFormat);
-                        *self.last_auth_ack.lock() = Some((from, status));
+                        if status != RelayAuthAckStatus::ReauthRequired {
+                            *self.last_auth_ack.lock() = Some((from, status));
+                        }
                     }
                     return Ok(None);
                 }
@@ -1728,7 +1747,17 @@ impl UdpRelay {
                 // Control frames (auth + ping telemetry) should never reach packet injection.
                 if payload_len >= 1 {
                     match frame_buffer[SESSION_ID_LEN] {
-                        AUTH_HELLO_FRAME_TYPE | AUTH_ACK_FRAME_TYPE | PING_FRAME_TYPE => {
+                        AUTH_ACK_FRAME_TYPE => {
+                            if len == SESSION_ID_LEN + 2
+                                && from == **self.relay_addr.load()
+                                && RelayAuthAckStatus::from_u8(frame_buffer[SESSION_ID_LEN + 1])
+                                    == Some(RelayAuthAckStatus::ReauthRequired)
+                            {
+                                self.reauth_requested.notify_one();
+                            }
+                            return Ok(None);
+                        }
+                        AUTH_HELLO_FRAME_TYPE | PING_FRAME_TYPE => {
                             return Ok(None);
                         }
                         PONG_FRAME_TYPE => {
@@ -3038,6 +3067,38 @@ mod tests {
 
         relay.check_health();
         assert_eq!(relay.relay_health(), RelayHealthState::Dead);
+    }
+
+    #[tokio::test]
+    async fn rebind_hint_from_current_relay_wakes_renewal_without_authenticating() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let relay = UdpRelay::new(server.local_addr().unwrap()).unwrap();
+        let destination =
+            SocketAddr::from(([127, 0, 0, 1], relay.socket.local_addr().unwrap().port()));
+        let mut frame = relay.session_id.to_vec();
+        frame.extend_from_slice(&[
+            AUTH_ACK_FRAME_TYPE,
+            RelayAuthAckStatus::ReauthRequired as u8,
+        ]);
+        server.send_to(&frame, destination).unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let mut buffer = [0u8; 1600];
+        assert!(
+            relay
+                .receive_inbound_payload(&mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                relay.wait_for_lease_refresh(Duration::from_secs(120))
+            )
+            .await
+            .is_ok()
+        );
+        assert!(relay.last_auth_ack.lock().is_none());
+        assert!(!RelayAuthAckStatus::ReauthRequired.is_authenticated());
     }
 
     #[test]

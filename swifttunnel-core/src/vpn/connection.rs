@@ -3089,8 +3089,13 @@ impl VpnConnection {
 
                 self.relay_lease_refresh_handle = Some(tokio::spawn(async move {
                     let mut delay = RELAY_LEASE_REFRESH_INTERVAL;
+                    let mut last_attempt = tokio::time::Instant::now() - Duration::from_secs(5);
                     loop {
-                        tokio::time::sleep(delay).await;
+                        relay_for_refresh.wait_for_lease_refresh(delay).await;
+                        // The hint is not an authorization. Bound API work even
+                        // if control frames are duplicated or spoofed.
+                        tokio::time::sleep_until(last_attempt + Duration::from_secs(5)).await;
+                        last_attempt = tokio::time::Instant::now();
 
                         let (region, addr) = router_for_refresh
                             .as_ref()
