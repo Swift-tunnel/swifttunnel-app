@@ -2472,8 +2472,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auth_ack_status_round_trips_including_replay() {
-        // Status 7 (replay) is modeled explicitly now, not coerced to BadFormat.
+    fn auth_ack_status_round_trips_including_rebinding() {
+        // Every assigned status has a distinct decoding, including reauthentication.
         for (byte, expected) in [
             (0u8, RelayAuthAckStatus::Ok),
             (1, RelayAuthAckStatus::BadFormat),
@@ -2483,11 +2483,14 @@ mod tests {
             (5, RelayAuthAckStatus::ServerMismatch),
             (6, RelayAuthAckStatus::AuthDisabled),
             (7, RelayAuthAckStatus::Replay),
+            (8, RelayAuthAckStatus::OwnerMismatch),
+            (9, RelayAuthAckStatus::ReauthRequired),
         ] {
             assert_eq!(RelayAuthAckStatus::from_u8(byte), Some(expected));
         }
         // Unknown statuses are still unmapped (caller coerces to BadFormat).
-        assert_eq!(RelayAuthAckStatus::from_u8(8), None);
+        assert_eq!(RelayAuthAckStatus::from_u8(10), None);
+        assert_eq!(RelayAuthAckStatus::from_u8(255), None);
     }
 
     #[test]
@@ -2519,6 +2522,8 @@ mod tests {
             RelayAuthAckStatus::ServerMismatch,
             RelayAuthAckStatus::AuthDisabled,
             RelayAuthAckStatus::Replay,
+            RelayAuthAckStatus::OwnerMismatch,
+            RelayAuthAckStatus::ReauthRequired,
         ] {
             assert!(
                 !status.is_authenticated(),
