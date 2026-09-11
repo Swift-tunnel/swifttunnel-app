@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 const SNAPSHOT_FILE: &str = "optimization_snapshots.json";
@@ -1030,7 +1030,30 @@ enum ActionSnapshot {
     },
 }
 
-type Snapshots = BTreeMap<String, Vec<ActionSnapshot>>;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum TweakSnapshot {
+    // Existing releases saved only the action list, after a successful apply.
+    Legacy(Vec<ActionSnapshot>),
+    Journal {
+        captured: Vec<ActionSnapshot>,
+        applied: bool,
+    },
+}
+
+impl TweakSnapshot {
+    fn captured(&self) -> &[ActionSnapshot] {
+        match self {
+            Self::Legacy(captured) | Self::Journal { captured, .. } => captured,
+        }
+    }
+
+    fn applied(&self) -> bool {
+        matches!(self, Self::Legacy(_) | Self::Journal { applied: true, .. })
+    }
+}
+
+type Snapshots = BTreeMap<String, TweakSnapshot>;
 
 static OPTIMIZATION_STATE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -1047,32 +1070,83 @@ fn snapshot_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("SwiftTunnel").join(SNAPSHOT_FILE))
 }
 
-fn load_all() -> Snapshots {
-    let Some(path) = snapshot_path() else {
-        return Snapshots::new();
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Snapshots::new(),
+fn load_all() -> Result<Snapshots, String> {
+    let path = snapshot_path().ok_or("No config dir for optimization snapshots")?;
+    read_snapshots(&path)
+}
+
+fn read_snapshots(path: &Path) -> Result<Snapshots, String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "Cannot read rollback records: {e}. Keep the snapshot file and contact support."
+            )
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Snapshots::new()),
+        Err(e) => Err(format!(
+            "Cannot read rollback records: {e}. Check access to your SwiftTunnel settings folder."
+        )),
     }
 }
 
 fn save_all(map: &Snapshots) -> Result<(), String> {
     let path = snapshot_path().ok_or("No config dir for optimization snapshots")?;
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    write_snapshots(&path, map).map_err(|e| {
+        format!("Cannot save rollback records: {e}. Check free disk space and folder access.")
+    })
+}
+
+fn write_snapshots(path: &Path, map: &Snapshots) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("No snapshot directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let json = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
+    let staged = parent.join(format!(".optimization-{:032x}.tmp", rand::random::<u128>()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    let result = (|| {
+        file.write_all(&json)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows::Win32::Storage::FileSystem::{
+                MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+            };
+            let from: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
+            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            unsafe {
+                MoveFileExW(
+                    windows::core::PCWSTR(from.as_ptr()),
+                    windows::core::PCWSTR(to.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            }
+            .map_err(std::io::Error::from)?;
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::rename(&staged, path)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
     }
-    let json =
-        serde_json::to_string_pretty(map).map_err(|e| format!("serialize snapshots: {e}"))?;
-    std::fs::write(&path, json).map_err(|e| format!("write snapshots: {e}"))
+    result
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-/// Ids of every tweak that currently has a snapshot (i.e. is applied).
-pub fn active_ids() -> Vec<String> {
-    let _guard = lock_optimization_state().ok();
-    load_all().keys().cloned().collect()
+/// Tweaks with rollback records, including interrupted changes needing revert.
+pub fn active_ids() -> Result<Vec<String>, String> {
+    let _guard = lock_optimization_state()?;
+    Ok(load_all()?.keys().cloned().collect())
 }
 
 /// Apply a tweak. Returns whether a restart is required to finish.
@@ -1081,8 +1155,11 @@ pub fn apply(id: &str) -> Result<bool, String> {
     let _guard = lock_optimization_state()?;
     let tweak = find_tweak(id).ok_or_else(|| format!("Unknown optimization: {id}"))?;
 
-    let mut snapshots = load_all();
-    if snapshots.contains_key(id) {
+    let mut snapshots = load_all()?;
+    if let Some(snapshot) = snapshots.get(id) {
+        if !snapshot.applied() {
+            return Err("A previous change did not finish. Revert this optimization before applying it again.".into());
+        }
         return Ok(tweak.requires_reboot); // already applied
     }
 
@@ -1099,19 +1176,63 @@ pub fn apply(id: &str) -> Result<bool, String> {
         captured.push(capture_action(action)?);
     }
 
-    // Apply each action; on the first failure, roll back what we already did.
-    for (index, action) in tweak.actions.iter().enumerate() {
-        if let Err(e) = apply_action(action) {
-            for (done_action, snap) in tweak.actions[..index].iter().zip(captured.iter()) {
-                let _ = restore_action(done_action, snap);
+    apply_captured(
+        id,
+        &mut snapshots,
+        captured,
+        |index| apply_action(&tweak.actions[index]),
+        |index, snap| restore_action(&tweak.actions[index], snap),
+        save_all,
+    )?;
+    Ok(tweak.requires_reboot)
+}
+
+fn apply_captured(
+    id: &str,
+    snapshots: &mut Snapshots,
+    captured: Vec<ActionSnapshot>,
+    mut apply: impl FnMut(usize) -> Result<(), String>,
+    mut restore: impl FnMut(usize, &ActionSnapshot) -> Result<(), String>,
+    mut persist: impl FnMut(&Snapshots) -> Result<(), String>,
+) -> Result<(), String> {
+    snapshots.insert(
+        id.to_string(),
+        TweakSnapshot::Journal {
+            captured: captured.clone(),
+            applied: false,
+        },
+    );
+    persist(snapshots)?;
+    for index in 0..captured.len() {
+        if let Err(e) = apply(index) {
+            // The failing action may have changed part of its state too.
+            let mut rollback_error = None;
+            for done_index in (0..=index).rev() {
+                if let Err(error) = restore(done_index, &captured[done_index]) {
+                    rollback_error.get_or_insert(error);
+                }
             }
-            return Err(format!("Failed to apply {id}: {e}"));
+            if let Some(error) = rollback_error {
+                return Err(format!(
+                    "Failed to apply {id}: {e}. Rollback also failed: {error}. The rollback record is kept; revert this optimization to retry recovery."
+                ));
+            }
+            snapshots.remove(id);
+            persist(snapshots).map_err(|save_error| format!("Failed to apply {id}: {e}. Settings were restored, but the rollback record could not be cleared: {save_error}"))?;
+            return Err(format!(
+                "Failed to apply {id}: {e}. Prior settings were restored."
+            ));
         }
     }
 
-    snapshots.insert(id.to_string(), captured);
-    save_all(&snapshots)?;
-    Ok(tweak.requires_reboot)
+    snapshots.insert(
+        id.to_string(),
+        TweakSnapshot::Journal {
+            captured,
+            applied: true,
+        },
+    );
+    persist(snapshots).map_err(|e| format!("Settings changed but completion could not be saved: {e}. The rollback record is kept; revert before applying again."))
 }
 
 /// Revert a tweak from its snapshot. Returns whether a restart is required.
@@ -1120,10 +1241,14 @@ pub fn revert(id: &str) -> Result<bool, String> {
     let _guard = lock_optimization_state()?;
     let tweak = find_tweak(id).ok_or_else(|| format!("Unknown optimization: {id}"))?;
 
-    let mut snapshots = load_all();
-    let Some(captured) = snapshots.get(id).cloned() else {
+    let mut snapshots = load_all()?;
+    let Some(snapshot) = snapshots.get(id).cloned() else {
         return Ok(tweak.requires_reboot); // already inactive
     };
+    let captured = snapshot.captured();
+    if captured.len() != tweak.actions.len() {
+        return Err("Rollback record does not match this optimization. Keep the snapshot file and contact support.".into());
+    }
 
     if tweak.requires_admin && !crate::utils::is_administrator() {
         return Err(
@@ -1133,7 +1258,7 @@ pub fn revert(id: &str) -> Result<bool, String> {
     }
 
     let mut first_error: Option<String> = None;
-    for (action, snap) in tweak.actions.iter().zip(captured.iter()) {
+    for (action, snap) in tweak.actions.iter().zip(captured.iter()).rev() {
         if let Err(e) = restore_action(action, snap)
             && first_error.is_none()
         {
@@ -1555,6 +1680,145 @@ fn restore_action(_action: &Action, _snap: &ActionSnapshot) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_save_failure_prevents_system_changes() {
+        let changed = std::cell::Cell::new(0);
+        let result = apply_captured(
+            "test",
+            &mut Snapshots::new(),
+            vec![ActionSnapshot::RegDword { value: Some(1) }],
+            |_| {
+                changed.set(changed.get() + 1);
+                Ok(())
+            },
+            |_, _| Ok(()),
+            |_| Err("disk full".into()),
+        );
+        assert!(result.is_err());
+        assert_eq!(
+            changed.get(),
+            0,
+            "changed the system without a durable snapshot"
+        );
+    }
+
+    #[test]
+    fn incomplete_apply_restores_the_failing_action_and_keeps_failed_rollback() {
+        let restored = std::cell::RefCell::new(Vec::new());
+        let disk = std::cell::RefCell::new(Snapshots::new());
+        let captured = vec![ActionSnapshot::RegDword { value: Some(1) }; 3];
+        let result = apply_captured(
+            "test",
+            &mut Snapshots::new(),
+            captured,
+            |index| {
+                assert!(!disk.borrow()["test"].applied());
+                if index == 1 {
+                    Err("partially changed".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |index, _| {
+                restored.borrow_mut().push(index);
+                Err("restore failed".into())
+            },
+            |map| {
+                *disk.borrow_mut() = map.clone();
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(*restored.borrow(), [1, 0]);
+        assert!(!disk.borrow()["test"].applied());
+    }
+
+    #[test]
+    fn completion_save_failure_keeps_pending_rollback_record() {
+        let disk = std::cell::RefCell::new(Snapshots::new());
+        let mut writes = 0;
+        let result = apply_captured(
+            "test",
+            &mut Snapshots::new(),
+            vec![ActionSnapshot::Task { was_enabled: true }],
+            |_| Ok(()),
+            |_, _| Ok(()),
+            |map| {
+                writes += 1;
+                if writes == 2 {
+                    return Err("disk full".into());
+                }
+                *disk.borrow_mut() = map.clone();
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert!(!disk.borrow()["test"].applied());
+        assert_eq!(disk.borrow()["test"].captured().len(), 1);
+    }
+
+    #[test]
+    fn successful_rollback_clears_only_its_own_record() {
+        let mut snapshots = Snapshots::new();
+        snapshots.insert("other".into(), TweakSnapshot::Legacy(vec![]));
+        let mut disk = snapshots.clone();
+        let mut restored = Vec::new();
+        let result = apply_captured(
+            "test",
+            &mut snapshots,
+            vec![ActionSnapshot::Task { was_enabled: true }; 2],
+            |index| {
+                if index == 1 {
+                    Err("apply failed".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |index, _| {
+                restored.push(index);
+                Ok(())
+            },
+            |map| {
+                disk = map.clone();
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(restored, [1, 0]);
+        assert!(disk.contains_key("other"));
+        assert!(!disk.contains_key("test"));
+    }
+
+    #[test]
+    fn snapshot_file_rejects_corruption_and_preserves_old_data_on_failed_replace() {
+        let dir =
+            std::env::temp_dir().join(format!("swift-opt-test-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join(SNAPSHOT_FILE);
+        assert!(read_snapshots(&path).unwrap().is_empty());
+        std::fs::write(&path, "broken json").unwrap();
+        assert!(read_snapshots(&path).is_err());
+        std::fs::write(&path, r#"{"old":[{"kind":"Task","was_enabled":true}]}"#).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        assert!(read_snapshots(&path).unwrap()["old"].applied());
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // A real sharing violation at replacement time, after staging.
+            let _guard = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&path)
+                .unwrap();
+            assert!(write_snapshots(&path, &Snapshots::new()).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        }
+        write_snapshots(&path, &Snapshots::new()).unwrap();
+        assert!(read_snapshots(&path).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn catalog_ids_are_unique() {

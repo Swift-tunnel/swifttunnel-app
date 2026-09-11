@@ -88,7 +88,15 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => ({
       }
       return { ok: true, requiresReboot: res.requires_reboot };
     } catch (error) {
-      set((s) => ({ status: { ...s.status, [def.id]: "inactive" } }));
+      // A failed apply can leave a durable rollback record. Keep Revert
+      // available for recovery instead of hiding it as an inactive tweak.
+      let needsRevert = false;
+      try {
+        needsRevert = (await optimizationGetActive()).includes(def.id);
+      } catch {
+        // The original failure remains visible, including its recovery step.
+      }
+      set((s) => ({ status: { ...s.status, [def.id]: needsRevert ? "active" : "inactive" } }));
       if (!opts?.silent) {
         useToastStore.getState().addToast({
           type: "error",

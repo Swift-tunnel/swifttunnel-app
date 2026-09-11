@@ -32,6 +32,6 @@ pub async fn optimization_revert(id: String) -> Result<OptimizationApplyResponse
 
 /// Ids of optimizations currently applied (have a persisted snapshot).
 #[tauri::command]
-pub fn optimization_get_active() -> Vec<String> {
+pub fn optimization_get_active() -> Result<Vec<String>, String> {
     swifttunnel_core::optimizations::active_ids()
 }
