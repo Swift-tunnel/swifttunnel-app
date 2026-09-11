@@ -669,21 +669,14 @@ jobs:
           $msi = Get-ChildItem "target/x86_64-pc-windows-msvc/release/bundle/msi" -Filter "*_x64_en-US.msi" |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msi) { throw "no x64 MSI found to wrap" }
-          Write-Host "::notice::wrapping $($msi.Name) ($($msi.Length) bytes)"
-          $env:SWIFTTUNNEL_SETUP_MSI = $msi.FullName
-          cargo build -p swifttunnel-setup --release --target x86_64-pc-windows-msvc
-          $exe = "target/x86_64-pc-windows-msvc/release/SwiftTunnel-Setup.exe"
-          if (-not (Test-Path $exe)) { throw "setup launcher was not produced" }
-          # Must be at least as large as the MSI it carries, or the payload did
-          # not make it in and the download would install nothing.
-          if ((Get-Item $exe).Length -lt $msi.Length) { throw "setup launcher is smaller than its payload" }
-          $named = "SwiftTunnel-Setup-$($env:RELEASE_VERSION).exe"
-          Copy-Item $exe $named
-          gh release upload "$env:GITHUB_REF_NAME" $named --clobber
+          $named = node scripts/build-recovery-setup.mjs --target x86_64-pc-windows-msvc --flavor desktop --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "Desktop recovery setup build failed" }
+          gh release upload "$env:RELEASE_TAG" $named --clobber
           Write-Host "::notice::uploaded $named"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
 
       # SwiftTunnel Lite also ships inside the app MSI. This is the
       # standalone installer, for someone on a machine that cannot
@@ -694,7 +687,9 @@ jobs:
         shell: pwsh
         run: |
           cargo build -p swifttunnel-lite --release --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Lite x64 build failed" }
           node swifttunnel-lite/scripts/build-msi.mjs --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Lite x64 MSI packaging failed" }
           $msi = Get-ChildItem "swifttunnel-lite/target-msi/x64" -Filter "*.msi" |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msi) { throw "no Lite MSI was produced for x64" }
@@ -703,23 +698,20 @@ jobs:
           # connect time on a user machine.
           if ($msi.Length -lt 2MB) { throw "Lite MSI is $($msi.Length) bytes; the driver is probably missing" }
           Write-Host "::notice::built $($msi.Name) ($($msi.Length) bytes)"
-          gh release upload "$env:GITHUB_REF_NAME" $msi.FullName --clobber
+          gh release upload "$env:RELEASE_TAG" $msi.FullName --clobber
 
           # And a launcher around it. A bare MSI cannot repair an installation
           # whose cached package Windows has lost, because the repair has to run
           # before msiexec starts. Shipping only the MSI is how the full app
           # ended up with users who could neither upgrade nor uninstall.
-          $env:SWIFTTUNNEL_SETUP_MSI = $msi.FullName
-          $env:SWIFTTUNNEL_SETUP_NAME = "SwiftTunnelLite-Installer.msi"
-          cargo build -p swifttunnel-setup --release --target x86_64-pc-windows-msvc
-          $stub = "target/x86_64-pc-windows-msvc/release/swifttunnel-setup.exe"
-          if (-not (Test-Path $stub)) { throw "the Lite launcher was not produced" }
-          $out = "SwiftTunnelLite-Setup-$($env:GITHUB_REF_NAME.TrimStart('v')).exe"
-          Copy-Item $stub $out -Force
+          $out = node scripts/build-recovery-setup.mjs --target x86_64-pc-windows-msvc --flavor lite --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "Lite recovery setup build failed" }
           Write-Host "::notice::built $out ($((Get-Item $out).Length) bytes)"
-          gh release upload "$env:GITHUB_REF_NAME" $out --clobber
+          gh release upload "$env:RELEASE_TAG" $out --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
           # Compiled into the build so Lite can verify the signed update
           # manifest. Without it Lite refuses to update rather than trusting
           # an unverified download.
@@ -756,6 +748,20 @@ jobs:
           updaterJsonPreferNsis: false
           args: --target aarch64-pc-windows-msvc
 
+      - name: Build website setup launcher (arm64)
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem "target/aarch64-pc-windows-msvc/release/bundle/msi" -Filter "*.msi" |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $msi) { throw "no ARM64 Desktop MSI found to wrap" }
+          $out = node scripts/build-recovery-setup.mjs --target aarch64-pc-windows-msvc --flavor desktop --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "ARM64 Desktop recovery setup build failed" }
+          gh release upload "$env:RELEASE_TAG" $out --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+
       # SwiftTunnel Lite also ships inside the app MSI. This is the
       # standalone installer, for someone on a machine that cannot
       # comfortably run the full client and should not have to install it to
@@ -765,7 +771,9 @@ jobs:
         shell: pwsh
         run: |
           cargo build -p swifttunnel-lite --release --target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Lite ARM64 build failed" }
           node swifttunnel-lite/scripts/build-msi.mjs --target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Lite ARM64 MSI packaging failed" }
           $msi = Get-ChildItem "swifttunnel-lite/target-msi/arm64" -Filter "*.msi" |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msi) { throw "no Lite MSI was produced for arm64" }
@@ -774,9 +782,14 @@ jobs:
           # connect time on a user machine.
           if ($msi.Length -lt 2MB) { throw "Lite MSI is $($msi.Length) bytes; the driver is probably missing" }
           Write-Host "::notice::built $($msi.Name) ($($msi.Length) bytes)"
-          gh release upload "$env:GITHUB_REF_NAME" $msi.FullName --clobber
+          gh release upload "$env:RELEASE_TAG" $msi.FullName --clobber
+          $out = node scripts/build-recovery-setup.mjs --target aarch64-pc-windows-msvc --flavor lite --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)"
+          if ($LASTEXITCODE -ne 0) { throw "ARM64 Lite recovery setup build failed" }
+          gh release upload "$env:RELEASE_TAG" $out --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
           # Compiled into the build so Lite can verify the signed update
           # manifest. Without it Lite refuses to update rather than trusting
           # an unverified download.

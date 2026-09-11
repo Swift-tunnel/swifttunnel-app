@@ -8,6 +8,7 @@ on:
       - "swifttunnel-installer-cache/**"
       - "swifttunnel-desktop/**"
       - "scripts/check-desktop-version-sync.mjs"
+      - "scripts/build-recovery-setup*"
       - "release-signing.toml"
       - "Cargo.toml"
       - ".github/workflows/ci.yml"
@@ -19,6 +20,7 @@ on:
       - "swifttunnel-installer-cache/**"
       - "swifttunnel-desktop/**"
       - "scripts/check-desktop-version-sync.mjs"
+      - "scripts/build-recovery-setup*"
       - "release-signing.toml"
       - "Cargo.toml"
       - ".github/workflows/ci.yml"
@@ -56,6 +58,9 @@ jobs:
 
       - name: Check desktop version sync
         run: node ../scripts/check-desktop-version-sync.mjs
+
+      - name: Test recovery setup packaging
+        run: node --test ../scripts/build-recovery-setup.test.mjs
 
       - name: Install dependencies
         run: npm ci
