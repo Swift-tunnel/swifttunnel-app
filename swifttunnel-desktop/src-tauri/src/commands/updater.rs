@@ -554,82 +554,15 @@ pub async fn updater_check_channel(
     })
 }
 
-/// Where downloaded installers are kept so Windows can always find them again.
-///
-/// ProgramData rather than %TEMP%: Windows stores the directory msiexec ran
-/// from as the product's installation source and consults it whenever the
-/// product is upgraded or removed. A temp directory is gone by then, which is
-/// what strands machines on "the feature you are trying to use is on a network
-/// resource that is unavailable".
-fn installer_cache_dir() -> Result<std::path::PathBuf, String> {
-    let base = std::env::var("ProgramData").map_err(|_| "ProgramData is not set".to_string())?;
-    let dir = std::path::Path::new(&base)
-        .join("SwiftTunnel")
-        .join("installers");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
-    Ok(dir)
+/// Keep every registered source immutable until a reference-aware collector exists.
+fn stage_installer(
+    version: &str,
+    package: &[u8],
+) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
+    swifttunnel_installer_cache::InstallerCache::open()
+        .and_then(|cache| cache.stage(&format!("SwiftTunnel-{version}.msi"), package))
+        .map_err(|error| format!("Could not prepare the protected installer cache: {error}. Check disk space and run SwiftTunnel as administrator."))
 }
-
-/// Write the verified package to the installer cache and return its path.
-///
-/// Older installers are pruned, but the newest few are deliberately kept: the
-/// source Windows wants is the one the *currently installed* version came from,
-/// not the one being installed now, so keeping only the newest would recreate
-/// the bug on the following upgrade.
-/// Whether a cached file is one of *our* installers, and so ours to delete.
-///
-/// The pruning matched any `.msi` in the folder, which the desktop app shares
-/// with SwiftTunnel Lite. So updating the desktop app deleted Lite's package.
-/// Windows records that file as Lite's installation source and refuses an
-/// upgrade or repair once it is gone, producing the "network resource
-/// unavailable" orphan this staging exists to prevent in the first place.
-///
-/// `swifttunnel-setup` prunes by stem for exactly this reason and says so in a
-/// comment. The updater simply did not, and the two were never compared.
-///
-/// The hyphen carries the weight: our files are `SwiftTunnel-<version>.msi`,
-/// and Lite's `SwiftTunnelLite_...` fails the match on it. That is subtle
-/// enough to be worth a test rather than a reader's trust.
-fn is_prunable_desktop_installer(path: &std::path::Path) -> bool {
-    const OUR_STEM_PREFIX: &str = "SwiftTunnel-";
-
-    if path.extension().and_then(|x| x.to_str()) != Some("msi") {
-        return false;
-    }
-
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|name| name.starts_with(OUR_STEM_PREFIX))
-}
-
-fn stage_installer(version: &str, package: &[u8]) -> Result<std::path::PathBuf, String> {
-    const KEEP: usize = 3;
-
-    let dir = installer_cache_dir()?;
-    let path = dir.join(format!("SwiftTunnel-{version}.msi"));
-    std::fs::write(&path, package)
-        .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
-
-    if let Ok(entries) = std::fs::read_dir(&dir) {
-        let mut msis: Vec<_> = entries
-            .flatten()
-            .filter(|e| is_prunable_desktop_installer(&e.path()) && e.path() != path)
-            .collect();
-        msis.sort_by_key(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-        });
-        while msis.len() >= KEEP {
-            let victim = msis.remove(0);
-            let _ = std::fs::remove_file(victim.path());
-        }
-    }
-
-    Ok(path)
-}
-
 /// Run msiexec against a staged installer.
 ///
 /// Mirrors what tauri-plugin-updater passes, so the install behaves exactly as
@@ -650,17 +583,20 @@ fn installer_exit_result(code: Option<i32>) -> Result<bool, String> {
     }
 }
 
-fn launch_msi_installer(installer: &std::path::Path) -> Result<bool, String> {
-    let msiexec = std::env::var("SYSTEMROOT")
-        .map(|root| format!(r"{root}\System32\msiexec.exe"))
-        .unwrap_or_else(|_| "msiexec.exe".to_string());
+fn launch_msi_installer(
+    installer: &swifttunnel_installer_cache::ProtectedInstaller,
+) -> Result<bool, String> {
+    use std::os::windows::process::CommandExt;
+    let msiexec =
+        swifttunnel_installer_cache::windows_installer_path().map_err(|e| e.to_string())?;
 
     let status = std::process::Command::new(msiexec)
         .arg("/i")
-        .arg(installer)
+        .arg(installer.path())
         .arg("/passive")
         .arg("/promptrestart")
         .arg("AUTOLAUNCHAPP=True")
+        .creation_flags(0x0800_0000)
         .status()
         .map_err(|e| format!("Failed to start the installer: {e}"))?;
 
@@ -799,52 +735,6 @@ mod tests {
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
     use sha2::{Digest, Sha256};
-
-    /// Updating the desktop app must not delete Lite's installer.
-    ///
-    /// They share a cache directory, and the pruning matched every `.msi` in
-    /// it. Windows records that file as Lite's installation source, so removing
-    /// it makes Lite's next upgrade or repair fail with "network resource
-    /// unavailable", the exact orphan this staging exists to avoid.
-    #[test]
-    fn pruning_only_touches_desktop_installers() {
-        use std::path::Path;
-
-        for ours in [
-            "SwiftTunnel-3.1.6.msi",
-            "SwiftTunnel-2.0.0.msi",
-            "SwiftTunnel-10.0.0-beta.1.msi",
-        ] {
-            assert!(
-                is_prunable_desktop_installer(Path::new(ours)),
-                "{ours} is one of ours and should be prunable"
-            );
-        }
-
-        for theirs in [
-            "SwiftTunnelLite_fixture.msi",
-            "SwiftTunnelLite-3.1.6.msi",
-            "WinpkFilter-x64.msi",
-            "SwiftTunnel-3.1.6.msi.bak",
-            "notes.txt",
-            // The important ones. `swifttunnel-msi-repair` shares this exact
-            // directory and copies every installed product's package here named
-            // by product code, then repoints Windows' recorded install source at
-            // the copy. Pruning those deletes the file Windows was told to
-            // depend on, which produces the "network resource unavailable"
-            // failure that crate exists to prevent. The updater was doing this
-            // to its own prevention tool, and only on machines where the
-            // preservation had already run, which is why it never reproduced on
-            // a dev box.
-            "A1B2C3D4-1234-5678-9ABC-DEF012345678.msi",
-            "{A1B2C3D4-1234-5678-9ABC-DEF012345678}.msi",
-        ] {
-            assert!(
-                !is_prunable_desktop_installer(Path::new(theirs)),
-                "{theirs} is not ours and must survive"
-            );
-        }
-    }
 
     fn release(tag: &str, prerelease: bool) -> GithubRelease {
         GithubRelease {

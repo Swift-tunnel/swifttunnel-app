@@ -5,6 +5,7 @@ edition = "2021"
 description = "Clears an orphaned SwiftTunnel MSI registration so an upgrade or uninstall can proceed"
 
 [dependencies]
+swifttunnel-installer-cache = { path = "../swifttunnel-installer-cache" }
 windows-registry = "0.5"
 
 [lib]
@@ -14,4 +15,3 @@ path = "src/lib.rs"
 [[bin]]
 name = "swifttunnel-msi-repair"
 path = "src/main.rs"
-

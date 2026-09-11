@@ -1,0 +1,12 @@
+[package]
+name = "swifttunnel-installer-cache"
+version = "0.1.0"
+edition = "2021"
+description = "Protected persistent Windows Installer sources shared by SwiftTunnel installers"
+
+[dependencies]
+sha2 = "0.10"
+rand = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_SystemInformation", "Win32_UI_Shell"] }

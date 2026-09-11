@@ -6,6 +6,7 @@ authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel core library - VPN, auth, optimization, and networking modules"
 
 [dependencies]
+swifttunnel-installer-cache = { path = "../swifttunnel-installer-cache" }
 # Windows API - version 0.62 to match ndisapi dependency
 windows = { version = "0.62", features = [
     "Win32_Foundation",

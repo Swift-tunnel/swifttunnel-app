@@ -188,7 +188,9 @@ pub async fn check_for_update(current_version: &str) -> Result<Option<AvailableU
 /// a temporary directory: Windows records the folder an install ran from as the
 /// product's source and needs it again to remove that version later, and a
 /// temporary one is gone by then.
-pub async fn download_verified(update: &AvailableUpdate) -> Result<std::path::PathBuf, String> {
+pub async fn download_verified(
+    update: &AvailableUpdate,
+) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
     let client = http_client()?;
     let bytes = fetch(&client, &update.url, &update.file).await?;
 
@@ -205,17 +207,17 @@ pub async fn download_verified(update: &AvailableUpdate) -> Result<std::path::Pa
 
     verify_bytes_sha256(&bytes, &update.sha256, &update.file)?;
 
-    let dir = installers_dir()?;
-    let path = dir.join(&update.file);
-    std::fs::write(&path, &bytes).map_err(|e| format!("could not save {}: {e}", path.display()))?;
+    let installer = swifttunnel_installer_cache::InstallerCache::open()
+        .and_then(|cache| cache.stage(&update.file, &bytes))
+        .map_err(|e| format!("Could not prepare the protected installer cache: {e}. Check disk space and run SwiftTunnel as administrator."))?;
 
     log::info!(
         "verified {} ({} bytes) and staged it at {}",
         update.file,
         bytes.len(),
-        path.display()
+        installer.path().display()
     );
-    Ok(path)
+    Ok(installer)
 }
 
 /// Hand a verified installer to msiexec.
@@ -223,21 +225,21 @@ pub async fn download_verified(update: &AvailableUpdate) -> Result<std::path::Pa
 /// Only ever called with a path returned by [`download_verified`], which is
 /// what makes this safe: by here the bytes have been checked against a signed
 /// manifest.
-pub fn launch_installer(path: &std::path::Path) -> Result<(), String> {
-    if !path.is_file() {
-        return Err(format!("{} is not there any more", path.display()));
-    }
-    std::process::Command::new("msiexec")
+pub fn launch_installer(
+    installer: &swifttunnel_installer_cache::ProtectedInstaller,
+) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    // Lite exits after handover. Its read guard lasts until then; the protected
+    // owner/DACL keeps the immutable source safe for later installer reads.
+    let msiexec =
+        swifttunnel_installer_cache::windows_installer_path().map_err(|e| e.to_string())?;
+    std::process::Command::new(msiexec)
         .arg("/i")
-        .arg(path)
+        .arg(installer.path())
+        .creation_flags(0x0800_0000)
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("could not start the installer: {e}"))
-}
-
-/// Where the last auto-update attempt is remembered.
-fn attempt_marker() -> Option<std::path::PathBuf> {
-    installers_dir().ok().map(|dir| dir.join("last-attempt"))
 }
 
 /// Remember that an installer was launched for this version.
@@ -245,8 +247,11 @@ fn attempt_marker() -> Option<std::path::PathBuf> {
 /// Written immediately before handing over to msiexec, because the process
 /// exits straight afterwards and gets no chance to write anything later.
 pub fn record_install_attempt(version: &Version) {
-    if let Some(path) = attempt_marker() {
-        let _ = std::fs::write(&path, version.to_string());
+    if let Ok(cache) = swifttunnel_installer_cache::InstallerCache::open() {
+        let _ = cache.write_note(
+            swifttunnel_installer_cache::CacheNote::LiteAttempt,
+            version.to_string().as_bytes(),
+        );
     }
 }
 
@@ -265,30 +270,24 @@ pub fn record_install_attempt(version: &Version) {
 /// update screen has asked for it explicitly and is told plainly if it fails,
 /// so refusing them would only leave them stuck.
 pub fn already_attempted(version: &Version) -> bool {
-    let Some(path) = attempt_marker() else {
+    let Ok(cache) = swifttunnel_installer_cache::InstallerCache::open() else {
         return false;
     };
-    let Ok(recorded) = std::fs::read_to_string(&path) else {
+    let Ok(recorded) = cache.read_note(swifttunnel_installer_cache::CacheNote::LiteAttempt) else {
         return false;
     };
+    attempt_matches_version(&recorded, version)
+}
+
+fn attempt_matches_version(recorded: &str, version: &Version) -> bool {
     Version::parse(recorded.trim()).is_ok_and(|tried| &tried == version)
 }
 
 /// Forget the last attempt, once this build is the version that was wanted.
 pub fn clear_install_attempt() {
-    if let Some(path) = attempt_marker() {
-        let _ = std::fs::remove_file(path);
+    if let Ok(cache) = swifttunnel_installer_cache::InstallerCache::open() {
+        let _ = cache.write_note(swifttunnel_installer_cache::CacheNote::LiteAttempt, b"");
     }
-}
-
-fn installers_dir() -> Result<std::path::PathBuf, String> {
-    let base = std::env::var_os("ProgramData").ok_or("ProgramData is not set")?;
-    let dir = std::path::PathBuf::from(base)
-        .join("SwiftTunnel")
-        .join("installers");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    Ok(dir)
 }
 
 fn base64_decode(value: &str) -> Result<Vec<u8>, String> {
@@ -363,47 +362,13 @@ mod tests {
     /// check keeps them equal, and this is what stands there if it ever fails.
     #[test]
     fn a_version_already_attempted_is_not_retried() {
-        // Needs a writable ProgramData. Nothing to assert if we cannot record.
-        if attempt_marker().is_none() {
-            return;
-        }
+        // Persistence is tested by the cache library. Never clear a real
+        // machine's auto-update marker or silently pass without write access.
         let wanted = Version::parse("9.9.9").unwrap();
-        let other = Version::parse("9.9.10").unwrap();
-
-        clear_install_attempt();
-        assert!(
-            !already_attempted(&wanted),
-            "nothing recorded, so nothing was attempted"
-        );
-
-        record_install_attempt(&wanted);
-        // Read our own write back rather than checking that *a* file exists.
-        //
-        // The marker is a real machine path under %ProgramData%, not a
-        // temporary one, so a genuine update leaves a real marker there. This
-        // checked `!path.exists()` and therefore passed whenever any marker was
-        // present, including one this test did not write: without admin the
-        // write silently fails, the stranger's file satisfies the existence
-        // check, and the assertion below then runs against somebody else's
-        // version. That is exactly what happened once Lite auto-updated on a
-        // dev machine and left "3.1.4" behind.
-        if !already_attempted(&wanted) {
-            // No write permission here; the guard is untestable in this
-            // environment rather than wrong.
-            return;
+        assert!(attempt_matches_version("9.9.9\n", &wanted));
+        for recorded in ["", "invalid", "9.9.10", "3.1.6"] {
+            assert!(!attempt_matches_version(recorded, &wanted));
         }
-
-        assert!(already_attempted(&wanted), "this one was just attempted");
-        assert!(
-            !already_attempted(&other),
-            "a different version was never attempted and must still install"
-        );
-
-        clear_install_attempt();
-        assert!(
-            !already_attempted(&wanted),
-            "an update that landed is cleared on the next launch"
-        );
     }
 
     /// A build must replace itself with its own architecture.

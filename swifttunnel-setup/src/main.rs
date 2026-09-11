@@ -64,23 +64,22 @@ fn run() -> i32 {
     // anyway, rather than an installer that refuses to start.
     let _ = swifttunnel_msi_repair::repair();
 
-    let Some(msi_path) = stage_payload() else {
-        return fail(
-            concat!(
-                "SwiftTunnel could not unpack its installer.",
-                "\n\n",
-                "Antivirus software removing the file is the usual cause. Check its ",
-                "quarantine or protection history and allow SwiftTunnel, then download ",
-                "it again from swifttunnel.net."
-            ),
-            1,
-        );
+    let installer = match stage_payload() {
+        Ok(installer) => installer,
+        Err(error) => return fail(&format!("SwiftTunnel could not prepare its protected installer cache.\n\n{error}\n\nCheck free disk space, run setup as administrator, and contact support if this persists."), 1),
     };
 
-    let status = Command::new("msiexec").arg("/i").arg(&msi_path).status();
-
-    // The installer stays where it is. See `stage_payload`.
-    prune_old_payloads(&msi_path);
+    let status = swifttunnel_installer_cache::windows_installer_path().and_then(|msiexec| {
+        use std::os::windows::process::CommandExt;
+        Command::new(msiexec)
+            .arg("/i")
+            .arg(installer.path())
+            .creation_flags(0x0800_0000)
+            .status()
+    });
+    // Keep the verified handle until msiexec exits. Never prune registered
+    // sources by filename count, including after failed/cancelled installation.
+    drop(installer);
 
     match status {
         Ok(s) => s.code().unwrap_or(1),
@@ -150,261 +149,19 @@ fn fail(message: &str, code: i32) -> i32 {
 /// Leave a note beside the installer too, for a ticket that arrives after the
 /// box has been dismissed.
 fn log_failure(message: &str) {
-    let Some(dir) = std::env::var_os("ProgramData").map(|base| {
-        std::path::PathBuf::from(base)
-            .join("SwiftTunnel")
-            .join("installers")
-    }) else {
-        return;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(dir.join("setup-error.txt"), message);
-}
-
-/// Where the payload is unpacked before msiexec runs.
-///
-/// `%ProgramData%`, and it is left there afterwards. Both halves of that matter
-/// and both used to be wrong.
-///
-/// Windows records the directory it installed from as the product's
-/// installation source. Removing a product needs that product's own package,
-/// because the package is what describes what to remove, and a major upgrade
-/// removes the old version before installing the new one. Windows keeps its own
-/// copy under `C:\Windows\Installer` for this, but cleanup tools delete it, and
-/// the source is the only fallback left when they do.
-///
-/// This used to unpack into `%TEMP%` and then delete the file as soon as
-/// msiexec returned, reasoning that a version specific installer could not help
-/// a later upgrade. That is backwards: the version specific installer is
-/// exactly what the next upgrade asks for, because it is the package for the
-/// version being removed. So every install made here was born pointing at a
-/// file that no longer existed, and stayed one cleanup tool away from
-/// "the feature you are trying to use is on a network resource that is
-/// unavailable", with nothing able to repair it from inside the MSI.
-///
-/// The name carries a tag derived from the payload so two versions never
-/// collide. Overwriting one name would leave the older product's source
-/// pointing at a newer package, which Windows rejects just as firmly as a
-/// missing one.
-fn stage_payload() -> Option<std::path::PathBuf> {
-    let dir = std::env::var_os("ProgramData")
-        .map(|base| {
-            std::path::PathBuf::from(base)
-                .join("SwiftTunnel")
-                .join("installers")
-        })
-        // Somewhere is better than nowhere: a machine without ProgramData set
-        // still gets an install, just without the durable source.
-        .unwrap_or_else(std::env::temp_dir);
-    let _ = std::fs::create_dir_all(&dir);
-
-    let path = dir.join(payload_file_name(MSI_NAME, &payload_tag()));
-
-    // Already staged by an earlier run of this same build, and byte for byte
-    // the same file, so rewriting it would only risk breaking a source another
-    // product is relying on.
-    //
-    // Byte for byte is meant literally. This compared lengths, which is not the
-    // same claim at all: the directory lives under ProgramData, whose inherited
-    // ACL normally lets an ordinary user create files, and the name is
-    // derivable from the shipped installer because the tag is a hash of the
-    // very bytes anybody can download. So a standard user, or malware running
-    // as one, could plant a package at the exact path, padded to the exact
-    // length, and the next elevated run of setup would hand it to msiexec.
-    // Reading the file is the difference between checking that something is
-    // there and checking that it is ours.
-    if file_matches_payload(&path) {
-        return Some(path);
-    }
-
-    // Not ours: overwrite it rather than trusting it. If that fails, staging
-    // fails and the install continues without a durable source, which is the
-    // safe direction.
-    std::fs::write(&path, MSI_BYTES).ok().map(|()| path)
-}
-
-/// Whether the file at `path` is exactly the payload this build carries.
-///
-/// Length first because it is free and rejects almost everything, then the
-/// contents, which is the part that actually decides it.
-///
-/// This does not close the gap between checking and msiexec opening the file
-/// later. Nothing short of writing to a fresh name every run, or holding the
-/// handle across the call, would, and both cost more than they buy here. What
-/// it does close is a package sitting there in advance being accepted purely
-/// for being the right size.
-fn file_matches_payload(path: &std::path::Path) -> bool {
-    if !std::fs::metadata(path).is_ok_and(|meta| meta.len() == MSI_BYTES.len() as u64) {
-        return false;
-    }
-
-    std::fs::read(path).is_ok_and(|existing| existing == MSI_BYTES)
-}
-
-/// The staged file's name: the installer's name with a payload tag before the
-/// extension.
-///
-/// Separate and pure because the property that matters is easy to get wrong and
-/// invisible when it is: two versions must never land on the same name. If they
-/// did, installing the newer one would overwrite the file the older product
-/// records as its source, and Windows refuses a source holding the wrong
-/// package just as firmly as a missing one, which is the failure this staging
-/// exists to prevent.
-fn payload_file_name(msi_name: &str, tag: &str) -> String {
-    match msi_name.rsplit_once('.') {
-        Some((stem, extension)) => format!("{stem}-{tag}.{extension}"),
-        None => format!("{msi_name}-{tag}"),
-    }
-}
-
-/// A short tag that differs whenever the payload does.
-///
-/// FNV-1a, because this only has to separate one build's installer from
-/// another's. Nothing security related rests on it.
-fn payload_tag() -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in MSI_BYTES {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
-}
-
-/// Keep the newest few installers and remove the rest.
-///
-/// Only what this launcher installs, matched on the same stem, so the full app
-/// never prunes Lite's package or the reverse. Three is enough to cover the
-/// version being replaced while not letting a folder of 15MB installers grow
-/// without limit.
-fn prune_old_payloads(current: &std::path::Path) {
-    const KEEP: usize = 3;
-
-    let (Some(dir), Some(stem)) = (current.parent(), MSI_NAME.rsplit_once('.').map(|(s, _)| s))
-    else {
-        return;
-    };
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut ours: Vec<_> = entries
-        .flatten()
-        .filter(|entry| {
-            let path = entry.path();
-            path != current
-                && path.extension().and_then(|e| e.to_str()) == Some("msi")
-                && path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|name| name.starts_with(stem))
-        })
-        .collect();
-
-    ours.sort_by_key(|entry| {
-        entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-    });
-
-    while ours.len() >= KEEP {
-        let oldest = ours.remove(0);
-        let _ = std::fs::remove_file(oldest.path());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{file_matches_payload, payload_file_name, MSI_BYTES};
-
-    /// A staged file is reused only when it really is our package.
-    ///
-    /// This checked the length alone, and the staging directory sits under
-    /// ProgramData where an ordinary user can normally create files, at a name
-    /// derived from a hash of the very bytes anybody can download. So a
-    /// same-length package could be left there in advance and the next elevated
-    /// run would hand it straight to msiexec. Length is a cheap first pass, not
-    /// an identity check.
-    #[test]
-    fn a_same_length_impostor_is_not_reused() {
-        let dir = std::env::temp_dir().join(format!(
-            "swifttunnel-stage-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("payload.msi");
-
-        // The real thing is reused.
-        std::fs::write(&path, MSI_BYTES).unwrap();
-        assert!(
-            file_matches_payload(&path),
-            "our own package must be recognised, or every run rewrites it"
-        );
-
-        // Same length, different bytes: precisely the planted case.
-        let mut impostor = MSI_BYTES.to_vec();
-        if let Some(first) = impostor.first_mut() {
-            *first = first.wrapping_add(1);
-        }
-        assert_eq!(impostor.len(), MSI_BYTES.len());
-        std::fs::write(&path, &impostor).unwrap();
-        assert!(
-            !file_matches_payload(&path),
-            "a same-length impostor must not be accepted as ours"
-        );
-
-        // A short file was already rejected and must stay rejected.
-        std::fs::write(&path, b"nope").unwrap();
-        assert!(!file_matches_payload(&path));
-
-        // A missing file is not a match either.
-        std::fs::remove_file(&path).unwrap();
-        assert!(!file_matches_payload(&path));
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Two builds must never stage to the same filename.
-    ///
-    /// The whole point of staging is that the older product's recorded source
-    /// keeps holding the older package. Installing a newer version over the
-    /// same name would replace it, and Windows rejects a source containing the
-    /// wrong package exactly as it rejects a missing one, which is the error
-    /// this was built to stop.
-    #[test]
-    fn two_payloads_never_share_a_file_name() {
-        let older = payload_file_name("SwiftTunnel-Installer.msi", "1111111111111111");
-        let newer = payload_file_name("SwiftTunnel-Installer.msi", "2222222222222222");
-        assert_ne!(older, newer);
-    }
-
-    /// The tag goes before the extension, not after.
-    ///
-    /// msiexec dispatches on `.msi`, so a name ending in the tag would not be
-    /// recognised as a package at all.
-    #[test]
-    fn the_name_still_ends_in_msi() {
-        let name = payload_file_name("SwiftTunnel-Installer.msi", "abc123");
-        assert_eq!(name, "SwiftTunnel-Installer-abc123.msi");
-        assert!(name.ends_with(".msi"));
-    }
-
-    /// The two products keep separate names, since they share the directory
-    /// and each prunes only its own.
-    #[test]
-    fn the_full_app_and_lite_do_not_collide() {
-        let tag = "deadbeefdeadbeef";
-        assert_ne!(
-            payload_file_name("SwiftTunnel-Installer.msi", tag),
-            payload_file_name("SwiftTunnelLite-Installer.msi", tag)
+    if let Ok(cache) = swifttunnel_installer_cache::InstallerCache::open() {
+        let _ = cache.write_note(
+            swifttunnel_installer_cache::CacheNote::SetupError,
+            message.as_bytes(),
         );
     }
+}
 
-    #[test]
-    fn a_name_without_an_extension_still_gets_a_tag() {
-        assert_eq!(payload_file_name("installer", "abc"), "installer-abc");
-    }
+/// Authenticated embedded bytes enter the same immutable cache as both updaters
+/// and MSI repair. Name/content and handle-sharing tests live in that library,
+/// where they can run without setup's elevation manifest or embedded MSI.
+fn stage_payload() -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
+    swifttunnel_installer_cache::InstallerCache::open()
+        .and_then(|cache| cache.stage(MSI_NAME, MSI_BYTES))
+        .map_err(|error| error.to_string())
 }

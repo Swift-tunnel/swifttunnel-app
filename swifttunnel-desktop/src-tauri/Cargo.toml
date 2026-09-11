@@ -7,6 +7,7 @@ authors = ["SwiftTunnel <support@swifttunnel.net>"]
 description = "SwiftTunnel desktop app - Tauri v2 frontend"
 
 [dependencies]
+swifttunnel-installer-cache = { path = "../../swifttunnel-installer-cache" }
 swifttunnel-core = { path = "../../swifttunnel-core" }
 # Clears an orphaned registration before an upgrade runs. Same crate the
 # standalone Setup launcher uses, so both paths heal identically.

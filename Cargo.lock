@@ -4379,6 +4379,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "swifttunnel-installer-cache",
  "sysinfo",
  "tauri-winrt-notification",
  "thiserror 1.0.69",
@@ -4407,6 +4408,7 @@ dependencies = [
  "sha2",
  "simplelog",
  "swifttunnel-core",
+ "swifttunnel-installer-cache",
  "swifttunnel-msi-repair",
  "sysinfo",
  "tauri",
@@ -4418,6 +4420,15 @@ dependencies = [
  "url",
  "windows 0.62.2",
  "winreg 0.52.0",
+]
+
+[[package]]
+name = "swifttunnel-installer-cache"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.5",
+ "sha2",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -4442,6 +4453,7 @@ dependencies = [
 name = "swifttunnel-msi-repair"
 version = "0.1.0"
 dependencies = [
+ "swifttunnel-installer-cache",
  "windows-registry 0.5.3",
 ]
 
@@ -4450,6 +4462,7 @@ name = "swifttunnel-setup"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "swifttunnel-installer-cache",
  "swifttunnel-msi-repair",
 ]
 

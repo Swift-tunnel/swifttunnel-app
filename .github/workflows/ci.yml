@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "swifttunnel-core/**"
+      - "swifttunnel-installer-cache/**"
       - "swifttunnel-desktop/**"
       - "scripts/check-desktop-version-sync.mjs"
       - "release-signing.toml"
@@ -15,6 +16,7 @@ on:
     branches: [main]
     paths:
       - "swifttunnel-core/**"
+      - "swifttunnel-installer-cache/**"
       - "swifttunnel-desktop/**"
       - "scripts/check-desktop-version-sync.mjs"
       - "release-signing.toml"
@@ -107,6 +109,9 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Test protected installer cache logic
+        run: cargo test -p swifttunnel-installer-cache
 
       - name: Check core
         run: cargo check -p swifttunnel-core

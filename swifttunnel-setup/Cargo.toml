@@ -5,6 +5,7 @@ edition = "2021"
 description = "Website installer for SwiftTunnel: repairs a broken MSI registration, then runs the installer"
 
 [dependencies]
+swifttunnel-installer-cache = { path = "../swifttunnel-installer-cache" }
 swifttunnel-msi-repair = { path = "../swifttunnel-msi-repair" }
 
 [build-dependencies]

@@ -129,8 +129,8 @@ pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
 /// since it settles almost every case for free.
 ///
 /// Any error is "not the same". Being unable to read one of them is not
-/// evidence they match, and the caller's response to a mismatch is to copy the
-/// real package over the destination, which is the safe direction.
+/// evidence they match. A mismatch leaves the registered source unchanged;
+/// the shared cache never overwrites an existing MSI.
 fn files_have_same_contents(left: &Path, right: &Path) -> bool {
     use std::io::Read;
 
@@ -488,20 +488,6 @@ mod tests {
     }
 }
 
-/// Where our own copies of the installer packages live.
-///
-/// `%ProgramData%`, because it survives everything that empties `%TEMP%` or a
-/// Downloads folder, and because a user will never find it to tidy it away.
-fn installers_dir() -> Result<std::path::PathBuf, String> {
-    let base = std::env::var_os("ProgramData").ok_or("ProgramData is not set")?;
-    let dir = std::path::PathBuf::from(base)
-        .join("SwiftTunnel")
-        .join("installers");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
 /// Keep a copy of every installed product's package, and point Windows at it.
 ///
 /// This is the prevention that makes the repair rarely needed. Windows keeps
@@ -525,7 +511,7 @@ fn installers_dir() -> Result<std::path::PathBuf, String> {
 /// Pointing Windows at a bad file breaks upgrades exactly as thoroughly as
 /// pointing it at a missing one, so a failure here leaves the registry alone.
 pub fn preserve_installer_sources() -> Result<Vec<String>, String> {
-    let dir = installers_dir()?;
+    let cache = swifttunnel_installer_cache::InstallerCache::open().map_err(|e| e.to_string())?;
     let mut preserved = Vec::new();
 
     for (product, usable) in all_registrations().map_err(|e| e.to_string())? {
@@ -541,43 +527,27 @@ pub fn preserve_installer_sources() -> Result<Vec<String>, String> {
             "{}.msi",
             product.product_code.trim_matches(|c| c == '{' || c == '}')
         );
-        let destination = dir.join(&file_name);
-
-        // Same file, not merely the same size.
-        //
-        // This compared lengths, and what follows is a signature check that
-        // passes for any valid MSI, so together they could not tell this
-        // product's package from somebody else's. The directory is under
-        // ProgramData, whose inherited permissions normally let an ordinary
-        // user create files, and the name here is the product code, which any
-        // user can read out of the registry. A package left at that path at the
-        // right length would therefore be skipped rather than overwritten, pass
-        // the signature check, and be handed to `point_source_at`, which writes
-        // it into the registry as the source Windows trusts for every later
-        // repair and upgrade. That is a lasting elevated execution primitive,
-        // not a one-off.
-        //
-        // Comparing the bytes makes a mismatch a copy instead, which overwrites
-        // the plant with the real package.
-        let source_len = std::fs::metadata(&product.local_package)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-        let already_copied = source_len > 0
-            && files_have_same_contents(Path::new(&product.local_package), &destination);
-
-        if !already_copied && std::fs::copy(&product.local_package, &destination).is_err() {
+        // Copy from a readable registered package, then hold the verified
+        // protected copy while checking the OLE header and updating SourceList.
+        let Ok(bytes) = std::fs::read(&product.local_package) else {
+            continue;
+        };
+        let Ok(installer) = cache.stage(&file_name, &bytes) else {
+            continue;
+        };
+        let destination = installer.path();
+        if !files_have_same_contents(Path::new(&product.local_package), destination)
+            || !package_is_usable(&destination.to_string_lossy())
+        {
             continue;
         }
-
-        // Verify before repointing. An interrupted copy would otherwise become
-        // the source Windows trusts, turning a healthy machine into the exact
-        // failure this is meant to prevent.
-        if !package_is_usable(&destination.to_string_lossy()) {
-            let _ = std::fs::remove_file(&destination);
+        let Some(dir) = destination.parent() else {
             continue;
-        }
-
-        if point_source_at(&product.packed, &dir, &file_name).is_ok() {
+        };
+        let Some(file_name) = destination.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if point_source_at(&product.packed, dir, file_name).is_ok() {
             preserved.push(format!(
                 "{} {}",
                 product.display_name, product.display_version
