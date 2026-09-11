@@ -4380,6 +4380,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "swifttunnel-installer-cache",
+ "swifttunnel-msi-repair",
  "sysinfo",
  "tauri-winrt-notification",
  "thiserror 1.0.69",

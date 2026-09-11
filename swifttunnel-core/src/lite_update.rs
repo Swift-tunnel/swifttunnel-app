@@ -233,13 +233,38 @@ pub fn launch_installer(
     // owner/DACL keeps the immutable source safe for later installer reads.
     let msiexec =
         swifttunnel_installer_cache::windows_installer_path().map_err(|e| e.to_string())?;
-    std::process::Command::new(msiexec)
-        .arg("/i")
-        .arg(installer.path())
-        .creation_flags(0x0800_0000)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("could not start the installer: {e}"))
+    launch_after_repair(
+        || swifttunnel_msi_repair::repair().map(|cleared| cleared.len()),
+        || {
+            std::process::Command::new(msiexec)
+                .arg("/i")
+                .arg(installer.path())
+                .creation_flags(0x0800_0000)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("could not start the installer: {e}"))
+        },
+    )
+}
+
+fn launch_after_repair(
+    repair: impl FnOnce() -> Result<usize, String>,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    // Startup is not a lasting guarantee: cleanup can remove the old package
+    // while Lite is open. Both manual and automatic updates come through here.
+    // Match Desktop's best-effort policy, since Windows may still find another
+    // valid source when inspection or repair is unavailable.
+    match repair() {
+        Ok(count) if count > 0 => {
+            log::warn!("cleared {count} orphaned SwiftTunnel registration(s) before Lite update");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("could not check installer registration before Lite update: {error}")
+        }
+    }
+    launch()
 }
 
 /// Remember that an installer was launched for this version.
@@ -339,6 +364,44 @@ async fn fetch(client: &reqwest::Client, url: &str, what: &str) -> Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_rechecks_an_orphan_created_after_lite_started() {
+        use std::cell::Cell;
+        // Model a healthy startup followed by a cleanup tool removing the MSI.
+        // The launch double refuses the upgrade while that orphan survives.
+        let orphan = Cell::new(false);
+        assert!(!orphan.get());
+        orphan.set(true);
+        let result = launch_after_repair(
+            || {
+                orphan.set(false);
+                Ok(1)
+            },
+            || {
+                if orphan.get() {
+                    Err("old package unavailable".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn repair_failure_still_allows_windows_to_resolve_another_source() {
+        let result = launch_after_repair(|| Err("registry unavailable".into()), || Ok(()));
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn repaired_registration_does_not_hide_installer_launch_failure() {
+        assert_eq!(
+            launch_after_repair(|| Ok(1), || Err("launch denied".into())),
+            Err("launch denied".into()),
+        );
+    }
 
     fn assets(x64: Option<&str>, arm64: Option<&str>) -> LiteAssets {
         let make = |file: &str| LiteAsset {
