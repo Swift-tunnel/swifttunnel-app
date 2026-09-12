@@ -7621,6 +7621,47 @@ enum AutoRoutingPacketAction {
 
 const ROBLOX_GAME_SERVER_PORT_START: u16 = 49152;
 
+#[derive(Default)]
+struct AdapterSelectionLog {
+    entries: std::collections::HashMap<Ipv4Addr, (u32, String, bool, std::time::Instant)>,
+}
+
+impl AdapterSelectionLog {
+    const CAPACITY: usize = 64;
+    const REPEAT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+    fn should_log(
+        &mut self,
+        ip: Ipv4Addr,
+        index: u32,
+        source: &str,
+        p2p: bool,
+        now: std::time::Instant,
+    ) -> bool {
+        if let Some((old_index, old_source, old_p2p, at)) = self.entries.get(&ip)
+            && *old_index == index
+            && old_source == source
+            && *old_p2p == p2p
+            && now.duration_since(*at) < Self::REPEAT_AFTER
+        {
+            return false;
+        }
+        if !self.entries.contains_key(&ip)
+            && self.entries.len() >= Self::CAPACITY
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.3)
+                .map(|(ip, _)| *ip)
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries
+            .insert(ip, (index, source.to_owned(), p2p, now));
+        true
+    }
+}
+
 /// Emit the adapter-selection line only when the answer differs from last time.
 ///
 /// Re-logs unchanged state every few minutes so a long session still shows the
@@ -7631,32 +7672,71 @@ fn log_adapter_selection_if_changed(
     source: &str,
     point_to_point: bool,
 ) {
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
-
-    const REPEAT_AFTER: Duration = Duration::from_secs(300);
-    static LAST: Mutex<Option<(String, Instant)>> = Mutex::new(None);
-
-    let current = format!("{ip}|{if_index}|{source}|{point_to_point}");
-
-    let should_log = match LAST.lock() {
-        Ok(mut last) => {
-            let stale = last
-                .as_ref()
-                .is_none_or(|(seen, at)| *seen != current || at.elapsed() >= REPEAT_AFTER);
-            if stale {
-                *last = Some((current, Instant::now()));
-            }
-            stale
-        }
-        // A poisoned lock must not silence the log entirely.
-        Err(_) => true,
-    };
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<AdapterSelectionLog>> = OnceLock::new();
+    let should_log = LAST
+        .get_or_init(|| Mutex::new(AdapterSelectionLog::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .should_log(
+            ip,
+            if_index,
+            source,
+            point_to_point,
+            std::time::Instant::now(),
+        );
 
     if should_log {
         log::info!(
             "Active internet adapter selected via GetBestInterfaceEx ({ip}): if_index {if_index}, source={source}, point_to_point={point_to_point}"
         );
+    }
+}
+
+#[cfg(test)]
+mod adapter_selection_log_tests {
+    use super::*;
+
+    #[test]
+    fn alternating_destinations_do_not_repeat_unchanged_selections() {
+        let mut log = AdapterSelectionLog::default();
+        let now = std::time::Instant::now();
+        let first = Ipv4Addr::new(192, 0, 2, 1);
+        let second = Ipv4Addr::new(192, 0, 2, 2);
+        assert!(log.should_log(first, 3, "native", false, now));
+        assert!(log.should_log(second, 3, "native", false, now));
+        for _ in 0..1000 {
+            assert!(!log.should_log(first, 3, "native", false, now));
+            assert!(!log.should_log(second, 3, "native", false, now));
+        }
+        assert!(log.should_log(first, 4, "native", false, now));
+        assert!(log.should_log(first, 4, "fallback", false, now));
+        assert!(log.should_log(first, 4, "fallback", true, now));
+        assert!(log.should_log(
+            second,
+            3,
+            "native",
+            false,
+            now + AdapterSelectionLog::REPEAT_AFTER
+        ));
+    }
+
+    #[test]
+    fn destination_history_is_bounded() {
+        let mut log = AdapterSelectionLog::default();
+        let now = std::time::Instant::now();
+        for n in 0..1000_u32 {
+            log.should_log(
+                Ipv4Addr::from(n),
+                3,
+                "native",
+                false,
+                now + std::time::Duration::from_secs(n.into()),
+            );
+            assert!(log.entries.len() <= AdapterSelectionLog::CAPACITY);
+        }
+        assert!(log.entries.contains_key(&Ipv4Addr::from(999)));
+        assert!(!log.entries.contains_key(&Ipv4Addr::from(0)));
     }
 }
 
