@@ -1,0 +1,15 @@
+[package]
+name = "swifttunnel-msi-actions"
+version = "0.1.0"
+edition = "2021"
+description = "Scoped Desktop MSI recovery custom actions"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+windows-registry = "0.5"
+
+[dev-dependencies]
+handlebars = "6"
+serde_json = "1"

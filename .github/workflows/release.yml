@@ -600,27 +600,23 @@ jobs:
           [System.IO.File]::WriteAllText($confPath, ($config | ConvertTo-Json -Depth 32), $utf8NoBom)
           Write-Host "::notice::Authenticode signCommand injected - Tauri will sign SwiftTunnel.exe and the MSI installer"
 
-      # build.rs embeds this binary into the MSI and runs it before Windows
-      # tries to remove the previous version, so an upgrade on a machine whose
-      # cached package is gone repairs itself instead of stopping on "the
-      # feature you are trying to use is on a network resource that is
-      # unavailable". Both architectures are built here because build.rs looks
-      # for the binary under the target triple it is packaging, and it fails
-      # the build rather than quietly producing an installer without it.
-      - name: Build MSI repair binary
+      # Recovery DLLs are embedded in Desktop MSIs. Validate the actual template
+      # before the Tauri action builds or uploads either architecture.
+      - name: Build and validate native MSI recovery
         shell: pwsh
         run: |
-          cargo build -p swifttunnel-msi-repair --release --target x86_64-pc-windows-msvc
-          cargo build -p swifttunnel-msi-repair --release --target aarch64-pc-windows-msvc
+          cargo test -p swifttunnel-msi-actions
+          if ($LASTEXITCODE -ne 0) { throw "MSI recovery tests failed" }
           foreach ($t in @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
-            $exe = "target/$t/release/swifttunnel-msi-repair.exe"
-            if (-not (Test-Path $exe)) { throw "MSI repair binary missing for $t" }
-            Write-Host "::notice::Built $exe ($((Get-Item $exe).Length) bytes)"
+            cargo build -p swifttunnel-msi-repair --release --target $t
+            if ($LASTEXITCODE -ne 0) { throw "MSI repair binary build failed for $t" }
+            & ./scripts/test-desktop-msi-package.ps1 -Target $t -WorkDir "$env:RUNNER_TEMP/desktop-msi-$t"
           }
 
       - name: Build and publish x64 release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
+          SWIFTTUNNEL_MSI_ACTIONS_DLL: ${{ github.workspace }}/target/x86_64-pc-windows-msvc/release/swifttunnel_msi_actions.dll
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_UPDATER_LEGACY_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_LEGACY_PUBLIC_KEY }}
           SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
@@ -657,12 +653,8 @@ jobs:
       # on a network resource that is unavailable" and cannot be completed at
       # all: not by upgrading, not by uninstalling first.
       #
-      # It has to be a launcher rather than something inside the MSI. An
-      # immediate custom action runs impersonating an unelevated user and
-      # cannot write HKLM; a deferred one runs as SYSTEM but cannot be
-      # sequenced ahead of RemoveExistingProducts, and moving that later makes
-      # the old product's uninstall delete the new install's files. All three
-      # were tried against a genuinely broken machine before settling here.
+      # Keep the launcher as a separate recovery route for per-user or corrupt
+      # package cases outside the Desktop MSI's scoped missing-package repair.
       - name: Build website setup launcher (x64)
         shell: pwsh
         run: |
@@ -719,6 +711,7 @@ jobs:
       - name: Build and publish ARM64 release
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
+          SWIFTTUNNEL_MSI_ACTIONS_DLL: ${{ github.workspace }}/target/aarch64-pc-windows-msvc/release/swifttunnel_msi_actions.dll
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_UPDATER_LEGACY_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_LEGACY_PUBLIC_KEY }}
           SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}

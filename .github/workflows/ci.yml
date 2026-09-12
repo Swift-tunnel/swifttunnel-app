@@ -6,6 +6,8 @@ on:
     paths:
       - "swifttunnel-core/**"
       - "swifttunnel-installer-cache/**"
+      - "swifttunnel-msi-actions/**"
+      - "scripts/*desktop-msi*.ps1"
       - "swifttunnel-desktop/**"
       - "scripts/check-desktop-version-sync.mjs"
       - "scripts/build-recovery-setup*"
@@ -18,6 +20,8 @@ on:
     paths:
       - "swifttunnel-core/**"
       - "swifttunnel-installer-cache/**"
+      - "swifttunnel-msi-actions/**"
+      - "scripts/*desktop-msi*.ps1"
       - "swifttunnel-desktop/**"
       - "scripts/check-desktop-version-sync.mjs"
       - "scripts/build-recovery-setup*"
@@ -115,6 +119,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Test native MSI recovery logic
+        run: cargo test -p swifttunnel-msi-actions
+
+      - name: Validate Desktop MSI sequence
+        shell: pwsh
+        run: |
+          $triple = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'aarch64-pc-windows-msvc' } else { 'x86_64-pc-windows-msvc' }
+          & ./scripts/test-desktop-msi-package.ps1 -Target $triple -WorkDir "$env:RUNNER_TEMP/desktop-msi-sequence"
+
       - name: Test protected installer cache logic
         run: cargo test -p swifttunnel-installer-cache
 
@@ -177,6 +190,13 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Test native MSI recovery logic
+        run: cargo test -p swifttunnel-msi-actions
+
+      - name: Validate Desktop MSI sequence
+        shell: pwsh
+        run: ./scripts/test-desktop-msi-package.ps1 -Target aarch64-pc-windows-msvc -WorkDir "$env:RUNNER_TEMP/desktop-msi-sequence"
 
       - name: Check core
         run: cargo check -p swifttunnel-core

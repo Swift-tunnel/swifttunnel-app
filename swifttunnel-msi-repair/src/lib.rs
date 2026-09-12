@@ -21,18 +21,12 @@
 //!
 //! # Why this is a library
 //!
-//! It cannot run from inside the MSI. The repair has to happen before
-//! `msiexec` starts, so it is called from two places that run *ahead* of it:
-//! `swifttunnel-setup`, the launcher the website serves, and the desktop app's
-//! updater. Both are already elevated when they call this; the registry writes
-//! need administrator and fail cleanly without it.
-//!
-//! Attempting this as a WiX custom action was tried and abandoned. An immediate
-//! action runs impersonating an unelevated user and cannot write HKLM, and a
-//! deferred one runs as SYSTEM but cannot be sequenced ahead of
-//! RemoveExistingProducts, which permits no action between itself and its
-//! anchor. Moving the removal later makes the old product's uninstall delete
-//! the new install's files.
+//! Setup and the app updaters call this library before launching msiexec.
+//! Their broader recovery runs elevated. The Desktop MSI now uses a separate,
+//! scoped DLL in `swifttunnel-msi-actions`: an early InstallExecute flush runs
+//! recovery as SYSTEM before RemoveExistingProducts and before new files land.
+//! It handles confirmed missing per-machine Desktop packages only. The launcher
+//! remains useful for other orphan cases. Neither approach is a full uninstall.
 
 use std::path::Path;
 
