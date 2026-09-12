@@ -557,23 +557,27 @@ fn sanitize_preset_filename(name: &str) -> String {
 /// Write a shareable preset as a `.txt` next to where diagnostics land (Desktop,
 /// falling back to Downloads), and return the path so the UI can reveal it.
 #[tauri::command]
-pub fn preset_save_to_downloads(
+pub async fn preset_save_to_downloads(
     app: AppHandle,
     file_name: String,
     contents: String,
 ) -> Result<NetworkDiagnosticsBundleResponse, String> {
-    let output_dir = resolve_output_dir(&app);
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("Failed to create output directory: {e}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let output_dir = resolve_output_dir(&app);
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("Failed to create output directory: {e}"))?;
 
-    let file_path = output_dir.join(sanitize_preset_filename(&file_name));
-    std::fs::write(&file_path, contents)
-        .map_err(|e| format!("Failed to write preset file: {e}"))?;
+        let file_path = output_dir.join(sanitize_preset_filename(&file_name));
+        std::fs::write(&file_path, contents)
+            .map_err(|e| format!("Failed to write preset file: {e}"))?;
 
-    Ok(NetworkDiagnosticsBundleResponse {
-        file_path: file_path.to_string_lossy().to_string(),
-        folder_path: output_dir.to_string_lossy().to_string(),
+        Ok(NetworkDiagnosticsBundleResponse {
+            file_path: file_path.to_string_lossy().to_string(),
+            folder_path: output_dir.to_string_lossy().to_string(),
+        })
     })
+    .await
+    .map_err(|e| format!("Preset export task failed: {e}"))?
 }
 
 #[cfg(test)]

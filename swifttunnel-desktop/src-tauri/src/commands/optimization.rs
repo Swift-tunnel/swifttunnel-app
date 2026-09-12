@@ -32,6 +32,9 @@ pub async fn optimization_revert(id: String) -> Result<OptimizationApplyResponse
 
 /// Ids of optimizations currently applied (have a persisted snapshot).
 #[tauri::command]
-pub fn optimization_get_active() -> Result<Vec<String>, String> {
-    swifttunnel_core::optimizations::active_ids()
+pub async fn optimization_get_active() -> Result<Vec<String>, String> {
+    // This read shares the lock held during apply/revert system commands.
+    tauri::async_runtime::spawn_blocking(swifttunnel_core::optimizations::active_ids)
+        .await
+        .map_err(|e| format!("Optimization status task failed: {e}"))?
 }

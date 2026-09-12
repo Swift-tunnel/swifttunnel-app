@@ -850,9 +850,13 @@ pub async fn vpn_get_diagnostics(
 }
 
 #[tauri::command]
-pub fn vpn_list_network_adapters() -> Result<Vec<swifttunnel_core::vpn::NetworkAdapterInfo>, String>
-{
-    swifttunnel_core::vpn::list_network_adapters().map_err(|e| e.to_string())
+pub async fn vpn_list_network_adapters()
+-> Result<Vec<swifttunnel_core::vpn::NetworkAdapterInfo>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        swifttunnel_core::vpn::list_network_adapters().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Adapter enumeration task failed: {e}"))?
 }
 
 // --- Server commands ---
