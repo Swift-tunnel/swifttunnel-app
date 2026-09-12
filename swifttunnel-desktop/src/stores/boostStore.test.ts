@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { boostUpdateConfig, boostSyncEffectiveConfig, boostRestartRoblox, boostGetSystemMemory, boostCleanRam } = vi.hoisted(() => ({
+const { boostGetMetrics, boostUpdateConfig, boostSyncEffectiveConfig, boostRestartRoblox, boostGetSystemMemory, boostCleanRam } = vi.hoisted(() => ({
+  boostGetMetrics: vi.fn(),
   boostUpdateConfig: vi.fn(),
   boostSyncEffectiveConfig: vi.fn(),
   boostRestartRoblox: vi.fn(),
@@ -9,7 +10,7 @@ const { boostUpdateConfig, boostSyncEffectiveConfig, boostRestartRoblox, boostGe
 }));
 
 vi.mock("../lib/commands", () => ({
-  boostGetMetrics: vi.fn(),
+  boostGetMetrics,
   boostGetSystemInfo: vi.fn(),
   boostGetSystemMemory,
   boostCleanRam,
@@ -33,12 +34,51 @@ async function loadStore() {
 
 describe("stores/boostStore", () => {
   beforeEach(() => {
+    boostGetMetrics.mockReset();
     boostUpdateConfig.mockReset();
     boostSyncEffectiveConfig.mockReset();
     boostRestartRoblox.mockReset();
     boostGetSystemMemory.mockReset();
     boostCleanRam.mockReset();
     notify.mockReset();
+  });
+
+  const metrics = { fps: 60, cpu_usage: 10, ram_usage: 100, ram_total: 1000, ping: 20, roblox_running: true, roblox_foreground: true, process_id: 123 };
+
+  it("shares unfinished metrics work across repeated component polls", async () => {
+    let release!: (value: typeof metrics) => void;
+    boostGetMetrics.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    const store = await loadStore();
+    const requests = Array.from({ length: 20 }, () => store.getState().fetchMetrics());
+    const callsWhilePending = boostGetMetrics.mock.calls.length;
+    release(metrics);
+    await Promise.all(requests);
+    expect(callsWhilePending).toBe(1);
+    expect(store.getState().fps).toBe(60);
+    await store.getState().fetchMetrics();
+    expect(boostGetMetrics).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not merge requests with different overlay settings", async () => {
+    let release!: (value: typeof metrics) => void;
+    boostGetMetrics.mockReturnValue(new Promise(resolve => { release = resolve; }));
+    const store = await loadStore();
+    const requests = [true, false, true, false].map(overlayWantsFps => store.getState().fetchMetrics({ overlayWantsFps }));
+    const callsWhilePending = boostGetMetrics.mock.calls.length;
+    release(metrics);
+    await Promise.all(requests);
+    expect(callsWhilePending).toBe(2);
+    expect(boostGetMetrics).toHaveBeenCalledWith({ overlayWantsFps: true });
+    expect(boostGetMetrics).toHaveBeenCalledWith({ overlayWantsFps: false });
+  });
+
+  it("allows a fresh metrics request after a failed sample", async () => {
+    boostGetMetrics.mockRejectedValueOnce(new Error("sample failed")).mockResolvedValue(metrics);
+    const store = await loadStore();
+    await store.getState().fetchMetrics();
+    await store.getState().fetchMetrics();
+    expect(boostGetMetrics).toHaveBeenCalledTimes(2);
+    expect(store.getState().fps).toBe(60);
   });
 
   it("updates config without notifications on success", async () => {

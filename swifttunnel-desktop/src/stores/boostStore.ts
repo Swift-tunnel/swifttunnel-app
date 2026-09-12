@@ -19,6 +19,10 @@ import type { BoostMetricsOptions } from "../lib/commands";
 import { reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
 
+// Each option is boolean or absent, so at most nine native requests can be
+// pending in this window. Slow samplers must not queue another job every tick.
+const pendingMetrics = new Map<string, Promise<void>>();
+
 interface BoostStore {
   // Metrics
   fps: number;
@@ -84,24 +88,33 @@ export const useBoostStore = create<BoostStore>((set) => ({
   osVersion: "",
   cpuCount: 1,
 
-  fetchMetrics: async (options) => {
-    try {
-      const m = await boostGetMetrics(options);
-      set({
-        fps: m.fps,
-        cpuUsage: m.cpu_usage,
-        ramUsage: m.ram_usage,
-        ramTotal: m.ram_total,
-        ping: m.ping,
-        robloxRunning: m.roblox_running,
-        robloxForeground: m.roblox_foreground,
-        processId: m.process_id,
-      });
-    } catch (error) {
-      reportError("Failed to fetch performance metrics", error, {
-        dedupeKey: "boost-fetch-metrics",
-      });
-    }
+  fetchMetrics: (options) => {
+    const key = `${options?.overlayWantsFps ?? "saved"}:${options?.overlayWantsPing ?? "saved"}`;
+    const pending = pendingMetrics.get(key);
+    if (pending) return pending;
+    const request = (async () => {
+      try {
+        const m = await boostGetMetrics(options);
+        set({
+          fps: m.fps,
+          cpuUsage: m.cpu_usage,
+          ramUsage: m.ram_usage,
+          ramTotal: m.ram_total,
+          ping: m.ping,
+          robloxRunning: m.roblox_running,
+          robloxForeground: m.roblox_foreground,
+          processId: m.process_id,
+        });
+      } catch (error) {
+        reportError("Failed to fetch performance metrics", error, {
+          dedupeKey: "boost-fetch-metrics",
+        });
+      }
+    })().finally(() => {
+      pendingMetrics.delete(key);
+    });
+    pendingMetrics.set(key, request);
+    return request;
   },
 
   fetchSystemMemory: async () => {
