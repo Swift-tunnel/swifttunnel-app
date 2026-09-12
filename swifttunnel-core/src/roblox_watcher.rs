@@ -219,6 +219,8 @@ fn is_private_ip(ip: Ipv4Addr) -> bool {
 struct TailedFile {
     reader: BufReader<File>,
     path: PathBuf,
+    pending_line: Vec<u8>,
+    discarding_line: bool,
 }
 
 impl TailedFile {
@@ -234,31 +236,55 @@ impl TailedFile {
 
         // Skip first potentially incomplete line if not at file start
         if start_pos > 0 {
-            let mut discard = String::new();
-            let _ = reader.read_line(&mut discard);
+            reader.skip_until(b'\n')?;
         }
 
         Ok(Self {
             reader,
             path: path.to_path_buf(),
+            pending_line: Vec::new(),
+            discarding_line: false,
         })
     }
 
     fn read_new_lines(&mut self) -> std::io::Result<Vec<String>> {
+        // Limit both work per poll and retained partial-line memory. A damaged
+        // or actively growing log must not monopolize the watcher thread.
+        const MAX_LINE_BYTES: usize = 64 * 1024;
+        const MAX_POLL_BYTES: usize = 256 * 1024;
         let mut lines = Vec::new();
-        let mut line = String::new();
-
-        loop {
-            match self.reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let trimmed = line.trim_end().to_string();
-                    if !trimmed.is_empty() {
-                        lines.push(trimmed);
-                    }
-                    line.clear();
+        let mut remaining = MAX_POLL_BYTES;
+        while remaining > 0 {
+            let available = self.reader.fill_buf()?;
+            let available = &available[..available.len().min(remaining)];
+            if available.is_empty() {
+                break;
+            }
+            let count = available
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(available.len(), |position| position + 1);
+            let complete = available[count - 1] == b'\n';
+            if !self.discarding_line {
+                if self.pending_line.len() + count > MAX_LINE_BYTES {
+                    self.pending_line.clear();
+                    self.discarding_line = true;
+                } else {
+                    self.pending_line.extend_from_slice(&available[..count]);
                 }
-                Err(e) => return Err(e),
+            }
+            self.reader.consume(count);
+            remaining -= count;
+            if complete {
+                if !self.discarding_line {
+                    let line = String::from_utf8_lossy(&self.pending_line);
+                    let trimmed = line.trim_end();
+                    if !trimmed.is_empty() {
+                        lines.push(trimmed.to_string());
+                    }
+                }
+                self.pending_line.clear();
+                self.discarding_line = false;
             }
         }
 
@@ -271,6 +297,70 @@ mod tests {
     use super::*;
     use std::fs;
     use std::net::Ipv4Addr;
+
+    fn tail_fixture(contents: &[u8]) -> (PathBuf, TailedFile) {
+        let path = std::env::temp_dir().join(format!(
+            "swifttunnel-tail-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, contents).unwrap();
+        let tail = TailedFile::new(&path).unwrap();
+        (path, tail)
+    }
+
+    #[test]
+    fn tail_consumes_invalid_utf8_once_and_keeps_following_events() {
+        let (path, mut tail) =
+            tail_fixture(b"bad\xfftext\nUDMUX Address = 198.51.100.10, Port = 54321\n");
+        let lines = tail
+            .read_new_lines()
+            .expect("a malformed byte must not restart the watcher");
+        assert_eq!(lines.len(), 2);
+        assert!(get_patterns().1.is_match(&lines[1]));
+        assert!(tail.read_new_lines().unwrap().is_empty());
+        drop(tail);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn tail_waits_for_a_complete_line_before_detecting_an_address() {
+        use std::io::Write;
+        let (path, mut tail) = tail_fixture(b"UDMUX Address = 198.51.100.");
+        assert!(tail.read_new_lines().unwrap().is_empty());
+        let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writer.write_all(b"10, Port = 54321\n").unwrap();
+        let lines = tail.read_new_lines().unwrap();
+        assert_eq!(lines, ["UDMUX Address = 198.51.100.10, Port = 54321"]);
+        drop(writer);
+        drop(tail);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn tail_bounds_oversized_lines_and_recovers_after_the_delimiter() {
+        use std::io::Write;
+        let (path, mut tail) = tail_fixture(b"");
+        let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writer.write_all(&vec![b'x'; 1024 * 1024]).unwrap();
+        writer
+            .write_all(b"\nUDMUX Address = 198.51.100.10, Port = 54321\n")
+            .unwrap();
+        assert!(tail.read_new_lines().unwrap().is_empty());
+        assert!(tail.reader.stream_position().unwrap() <= 256 * 1024);
+        assert!(tail.pending_line.len() <= 64 * 1024);
+        let mut lines = Vec::new();
+        for _ in 0..4 {
+            lines.extend(tail.read_new_lines().unwrap());
+        }
+        assert_eq!(lines, ["UDMUX Address = 198.51.100.10, Port = 54321"]);
+        drop(writer);
+        drop(tail);
+        fs::remove_file(path).unwrap();
+    }
 
     // ── is_private_ip ───────────────────────────────────────────────
 
