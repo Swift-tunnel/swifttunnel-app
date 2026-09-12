@@ -23,6 +23,7 @@ pub mod ram_cleaner;
 pub mod roblox_optimizer;
 pub mod roblox_proxy;
 pub mod roblox_watcher;
+pub mod rolling_log;
 pub mod settings;
 pub mod structs;
 pub mod system_optimizer;

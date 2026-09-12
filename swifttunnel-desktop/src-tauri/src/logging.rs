@@ -1,5 +1,5 @@
-use std::fs::OpenOptions;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use swifttunnel_core::rolling_log::RollingLog;
 
 use simplelog::{
     ColorChoice, CombinedLogger, Config, ConfigBuilder, LevelFilter, SharedLogger, TermLogger,
@@ -20,8 +20,8 @@ const PREVIOUS_LOG_FILE: &str = "swifttunnel.previous.log";
 /// have run the app longest, so the ones with the most useful logs were exactly
 /// the ones who could not hand them over.
 ///
-/// 8 MB leaves headroom under that limit after the current file and the
-/// previous one are both considered.
+/// Each file stays below that attachment limit. Rotation also runs during a
+/// session, with an in-memory byte count instead of a metadata read per write.
 const MAX_LOG_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn log_file_path() -> PathBuf {
@@ -41,37 +41,6 @@ fn log_dir() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
         .join(APP_DIR)
         .join(LOG_DIR)
-}
-
-/// Whether `size` has earned a rollover. Split out so it can be tested without
-/// touching the filesystem.
-pub fn should_rotate(size: u64, max: u64) -> bool {
-    size >= max
-}
-
-/// Move the current log aside if it has grown past the cap.
-///
-/// Runs once at startup rather than on every write: checking a file size per
-/// log line would cost more than the logging itself, and a single session
-/// cannot realistically overshoot far enough to matter.
-fn rotate_if_needed(path: &Path) {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return; // No log yet, nothing to roll.
-    };
-
-    if !should_rotate(meta.len(), MAX_LOG_BYTES) {
-        return;
-    }
-
-    let previous = previous_log_file_path();
-    let _ = std::fs::remove_file(&previous);
-
-    if let Err(e) = std::fs::rename(path, &previous) {
-        // Truncating loses history, but an unbounded file loses the user's
-        // disk, so falling back is still the better failure.
-        eprintln!("SwiftTunnel: could not rotate log ({e}); truncating instead");
-        let _ = std::fs::File::create(path);
-    }
 }
 
 fn level_from_env() -> LevelFilter {
@@ -119,9 +88,7 @@ pub fn init() {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    rotate_if_needed(&path);
-
-    match OpenOptions::new().create(true).append(true).open(&path) {
+    match RollingLog::open(&path, &previous_log_file_path(), MAX_LOG_BYTES) {
         Ok(file) => loggers.push(WriteLogger::new(level, file_config(), file)),
         Err(e) => {
             eprintln!(
@@ -138,14 +105,6 @@ pub fn init() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rotates_only_once_past_the_cap() {
-        assert!(!should_rotate(0, MAX_LOG_BYTES));
-        assert!(!should_rotate(MAX_LOG_BYTES - 1, MAX_LOG_BYTES));
-        assert!(should_rotate(MAX_LOG_BYTES, MAX_LOG_BYTES));
-        assert!(should_rotate(MAX_LOG_BYTES * 100, MAX_LOG_BYTES));
-    }
 
     #[test]
     fn cap_stays_under_the_discord_attachment_limit() {
