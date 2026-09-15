@@ -70,6 +70,8 @@ pub fn user_friendly_error(error: &VpnError) -> String {
                 "Already connected.".to_string()
             } else if msg.contains("in progress") {
                 "Connection in progress. Please wait.".to_string()
+            } else if is_backend_outage_message(&msg.to_lowercase()) {
+                backend_outage_message()
             } else {
                 "Couldn't connect.\n\nCheck your internet connection and try again. If it keeps happening, open the Repair tab and run a repair.".to_string()
             }
@@ -77,7 +79,9 @@ pub fn user_friendly_error(error: &VpnError) -> String {
 
         // Network issues
         VpnError::Network(msg) => {
-            if msg.contains("timeout") || msg.contains("timed out") {
+            if is_backend_outage_message(&msg.to_lowercase()) {
+                backend_outage_message()
+            } else if msg.contains("timeout") || msg.contains("timed out") {
                 "Connection timed out.\n\nPlease check your internet connection and try again.".to_string()
             } else if msg.contains("DNS") || msg.contains("resolve") {
                 "DNS lookup failed.\n\nPlease check your internet connection.".to_string()
@@ -92,6 +96,10 @@ pub fn user_friendly_error(error: &VpnError) -> String {
                 "Session expired.\n\nPlease sign out and sign in again.".to_string()
             } else if msg.contains("404") || msg.contains("Not Found") {
                 "Server not found.\n\nThe selected region may be temporarily unavailable.".to_string()
+            } else if is_backend_outage_message(&msg.to_lowercase()) {
+                backend_outage_message()
+            } else if msg.to_lowercase().contains("unavailable in server list") {
+                "That region is temporarily unavailable.\n\nPick another region and connect again.".to_string()
             } else if msg.contains("timeout") {
                 "Failed to reach server.\n\nPlease check your internet connection.".to_string()
             } else {
@@ -138,6 +146,54 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             "SwiftTunnel hit a system error.\n\nPlease try again. If it keeps happening, open the Repair tab and run a repair.".to_string()
         }
     }
+}
+
+/// True when the failure is on SwiftTunnel's side rather than the user's device.
+///
+/// This distinction is the whole point of the function. The generic connect and
+/// config-fetch messages tell users to check their internet and run a repair,
+/// which is actively wrong during a backend outage: it sends them through
+/// reinstalls, driver repairs and PC restarts that cannot possibly help, and
+/// then into a support ticket. When we know the fault is ours, say so.
+fn is_backend_outage_message(lowercase_msg: &str) -> bool {
+    // An HTTP status from our own API. Any 5xx is the server side failing:
+    // 500-504 is the origin itself, and Cloudflare's 52x family means the edge
+    // could not get a response out of the origin at all (522 is the origin
+    // timing out). Neither is the user's network.
+    //
+    // The status is parsed rather than substring-matched so that a digit
+    // sequence elsewhere in the message - a request id, a byte count - cannot
+    // turn a 4xx into a claimed outage.
+    let api_status_failure = lowercase_msg
+        .split_once("api returned error status:")
+        .and_then(|(_, rest)| {
+            let digits: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            digits.parse::<u16>().ok()
+        })
+        .is_some_and(|status| (500..600).contains(&status));
+
+    api_status_failure
+        || lowercase_msg.contains("could not load server list")
+        || lowercase_msg.contains("failed to fetch server list")
+        // The control plane could not hand out a relay policy or ticket, so no
+        // candidate could authenticate. Either the API is down or the relays
+        // are; either way the user cannot fix it from their end.
+        || lowercase_msg.contains("relay policy unavailable")
+        || lowercase_msg.contains("no relay candidate authenticated")
+        || lowercase_msg.contains("relay preflight enforcement blocked")
+}
+
+/// The one message shown for every backend outage.
+///
+/// It states whose fault it is, and rules out the two actions users reach for
+/// first, because the generic wording had them reinstalling the app and
+/// running driver repairs during a server-side outage.
+fn backend_outage_message() -> String {
+    "SwiftTunnel's servers are unreachable.\n\nThis is a problem on our end, not your device or your internet connection. Reinstalling SwiftTunnel or running a repair will not help.\n\nPlease try again in a few minutes. Check our Discord for status updates.".to_string()
 }
 
 fn is_winpkfilter_reboot_error(lowercase_msg: &str) -> bool {
@@ -214,6 +270,13 @@ fn simplify_message(msg: &str) -> String {
 /// Convert an error to a short status message (for status bars)
 pub fn short_error(error: &VpnError) -> &'static str {
     match error {
+        // Checked before the per-variant arms: an outage is an outage whichever
+        // of the three network-ish variants carried it.
+        VpnError::Connection(msg) | VpnError::ConfigFetch(msg) | VpnError::Network(msg)
+            if is_backend_outage_message(&msg.to_lowercase()) =>
+        {
+            "Servers unreachable"
+        }
         VpnError::SplitTunnelNotAvailable => "Driver not installed",
         VpnError::SplitTunnelSetupFailed(_) => "Split tunnel failed",
         VpnError::DriverNotOpen => "Driver not open",
@@ -455,5 +518,137 @@ mod tests {
         assert!(!msg.contains("502"));
         assert!(!msg.contains("<html>"));
         assert!(msg.contains("servers"));
+    }
+
+    // --- Backend outage: the fault is ours, so the message must not send the
+    // user to Repair or blame their connection. ---
+
+    #[test]
+    fn test_relay_policy_unavailable_is_reported_as_our_outage() {
+        let error = VpnError::Connection(
+            "Relay policy unavailable; refusing unauthenticated legacy fallback".to_string(),
+        );
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("problem on our end"));
+        assert!(msg.contains("will not help"));
+        assert!(!msg.contains("Repair tab"));
+        assert!(!msg.contains("Check your internet connection and try again"));
+        assert!(!msg.contains("legacy fallback"));
+    }
+
+    #[test]
+    fn test_no_authenticated_relay_candidate_is_reported_as_our_outage() {
+        let error = VpnError::Connection(
+            "Relay authentication required but no relay candidate authenticated".to_string(),
+        );
+        assert!(user_friendly_error(&error).contains("problem on our end"));
+    }
+
+    #[test]
+    fn test_preflight_enforcement_block_is_reported_as_our_outage() {
+        let error = VpnError::Connection(
+            "Relay preflight enforcement blocked connection (no healthy authenticated relay candidate)"
+                .to_string(),
+        );
+        assert!(user_friendly_error(&error).contains("problem on our end"));
+    }
+
+    #[test]
+    fn test_server_list_load_failure_is_reported_as_our_outage() {
+        // The exact shape servers.rs produces when there is no usable cache.
+        let error = VpnError::ConfigFetch(
+            "Could not load server list: API returned error status: 522 . Please check your internet connection."
+                .to_string(),
+        );
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("problem on our end"));
+        assert!(!msg.contains("522"));
+        assert!(!msg.contains("Repair tab"));
+    }
+
+    #[test]
+    fn test_cloudflare_and_5xx_api_statuses_are_our_outage() {
+        for code in ["500", "502", "503", "504", "521", "522", "524", "530"] {
+            let error = VpnError::ConfigFetch(format!("API returned error status: {} ", code));
+            let msg = user_friendly_error(&error);
+            assert!(
+                msg.contains("problem on our end"),
+                "status {} should read as our outage, got: {}",
+                code,
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn test_backend_outage_via_network_variant() {
+        let error = VpnError::Network(
+            "Failed to fetch server list: connection closed before message completed".to_string(),
+        );
+        assert!(user_friendly_error(&error).contains("problem on our end"));
+    }
+
+    #[test]
+    fn test_short_error_flags_backend_outage() {
+        let error = VpnError::Connection("Relay policy unavailable".to_string());
+        assert_eq!(short_error(&error), "Servers unreachable");
+        let error = VpnError::ConfigFetch("Could not load server list: boom".to_string());
+        assert_eq!(short_error(&error), "Servers unreachable");
+    }
+
+    #[test]
+    fn test_region_unavailable_points_at_another_region_not_the_users_internet() {
+        let error = VpnError::ConfigFetch(
+            "Selected region 'singapore' is unavailable in server list".to_string(),
+        );
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("temporarily unavailable"));
+        assert!(msg.contains("Pick another region"));
+        assert!(!msg.contains("Check your internet connection"));
+        assert!(!msg.contains("singapore"));
+    }
+
+    // --- Regression guards: local failures must still read as local. ---
+
+    #[test]
+    fn test_local_connection_failure_still_generic_not_an_outage_claim() {
+        let error = VpnError::Connection("relay handshake byte 0x4F mismatch".to_string());
+        let msg = user_friendly_error(&error);
+        assert!(!msg.contains("problem on our end"));
+        assert!(msg.contains("Couldn't connect"));
+        assert_eq!(short_error(&error), "Connection failed");
+    }
+
+    #[test]
+    fn test_dns_failure_still_reads_as_local() {
+        let error = VpnError::Network("DNS resolve failed".to_string());
+        let msg = user_friendly_error(&error);
+        assert!(msg.contains("DNS lookup failed"));
+        assert!(!msg.contains("problem on our end"));
+    }
+
+    #[test]
+    fn test_auth_failures_are_not_swallowed_by_outage_detection() {
+        let error = VpnError::ConfigFetch("401 Unauthorized".to_string());
+        assert!(user_friendly_error(&error).contains("Session expired"));
+        let error = VpnError::ConfigFetch("404 Not Found".to_string());
+        assert!(user_friendly_error(&error).contains("Server not found"));
+    }
+
+    #[test]
+    fn test_digits_elsewhere_in_message_cannot_fake_an_outage() {
+        // A 4xx whose body happens to contain a 5xx-looking number must not be
+        // reported as our outage.
+        let error = VpnError::ConfigFetch(
+            "API returned error status: 403 Forbidden (request id 500123, 502 bytes)".to_string(),
+        );
+        assert!(!user_friendly_error(&error).contains("problem on our end"));
+    }
+
+    #[test]
+    fn test_client_side_4xx_is_not_treated_as_an_outage() {
+        // 400/403/429 are not outage codes; only 5xx and Cloudflare 52x are.
+        let error = VpnError::ConfigFetch("API returned error status: 403 ".to_string());
+        assert!(!user_friendly_error(&error).contains("problem on our end"));
     }
 }
