@@ -40,7 +40,7 @@
     <Package Id="*"
              Keywords="Installer"
              Description="SwiftTunnel Lite"
-             InstallerVersion="450"
+             InstallerVersion="500"
              Languages="1033"
              Compressed="yes"
              InstallScope="perMachine" />
@@ -51,6 +51,14 @@
 
     <MajorUpgrade Schedule="afterInstallInitialize"
                   AllowDowngrades="yes" />
+
+    <UIRef Id="SwiftSetupUI" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open SwiftTunnel Lite" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction Id="LaunchLite" FileKey="LiteExeFile" ExeCommand="" Impersonate="yes" Return="asyncNoWait" />
+    <UI>
+      <Publish Dialog="SwiftFinish" Control="Finish" Event="DoAction" Value="LaunchLite">WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed AND NOT REMOVE</Publish>
+    </UI>
 
     <Media Id="1" Cabinet="lite.cab" EmbedCab="yes" />
 

@@ -45,12 +45,13 @@ $arch = if ($Target.StartsWith('aarch64')) { 'arm64' } else { 'x64' }
 Push-Location $WorkDir
 try {
     & "$wix/candle.exe" -nologo -arch $arch -ext WixUtilExtension main.wxs `
-        "$repo/swifttunnel-desktop/src-tauri/wix/nsis-migration.wxs" "$repo/swifttunnel-desktop/src-tauri/wix/lite.wxs"
+        "$repo/swifttunnel-desktop/src-tauri/wix/nsis-migration.wxs" "$repo/swifttunnel-desktop/src-tauri/wix/lite.wxs" "$repo/installer/SwiftSetupUI.wxs"
     if ($LASTEXITCODE -ne 0) { throw 'WiX fixture compile failed' }
     & "$wix/light.exe" -nologo -wx -ice:ICE63 -ext WixUIExtension -ext WixUtilExtension `
-        -cultures:en-us -loc fixture.wxl -out desktop-sequence-fixture.msi main.wixobj nsis-migration.wixobj lite.wixobj
+        -cultures:en-us -loc fixture.wxl -out desktop-sequence-fixture.msi main.wixobj nsis-migration.wixobj lite.wixobj SwiftSetupUI.wixobj
     if ($LASTEXITCODE -ne 0) { throw 'WiX upgrade sequencing validation failed' }
     & "$PSScriptRoot/check-desktop-msi-sequence.ps1" -Msi desktop-sequence-fixture.msi
+    & "$PSScriptRoot/check-installer-ui.ps1" -Msi desktop-sequence-fixture.msi
     $fixtureInstaller = New-Object -ComObject WindowsInstaller.Installer
     $fixtureDb = $fixtureInstaller.OpenDatabase((Join-Path $WorkDir 'desktop-sequence-fixture.msi'), 0)
     $guard = $fixtureDb.OpenView('SELECT `Condition` FROM `LaunchCondition`')

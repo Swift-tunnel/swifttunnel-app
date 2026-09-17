@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!-- Shared by Desktop and Lite, including their embedded-MSI Setup EXEs.
+         Windows Installer still owns costing, cancellation, rollback and errors. -->
+    <UI Id="SwiftSetupUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Segoe UI" Size="9" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Segoe UI" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Segoe UI" Size="10" Bold="yes" />
+      <TextStyle Id="SwiftHeading" FaceName="Segoe UI" Size="16" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <Property Id="ARPNOMODIFY" Value="1" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="VerifyReadyDlg" />
+
+      <Dialog Id="SwiftWelcome" Width="370" Height="230" Title="[ProductName] Setup" TrackDiskSpace="yes">
+        <Control Id="Heading" Type="Text" X="24" Y="24" Width="322" Height="30" NoPrefix="yes" Text="{\SwiftHeading}[ProductName]" />
+        <Control Id="Version" Type="Text" X="24" Y="60" Width="322" Height="16" Text="Version [ProductVersion]" />
+        <Control Id="Description" Type="Text" X="24" Y="92" Width="322" Height="36" Text="Install [ProductName] on this PC. Setup includes the network driver and updates an existing installation." />
+        <Control Id="Folder" Type="Text" X="24" Y="140" Width="322" Height="32" NoPrefix="yes" Text="Install location: [INSTALLDIR]" />
+        <Control Id="Install" Type="PushButton" X="184" Y="193" Width="90" Height="22" Default="yes" ElevationShield="yes" Text="&amp;Install">
+          <Publish Event="SpawnWaitDialog" Value="WaitForCostingDlg" Order="1">CostingComplete = 1</Publish>
+          <Publish Event="SpawnDialog" Value="OutOfDiskDlg" Order="2">OutOfDiskSpace = 1</Publish>
+          <Publish Event="EndDialog" Value="Return" Order="3"><![CDATA[OutOfDiskSpace <> 1]]></Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="282" Y="193" Width="64" Height="22" Cancel="yes" Text="Cancel">
+          <Publish Event="EndDialog" Value="Exit">1</Publish>
+        </Control>
+      </Dialog>
+
+      <Dialog Id="SwiftMaintenance" Width="370" Height="230" Title="[ProductName] Setup" TrackDiskSpace="yes">
+        <Control Id="Heading" Type="Text" X="24" Y="24" Width="322" Height="30" NoPrefix="yes" Text="{\SwiftHeading}[ProductName]" />
+        <Control Id="Description" Type="Text" X="24" Y="76" Width="322" Height="40" Text="[ProductName] is already installed. Repair replaces missing or damaged application files. Remove uninstalls the application." />
+        <Control Id="Repair" Type="PushButton" X="24" Y="140" Width="100" Height="24" Default="yes" Text="&amp;Repair">
+          <Publish Property="WixUI_InstallMode" Value="Repair" Order="1">1</Publish>
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="2">1</Publish>
+        </Control>
+        <Control Id="Remove" Type="PushButton" X="136" Y="140" Width="100" Height="24" Text="&amp;Remove">
+          <Publish Property="WixUI_InstallMode" Value="Remove" Order="1">1</Publish>
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="2">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="282" Y="193" Width="64" Height="22" Cancel="yes" Text="Cancel">
+          <Publish Event="EndDialog" Value="Exit">1</Publish>
+        </Control>
+      </Dialog>
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="SwiftMaintenance">1</Publish>
+
+      <Dialog Id="SwiftProgress" Width="370" Height="230" Title="[ProductName] Setup" Modeless="yes">
+        <Control Id="Heading" Type="Text" X="24" Y="24" Width="322" Height="30" Text="{\SwiftHeading}Applying changes" />
+        <Control Id="Description" Type="Text" X="24" Y="76" Width="322" Height="32" Text="Please wait while Setup updates [ProductName]." />
+        <Control Id="Progress" Type="ProgressBar" X="24" Y="124" Width="322" Height="12" ProgressBlocks="no" Text="Progress">
+          <Subscribe Event="SetProgress" Attribute="Progress" />
+        </Control>
+        <Control Id="Action" Type="Text" X="24" Y="148" Width="322" Height="32" NoPrefix="yes">
+          <Subscribe Event="ActionText" Attribute="Text" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="282" Y="193" Width="64" Height="22" Default="yes" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+
+      <Dialog Id="SwiftFinish" Width="370" Height="230" Title="[ProductName] Setup">
+        <Control Id="Heading" Type="Text" X="24" Y="24" Width="322" Height="30" Text="{\SwiftHeading}Setup complete" />
+        <Control Id="Description" Type="Text" X="24" Y="76" Width="322" Height="36" Text="Your changes to [ProductName] have been applied." />
+        <Control Id="Launch" Type="CheckBox" X="24" Y="136" Width="322" Height="22" Hidden="yes" Property="WIXUI_EXITDIALOGOPTIONALCHECKBOX" CheckBoxValue="1" Text="[WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT]">
+          <Condition Action="show">WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT AND NOT Installed AND NOT REMOVE</Condition>
+        </Control>
+        <Control Id="Finish" Type="PushButton" X="256" Y="193" Width="90" Height="22" Default="yes" Cancel="yes" Text="Finish">
+          <Publish Event="EndDialog" Value="Return" Order="999">1</Publish>
+        </Control>
+      </Dialog>
+      <InstallUISequence>
+        <Show Dialog="SwiftWelcome" Before="SwiftProgress">NOT Installed</Show>
+        <Show Dialog="SwiftMaintenance" Before="SwiftWelcome">Installed AND NOT RESUME AND NOT Preselected AND NOT PATCH</Show>
+        <Show Dialog="SwiftProgress" Before="ExecuteAction" />
+        <Show Dialog="SwiftFinish" OnExit="success" />
+      </InstallUISequence>
+    </UI>
+    <UIRef Id="WixUI_Common" />
+  </Fragment>
+</Wix>

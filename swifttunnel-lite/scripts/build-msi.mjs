@@ -106,6 +106,10 @@ execFileSync(
   { stdio: "inherit" },
 );
 
+// Compile the same UI fragment the Desktop bundle uses.
+const uiObject = join(out, "SwiftSetupUI.wixobj");
+execFileSync(candle, ["-arch", wixArch, "-out", uiObject, join(repo, "installer", "SwiftSetupUI.wxs")], { stdio: "inherit", windowsHide: true });
+
 console.log("==> light");
 execFileSync(
   light,
@@ -118,6 +122,7 @@ execFileSync(
     "-out",
     msi,
     wixobj,
+    uiObject,
   ],
   { stdio: "inherit" },
 );
