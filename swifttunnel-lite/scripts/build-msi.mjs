@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { liteMsiInputs } from "../../scripts/msi-build-paths.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const crate = resolve(here, "..");
@@ -26,7 +27,13 @@ const flag = (name) => {
 };
 
 const triple = flag("--target") ?? process.env.TAURI_ENV_TARGET_TRIPLE ?? "";
-const arch = triple.startsWith("aarch64") ? "arm64" : "x64";
+const targetDir = JSON.parse(execFileSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
+  cwd: repo, encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024,
+})).target_directory;
+const host = triple ? triple : execFileSync("rustc", ["-vV"], {
+  encoding: "utf8", windowsHide: true,
+}).match(/^host: (.+)$/m)?.[1]?.trim();
+const { arch, litePath, wixDir } = liteMsiInputs(targetDir, triple, host);
 const wixArch = arch === "arm64" ? "arm64" : "x64";
 
 // The version is the crate's, so the installer and the About row cannot
@@ -36,10 +43,6 @@ const version = readFileSync(join(crate, "Cargo.toml"), "utf8")
 if (!version) throw new Error("could not read the Lite version from Cargo.toml");
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
-
-const litePath = triple
-  ? join(repo, "target", triple, "release", "swifttunnel-lite.exe")
-  : join(repo, "target", "release", "swifttunnel-lite.exe");
 
 // The driver package Lite ships beside itself, in the layout core searches
 // for. Taken from the desktop crate's resources so there is one copy of it in
@@ -69,7 +72,6 @@ for (const [label, path] of [
 
 // ── The toolset ────────────────────────────────────────────────────────────
 
-const wixDir = join(repo, "target", ".tauri", "WixTools314");
 const candle = join(wixDir, "candle.exe");
 const light = join(wixDir, "light.exe");
 if (!existsSync(candle) || !existsSync(light)) {
