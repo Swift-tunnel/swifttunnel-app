@@ -1,6 +1,6 @@
 //! Native MSI actions. No process launch, console, or work in DllMain.
 //! The deferred action runs as SYSTEM, before any new files are installed.
-//! Only missing cached packages of related per-machine Desktop products qualify.
+//! Only missing cached packages of related per-machine products in the selected family qualify.
 //! Unknown state is retained for Windows Installer to handle normally.
 
 mod registry;
@@ -8,6 +8,25 @@ mod registry;
 // Keep synchronized with the explicit Desktop wix.upgradeCode. This is Tauri's
 // original UUIDv5 for SwiftTunnel.exe.app.x64, also used on ARM64.
 const UPGRADE_CODE: &str = "{E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D}";
+#[derive(Clone, Copy)]
+struct ProductFamily {
+    name: &'static str,
+    upgrade_code: &'static str,
+    candidates_property: &'static str,
+    repair_action: &'static str,
+}
+const DESKTOP: ProductFamily = ProductFamily {
+    name: "SwiftTunnel",
+    upgrade_code: UPGRADE_CODE,
+    candidates_property: "SwiftDesktopRecoveryCandidates",
+    repair_action: "RepairDesktopOrphans",
+};
+const LITE: ProductFamily = ProductFamily {
+    name: "SwiftTunnel Lite",
+    upgrade_code: "{9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520}",
+    candidates_property: "SwiftLiteRecoveryCandidates",
+    repair_action: "RepairLiteOrphans",
+};
 const MAX_PRODUCTS: usize = 32;
 type Result<T> = std::result::Result<T, String>;
 
@@ -137,8 +156,7 @@ fn entry(handle: u32, action: impl FnOnce() -> Result<()> + std::panic::UnwindSa
     }
 }
 
-#[no_mangle]
-pub extern "system" fn PrepareDesktopRecovery(handle: u32) -> u32 {
+fn prepare_recovery(handle: u32, family: ProductFamily) -> u32 {
     entry(handle, || {
         let current = canonical_guid(&property(handle, "ProductCode")?)?;
         let related = product_list(&property(handle, "WIX_UPGRADE_DETECTED")?)?;
@@ -146,7 +164,7 @@ pub extern "system" fn PrepareDesktopRecovery(handle: u32) -> u32 {
             .into_iter()
             .filter(|code| {
                 code != &current
-                    && registry::is_desktop_machine_product(&windows_registry::LOCAL_MACHINE, code)
+                    && registry::is_machine_product(&windows_registry::LOCAL_MACHINE, code, family)
             })
             .collect();
         // Lowercase property names are private and cannot be supplied on msiexec's
@@ -155,23 +173,26 @@ pub extern "system" fn PrepareDesktopRecovery(handle: u32) -> u32 {
         log(
             handle,
             &format!(
-                "identified {} related Desktop machine registrations",
-                candidates.len()
+                "identified {} related {} machine registrations",
+                candidates.len(),
+                family.name
             ),
         );
-        set_property(handle, "SwiftDesktopRecoveryCandidates", &codes)?;
-        set_property(handle, "RepairDesktopOrphans", &codes)
+        set_property(handle, family.candidates_property, &codes)?;
+        set_property(handle, family.repair_action, &codes)
     })
 }
 
-#[no_mangle]
-pub extern "system" fn RepairDesktopOrphans(handle: u32) -> u32 {
+fn repair_orphans(handle: u32, family: ProductFamily) -> u32 {
     entry(handle, || {
         for code in product_list(&property(handle, "CustomActionData")?)? {
-            if registry::repair_missing_package(&windows_registry::LOCAL_MACHINE, &code)? {
+            if registry::repair_missing_package(&windows_registry::LOCAL_MACHINE, &code, family)? {
                 log(
                     handle,
-                    &format!("cleared missing-package Desktop registration {code}"),
+                    &format!(
+                        "cleared missing-package {} registration {code}",
+                        family.name
+                    ),
                 );
             } else {
                 log(handle, &format!("left registration unchanged {code}"));
@@ -181,16 +202,42 @@ pub extern "system" fn RepairDesktopOrphans(handle: u32) -> u32 {
     })
 }
 
-#[no_mangle]
-pub extern "system" fn RefreshDesktopUpgradeList(handle: u32) -> u32 {
+fn refresh_upgrade_list(handle: u32, family: ProductFamily) -> u32 {
     entry(handle, || {
         let related = product_list(&property(handle, "WIX_UPGRADE_DETECTED")?)?;
-        let candidates = product_list(&property(handle, "SwiftDesktopRecoveryCandidates")?)?;
+        let candidates = product_list(&property(handle, family.candidates_property)?)?;
         let remaining = remaining_products(&related, &candidates, |code| {
             registry::registration_absent(&windows_registry::LOCAL_MACHINE, code)
         });
         set_property(handle, "WIX_UPGRADE_DETECTED", &remaining.join(";"))
     })
+}
+
+// Family selection is compiled into each entry point, never taken from an MSI
+// command-line property. A Lite repair cannot select Desktop registrations.
+#[no_mangle]
+pub extern "system" fn PrepareDesktopRecovery(handle: u32) -> u32 {
+    prepare_recovery(handle, DESKTOP)
+}
+#[no_mangle]
+pub extern "system" fn RepairDesktopOrphans(handle: u32) -> u32 {
+    repair_orphans(handle, DESKTOP)
+}
+#[no_mangle]
+pub extern "system" fn RefreshDesktopUpgradeList(handle: u32) -> u32 {
+    refresh_upgrade_list(handle, DESKTOP)
+}
+#[no_mangle]
+pub extern "system" fn PrepareLiteRecovery(handle: u32) -> u32 {
+    prepare_recovery(handle, LITE)
+}
+#[no_mangle]
+pub extern "system" fn RepairLiteOrphans(handle: u32) -> u32 {
+    repair_orphans(handle, LITE)
+}
+#[no_mangle]
+pub extern "system" fn RefreshLiteUpgradeList(handle: u32) -> u32 {
+    refresh_upgrade_list(handle, LITE)
 }
 
 #[cfg(test)]
@@ -213,6 +260,12 @@ mod tests {
             canonical_guid(&format!("{{{code}}}")).unwrap(),
             UPGRADE_CODE
         );
+    }
+
+    #[test]
+    fn lite_template_and_recovery_use_the_same_upgrade_family() {
+        let template = include_str!("../../swifttunnel-lite/wix/product.wxs");
+        assert!(template.contains(&format!("UpgradeCode=\"{}\"", &LITE.upgrade_code[1..37])));
     }
 
     #[test]

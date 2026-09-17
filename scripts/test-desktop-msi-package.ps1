@@ -59,6 +59,7 @@ try {
     $guardFound = $false
     while ($row = $guard.Fetch()) { if ($row.StringData(1) -eq '0') { $guardFound = $true } }
     if (-not $guardFound) { throw 'Fixture must refuse actual installation' }
+    & "$PSScriptRoot/test-lite-msi-package.ps1" -WorkDir (Join-Path $WorkDir 'lite') -WixDir $wix -Architecture $arch -MsiActionsPath $dll
 } finally {
     Pop-Location
     $env:SWIFTTUNNEL_MSI_ACTIONS_DLL = $previousDll

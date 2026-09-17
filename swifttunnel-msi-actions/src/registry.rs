@@ -1,4 +1,4 @@
-use super::{packed_guid, Result, UPGRADE_CODE};
+use super::{packed_guid, ProductFamily, Result};
 use windows_registry::Key;
 
 const USERDATA: &str =
@@ -20,18 +20,18 @@ fn machine_properties(root: &Key, code: &str) -> windows_registry::Result<Key> {
     ))
 }
 
-pub(super) fn is_desktop_machine_product(root: &Key, code: &str) -> bool {
+pub(super) fn is_machine_product(root: &Key, code: &str, family: ProductFamily) -> bool {
     let Ok(props) = machine_properties(root, code) else {
         return false;
     };
-    if props.get_string("DisplayName").ok().as_deref() != Some("SwiftTunnel")
+    if props.get_string("DisplayName").ok().as_deref() != Some(family.name)
         || props.get_string("Publisher").ok().as_deref() != Some("SwiftTunnel")
     {
         return false;
     }
     // Do not trust a caller-controlled related-products property alone. Confirm
-    // membership in the original Desktop upgrade family in protected HKLM state.
-    let Ok(family) = root.open(format!(r"{UPGRADES}\{}", packed_guid(UPGRADE_CODE))) else {
+    // membership in the selected upgrade family in protected HKLM state.
+    let Ok(family) = root.open(format!(r"{UPGRADES}\{}", packed_guid(family.upgrade_code))) else {
         return false;
     };
     family.get_string(packed_guid(code)).is_ok()
@@ -58,8 +58,12 @@ pub(super) fn registration_absent(root: &Key, code: &str) -> bool {
     .all(|path| matches!(root.open(path), Err(error) if not_found(error.code().0 as u32)))
 }
 
-pub(super) fn repair_missing_package(root: &Key, code: &str) -> Result<bool> {
-    if !is_desktop_machine_product(root, code) {
+pub(super) fn repair_missing_package(
+    root: &Key,
+    code: &str,
+    family: ProductFamily,
+) -> Result<bool> {
+    if !is_machine_product(root, code, family) {
         return Ok(false);
     }
     let path =
@@ -106,6 +110,7 @@ pub(super) fn repair_missing_package(root: &Key, code: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DESKTOP, LITE};
     use std::io::{Error, ErrorKind};
 
     struct Fixture {
@@ -130,7 +135,7 @@ mod tests {
                 package: std::env::temp_dir().join(format!("swift-msi-action-{unique}.msi")),
             }
         }
-        fn product(&self, code: &str, name: &str) {
+        fn product_in_family(&self, code: &str, name: &str, family: ProductFamily) {
             let packed = packed_guid(code);
             let props = self
                 .root
@@ -149,10 +154,15 @@ mod tests {
                 self.root.create(path).unwrap();
             }
             self.root
-                .create(format!(r"{UPGRADES}\{}", packed_guid(UPGRADE_CODE)))
+                .create(format!(r"{UPGRADES}\{}", packed_guid(family.upgrade_code)))
                 .unwrap()
                 .set_string(packed, "")
                 .unwrap();
+        }
+    }
+    impl Fixture {
+        fn product(&self, code: &str, name: &str) {
+            self.product_in_family(code, name, DESKTOP);
         }
     }
     impl Drop for Fixture {
@@ -171,10 +181,10 @@ mod tests {
         let fixture = Fixture::new();
         fixture.product(OLD, "SwiftTunnel");
         fixture.product(OTHER, "SwiftTunnel");
-        assert!(repair_missing_package(&fixture.root, OLD).unwrap());
+        assert!(repair_missing_package(&fixture.root, OLD, DESKTOP).unwrap());
         assert!(registration_absent(&fixture.root, OLD));
         assert!(!registration_absent(&fixture.root, OTHER));
-        assert!(!repair_missing_package(&fixture.root, OLD).unwrap());
+        assert!(!repair_missing_package(&fixture.root, OLD, DESKTOP).unwrap());
     }
 
     #[test]
@@ -186,21 +196,44 @@ mod tests {
             b"existing cached file, validity delegated to MSI",
         )
         .unwrap();
-        assert!(!repair_missing_package(&fixture.root, OLD).unwrap());
+        assert!(!repair_missing_package(&fixture.root, OLD, DESKTOP).unwrap());
         std::fs::remove_file(&fixture.package).unwrap();
         fixture.product(OLD, "SwiftTunnel Lite");
-        assert!(!repair_missing_package(&fixture.root, OLD).unwrap());
+        assert!(!repair_missing_package(&fixture.root, OLD, DESKTOP).unwrap());
         fixture.product(OLD, "SwiftTunnel");
         fixture
             .root
             .options()
             .read()
             .write()
-            .open(format!(r"{UPGRADES}\{}", packed_guid(UPGRADE_CODE)))
+            .open(format!(r"{UPGRADES}\{}", packed_guid(DESKTOP.upgrade_code)))
             .unwrap()
             .remove_value(packed_guid(OLD))
             .unwrap();
-        assert!(!repair_missing_package(&fixture.root, OLD).unwrap());
+        assert!(!repair_missing_package(&fixture.root, OLD, DESKTOP).unwrap());
+        assert!(!registration_absent(&fixture.root, OLD));
+    }
+
+    #[test]
+    fn lite_recovery_is_scoped_and_keeps_desktop_and_healthy_packages() {
+        let fixture = Fixture::new();
+        fixture.product_in_family(OLD, "SwiftTunnel Lite", LITE);
+        fixture.product(OTHER, "SwiftTunnel");
+        assert!(!repair_missing_package(&fixture.root, OLD, DESKTOP).unwrap());
+        assert!(!repair_missing_package(&fixture.root, OTHER, LITE).unwrap());
+        std::fs::write(&fixture.package, b"cached MSI").unwrap();
+        assert!(!repair_missing_package(&fixture.root, OLD, LITE).unwrap());
+        std::fs::remove_file(&fixture.package).unwrap();
+        assert!(repair_missing_package(&fixture.root, OLD, LITE).unwrap());
+        assert!(registration_absent(&fixture.root, OLD));
+        assert!(!registration_absent(&fixture.root, OTHER));
+    }
+
+    #[test]
+    fn lite_name_without_lite_upgrade_membership_does_not_authorize_repair() {
+        let fixture = Fixture::new();
+        fixture.product(OLD, "SwiftTunnel Lite");
+        assert!(!repair_missing_package(&fixture.root, OLD, LITE).unwrap());
         assert!(!registration_absent(&fixture.root, OLD));
     }
 

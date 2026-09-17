@@ -2,7 +2,7 @@
 name = "swifttunnel-msi-actions"
 version = "0.1.0"
 edition = "2021"
-description = "Scoped Desktop MSI recovery custom actions"
+description = "Scoped Desktop and Lite MSI recovery custom actions"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

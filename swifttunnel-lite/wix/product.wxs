@@ -49,8 +49,20 @@
          upgrade over a half-broken install actually replaces what is there. -->
     <Property Id="REINSTALLMODE" Value="amus" />
 
-    <MajorUpgrade Schedule="afterInstallInitialize"
+    <MajorUpgrade Schedule="afterInstallExecuteAgain"
                   AllowDowngrades="yes" />
+
+    <Binary Id="SwiftLiteMsiActions" SourceFile="$(var.MsiActionsPath)" />
+    <CustomAction Id="PrepareLiteRecovery" BinaryKey="SwiftLiteMsiActions" DllEntry="PrepareLiteRecovery" Return="check" />
+    <CustomAction Id="RepairLiteOrphans" BinaryKey="SwiftLiteMsiActions" DllEntry="RepairLiteOrphans" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RefreshLiteUpgradeList" BinaryKey="SwiftLiteMsiActions" DllEntry="RefreshLiteUpgradeList" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="PrepareLiteRecovery" After="InstallInitialize">NOT Installed AND NOT REMOVE AND WIX_UPGRADE_DETECTED</Custom>
+      <Custom Action="RepairLiteOrphans" After="PrepareLiteRecovery">NOT Installed AND NOT REMOVE AND WIX_UPGRADE_DETECTED</Custom>
+      <InstallExecute After="RepairLiteOrphans" />
+      <Custom Action="RefreshLiteUpgradeList" After="InstallExecute">NOT Installed AND NOT REMOVE AND WIX_UPGRADE_DETECTED</Custom>
+      <InstallExecuteAgain After="RefreshLiteUpgradeList" />
+    </InstallExecuteSequence>
 
     <UIRef Id="SwiftSetupUI" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Open SwiftTunnel Lite" />

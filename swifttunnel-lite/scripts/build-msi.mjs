@@ -82,6 +82,20 @@ if (!existsSync(candle) || !existsSync(light)) {
 
 // ── Build ──────────────────────────────────────────────────────────────────
 
+// Resolve the freshly built action DLL from Cargo, including external target dirs.
+const actionOutput = execFileSync("cargo", ["build", "-p", "swifttunnel-msi-actions", "--release", "--target", triple || host, "--message-format=json-render-diagnostics"], {
+  cwd: repo, encoding: "utf8", windowsHide: true, maxBuffer: 32 * 1024 * 1024,
+});
+const actionDlls = actionOutput.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
+  .filter(record => record.reason === "compiler-artifact" && record.target?.name === "swifttunnel_msi_actions")
+  .flatMap(record => record.filenames.filter(name => name.endsWith(".dll")));
+if (actionDlls.length !== 1) throw new Error("Cargo did not identify one MSI action DLL");
+const actionDll = actionDlls[0];
+const pe = readFileSync(actionDll);
+if (pe.readUInt16LE(pe.readUInt32LE(0x3c) + 4) !== (arch === "arm64" ? 0xaa64 : 0x8664)) {
+  throw new Error("MSI action DLL architecture mismatch");
+}
+
 const out = join(crate, "target-msi", arch);
 mkdirSync(out, { recursive: true });
 
@@ -95,6 +109,7 @@ execFileSync(
     "-arch",
     wixArch,
     `-dVersion=${version}`,
+    `-dMsiActionsPath=${actionDll}`,
     `-dLitePath=${litePath}`,
     `-dDriverDir=${driverDir}`,
     `-dDriverArch=${arch}`,
