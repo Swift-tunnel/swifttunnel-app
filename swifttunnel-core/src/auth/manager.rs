@@ -534,12 +534,29 @@ impl AuthManager {
     /// Call this on app startup to pick up changes made via the admin panel
     /// (e.g., tester access granted/revoked) without requiring a full re-login.
     pub async fn refresh_profile(&self) -> Result<(), AuthError> {
+        if !matches!(
+            self.get_state(),
+            AuthState::LoggedIn(_) | AuthState::Banned(_)
+        ) {
+            return Ok(());
+        }
+
+        // The stored access token is routinely already expired by the time this
+        // runs at startup, and fetching the profile with it just answers 401. So
+        // the ban and tester check silently failed on exactly the launches where
+        // it matters, while leaving an alarming error in the log. Refresh first
+        // and use the token that comes back.
+        //
+        // The session is re-read afterwards because a refresh replaces it: the
+        // copy taken before would be the stale one.
+        let access_token = self.get_access_token().await?;
+
         let session = match self.get_state() {
             AuthState::LoggedIn(session) | AuthState::Banned(session) => session,
             _ => return Ok(()),
         };
 
-        let profile = match self.client.fetch_user_profile(&session.access_token).await {
+        let profile = match self.client.fetch_user_profile(&access_token).await {
             Ok(profile) => profile,
             Err(AuthError::UserBanned(reason)) => {
                 let mut banned_session = session;
