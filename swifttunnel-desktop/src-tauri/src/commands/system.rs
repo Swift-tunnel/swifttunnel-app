@@ -1180,6 +1180,28 @@ fn startup_driver_repair_decision(
         ));
     }
 
+    // Zero TCP/IP-bound adapters is the normal disconnected state, not a fault.
+    // SwiftTunnel unbinds WinpkFilter from every adapter when it disconnects, so
+    // a launch following a clean exit finds nothing bound and the driver reports
+    // itself unhealthy. Treating that as a real fault made the app delete and
+    // recreate the kernel driver service on 9 of 18 launches on one machine,
+    // with a "SwiftTunnel repaired itself" popup every time, to reach a state
+    // Connect produces on its own: it binds the adapter it needs, and the
+    // connect path has its own repair when that genuinely fails.
+    //
+    // This is the same judgement the binding-disabled branch above already makes
+    // for the ready-driver case; it just never got reached, because an unbound
+    // driver reports not-ready and short-circuits before it.
+    if matches!(
+        health.status,
+        swifttunnel_core::vpn::DriverHealthStatus::NoAdapters
+    ) {
+        log::info!(
+            "Startup driver recovery: no adapters are bound while disconnected; skipping repair because Connect binds the adapter it needs"
+        );
+        return Ok(StartupDriverRepairDecision::Skip);
+    }
+
     match health.recommended_action {
         DriverRecommendedAction::Install
         | DriverRecommendedAction::ResetService
