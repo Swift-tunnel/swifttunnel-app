@@ -1,28 +1,7 @@
-//! The installer the website hands out.
-//!
-//! It does two things the MSI cannot do for itself, and they are opposite ends
-//! of the same failure.
-//!
-//! It runs the orphaned-registration repair *before* `msiexec` starts, which no
-//! custom action inside an MSI can be sequenced to do. Without that, an upgrade
-//! on a machine whose cached package is missing dies on "The feature you are
-//! trying to use is on a network resource that is unavailable" with no way
-//! forward. That is the cure.
-//!
-//! And it leaves the package it installed from somewhere permanent, so the next
-//! upgrade has a source to fall back on when Windows' own cached copy is
-//! deleted. That is the prevention, and it is the more important half: it used
-//! to install out of `%TEMP%` and delete the file immediately afterwards, so
-//! every install made here started out needing the repair.
-//!
-//! The rest is deliberately boring. It hands the MSI to `msiexec` with the
-//! normal installer UI, waits, and returns whatever msiexec returned. The user
-//! sees the same install they always did, one UAC prompt earlier.
-//!
-//! No console window: the manifest asks for administrator, so Windows prompts
-//! at launch, and msiexec draws the only UI. A flashing console would look
-//! like a script running against the machine, which is exactly the impression
-//! an unsigned installer does not need.
+//! Normal EXE setup for Desktop and Lite. It retains the embedded MSI in the
+//! protected source cache, then runs the same UI and scoped recovery as the MSI.
+//! Recovery happens inside the selected product's install transaction, after
+//! confirmation. The launcher does not modify other product registrations.
 
 #![windows_subsystem = "windows"]
 
@@ -58,12 +37,6 @@ fn run() -> i32 {
         );
     }
 
-    // Best effort, and never fatal. A machine that is not broken finds nothing
-    // to do here, and a repair that fails should still let the install be
-    // attempted: the worst case is the old error the user would have had
-    // anyway, rather than an installer that refuses to start.
-    let _ = swifttunnel_msi_repair::repair();
-
     let installer = match stage_payload() {
         Ok(installer) => installer,
         Err(error) => return fail(&format!("SwiftTunnel could not prepare its protected installer cache.\n\n{error}\n\nCheck free disk space, run setup as administrator, and contact support if this persists."), 1),
@@ -74,6 +47,7 @@ fn run() -> i32 {
         Command::new(msiexec)
             .arg("/i")
             .arg(installer.path())
+            .arg("/norestart")
             .creation_flags(0x0800_0000)
             .status()
     });
@@ -82,7 +56,19 @@ fn run() -> i32 {
     drop(installer);
 
     match status {
-        Ok(s) => s.code().unwrap_or(1),
+        Ok(s) => {
+            let code = s.code().unwrap_or(1);
+            match code {
+                0 | 1602 => {}, // Success or deliberate cancellation.
+                3010 | 1641 => message_box("Setup completed. Restart Windows before using SwiftTunnel.", false),
+                1618 => { return fail("Another installation is running. Wait for it to finish, then open SwiftTunnel Setup again.", code); }
+                1619 | 1620 => { return fail("Windows could not open this installer package. Download Setup again from swifttunnel.net and contact support if this persists.", code); }
+                // The MSI's failure dialog already explains installation errors.
+                // Keep the exit code for support without showing a second dialog.
+                _ => log_failure(&format!("Windows Installer exited with code {code}.")),
+            }
+            code
+        },
         Err(error) => fail(
             &format!(
                 "SwiftTunnel could not start Windows Installer.\n\n{error}\n\nRestart the PC and try again."
@@ -109,6 +95,11 @@ fn fail(message: &str, code: i32) -> i32 {
     // leave nothing behind for the ticket that follows.
     log_failure(message);
 
+    message_box(message, true);
+    code
+}
+
+fn message_box(message: &str, error: bool) {
     #[cfg(windows)]
     {
         // Declared here rather than pulling in a Windows crate: one function,
@@ -123,7 +114,7 @@ fn fail(message: &str, code: i32) -> i32 {
             ) -> i32;
         }
         const MB_OK: u32 = 0x0000_0000;
-        const MB_ICONERROR: u32 = 0x0000_0010;
+        let icon = if error { 0x0000_0010 } else { 0x0000_0040 };
         const MB_SETFOREGROUND: u32 = 0x0001_0000;
 
         let wide = |s: &str| {
@@ -139,11 +130,10 @@ fn fail(message: &str, code: i32) -> i32 {
                 std::ptr::null_mut(),
                 text.as_ptr(),
                 caption.as_ptr(),
-                MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+                MB_OK | icon | MB_SETFOREGROUND,
             );
         }
     }
-    code
 }
 
 /// Leave a note beside the installer too, for a ticket that arrives after the

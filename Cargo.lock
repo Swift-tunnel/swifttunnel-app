@@ -4612,7 +4612,6 @@ version = "0.1.0"
 dependencies = [
  "embed-manifest",
  "swifttunnel-installer-cache",
- "swifttunnel-msi-repair",
 ]
 
 [[package]]

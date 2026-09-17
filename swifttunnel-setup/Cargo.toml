@@ -2,11 +2,10 @@
 name = "swifttunnel-setup"
 version = "0.1.0"
 edition = "2021"
-description = "Website installer for SwiftTunnel: repairs a broken MSI registration, then runs the installer"
+description = "Desktop and Lite setup with a protected persistent MSI source"
 
 [dependencies]
 swifttunnel-installer-cache = { path = "../swifttunnel-installer-cache" }
-swifttunnel-msi-repair = { path = "../swifttunnel-msi-repair" }
 
 [build-dependencies]
 embed-manifest = "1.4"

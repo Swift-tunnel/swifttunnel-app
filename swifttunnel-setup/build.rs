@@ -1,9 +1,5 @@
-//! Embeds a manifest that requires administrator, and stages the MSI payload.
-//!
-//! The manifest is the entire reason the launcher exists. The repair has to
-//! write HKLM before `msiexec` starts, and the MSI itself cannot arrange that:
-//! an immediate custom action impersonates an unelevated user, and a deferred
-//! one runs as SYSTEM but cannot be sequenced ahead of RemoveExistingProducts.
+//! Embed the elevation manifest needed to stage a protected installation source.
+//! Product-specific recovery and confirmation are handled inside the MSI.
 
 use std::path::PathBuf;
 
