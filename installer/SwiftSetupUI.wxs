@@ -38,8 +38,12 @@
         <Control Id="Heading" Type="Text" X="24" Y="24" Width="322" Height="30" NoPrefix="yes" Text="{\SwiftHeading}[ProductName]" />
         <Control Id="Description" Type="Text" X="24" Y="76" Width="322" Height="40" Text="[ProductName] is already installed. Repair replaces missing or damaged application files. Remove uninstalls the application." />
         <Control Id="Repair" Type="PushButton" X="24" Y="140" Width="100" Height="24" Default="yes" Text="&amp;Repair">
-          <Publish Property="WixUI_InstallMode" Value="Repair" Order="1">1</Publish>
-          <Publish Event="NewDialog" Value="VerifyReadyDlg" Order="2">1</Publish>
+          <Publish Event="SpawnWaitDialog" Value="WaitForCostingDlg" Order="1">CostingComplete = 1</Publish>
+          <Publish Event="SpawnDialog" Value="OutOfDiskDlg" Order="2">OutOfDiskSpace = 1</Publish>
+          <Publish Property="WixUI_InstallMode" Value="Repair" Order="3">1</Publish>
+          <Publish Event="ReinstallMode" Value="amus" Order="4"><![CDATA[OutOfDiskSpace <> 1]]></Publish>
+          <Publish Event="Reinstall" Value="All" Order="5"><![CDATA[OutOfDiskSpace <> 1]]></Publish>
+          <Publish Event="EndDialog" Value="Return" Order="6"><![CDATA[OutOfDiskSpace <> 1]]></Publish>
         </Control>
         <Control Id="Remove" Type="PushButton" X="136" Y="140" Width="100" Height="24" Text="&amp;Remove">
           <Publish Property="WixUI_InstallMode" Value="Remove" Order="1">1</Publish>

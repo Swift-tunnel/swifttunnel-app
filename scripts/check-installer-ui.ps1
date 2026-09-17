@@ -36,7 +36,12 @@ if ($install[4] -ne 'OutOfDiskSpace <> 1') { throw 'Install must check disk spac
 $null = RequireEvent SwiftWelcome Install SpawnWaitDialog WaitForCostingDlg
 $null = RequireEvent SwiftWelcome Cancel EndDialog Exit
 $null = RequireEvent SwiftProgress Cancel SpawnDialog CancelDlg
-$null = RequireEvent SwiftMaintenance Repair NewDialog VerifyReadyDlg
+$repairMode = RequireEvent SwiftMaintenance Repair ReinstallMode amus
+$repair = RequireEvent SwiftMaintenance Repair Reinstall All
+$repairEnd = RequireEvent SwiftMaintenance Repair EndDialog Return
+if ([int]$repairMode[5] -ge [int]$repair[5] -or [int]$repair[5] -ge [int]$repairEnd[5]) {
+    throw 'Repair must select complete file replacement before reinstalling and dismissing'
+}
 $null = RequireEvent SwiftMaintenance Remove NewDialog VerifyReadyDlg
 $null = RequireEvent VerifyReadyDlg Back NewDialog SwiftMaintenance
 $finish = RequireEvent SwiftFinish Finish EndDialog Return
