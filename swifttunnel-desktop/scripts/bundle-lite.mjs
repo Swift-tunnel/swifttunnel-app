@@ -32,9 +32,21 @@ if (triple) {
 console.log(`==> cargo ${args.join(" ")}`);
 execFileSync("cargo", args, { cwd: repo, stdio: "inherit" });
 
+// Cargo does not always write to `<repo>/target`. This repo redirects the
+// target directory in .cargo/config.toml to keep tens of GB of artifacts out
+// of OneDrive, and assuming the default made this script fail on exactly the
+// machine the redirect exists for. Ask cargo where it actually writes.
+const targetDir = JSON.parse(
+  execFileSync("cargo", ["metadata", "--format-version", "1", "--no-deps"], {
+    cwd: repo,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  }),
+).target_directory;
+
 const built = triple
-  ? join(repo, "target", triple, "release", "swifttunnel-lite.exe")
-  : join(repo, "target", "release", "swifttunnel-lite.exe");
+  ? join(targetDir, triple, "release", "swifttunnel-lite.exe")
+  : join(targetDir, "release", "swifttunnel-lite.exe");
 
 // A stale copy from a previous build would ship silently, so the freshly built
 // one has to actually be there.
