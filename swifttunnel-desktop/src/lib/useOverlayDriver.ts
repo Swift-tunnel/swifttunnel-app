@@ -113,6 +113,7 @@ export function useOverlayDriver() {
     }
 
     let disposed = false;
+    let inFlight = false;
     let sessionStart = 0;
     let wasRunning = false;
 
@@ -126,7 +127,7 @@ export function useOverlayDriver() {
       label: "overlay-stats",
     }).catch(() => {});
 
-    const tick = async () => {
+    const sample = async () => {
       const cfgBefore = ovRef.current;
       if (disposed) return;
       await overlayWindowReady;
@@ -140,6 +141,7 @@ export function useOverlayDriver() {
       } catch {
         /* keep last values */
       }
+      if (disposed) return;
       const needsThroughput =
         cfgBefore.metrics.includes("upload") ||
         cfgBefore.metrics.includes("download");
@@ -151,6 +153,7 @@ export function useOverlayDriver() {
           /* keep last throughput sample */
         }
       }
+      if (disposed) return;
       if (needsPing && vpnBefore.state === "connected") {
         try {
           await fetchPing();
@@ -158,6 +161,7 @@ export function useOverlayDriver() {
           /* keep last ping sample */
         }
       }
+      if (disposed) return;
       const b = useBoostStore.getState();
       const vpn = useVpnStore.getState();
       const nowMs = Date.now();
@@ -211,6 +215,18 @@ export function useOverlayDriver() {
               )
             : {},
       }).catch(() => {});
+    };
+
+    // A slow native call must occupy one tick, not accumulate a new waiting
+    // continuation every second. Keep the guard through the render IPC too.
+    const tick = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      try {
+        await sample();
+      } finally {
+        inFlight = false;
+      }
     };
 
     void tick();
