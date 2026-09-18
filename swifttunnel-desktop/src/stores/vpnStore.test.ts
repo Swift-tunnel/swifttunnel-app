@@ -97,6 +97,18 @@ function driverStatus(overrides = {}) {
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function disconnectedState() {
+  return { ...connectedState("singapore"), state: "disconnected", region: null,
+    server_endpoint: null, assigned_ip: null, split_tunnel_active: false, tunneled_processes: [] };
+}
+
 describe("stores/vpnStore", () => {
   beforeEach(() => {
     vi.useRealTimers();
@@ -165,6 +177,98 @@ describe("stores/vpnStore", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("keeps a cancelled Roblox check from restarting connection setup", async () => {
+    const metrics = deferred<{ roblox_running: boolean }>();
+    boostGetMetrics.mockReturnValueOnce(metrics.promise);
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue(disconnectedState());
+    const useVpnStore = await loadStore();
+    const { useSettingsStore } = await import("./settingsStore");
+    useSettingsStore.getState().update({ enable_country_ban: true });
+    const connecting = useVpnStore.getState().connect("singapore", ["roblox"]);
+    await useVpnStore.getState().disconnect();
+    metrics.resolve({ roblox_running: false });
+    await connecting;
+    expect(systemCheckDriver).not.toHaveBeenCalled();
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().state).toBe("disconnected");
+  });
+
+  it("does not repair a driver after the user cancelled its readiness check", async () => {
+    const check = deferred<ReturnType<typeof driverStatus>>();
+    systemCheckDriver.mockReturnValueOnce(check.promise);
+    systemRepairDriver.mockResolvedValue(driverStatus());
+    vpnGetState.mockResolvedValue(disconnectedState());
+    const useVpnStore = await loadStore();
+    const connecting = useVpnStore.getState().connect("singapore", ["roblox"]);
+    await vi.waitFor(() => expect(systemCheckDriver).toHaveBeenCalledOnce());
+    await useVpnStore.getState().disconnect();
+    check.resolve(driverStatus({ ready: false, recommended_action: "reinstall" }));
+    await connecting;
+    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().driverStatus).toBeNull();
+  });
+
+  it("does not let a superseded connect failure disconnect the new session", async () => {
+    const old = deferred<void>();
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockReturnValueOnce(old.promise).mockResolvedValueOnce(undefined);
+    vpnGetState.mockResolvedValueOnce(disconnectedState()).mockResolvedValue(connectedState("tokyo"));
+    const useVpnStore = await loadStore();
+    const first = useVpnStore.getState().connect("singapore", ["roblox"]);
+    await vi.waitFor(() => expect(vpnConnect).toHaveBeenCalledOnce());
+    await useVpnStore.getState().disconnect();
+    await useVpnStore.getState().connect("tokyo", ["roblox"]);
+    old.reject(new Error("connection failed"));
+    await first;
+    expect(vpnDisconnect).toHaveBeenCalledTimes(1);
+    expect(useVpnStore.getState().state).toBe("connected");
+    expect(useVpnStore.getState().region).toBe("tokyo");
+  });
+
+  it("ignores a state poll from before disconnect", async () => {
+    const poll = deferred<ReturnType<typeof connectedState>>();
+    vpnGetState.mockReturnValueOnce(poll.promise).mockResolvedValue(disconnectedState());
+    const useVpnStore = await loadStore();
+    const fetching = useVpnStore.getState().fetchState();
+    await useVpnStore.getState().disconnect();
+    poll.resolve(connectedState("singapore"));
+    await fetching;
+    expect(useVpnStore.getState().state).toBe("disconnected");
+    expect(useVpnStore.getState().connectedAt).toBeNull();
+  });
+
+  it("does not clear a new session when an older disconnect response arrives", async () => {
+    const old = deferred<void>();
+    vpnDisconnect.mockReturnValueOnce(old.promise);
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue(connectedState("tokyo"));
+    const useVpnStore = await loadStore();
+    const disconnecting = useVpnStore.getState().disconnect();
+    await useVpnStore.getState().connect("tokyo", ["roblox"]);
+    old.resolve(undefined);
+    await disconnecting;
+    expect(useVpnStore.getState().region).toBe("tokyo");
+    expect(useVpnStore.getState().connectedAt).not.toBeNull();
+    expect(notify).not.toHaveBeenCalledWith("SwiftTunnel", "VPN disconnected.");
+  });
+
+  it("does not reconnect after dismissing an adapter choice while it saves", async () => {
+    const saving = deferred<void>();
+    settingsSave.mockReturnValueOnce(saving.promise);
+    const preflight = { ...await vpnPreflightBinding(), status: "ambiguous" };
+    const useVpnStore = await loadStore();
+    useVpnStore.setState({ bindingPreflight: preflight, pendingConnectIntent: { region: "singapore", gamePresets: ["roblox"] } });
+    const resuming = useVpnStore.getState().resumeConnectWithAdapter("adapter-guid");
+    useVpnStore.getState().dismissBindingChooser();
+    saving.resolve(undefined);
+    await resuming;
+    expect(systemCheckDriver).not.toHaveBeenCalled();
+    expect(vpnConnect).not.toHaveBeenCalled();
   });
 
   it("repairs missing split tunnel driver before connecting", async () => {
@@ -798,7 +902,7 @@ describe("stores/vpnStore", () => {
     );
   });
 
-  it("does not start a stale auto-repair continuation after binding preflight failure", async () => {
+  it.each([true, false])("ignores a cancelled binding repair result (ready=%s)", async (ready) => {
     systemCheckDriver.mockResolvedValue(driverStatus());
     vpnPreflightBinding.mockResolvedValue({
       status: "unrecoverable",
@@ -842,13 +946,14 @@ describe("stores/vpnStore", () => {
 
     await useVpnStore.getState().disconnect();
     if (finishRepair) {
-      finishRepair(driverStatus());
+      finishRepair(driverStatus({ ready }));
     }
     await connectPromise;
 
     expect(vpnConnect).not.toHaveBeenCalled();
     expect(useVpnStore.getState().state).toBe("disconnected");
     expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);
+    expect(useVpnStore.getState().driverStatus).toBeNull();
   });
 
   it("ignores stale disconnected events while a connect attempt is pending", async () => {

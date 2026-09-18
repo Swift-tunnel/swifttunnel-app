@@ -452,7 +452,7 @@ interface VpnStore {
 
   // Actions
   fetchState: () => Promise<void>;
-  ensureDriverReady: () => Promise<void>;
+  ensureDriverReady: (attempt?: number) => Promise<void>;
   repairDriver: () => Promise<void>;
   installDriver: () => Promise<void>;
   resetDriver: () => Promise<void>;
@@ -496,8 +496,10 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   connectAttemptInFlight: false,
 
   fetchState: async () => {
+    const attempt = connectAttemptSeq;
     try {
       const resp = await vpnGetState();
+      if (!isCurrentConnectAttempt(attempt)) return;
       set((current) => {
         const staleReadyPoll =
           resp.state === "disconnected" &&
@@ -536,14 +538,17 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         };
       });
     } catch (e) {
+      if (!isCurrentConnectAttempt(attempt)) return;
       set({ error: String(e) });
     }
   },
 
-  ensureDriverReady: async () => {
+  ensureDriverReady: async (attempt) => {
+    const active = () => attempt === undefined || isCurrentConnectAttempt(attempt);
     try {
       set({ driverSetupState: "checking", driverSetupError: null });
       const check = await systemCheckDriver();
+      if (!active()) return;
       set({ driverStatus: check });
       if (check.ready) {
         set({ driverSetupState: "idle", driverSetupError: null });
@@ -566,6 +571,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           : "repairing";
       set({ driverSetupState: repairState, driverSetupError: null });
       const repaired = await systemRepairDriver();
+      if (!active()) return;
       set({ driverStatus: repaired });
       if (!repaired.ready) {
         set({ driverResetAttempted: true });
@@ -573,6 +579,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       }
       set({ driverSetupState: "idle", driverSetupError: null });
     } catch (e) {
+      if (!active()) return;
       const message = cleanDriverSetupMessage(getErrorMessage(e));
       set({ driverSetupState: "error", driverSetupError: message });
       throw new Error(message);
@@ -669,10 +676,19 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     const attempt = nextConnectAttempt();
     const fullCountryBanEnabled =
       useSettingsStore.getState().settings.enable_country_ban;
+    set({
+      state: "fetching_config",
+      error: null,
+      driverSetupError: null,
+      bindingPreflight: null,
+      pendingConnectIntent: null,
+      connectAttemptInFlight: true,
+    });
     try {
       if (fullCountryBanEnabled) {
         try {
           const robloxRunning = (await boostGetMetrics()).roblox_running;
+          if (!isCurrentConnectAttempt(attempt)) return;
           if (robloxRunning) {
             set({
               state: "error",
@@ -689,20 +705,13 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
             return;
           }
         } catch (e) {
+          if (!isCurrentConnectAttempt(attempt)) return;
           reportError("Failed to check Roblox before Full Country Ban connect", e, {
             dedupeKey: "full-country-ban-roblox-running-check",
           });
         }
       }
-      set({
-        state: "fetching_config",
-        error: null,
-        driverSetupError: null,
-        bindingPreflight: null,
-        pendingConnectIntent: null,
-        connectAttemptInFlight: true,
-      });
-      await get().ensureDriverReady();
+      await get().ensureDriverReady(attempt);
       if (!isCurrentConnectAttempt(attempt)) return;
       set({
         state: "fetching_config",
@@ -730,6 +739,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           pendingConnectIntent: null,
         });
         const repaired = await systemRepairDriver();
+        if (!isCurrentConnectAttempt(attempt)) return;
         set({ driverStatus: repaired });
         if (!repaired.ready) {
           const message = driverStatusMessage(repaired);
@@ -802,6 +812,9 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           VPN_CONNECT_TIMEOUT_MS,
         );
       } catch (e) {
+        // Check before cleanup or repair: those commands can affect the newer
+        // session even if a later state update is correctly discarded.
+        if (!isCurrentConnectAttempt(attempt)) return;
         const message = getErrorMessage(e);
         if (isDriverRebootMessage(message)) {
           const status = driverRebootRequiredStatus(message);
@@ -837,6 +850,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
               driverSetupError: null,
             });
             const repaired = await systemRepairDriver();
+            if (!isCurrentConnectAttempt(attempt)) return;
             set({ driverStatus: repaired });
             if (!repaired.ready) {
               throw new Error(driverStatusMessage(repaired));
@@ -878,6 +892,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
               driverSetupError: null,
             });
             const repaired = await systemRepairWindowsFirewall();
+            if (!isCurrentConnectAttempt(attempt)) return;
             if (!repaired.after_available) {
               throw new Error(repaired.message || message);
             }
@@ -917,6 +932,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       }
       // Successful connect clears the reset-attempted one-shot so a future
       // unrelated incident gets a fresh "Reset driver service" offer.
+      if (!isCurrentConnectAttempt(attempt)) return;
       set({
         driverSetupState: "idle",
         driverSetupError: null,
@@ -944,6 +960,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   resumeConnectWithAdapter: async (guid) => {
+    const attempt = connectAttemptSeq;
     const preflight = get().bindingPreflight;
     const pending = get().pendingConnectIntent;
     if (!preflight || !pending) {
@@ -958,6 +975,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       },
     });
     await settingsStore.save();
+    if (!isCurrentConnectAttempt(attempt) || get().pendingConnectIntent !== pending) return;
 
     set({
       bindingPreflight: null,
@@ -976,11 +994,13 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   disconnect: async () => {
-    nextConnectAttempt();
+    const attempt = nextConnectAttempt();
     try {
       set({ state: "disconnecting" });
       await vpnDisconnect();
+      if (!isCurrentConnectAttempt(attempt)) return;
       await get().fetchState();
+      if (!isCurrentConnectAttempt(attempt)) return;
       set({
         region: null,
         serverEndpoint: null,
@@ -1006,6 +1026,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       autoRepairedFirewallSignatures.clear();
       await notify("SwiftTunnel", "VPN disconnected.");
     } catch (e) {
+      if (!isCurrentConnectAttempt(attempt)) return;
       set({ state: "error", error: String(e) });
     }
   },
