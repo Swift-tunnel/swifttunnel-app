@@ -82,6 +82,10 @@ const DENYLIST_NAMES_LOWER: &[&str] = &[
     // SwiftTunnel itself
     "swifttunnel.exe",
     "swifttunnel-desktop.exe",
+    // WebView2 hosts our UI in separate browser, renderer and GPU processes.
+    // Excluding only our PID still lets Auto Clean evict the interface while
+    // Roblox is foreground. Protect embedded WebView UIs regardless of PID.
+    "msedgewebview2.exe",
     // Roblox
     "robloxplayerbeta.exe",
     "robloxplayer.exe",
@@ -669,6 +673,23 @@ mod tests {
         let selected = select_trim_candidates(processes, &exclude);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].pid, 12);
+    }
+
+    #[test]
+    fn select_candidates_preserves_webview_ui_when_roblox_is_foreground() {
+        // The foreground exclusion protects Roblox, not the WebView2 browser,
+        // renderer and GPU processes that keep our background window alive.
+        let processes = vec![
+            proc(10, "SwiftTunnel-Desktop.exe", 100, 0.0),
+            proc(11, "msedgewebview2.exe", 150, 0.0),
+            proc(12, "MSEdgeWebView2.exe", 400, 1.0),
+            proc(13, "msedgewebview2.exe", 80, 0.0),
+            proc(14, "RobloxPlayerBeta.exe", 800, 3.0),
+            proc(15, "background-app.exe", 600, 0.0),
+        ];
+        let exclude = HashSet::from([10, 14]);
+        let selected = select_trim_candidates(processes, &exclude);
+        assert_eq!(selected.iter().map(|p| p.pid).collect::<Vec<_>>(), [15]);
     }
 
     #[test]
