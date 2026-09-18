@@ -75,6 +75,37 @@ describe("stores/settingsStore", () => {
     expect(useSettingsStore.getState().activeTab).toBe("games");
   });
 
+  it("keeps a slow earlier save from overwriting the latest preference", async () => {
+    let finishFirst!: () => void;
+    const firstWrite = new Promise<void>((resolve) => { finishFirst = resolve; });
+    let persisted = false;
+    settingsSave.mockImplementation(async (settings: AppSettings) => {
+      if (!settings.minimize_to_tray) await firstWrite;
+      persisted = settings.minimize_to_tray;
+    });
+    const useSettingsStore = await loadStore();
+    useSettingsStore.getState().update({ minimize_to_tray: false });
+    const first = useSettingsStore.getState().save();
+    useSettingsStore.getState().update({ minimize_to_tray: true });
+    const second = useSettingsStore.getState().save();
+    await Promise.resolve();
+    finishFirst();
+    await Promise.all([first, second]);
+    expect(persisted).toBe(true);
+    expect(settingsSave).toHaveBeenCalledTimes(2);
+  });
+
+  it("still saves a later preference after an earlier save fails", async () => {
+    settingsSave.mockRejectedValueOnce(new Error("disk unavailable")).mockResolvedValueOnce(undefined);
+    const useSettingsStore = await loadStore();
+    const first = useSettingsStore.getState().save();
+    useSettingsStore.getState().update({ minimize_to_tray: true });
+    const second = useSettingsStore.getState().save();
+    await Promise.all([first, second]);
+    expect(settingsSave).toHaveBeenCalledTimes(2);
+    expect(settingsSave.mock.calls[1][0].minimize_to_tray).toBe(true);
+  });
+
   it("migrates legacy master network boost into current per-toggle boosts", async () => {
     settingsLoad.mockResolvedValue({
       ...DEFAULT_SETTINGS,

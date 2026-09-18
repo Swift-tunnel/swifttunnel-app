@@ -4,6 +4,10 @@ import { settingsLoad, settingsSave } from "../lib/commands";
 import { DEFAULT_SETTINGS, mergeAppSettings } from "../lib/settings";
 import { reportError } from "../lib/errors";
 
+// Native saves perform filesystem and system work on blocking workers. Keep
+// one in flight so an older snapshot cannot finish after a newer preference.
+let saveTail: Promise<void> = Promise.resolve();
+
 /**
  * Keep the restored tab inside what this build actually has.
  *
@@ -57,9 +61,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   save: async () => {
+    const { settings, activeTab } = get();
+    // Capture at request time, just as IPC serialization did before queueing.
+    const snapshot = structuredClone({ ...settings, current_tab: activeTab });
+    const write = saveTail.then(() => settingsSave(snapshot));
+    // A failed write must not poison the queue or drop subsequent changes.
+    saveTail = write.catch(() => {});
     try {
-      const { settings, activeTab } = get();
-      await settingsSave({ ...settings, current_tab: activeTab });
+      await write;
     } catch (error) {
       reportError("Failed to save settings", error);
     }
