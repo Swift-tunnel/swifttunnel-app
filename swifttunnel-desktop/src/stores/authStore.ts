@@ -12,6 +12,10 @@ import {
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
 
+// Reads may complete after a newer native event or account action. Only the
+// latest read in the current revision may publish a snapshot or an error.
+let authStateRevision = 0;
+
 function formatAuthError(error: unknown): string {
   const message = String(error);
   const lower = message.toLowerCase();
@@ -61,8 +65,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   error: null,
 
   fetchState: async () => {
+    const revision = ++authStateRevision;
     try {
       const resp = await authGetState();
+      if (revision !== authStateRevision) return;
       set({
         state: resp.state,
         email: resp.email,
@@ -75,11 +81,13 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         error: null,
       });
     } catch (e) {
+      if (revision !== authStateRevision) return;
       set({ isLoading: false, error: formatAuthError(e) });
     }
   },
 
   login: async (email, password) => {
+    ++authStateRevision;
     try {
       set({ state: "logging_in", isLoading: true, error: null });
       await authLogin(email, password);
@@ -95,6 +103,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   startOAuth: async () => {
+    ++authStateRevision;
     try {
       set({ state: "awaiting_oauth", error: null });
       // Native auth command already opens the browser and tracks pending state.
@@ -120,6 +129,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   cancelOAuth: async (reason = "Login cancelled.") => {
+    ++authStateRevision;
     try {
       await authCancelOAuth();
     } catch (error) {
@@ -128,15 +138,15 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       });
     }
 
-    set({
-      state: "logged_out",
-      error: reason,
-    });
+    ++authStateRevision;
+    set({ state: "logged_out", isLoading: false, error: reason });
   },
 
   logout: async () => {
+    ++authStateRevision;
     try {
       await authLogout();
+      ++authStateRevision;
       set({
         state: "logged_out",
         email: null,
@@ -145,6 +155,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         isBanned: false,
         bannedReason: null,
         bannedAt: null,
+        isLoading: false,
         error: null,
       });
     } catch (e) {
@@ -162,10 +173,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   handleStateEvent: (event) => {
+    ++authStateRevision;
     const isBanned = Boolean(event.is_banned);
 
     set({
       state: event.state as AuthState,
+      isLoading: event.state === "logging_in",
       email: event.email,
       userId: event.user_id,
       isBanned,
