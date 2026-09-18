@@ -8,6 +8,10 @@ import {
 } from "../lib/commands";
 import { reportError } from "../lib/errors";
 
+// A scan probes every relay and can wait behind connection setup. Timer ticks,
+// focus changes and refresh clicks must share it instead of queuing more scans.
+let pendingLatencies: Promise<void> | null = null;
+
 interface ServerStore {
   regions: ServerRegion[];
   servers: ServerInfo[];
@@ -56,19 +60,23 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     }
   },
 
-  fetchLatencies: async () => {
-    try {
-      const entries = await serverGetLatencies();
-      const latencies = new Map<string, number | null>();
-      for (const entry of entries) {
-        latencies.set(entry.region, entry.latency_ms);
+  fetchLatencies: () => {
+    if (pendingLatencies) return pendingLatencies;
+    pendingLatencies = (async () => {
+      try {
+        const entries = await serverGetLatencies();
+        const latencies = new Map<string, number | null>();
+        for (const entry of entries) {
+          latencies.set(entry.region, entry.latency_ms);
+        }
+        set({ latencies });
+      } catch (error) {
+        reportError("Failed to fetch server latencies", error, {
+          dedupeKey: "server-fetch-latencies",
+        });
       }
-      set({ latencies });
-    } catch (error) {
-      reportError("Failed to fetch server latencies", error, {
-        dedupeKey: "server-fetch-latencies",
-      });
-    }
+    })().finally(() => { pendingLatencies = null; });
+    return pendingLatencies;
   },
 
   refresh: async () => {
