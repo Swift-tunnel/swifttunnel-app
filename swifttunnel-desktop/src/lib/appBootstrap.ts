@@ -33,9 +33,11 @@ async function safeAwait(label: string, task: () => Promise<void>) {
   }
 }
 
-export async function runAppBootstrap(deps: AppBootstrapDeps) {
+export async function runAppBootstrap(deps: AppBootstrapDeps, signal?: AbortSignal) {
+  if (signal?.aborted) return;
   // A failed listener registration must not block the fetchers below.
   await safeAwait("initEventListeners", deps.initEventListeners);
+  if (signal?.aborted) return;
 
   // allSettled so one failing IPC/network call can't abort the others —
   // fetchAuth in particular MUST run to completion so isLoading clears.
@@ -46,6 +48,7 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
     deps.fetchSystemInfo(),
     deps.fetchVpnState(),
   ]);
+  if (signal?.aborted) return;
 
   // Server list + settings are loaded now: coerce a stale saved region to a
   // valid one BEFORE the auto-connect decision below reads selected_region.
@@ -54,7 +57,9 @@ export async function runAppBootstrap(deps: AppBootstrapDeps) {
   const authState = deps.getAuthState();
   if (authState === "logged_in") {
     await safeAwait("refreshAuthProfile", deps.refreshAuthProfile);
+    if (signal?.aborted) return;
     await Promise.allSettled([deps.fetchAuth(), deps.fetchVpnState()]);
+    if (signal?.aborted) return;
   }
 
   const loadedSettings = deps.getSettings();

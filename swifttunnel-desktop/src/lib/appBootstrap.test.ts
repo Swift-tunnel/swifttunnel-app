@@ -3,6 +3,46 @@ import { DEFAULT_SETTINGS } from "./settings";
 import { runAppBootstrap } from "./appBootstrap";
 
 describe("app bootstrap", () => {
+  it.each(["initEventListeners", "loadSettings", "refreshAuthProfile", "secondAuthRead"])(
+    "does not reconnect or check updates after cancellation during %s",
+    async (stage) => {
+      let finish!: () => void;
+      const pending = new Promise<void>((resolve) => { finish = resolve; });
+      let entered!: () => void;
+      const reached = new Promise<void>((resolve) => { entered = resolve; });
+      const wait = () => { entered(); return pending; };
+      const deps = {
+        initEventListeners: vi.fn(async () => {}),
+        fetchAuth: vi.fn(async () => {}),
+        loadSettings: vi.fn(async () => {}),
+        fetchServers: vi.fn(async () => {}),
+        fetchSystemInfo: vi.fn(async () => {}),
+        fetchVpnState: vi.fn(async () => {}),
+        refreshAuthProfile: vi.fn(async () => {}),
+        getSettings: () => ({ ...DEFAULT_SETTINGS, auto_reconnect: true, resume_vpn_on_startup: true }),
+        getAuthState: () => "logged_in" as const,
+        getVpnState: () => "disconnected" as const,
+        connectVpn: vi.fn(async () => {}),
+        checkForUpdates: vi.fn(async () => {}),
+        reconcileSelectedRegion: vi.fn(),
+      };
+      if (stage === "secondAuthRead") {
+        deps.fetchAuth.mockResolvedValueOnce(undefined).mockImplementationOnce(wait);
+      } else {
+        deps[stage as "initEventListeners" | "loadSettings" | "refreshAuthProfile"].mockImplementationOnce(wait);
+      }
+      const controller = new AbortController();
+      const bootstrap = runAppBootstrap(deps, controller.signal);
+      await reached;
+      controller.abort();
+      finish();
+      await bootstrap;
+      expect(deps.connectVpn).not.toHaveBeenCalled();
+      expect(deps.checkForUpdates).not.toHaveBeenCalled();
+      if (stage === "initEventListeners") expect(deps.loadSettings).not.toHaveBeenCalled();
+    },
+  );
+
   it("loads dependencies, reconnects, and checks updates", async () => {
     const initEventListeners = vi.fn().mockResolvedValue(undefined);
     const fetchAuth = vi.fn().mockResolvedValue(undefined);

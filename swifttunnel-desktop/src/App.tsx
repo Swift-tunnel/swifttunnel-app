@@ -139,6 +139,8 @@ function App() {
   useEffect(() => {
     let disposed = false;
 
+    const bootstrapController = new AbortController();
+
     // Show the window ASAP, independent of bootstrap. Bootstrap does several
     // network calls (auth, servers, profile); waiting for it to finish before
     // showing made a slow first launch look like nothing happened, so the user
@@ -197,7 +199,7 @@ function App() {
           connectVpn,
           checkForUpdates,
           reconcileSelectedRegion,
-        });
+        }, bootstrapController.signal);
       } catch (error) {
         reportError("App bootstrap threw", error, {
           dedupeKey: "app-bootstrap-init",
@@ -213,15 +215,15 @@ function App() {
         window.clearTimeout(spinnerSafetyTimer);
       }
 
-      if (disposed) {
-        void cleanupEventListeners();
-      }
+      // Cleanup belongs to this effect's teardown. A delayed old bootstrap
+      // must not remove the listeners registered by a newer effect.
     };
 
     void init();
 
     return () => {
       disposed = true;
+      bootstrapController.abort();
       window.clearTimeout(spinnerSafetyTimer);
       void cleanupEventListeners();
     };

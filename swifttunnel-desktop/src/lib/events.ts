@@ -13,6 +13,7 @@ import { useBoostStore } from "../stores/boostStore";
 import { useServerStore } from "../stores/serverStore";
 import { useUpdaterStore } from "../stores/updaterStore";
 import { useToastStore } from "../stores/toastStore";
+import { reportError } from "./errors";
 
 const EVENT_VPN_STATE_CHANGED = "vpn-state-changed";
 const EVENT_AUTH_STATE_CHANGED = "auth-state-changed";
@@ -25,75 +26,86 @@ const EVENT_UPDATER_DONE = "updater://done";
 const EVENT_COUNTRY_BAN_BYPASS_UNAVAILABLE = "country-ban-bypass-unavailable";
 
 let unlisteners: UnlistenFn[] = [];
+let listenerGeneration = 0;
+
+function clearRegisteredListeners() {
+  const previous = unlisteners;
+  unlisteners = [];
+  for (const unlisten of previous) {
+    try {
+      unlisten();
+    } catch (error) {
+      reportError("Failed to remove native event listener", error, {
+        dedupeKey: "event-listener-cleanup",
+      });
+    }
+  }
+}
 
 export async function initEventListeners() {
-  // Clean up any existing listeners
-  await cleanupEventListeners();
+  // Claim this generation synchronously, before any registration can yield.
+  const generation = ++listenerGeneration;
+  clearRegisteredListeners();
 
-  unlisteners.push(
-    await listen<VpnStateEvent>(EVENT_VPN_STATE_CHANGED, (event) => {
+  async function register<T>(name: string, handler: (event: { payload: T }) => void) {
+    if (generation !== listenerGeneration) return;
+    const stop = await listen<T>(name, (event) => {
+      if (generation === listenerGeneration) handler(event);
+    });
+    if (generation !== listenerGeneration) stop();
+    else unlisteners.push(stop);
+  }
+
+  try {
+    await register<VpnStateEvent>(EVENT_VPN_STATE_CHANGED, (event) => {
       useVpnStore.getState().handleStateEvent(event.payload);
-    }),
-  );
+    });
 
-  unlisteners.push(
-    await listen<AuthStateEvent>(EVENT_AUTH_STATE_CHANGED, (event) => {
+    await register<AuthStateEvent>(EVENT_AUTH_STATE_CHANGED, (event) => {
       useAuthStore.getState().handleStateEvent(event.payload);
-    }),
-  );
+    });
 
-  unlisteners.push(
-    await listen<ThroughputEvent>(EVENT_THROUGHPUT_UPDATE, (event) => {
+    await register<ThroughputEvent>(EVENT_THROUGHPUT_UPDATE, (event) => {
       useVpnStore.getState().handleThroughputEvent(event.payload);
-    }),
-  );
+    });
 
-  unlisteners.push(
-    await listen<PerformanceMetricsEvent>(
+    await register<PerformanceMetricsEvent>(
       EVENT_PERFORMANCE_METRICS_UPDATE,
       (event) => {
         useBoostStore.getState().handleMetricsEvent(event.payload);
       },
-    ),
-  );
+    );
 
-  unlisteners.push(
-    await listen<RamCleanProgressEvent>(EVENT_RAM_CLEAN_PROGRESS, (event) => {
+    await register<RamCleanProgressEvent>(EVENT_RAM_CLEAN_PROGRESS, (event) => {
       useBoostStore.getState().handleRamCleanProgress(event.payload);
-    }),
-  );
+    });
 
-  unlisteners.push(
-    await listen<string>(EVENT_SERVER_LIST_UPDATED, () => {
+    await register<string>(EVENT_SERVER_LIST_UPDATED, () => {
       void useServerStore.getState().fetchList();
-    }),
-  );
+    });
 
-  unlisteners.push(
-    await listen<UpdaterProgressEvent>(EVENT_UPDATER_PROGRESS, (event) => {
+    await register<UpdaterProgressEvent>(EVENT_UPDATER_PROGRESS, (event) => {
       useUpdaterStore.getState().handleUpdaterProgress(event.payload);
-    }),
-  );
+    });
 
-  unlisteners.push(
-    await listen<void>(EVENT_UPDATER_DONE, () => {
+    await register<void>(EVENT_UPDATER_DONE, () => {
       useUpdaterStore.getState().handleUpdaterDone();
-    }),
-  );
+    });
 
-  unlisteners.push(
-    await listen<void>(EVENT_COUNTRY_BAN_BYPASS_UNAVAILABLE, () => {
+    await register<void>(EVENT_COUNTRY_BAN_BYPASS_UNAVAILABLE, () => {
       useToastStore.getState().addToast({
         type: "warning",
         message: "Country ban bypass unavailable on this network",
       });
-    }),
-  );
+    });
+  } catch (error) {
+    // A stale registration failure must not remove a newer run's listeners.
+    if (generation === listenerGeneration) await cleanupEventListeners();
+    throw error;
+  }
 }
 
 export async function cleanupEventListeners() {
-  for (const unlisten of unlisteners) {
-    unlisten();
-  }
-  unlisteners = [];
+  ++listenerGeneration;
+  clearRegisteredListeners();
 }
