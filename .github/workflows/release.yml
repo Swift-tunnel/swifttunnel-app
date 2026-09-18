@@ -600,7 +600,7 @@ jobs:
           [System.IO.File]::WriteAllText($confPath, ($config | ConvertTo-Json -Depth 32), $utf8NoBom)
           Write-Host "::notice::Authenticode signCommand injected - Tauri will sign SwiftTunnel.exe and the MSI installer"
 
-      # Recovery DLLs are embedded in Desktop MSIs. Validate the actual template
+      # Recovery DLLs are embedded in Desktop and Lite MSIs. Validate both templates
       # before the Tauri action builds or uploads either architecture.
       - name: Build and validate native MSI recovery
         shell: pwsh
@@ -646,15 +646,8 @@ jobs:
           updaterJsonPreferNsis: false
           args: --target x86_64-pc-windows-msvc
 
-      # The download the website hands out. It wraps the MSI and, before
-      # msiexec starts, clears an orphaned registration left behind when the
-      # cached package under C:\Windows\Installer has gone. Without that an
-      # upgrade on such a machine dies on "the feature you are trying to use is
-      # on a network resource that is unavailable" and cannot be completed at
-      # all: not by upgrading, not by uninstalling first.
-      #
-      # Keep the launcher as a separate recovery route for per-user or corrupt
-      # package cases outside the Desktop MSI's scoped missing-package repair.
+      # Normal website Setup: retain a protected MSI source and run its UI.
+      # Product-specific recovery runs inside the MSI after install confirmation.
       - name: Build website setup launcher (x64)
         shell: pwsh
         run: |
@@ -662,7 +655,7 @@ jobs:
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msi) { throw "no x64 MSI found to wrap" }
           $named = node scripts/build-recovery-setup.mjs --target x86_64-pc-windows-msvc --flavor desktop --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)"
-          if ($LASTEXITCODE -ne 0) { throw "Desktop recovery setup build failed" }
+          if ($LASTEXITCODE -ne 0) { throw "Desktop setup build failed" }
           gh release upload "$env:RELEASE_TAG" $named --clobber
           Write-Host "::notice::uploaded $named"
         env:
@@ -697,7 +690,7 @@ jobs:
           # before msiexec starts. Shipping only the MSI is how the full app
           # ended up with users who could neither upgrade nor uninstall.
           $out = node scripts/build-recovery-setup.mjs --target x86_64-pc-windows-msvc --flavor lite --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)"
-          if ($LASTEXITCODE -ne 0) { throw "Lite recovery setup build failed" }
+          if ($LASTEXITCODE -ne 0) { throw "Lite setup build failed" }
           Write-Host "::notice::built $out ($((Get-Item $out).Length) bytes)"
           gh release upload "$env:RELEASE_TAG" $out --clobber
         env:
@@ -748,7 +741,7 @@ jobs:
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msi) { throw "no ARM64 Desktop MSI found to wrap" }
           $out = node scripts/build-recovery-setup.mjs --target aarch64-pc-windows-msvc --flavor desktop --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)"
-          if ($LASTEXITCODE -ne 0) { throw "ARM64 Desktop recovery setup build failed" }
+          if ($LASTEXITCODE -ne 0) { throw "ARM64 Desktop setup build failed" }
           gh release upload "$env:RELEASE_TAG" $out --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -777,7 +770,7 @@ jobs:
           Write-Host "::notice::built $($msi.Name) ($($msi.Length) bytes)"
           gh release upload "$env:RELEASE_TAG" $msi.FullName --clobber
           $out = node scripts/build-recovery-setup.mjs --target aarch64-pc-windows-msvc --flavor lite --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)"
-          if ($LASTEXITCODE -ne 0) { throw "ARM64 Lite recovery setup build failed" }
+          if ($LASTEXITCODE -ne 0) { throw "ARM64 Lite setup build failed" }
           gh release upload "$env:RELEASE_TAG" $out --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

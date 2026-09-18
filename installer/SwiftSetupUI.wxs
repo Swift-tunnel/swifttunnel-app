@@ -85,6 +85,9 @@
         <Show Dialog="SwiftProgress" Before="ExecuteAction" />
         <Show Dialog="SwiftFinish" OnExit="success" />
       </InstallUISequence>
+      <AdminUISequence>
+        <Show Dialog="SwiftFinish" OnExit="success" />
+      </AdminUISequence>
     </UI>
     <UIRef Id="WixUI_Common" />
   </Fragment>

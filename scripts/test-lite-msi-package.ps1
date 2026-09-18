@@ -30,7 +30,7 @@ try {
         "-dMsiActionsPath=$MsiActionsPath" "-dLitePath=$WorkDir/lite.exe" "-dDriverDir=$WorkDir" "-dDriverArch=$Architecture" `
         "-dIconPath=$repo/swifttunnel-lite/resources/icon.ico" product.wxs "$repo/installer/SwiftSetupUI.wxs"
     if ($LASTEXITCODE -ne 0) { throw 'Lite MSI compile failed' }
-    & "$WixDir/light.exe" -nologo -wx -ice:ICE63 -ext WixUIExtension -out lite-fixture.msi product.wixobj SwiftSetupUI.wixobj
+    & "$WixDir/light.exe" -nologo -wx -ice:ICE20 -ice:ICE31 -ice:ICE44 -ice:ICE63 -ext WixUIExtension -out lite-fixture.msi product.wixobj SwiftSetupUI.wixobj
     if ($LASTEXITCODE -ne 0) { throw 'Lite MSI link failed' }
     & "$PSScriptRoot/check-installer-ui.ps1" -Msi lite-fixture.msi
     & "$PSScriptRoot/check-desktop-msi-sequence.ps1" -Msi lite-fixture.msi -Product Lite
