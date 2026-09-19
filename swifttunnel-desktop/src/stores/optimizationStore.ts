@@ -30,130 +30,165 @@ interface OptimizationStore {
   deactivate: (def: OptTarget, opts?: OptOptions) => Promise<OptOutcome>;
 }
 
-export const useOptimizationStore = create<OptimizationStore>((set, get) => ({
-  status: {},
-  loaded: false,
+function isBusy(status: OptStatus | undefined): boolean {
+  return status === "activating" || status === "deactivating";
+}
 
-  /** Load which optimizations are currently applied (persisted snapshots). */
-  loadActive: async () => {
-    try {
-      const active = await optimizationGetActive();
-      const status: Record<string, OptStatus> = {};
-      for (const id of active) status[id] = "active";
-      set({ status, loaded: true });
-    } catch (error) {
-      reportError("Failed to load optimization states", error, {
-        dedupeKey: "optimization-load",
-      });
-      set({ loaded: true });
-    }
-  },
+function busyOutcome(def: OptTarget, opts?: OptOptions): OptOutcome {
+  if (!opts?.silent) {
+    useToastStore.getState().addToast({
+      type: "warning",
+      message: `${def.name} is still changing. Wait for it to finish.`,
+    });
+  }
+  return { ok: false, requiresReboot: false };
+}
 
-  activate: async (def, opts) => {
-    if (get().status[def.id] === "active") {
-      return { ok: true, requiresReboot: false };
-    }
-    set((s) => ({ status: { ...s.status, [def.id]: "activating" } }));
+export const useOptimizationStore = create<OptimizationStore>((set, get) => {
+  const revisions = new Map<string, number>();
+  let loadRequest = 0;
+  const setStatus = (id: string, status: OptStatus) => {
+    // Count both start and completion, including an action already in flight
+    // when a status read begins. Preserve unrelated items from that read.
+    revisions.set(id, (revisions.get(id) ?? 0) + 1);
+    set((s) => ({ status: { ...s.status, [id]: status } }));
+  };
+  return {
+    status: {},
+    loaded: false,
 
-    try {
-      const res = await optimizationApply(def.id);
-      // A defined response proves the real backend command ran. If it's
-      // undefined the command wasn't available (e.g. a stale dev build), so we
-      // must NOT pretend it succeeded.
-      if (!res || typeof res.requires_reboot !== "boolean") {
-        throw new Error(
-          "Optimization backend unavailable, fully restart SwiftTunnel and try again.",
-        );
-      }
-
-      set((s) => ({ status: { ...s.status, [def.id]: "active" } }));
-      if (!opts?.silent) {
-        useToastStore.getState().addToast({
-          type: "success",
-          message: `${def.name} activated`,
-        });
-
-        // Restart-required tweaks surface through SwiftTunnel's normal
-        // notification channels (in-app toast + OS notification).
-        if (res.requires_reboot) {
-          useToastStore.getState().addToast({
-            type: "warning",
-            message: `Restart your PC to finish applying ${def.name}.`,
-          });
-          void notify(
-            "Restart required",
-            `Restart your PC to finish applying ${def.name}.`,
-          );
-        }
-      }
-      return { ok: true, requiresReboot: res.requires_reboot };
-    } catch (error) {
-      // A failed apply can leave a durable rollback record. Keep Revert
-      // available for recovery instead of hiding it as an inactive tweak.
-      let needsRevert = false;
+    /** Load which optimizations are currently applied (persisted snapshots). */
+    loadActive: async () => {
+      const request = ++loadRequest;
+      const before = new Map(revisions);
       try {
-        needsRevert = (await optimizationGetActive()).includes(def.id);
-      } catch {
-        // The original failure remains visible, including its recovery step.
-      }
-      set((s) => ({ status: { ...s.status, [def.id]: needsRevert ? "active" : "inactive" } }));
-      if (!opts?.silent) {
-        useToastStore.getState().addToast({
-          type: "error",
-          message: `Couldn't activate ${def.name}: ${String(error)}`,
+        const active = await optimizationGetActive();
+        if (request !== loadRequest) return;
+        const status: Record<string, OptStatus> = {};
+        for (const id of active) status[id] = "active";
+        for (const [id, current] of Object.entries(get().status)) {
+          if (isBusy(current) || revisions.get(id) !== before.get(id)) {
+            status[id] = current;
+          }
+        }
+        set({ status, loaded: true });
+      } catch (error) {
+        if (request !== loadRequest) return;
+        reportError("Failed to load optimization states", error, {
+          dedupeKey: "optimization-load",
         });
+        set({ loaded: true });
       }
-      return { ok: false, requiresReboot: false };
-    }
-  },
+    },
 
-  deactivate: async (def, opts) => {
-    const current = get().status[def.id];
-    if (current !== "active" && current !== "activating") {
-      return { ok: true, requiresReboot: false };
-    }
-    set((s) => ({ status: { ...s.status, [def.id]: "deactivating" } }));
-
-    try {
-      const res = await optimizationRevert(def.id);
-      if (!res || typeof res.requires_reboot !== "boolean") {
-        throw new Error(
-          "Optimization backend unavailable, fully restart SwiftTunnel and try again.",
-        );
+    activate: async (def, opts) => {
+      if (isBusy(get().status[def.id])) return busyOutcome(def, opts);
+      if (get().status[def.id] === "active") {
+        return { ok: true, requiresReboot: false };
       }
+      setStatus(def.id, "activating");
 
-      set((s) => ({ status: { ...s.status, [def.id]: "inactive" } }));
-      if (!opts?.silent) {
-        useToastStore.getState().addToast({
-          type: "info",
-          message: `${def.name} reverted`,
-        });
-
-        if (res.requires_reboot) {
-          // Toast as well as the OS notification, matching the apply path. A
-          // revert only half-takes-effect the same way an apply does, so
-          // someone who turned a tweak off and saw nothing change would
-          // reasonably conclude the revert had failed.
-          useToastStore.getState().addToast({
-            type: "warning",
-            message: `Restart your PC to finish reverting ${def.name}.`,
-          });
-          void notify(
-            "Restart required",
-            `Restart your PC to finish reverting ${def.name}.`,
+      try {
+        const res = await optimizationApply(def.id);
+        // A defined response proves the real backend command ran. If it's
+        // undefined the command wasn't available (e.g. a stale dev build), so we
+        // must NOT pretend it succeeded.
+        if (!res || typeof res.requires_reboot !== "boolean") {
+          throw new Error(
+            "Optimization backend unavailable, fully restart SwiftTunnel and try again.",
           );
         }
+
+        setStatus(def.id, "active");
+        if (!opts?.silent) {
+          useToastStore.getState().addToast({
+            type: "success",
+            message: `${def.name} activated`,
+          });
+
+          // Restart-required tweaks surface through SwiftTunnel's normal
+          // notification channels (in-app toast + OS notification).
+          if (res.requires_reboot) {
+            useToastStore.getState().addToast({
+              type: "warning",
+              message: `Restart your PC to finish applying ${def.name}.`,
+            });
+            void notify(
+              "Restart required",
+              `Restart your PC to finish applying ${def.name}.`,
+            );
+          }
+        }
+        return { ok: true, requiresReboot: res.requires_reboot };
+      } catch (error) {
+        // A failed apply can leave a durable rollback record. Keep Revert
+        // available for recovery instead of hiding it as an inactive tweak.
+        let needsRevert = false;
+        try {
+          needsRevert = (await optimizationGetActive()).includes(def.id);
+        } catch {
+          // The original failure remains visible, including its recovery step.
+        }
+        setStatus(def.id, needsRevert ? "active" : "inactive");
+        if (!opts?.silent) {
+          useToastStore.getState().addToast({
+            type: "error",
+            message: `Couldn't activate ${def.name}: ${String(error)}`,
+          });
+        }
+        return { ok: false, requiresReboot: false };
       }
-      return { ok: true, requiresReboot: res.requires_reboot };
-    } catch (error) {
-      set((s) => ({ status: { ...s.status, [def.id]: "active" } }));
-      if (!opts?.silent) {
-        useToastStore.getState().addToast({
-          type: "error",
-          message: `Couldn't revert ${def.name}: ${String(error)}`,
-        });
+    },
+
+    deactivate: async (def, opts) => {
+      const current = get().status[def.id];
+      if (isBusy(current)) return busyOutcome(def, opts);
+      if (current !== "active") {
+        return { ok: true, requiresReboot: false };
       }
-      return { ok: false, requiresReboot: false };
-    }
-  },
-}));
+      setStatus(def.id, "deactivating");
+
+      try {
+        const res = await optimizationRevert(def.id);
+        if (!res || typeof res.requires_reboot !== "boolean") {
+          throw new Error(
+            "Optimization backend unavailable, fully restart SwiftTunnel and try again.",
+          );
+        }
+
+        setStatus(def.id, "inactive");
+        if (!opts?.silent) {
+          useToastStore.getState().addToast({
+            type: "info",
+            message: `${def.name} reverted`,
+          });
+
+          if (res.requires_reboot) {
+            // Toast as well as the OS notification, matching the apply path. A
+            // revert only half-takes-effect the same way an apply does, so
+            // someone who turned a tweak off and saw nothing change would
+            // reasonably conclude the revert had failed.
+            useToastStore.getState().addToast({
+              type: "warning",
+              message: `Restart your PC to finish reverting ${def.name}.`,
+            });
+            void notify(
+              "Restart required",
+              `Restart your PC to finish reverting ${def.name}.`,
+            );
+          }
+        }
+        return { ok: true, requiresReboot: res.requires_reboot };
+      } catch (error) {
+        setStatus(def.id, "active");
+        if (!opts?.silent) {
+          useToastStore.getState().addToast({
+            type: "error",
+            message: `Couldn't revert ${def.name}: ${String(error)}`,
+          });
+        }
+        return { ok: false, requiresReboot: false };
+      }
+    },
+  };
+});
