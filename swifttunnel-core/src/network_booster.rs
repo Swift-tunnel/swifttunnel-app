@@ -4,7 +4,7 @@ use crate::structs::*;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const LEGACY_ROBLOX_PRIORITY_POLICY: &str = "RobloxPriority";
 // QoS policies written by previous SwiftTunnel versions. The feature is gone,
@@ -59,12 +59,89 @@ struct QosRegistrySnapshot {
 }
 
 /// On-disk snapshot of pre-modification values for crash/uninstall recovery.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistentSnapshot {
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
     #[serde(default)]
     qos_registry_snapshot: Option<QosRegistrySnapshot>,
+}
+
+impl PersistentSnapshot {
+    fn is_empty(&self) -> bool {
+        self.nagle_registry_snapshot.is_empty()
+            && self.network_throttling_snapshot.is_none()
+            && self.qos_registry_snapshot.is_none()
+    }
+}
+
+fn read_network_snapshot(path: &Path) -> Result<PersistentSnapshot> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
+            anyhow::anyhow!("Network rollback record is unreadable; preserve it for recovery: {e}")
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PersistentSnapshot::default()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn save_network_snapshot(path: &Path, snapshot: &PersistentSnapshot) -> Result<()> {
+    use std::io::Write;
+    // Do not replace a damaged recovery record with freshly captured settings.
+    read_network_snapshot(path)?;
+    if snapshot.is_empty() {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("No snapshot directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let staged = parent.join(format!(".network-{:032x}.tmp", rand::random::<u128>()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    let result: Result<()> = (|| {
+        file.write_all(&serde_json::to_vec_pretty(snapshot)?)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows::Win32::Storage::FileSystem::{
+                MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+            };
+            let from: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
+            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            unsafe {
+                MoveFileExW(
+                    windows::core::PCWSTR(from.as_ptr()),
+                    windows::core::PCWSTR(to.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            }?;
+        }
+        #[cfg(not(windows))]
+        std::fs::rename(&staged, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result
+}
+
+fn change_with_network_snapshot<T>(
+    path: &Path,
+    snapshot: &PersistentSnapshot,
+    change: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    save_network_snapshot(path, snapshot)?;
+    change()
 }
 
 const SNAPSHOT_FILE: &str = "network_snapshots.json";
@@ -145,6 +222,21 @@ impl NetworkBooster {
         let mut applied_config = requested_config.clone();
         let mut warnings = Vec::new();
 
+        // Existing records contain the originals, even if a prior restore
+        // failed. Never capture the already-modified values over those records.
+        if let Err(e) = self.load_saved_snapshot() {
+            applied_config.disable_nagle = false;
+            applied_config.disable_network_throttling = false;
+            applied_config.firewall_fix = false;
+            applied_config.normalize_legacy_master_boost();
+            return NetworkApplyOutcome {
+                applied_config,
+                warnings: vec![format!(
+                    "Network changes skipped because rollback data could not be read: {e}"
+                )],
+            };
+        }
+
         Self::cleanup_removed_qos_policies();
 
         let relay_qos_requested = Self::relay_qos_requested(&requested_config);
@@ -190,7 +282,9 @@ impl NetworkBooster {
             warnings.push(format!("Restore Roblox firewall rules: {}", e));
         }
 
-        self.persist_snapshot();
+        if let Err(e) = self.persist_snapshot() {
+            warnings.push(format!("Could not update network rollback record: {e}"));
+        }
         applied_config.normalize_legacy_master_boost();
 
         let mut effective_config = self.effective_network_config(&applied_config);
@@ -528,15 +622,15 @@ impl NetworkBooster {
 
         // Make Windows policy/user TOS marking deterministic on all network profiles,
         // then scope the DSCP policy to only SwiftTunnel's relay UDP endpoint.
-        Self::set_registry_dword(TCPIP_QOS_KEY, REG_VALUE_DO_NOT_USE_NLA, 1)?;
-        Self::set_registry_dword(TCPIP_PARAMETERS_KEY, REG_VALUE_DISABLE_USER_TOS_SETTING, 0)?;
-
-        for exe in RELAY_QOS_EXECUTABLES {
-            let policy_name = Self::relay_qos_policy_name(exe);
-            Self::write_relay_qos_policy(&policy_name, exe)?;
-        }
-
-        Ok(())
+        self.with_saved_snapshot(|| {
+            Self::set_registry_dword(TCPIP_QOS_KEY, REG_VALUE_DO_NOT_USE_NLA, 1)?;
+            Self::set_registry_dword(TCPIP_PARAMETERS_KEY, REG_VALUE_DISABLE_USER_TOS_SETTING, 0)?;
+            for exe in RELAY_QOS_EXECUTABLES {
+                let policy_name = Self::relay_qos_policy_name(exe);
+                Self::write_relay_qos_policy(&policy_name, exe)?;
+            }
+            Ok(())
+        })
     }
 
     fn remove_relay_socket_qos_policy(&mut self) -> Result<()> {
@@ -620,11 +714,10 @@ impl NetworkBooster {
                 self.nagle_registry_snapshot.insert(guid, snapshot);
             }
 
-            // TcpAckFrequency = 1
-            Self::set_registry_dword(&key_path, REG_VALUE_TCP_ACK_FREQUENCY, 1)?;
-
-            // TCPNoDelay = 1 (disable Nagle)
-            Self::set_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, 1)?;
+            self.with_saved_snapshot(|| {
+                Self::set_registry_dword(&key_path, REG_VALUE_TCP_ACK_FREQUENCY, 1)?;
+                Self::set_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, 1)
+            })?;
         }
         info!("Nagle's algorithm disabled on all adapters");
 
@@ -675,21 +768,19 @@ impl NetworkBooster {
             });
         }
 
-        // Disable network throttling (0xFFFFFFFF = disabled)
-        Self::set_registry_dword(
-            NETWORK_SYSTEM_PROFILE_KEY,
-            REG_VALUE_NETWORK_THROTTLING_INDEX,
-            u32::MAX, // 0xFFFFFFFF
-        )?;
+        self.with_saved_snapshot(|| {
+            Self::set_registry_dword(
+                NETWORK_SYSTEM_PROFILE_KEY,
+                REG_VALUE_NETWORK_THROTTLING_INDEX,
+                u32::MAX, // 0xFFFFFFFF
+            )?;
+            Self::set_registry_dword(
+                NETWORK_SYSTEM_PROFILE_KEY,
+                REG_VALUE_SYSTEM_RESPONSIVENESS,
+                0,
+            )
+        })?;
         info!("Network throttling disabled");
-
-        // Also set SystemResponsiveness to 0 (0% reserved for background tasks)
-        Self::set_registry_dword(
-            NETWORK_SYSTEM_PROFILE_KEY,
-            REG_VALUE_SYSTEM_RESPONSIVENESS,
-            0,
-        )?;
-
         Ok(())
     }
 
@@ -738,6 +829,9 @@ impl NetworkBooster {
     /// Restore original DNS settings
     pub fn restore(&mut self) -> Result<()> {
         info!("Restoring original network settings");
+        // Direct shutdown/cleanup callers must not discard an existing record
+        // just because this instance has not performed startup recovery yet.
+        self.load_saved_snapshot()?;
 
         let mut errors = Vec::new();
 
@@ -766,75 +860,61 @@ impl NetworkBooster {
             ));
         }
 
-        Self::clear_snapshot();
-
-        Ok(())
+        self.persist_snapshot()
     }
 
     /// Save pre-modification values to disk for crash/uninstall recovery.
-    fn persist_snapshot(&self) {
-        let Some(path) = snapshot_path() else {
-            return;
-        };
-        let snapshot = PersistentSnapshot {
+    fn snapshot(&self) -> PersistentSnapshot {
+        PersistentSnapshot {
             nagle_registry_snapshot: self.nagle_registry_snapshot.clone(),
             network_throttling_snapshot: self.network_throttling_snapshot.clone(),
             qos_registry_snapshot: self.qos_registry_snapshot.clone(),
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match serde_json::to_string_pretty(&snapshot) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
-                    warn!("Failed to persist network snapshot: {e}");
-                }
-            }
-            Err(e) => warn!("Failed to serialize network snapshot: {e}"),
         }
     }
 
-    /// Remove the on-disk snapshot file.
-    fn clear_snapshot() {
-        if let Some(path) = snapshot_path() {
-            let _ = std::fs::remove_file(path);
-        }
+    fn persist_snapshot(&self) -> Result<()> {
+        let path =
+            snapshot_path().ok_or_else(|| anyhow::anyhow!("No network rollback directory"))?;
+        save_network_snapshot(&path, &self.snapshot())
     }
 
-    /// Recover from a persisted snapshot (call on startup).
-    ///
-    /// If a snapshot file exists, it means the previous session didn't get to
-    /// `restore()`. Load the saved originals and restore them.
-    pub fn recover_from_snapshot(&mut self) {
-        let Some(path) = snapshot_path() else {
-            return;
-        };
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => return, // no snapshot on disk
-        };
-        let snapshot: PersistentSnapshot = match serde_json::from_str(&content) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("Failed to parse network snapshot, removing: {e}");
-                let _ = std::fs::remove_file(&path);
-                return;
-            }
-        };
+    fn with_saved_snapshot<T>(&self, change: impl FnOnce() -> Result<T>) -> Result<T> {
+        let path =
+            snapshot_path().ok_or_else(|| anyhow::anyhow!("No network rollback directory"))?;
+        change_with_network_snapshot(&path, &self.snapshot(), change)
+    }
 
-        info!("Recovering network settings from persisted snapshot");
+    fn load_saved_snapshot(&mut self) -> Result<()> {
+        let path =
+            snapshot_path().ok_or_else(|| anyhow::anyhow!("No network rollback directory"))?;
+        self.merge_saved_snapshot(read_network_snapshot(&path)?);
+        Ok(())
+    }
 
-        if self.nagle_registry_snapshot.is_empty() {
-            self.nagle_registry_snapshot = snapshot.nagle_registry_snapshot;
-        }
-        if self.network_throttling_snapshot.is_none() {
+    fn merge_saved_snapshot(&mut self, snapshot: PersistentSnapshot) {
+        self.nagle_registry_snapshot
+            .extend(snapshot.nagle_registry_snapshot);
+        if snapshot.network_throttling_snapshot.is_some() {
             self.network_throttling_snapshot = snapshot.network_throttling_snapshot;
         }
-        if self.qos_registry_snapshot.is_none() {
+        if snapshot.qos_registry_snapshot.is_some() {
             self.qos_registry_snapshot = snapshot.qos_registry_snapshot;
         }
+    }
 
-        let _ = self.restore();
+    fn recover_from_snapshot_checked(&mut self) -> Result<()> {
+        self.load_saved_snapshot()?;
+        if self.snapshot().is_empty() {
+            return Ok(());
+        }
+        info!("Recovering network settings from persisted snapshot");
+        self.restore()
+    }
+
+    pub fn recover_from_snapshot(&mut self) {
+        if let Err(e) = self.recover_from_snapshot_checked() {
+            warn!("Network recovery incomplete; keeping rollback data: {e}");
+        }
     }
 }
 
@@ -847,7 +927,7 @@ pub fn cleanup_all_system_state() -> Result<()> {
     info!("Running full stateless system cleanup");
 
     let mut booster = NetworkBooster::new();
-    booster.recover_from_snapshot();
+    let network_recovery = booster.recover_from_snapshot_checked();
 
     // 1. Remove hosts file entries
     if let Err(e) = crate::roblox_proxy::hosts::remove_overrides() {
@@ -878,8 +958,8 @@ pub fn cleanup_all_system_state() -> Result<()> {
     // know they exist and leaves them behind pointing at a deleted exe.
     crate::autostart::remove_all_run_entries();
 
-    // 8. Remove the snapshot file itself
-    NetworkBooster::clear_snapshot();
+    // Only successful restoration removes its rollback record. Failed or
+    // unreadable records must survive uninstall cleanup for a recovery retry.
 
     // 9. Restore system optimizer settings (MMCSS, Game Bar, fullscreen opts, Game Mode, power plan)
     crate::system_optimizer::cleanup_for_uninstall();
@@ -916,7 +996,7 @@ pub fn cleanup_all_system_state() -> Result<()> {
     // it was deleted moments later anyway.
 
     info!("Full system cleanup completed");
-    Ok(())
+    network_recovery
 }
 
 /// Reset MTU to 1500 on all active network adapters.
@@ -968,6 +1048,139 @@ impl Default for NetworkBooster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot_test_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-network-test-{:032x}",
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn example_snapshot() -> PersistentSnapshot {
+        PersistentSnapshot {
+            network_throttling_snapshot: Some(NetworkThrottlingSnapshot {
+                network_throttling_index: Some(10),
+                system_responsiveness: Some(20),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn network_changes_require_saved_originals_and_keep_them_after_failure() {
+        let dir = snapshot_test_dir();
+        let path = dir.join(SNAPSHOT_FILE);
+        let snapshot = example_snapshot();
+        let mut changed = false;
+        let result: Result<()> = change_with_network_snapshot(&path, &snapshot, || {
+            assert_eq!(read_network_snapshot(&path).unwrap(), snapshot);
+            changed = true;
+            Err(anyhow::anyhow!("injected operation failure"))
+        });
+        assert!(result.is_err());
+        assert!(changed);
+        assert_eq!(read_network_snapshot(&path).unwrap(), snapshot);
+
+        let invalid_path = path.join("not-a-directory.json");
+        changed = false;
+        let result = change_with_network_snapshot(&invalid_path, &snapshot, || {
+            changed = true;
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(
+            !changed,
+            "must not mutate settings if originals cannot be saved"
+        );
+        assert_eq!(read_network_snapshot(&path).unwrap(), snapshot);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_network_recovery_record_is_never_overwritten_or_deleted() {
+        let dir = snapshot_test_dir();
+        let path = dir.join(SNAPSHOT_FILE);
+        std::fs::write(&path, b"interrupted old snapshot").unwrap();
+        assert!(read_network_snapshot(&path).is_err());
+        let mut changed = false;
+        assert!(
+            change_with_network_snapshot(&path, &example_snapshot(), || {
+                changed = true;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!changed);
+        assert!(save_network_snapshot(&path, &PersistentSnapshot::default()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"interrupted old snapshot");
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_network_snapshot_replace_preserves_the_previous_record() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = snapshot_test_dir();
+        let path = dir.join(SNAPSHOT_FILE);
+        let old = example_snapshot();
+        save_network_snapshot(&path, &old).unwrap();
+        let mut next = old.clone();
+        next.qos_registry_snapshot = Some(QosRegistrySnapshot::default());
+        {
+            let _lock = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&path)
+                .unwrap();
+            let mut changed = false;
+            assert!(
+                change_with_network_snapshot(&path, &next, || {
+                    changed = true;
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(!changed);
+            assert_eq!(read_network_snapshot(&path).unwrap(), old);
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        }
+        save_network_snapshot(&path, &next).unwrap();
+        assert_eq!(read_network_snapshot(&path).unwrap(), next);
+        save_network_snapshot(&path, &PersistentSnapshot::default()).unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn persisted_network_originals_survive_partial_in_memory_state() {
+        let mut booster = NetworkBooster::new();
+        booster.network_throttling_snapshot = Some(NetworkThrottlingSnapshot::default());
+        booster
+            .nagle_registry_snapshot
+            .insert("new-adapter".into(), NagleRegistrySnapshot::default());
+        let mut saved = example_snapshot();
+        saved.nagle_registry_snapshot.insert(
+            "old-adapter".into(),
+            NagleRegistrySnapshot {
+                tcp_ack_frequency: Some(2),
+                tcp_no_delay: None,
+            },
+        );
+        booster.merge_saved_snapshot(saved.clone());
+        assert_eq!(
+            booster.network_throttling_snapshot,
+            saved.network_throttling_snapshot
+        );
+        assert_eq!(
+            booster.nagle_registry_snapshot["old-adapter"].tcp_ack_frequency,
+            Some(2)
+        );
+        assert!(booster.nagle_registry_snapshot.contains_key("new-adapter"));
+    }
 
     #[test]
     fn parse_first_line_returns_trimmed_first_value() {
