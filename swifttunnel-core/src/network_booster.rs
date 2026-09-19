@@ -73,6 +73,16 @@ fn snapshot_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("SwiftTunnel").join(SNAPSHOT_FILE))
 }
 
+// Only an absent value is a safe "delete on restore" snapshot. Access denial,
+// an unexpected type and other read failures must stop capture before writes.
+fn optional_registry_read<T>(read: std::io::Result<T>) -> Result<Option<T>> {
+    match read {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub struct NetworkBooster {
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
@@ -261,43 +271,32 @@ impl NetworkBooster {
         }
     }
 
-    fn parse_registry_dword(token: &str) -> Option<u32> {
-        let raw = token.trim();
-        if raw.is_empty() {
-            return None;
-        }
-
-        if let Some(hex) = raw.strip_prefix("0x") {
-            return u32::from_str_radix(hex, 16).ok();
-        }
-
-        raw.parse::<u32>().ok()
+    fn query_registry_dword(key_path: &str, value_name: &str) -> Option<u32> {
+        Self::query_registry_dword_checked(key_path, value_name)
+            .ok()
+            .flatten()
     }
 
-    fn query_registry_dword(key_path: &str, value_name: &str) -> Option<u32> {
-        let output = hidden_command("reg")
-            .args(["query", key_path, "/v", value_name])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
+    #[cfg(windows)]
+    fn query_registry_dword_checked(key_path: &str, value_name: &str) -> Result<Option<u32>> {
+        use winreg::RegKey;
+        use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+        let subkey = key_path
+            .strip_prefix("HKLM\\")
+            .ok_or_else(|| anyhow::anyhow!("Unsupported network registry root"))?;
+        let key = optional_registry_read(
+            RegKey::predef(HKEY_LOCAL_MACHINE)
+                .open_subkey_with_flags(subkey, KEY_READ | KEY_WOW64_64KEY),
+        )?;
+        match key {
+            Some(key) => optional_registry_read(key.get_value(value_name)),
+            None => Ok(None),
         }
+    }
 
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        for line in output_str.lines() {
-            if !line.contains(value_name) || !line.contains("REG_DWORD") {
-                continue;
-            }
-
-            if let Some(value_token) = line.split_whitespace().last()
-                && let Some(parsed) = Self::parse_registry_dword(value_token)
-            {
-                return Some(parsed);
-            }
-        }
-
-        None
+    #[cfg(not(windows))]
+    fn query_registry_dword_checked(_key_path: &str, _value_name: &str) -> Result<Option<u32>> {
+        Err(anyhow::anyhow!("Network registry capture requires Windows"))
     }
 
     pub fn effective_network_config(&self, desired: &NetworkConfig) -> NetworkConfig {
@@ -395,7 +394,7 @@ impl NetworkBooster {
                 let _ = hidden_command("reg")
                     .args(["delete", key_path, "/v", value_name, "/f"])
                     .output();
-                if Self::query_registry_dword(key_path, value_name).is_none() {
+                if Self::query_registry_dword_checked(key_path, value_name)?.is_none() {
                     Ok(())
                 } else {
                     Err(anyhow::anyhow!(
@@ -516,11 +515,14 @@ impl NetworkBooster {
 
         if self.qos_registry_snapshot.is_none() {
             self.qos_registry_snapshot = Some(QosRegistrySnapshot {
-                do_not_use_nla: Self::query_registry_dword(TCPIP_QOS_KEY, REG_VALUE_DO_NOT_USE_NLA),
-                disable_user_tos_setting: Self::query_registry_dword(
+                do_not_use_nla: Self::query_registry_dword_checked(
+                    TCPIP_QOS_KEY,
+                    REG_VALUE_DO_NOT_USE_NLA,
+                )?,
+                disable_user_tos_setting: Self::query_registry_dword_checked(
                     TCPIP_PARAMETERS_KEY,
                     REG_VALUE_DISABLE_USER_TOS_SETTING,
-                ),
+                )?,
             });
         }
 
@@ -604,15 +606,19 @@ impl NetworkBooster {
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
                 guid
             );
-            self.nagle_registry_snapshot
-                .entry(guid)
-                .or_insert_with(|| NagleRegistrySnapshot {
-                    tcp_ack_frequency: Self::query_registry_dword(
+            if !self.nagle_registry_snapshot.contains_key(&guid) {
+                let snapshot = NagleRegistrySnapshot {
+                    tcp_ack_frequency: Self::query_registry_dword_checked(
                         &key_path,
                         REG_VALUE_TCP_ACK_FREQUENCY,
-                    ),
-                    tcp_no_delay: Self::query_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY),
-                });
+                    )?,
+                    tcp_no_delay: Self::query_registry_dword_checked(
+                        &key_path,
+                        REG_VALUE_TCP_NO_DELAY,
+                    )?,
+                };
+                self.nagle_registry_snapshot.insert(guid, snapshot);
+            }
 
             // TcpAckFrequency = 1
             Self::set_registry_dword(&key_path, REG_VALUE_TCP_ACK_FREQUENCY, 1)?;
@@ -658,14 +664,14 @@ impl NetworkBooster {
 
         if self.network_throttling_snapshot.is_none() {
             self.network_throttling_snapshot = Some(NetworkThrottlingSnapshot {
-                network_throttling_index: Self::query_registry_dword(
+                network_throttling_index: Self::query_registry_dword_checked(
                     NETWORK_SYSTEM_PROFILE_KEY,
                     REG_VALUE_NETWORK_THROTTLING_INDEX,
-                ),
-                system_responsiveness: Self::query_registry_dword(
+                )?,
+                system_responsiveness: Self::query_registry_dword_checked(
                     NETWORK_SYSTEM_PROFILE_KEY,
                     REG_VALUE_SYSTEM_RESPONSIVENESS,
-                ),
+                )?,
             });
         }
 
@@ -978,14 +984,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_registry_dword_supports_hex_and_decimal() {
-        assert_eq!(NetworkBooster::parse_registry_dword("0x1"), Some(1));
+    fn registry_capture_distinguishes_absent_values_from_failed_reads() {
+        use std::io::{Error, ErrorKind};
         assert_eq!(
-            NetworkBooster::parse_registry_dword("4294967295"),
+            optional_registry_read(Ok(u32::MAX)).unwrap(),
             Some(u32::MAX)
         );
-        assert_eq!(NetworkBooster::parse_registry_dword(""), None);
-        assert_eq!(NetworkBooster::parse_registry_dword("invalid"), None);
+        assert_eq!(
+            optional_registry_read::<u32>(Err(Error::from(ErrorKind::NotFound))).unwrap(),
+            None
+        );
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidData,
+            ErrorKind::Interrupted,
+        ] {
+            assert!(optional_registry_read::<u32>(Err(Error::from(kind))).is_err());
+        }
     }
 
     #[test]
