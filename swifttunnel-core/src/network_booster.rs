@@ -39,6 +39,38 @@ const TCPIP_QOS_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\QoS";
 const TCPIP_PARAMETERS_KEY: &str = r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters";
 const REG_VALUE_DO_NOT_USE_NLA: &str = "Do not use NLA";
 const REG_VALUE_DISABLE_USER_TOS_SETTING: &str = "DisableUserTOSSetting";
+const ADAPTER_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn parse_adapter_guids(output: crate::BoundedCommandOutput) -> Result<Vec<String>> {
+    if output.timed_out {
+        return Err(anyhow::anyhow!("Adapter enumeration timed out"));
+    }
+    if !output.success {
+        return Err(anyhow::anyhow!("Adapter enumeration failed"));
+    }
+    let mut guids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let raw = line
+            .strip_prefix('{')
+            .and_then(|inner| inner.strip_suffix('}'))
+            .unwrap_or(line);
+        let normalized = crate::utils::normalize_guid_ascii_lowercase(raw)
+            .filter(|_| raw.len() == 36)
+            .ok_or_else(|| anyhow::anyhow!("Adapter enumeration returned an invalid GUID"))?;
+        if seen.insert(normalized) {
+            // Keep PowerShell's original representation for existing snapshot
+            // keys. Validate the entire result before returning registry targets.
+            guids.push(line.to_string());
+        }
+    }
+    Ok(guids)
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct NagleRegistrySnapshot {
@@ -344,25 +376,15 @@ impl NetworkBooster {
         Self::parse_first_line(&output.stdout, "No active network interface found")
     }
 
-    pub(crate) fn list_adapter_guids(&self) -> Vec<String> {
-        match hidden_command("powershell")
-            .args([
+    pub(crate) fn list_adapter_guids(&self) -> Result<Vec<String>> {
+        parse_adapter_guids(crate::run_hidden_command_with_timeout(
+            "powershell",
+            &[
                 "-Command",
-                "Get-NetAdapter | Select-Object -ExpandProperty InterfaceGuid",
-            ])
-            .output()
-        {
-            Ok(output) => String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|line| !line.is_empty())
-                .map(ToOwned::to_owned)
-                .collect(),
-            Err(e) => {
-                warn!("Failed to get adapter GUIDs: {}", e);
-                Vec::new()
-            }
-        }
+                "$ErrorActionPreference = 'Stop'; Get-NetAdapter | Select-Object -ExpandProperty InterfaceGuid",
+            ],
+            ADAPTER_QUERY_TIMEOUT,
+        ))
     }
 
     fn query_registry_dword(key_path: &str, value_name: &str) -> Option<u32> {
@@ -399,7 +421,10 @@ impl NetworkBooster {
         let requested = effective.clone();
 
         if requested.disable_nagle {
-            let adapter_guids = self.list_adapter_guids();
+            let adapter_guids = self.list_adapter_guids().unwrap_or_else(|error| {
+                warn!("Cannot verify adapter TCP settings: {error}");
+                Vec::new()
+            });
             effective.disable_nagle = !adapter_guids.is_empty()
                 && adapter_guids.iter().all(|guid| {
                     let key_path = format!(
@@ -690,7 +715,7 @@ impl NetworkBooster {
     fn disable_nagle_algorithm(&mut self) -> Result<()> {
         info!("Disabling Nagle's algorithm for all adapters");
 
-        let adapter_guids = self.list_adapter_guids();
+        let adapter_guids = self.list_adapter_guids()?;
         if adapter_guids.is_empty() {
             return Err(anyhow::anyhow!("no network adapters found"));
         }
@@ -1048,6 +1073,47 @@ impl Default for NetworkBooster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn adapter_query_result(stdout: &str) -> crate::BoundedCommandOutput {
+        crate::BoundedCommandOutput {
+            success: true,
+            timed_out: false,
+            exit_code: Some(0),
+            stdout: stdout.to_string(),
+            stderr: String::new(),
+        }
+    }
+
+    #[test]
+    fn adapter_query_rejects_partial_results_on_failure_or_timeout() {
+        let guid = "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}";
+        let mut failed = adapter_query_result(guid);
+        failed.success = false;
+        failed.exit_code = Some(1);
+        assert!(parse_adapter_guids(failed).is_err());
+        let mut timed_out = adapter_query_result(guid);
+        timed_out.timed_out = true;
+        assert!(parse_adapter_guids(timed_out).is_err());
+    }
+
+    #[test]
+    fn adapter_query_validates_the_entire_result_before_returning_targets() {
+        let guid = "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}";
+        for invalid in ["Wi-Fi", "Warning: failed", "..\\Other", "{bad}", ""] {
+            if invalid.is_empty() {
+                assert!(
+                    parse_adapter_guids(adapter_query_result(invalid))
+                        .unwrap()
+                        .is_empty()
+                );
+                continue;
+            }
+            let output = adapter_query_result(&format!("{guid}\r\n{invalid}"));
+            assert!(parse_adapter_guids(output).is_err());
+        }
+        let output = adapter_query_result(&format!("\r\n {guid} \r\n{}\n", guid.to_lowercase()));
+        assert_eq!(parse_adapter_guids(output).unwrap(), vec![guid]);
+    }
 
     fn snapshot_test_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
