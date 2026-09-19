@@ -2,7 +2,34 @@ use crate::structs::Result;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+static CLEAN_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+fn run_exclusive_clean<T>(
+    in_progress: &AtomicBool,
+    clean: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if in_progress
+        .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        return Err(anyhow::anyhow!(
+            "RAM cleaning is already running. Wait for it to finish."
+        ));
+    }
+    // Own the guard on the worker doing the actual work, so dropping an IPC
+    // future cannot permit a second run while the first is still cleaning.
+    struct Permit<'a>(&'a AtomicBool);
+    impl Drop for Permit<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Release);
+        }
+    }
+    let _permit = Permit(in_progress);
+    clean()
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SystemMemorySnapshot {
@@ -148,7 +175,16 @@ pub fn get_memory_list_stats() -> Option<MemoryListStats> {
     }
 }
 
-pub fn clean_ram<F>(exclude_pids: &[u32], mut on_progress: F) -> Result<RamCleanResult>
+pub fn clean_ram<F>(exclude_pids: &[u32], on_progress: F) -> Result<RamCleanResult>
+where
+    F: FnMut(&str, SystemMemorySnapshot, u32, Option<String>, Option<String>),
+{
+    run_exclusive_clean(&CLEAN_IN_PROGRESS, || {
+        clean_ram_impl(exclude_pids, on_progress)
+    })
+}
+
+fn clean_ram_impl<F>(exclude_pids: &[u32], mut on_progress: F) -> Result<RamCleanResult>
 where
     F: FnMut(&str, SystemMemorySnapshot, u32, Option<String>, Option<String>),
 {
@@ -588,6 +624,52 @@ mod windows_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_clean_is_rejected_without_running_or_queuing_work() {
+        use std::sync::{Arc, mpsc};
+        let busy = Arc::new(AtomicBool::new(false));
+        let worker_busy = busy.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            run_exclusive_clean(&worker_busy, || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let ran = AtomicBool::new(false);
+        let second = run_exclusive_clean(&busy, || {
+            ran.store(true, Ordering::Relaxed);
+            Ok(())
+        });
+        release_tx.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert!(second.is_err());
+        assert!(!ran.load(Ordering::Relaxed));
+        assert!(run_exclusive_clean(&busy, || Ok(())).is_ok());
+    }
+
+    #[test]
+    fn failed_clean_releases_the_guard() {
+        let busy = AtomicBool::new(false);
+        let failed: Result<()> =
+            run_exclusive_clean(&busy, || Err(anyhow::anyhow!("test failure")));
+        assert!(failed.is_err());
+        assert_eq!(run_exclusive_clean(&busy, || Ok(42)).unwrap(), 42);
+    }
+
+    #[test]
+    fn unwinding_clean_releases_the_guard() {
+        let busy = AtomicBool::new(false);
+        let result = std::panic::catch_unwind(|| {
+            let _: Result<()> = run_exclusive_clean(&busy, || panic!("test panic"));
+        });
+        assert!(result.is_err());
+        assert!(run_exclusive_clean(&busy, || Ok(())).is_ok());
+    }
 
     fn proc(pid: u32, name: &str, memory_mb: u64, cpu: f32) -> ProcessSample {
         ProcessSample {
