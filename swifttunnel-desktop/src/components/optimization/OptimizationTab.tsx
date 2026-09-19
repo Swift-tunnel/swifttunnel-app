@@ -143,9 +143,9 @@ function CardBadges({ def }: { def: OptimizationDef }) {
   }
   if (def.requiresReboot) {
     badges.push(
-      <Tooltip key="reboot" content="Takes effect after a restart or sign-out.">
+      <Tooltip key="reboot" content="Restart your PC after applying or reverting this change.">
         <span
-          className="inline-flex h-[18px] w-[18px] items-center justify-center rounded-[5px]"
+          className="inline-flex h-[18px] items-center justify-center gap-1 rounded-[5px] px-1.5 text-[10px] text-text-muted"
           style={{
             backgroundColor: "var(--color-bg-elevated)",
             border: "1px solid var(--color-border-subtle)",
@@ -166,6 +166,7 @@ function CardBadges({ def }: { def: OptimizationDef }) {
               strokeLinejoin="round"
             />
           </svg>
+          Restart PC
         </span>
       </Tooltip>,
     );
@@ -694,6 +695,16 @@ export function OptimizationTab() {
           silently changed meaning when you switched sub-tabs. */}
       <OptimizeAllHeader view={view} />
 
+      <div className="instrument px-4 py-3 text-[12px] leading-relaxed text-text-muted">
+        <p className="font-semibold text-text-primary">Some changes need a PC restart</p>
+        <p>
+          After enabling or reverting an item marked "Restart PC", save your work
+          and choose Start &gt; Power &gt; Restart in Windows. Reopening SwiftTunnel
+          or signing out is not enough for those changes. You do not need to
+          restart for every optimization.
+        </p>
+      </div>
+
       {/* RAM cleaner stays mounted across both sub-tabs. */}
       <MemoryCleaner />
 
@@ -1101,6 +1112,11 @@ function SpeedUpItem({ def }: { def: SpeedUpDef }) {
         <span className="block text-[10.5px] leading-snug text-text-muted">
           {def.description}
         </span>
+        {def.requiresReboot && (
+          <span className="mt-1 block text-[10.5px] font-medium text-text-primary">
+            Restart PC after enabling or reverting
+          </span>
+        )}
       </span>
     </button>
   );
