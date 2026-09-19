@@ -858,9 +858,9 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
   },
   {
     id: "su_qos_bandwidth",
-    name: "Reclaim reserved bandwidth",
+    name: "Disable QoS bandwidth reservations",
     description:
-      "Removes the 20% of bandwidth Windows reserves for QoS by default, freeing it for games and downloads.",
+      "Sets the limit for application-requested QoS bandwidth reservations to zero. This does not add bandwidth and can affect apps that rely on reservations.",
     category: "Network",
     requiresAdmin: true,
     requiresReboot: false,
