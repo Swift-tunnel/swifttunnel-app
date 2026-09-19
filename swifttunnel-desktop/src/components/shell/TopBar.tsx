@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useBoostStore } from "../../stores/boostStore";
+import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useAuthStore } from "../../stores/authStore";
 import { getLatencyColor } from "../../lib/utils";
 import { StatusChip } from "./StatusChip";
@@ -46,9 +47,8 @@ export function TopBar() {
   // call). 4s is plenty for a "is Roblox open yet" signal.
   useEffect(() => {
     void fetchMetrics();
-    const id = window.setInterval(() => void fetchMetrics(), 4000);
-    return () => window.clearInterval(id);
   }, [fetchMetrics]);
+  useFocusAwareInterval(() => void fetchMetrics(), 4000);
 
   // Free-tier budget. The authoritative number only changes when a relay
   // ticket is refreshed (~2 min), so resync on a slow interval and tick the

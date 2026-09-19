@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
+import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useToastStore } from "../../stores/toastStore";
 import {
   boostCloseRoblox,
@@ -321,22 +322,16 @@ export function BoostTab() {
   );
   const validationError = configValidationError(draft);
 
-  useEffect(() => {
-    const id = setInterval(boost.fetchMetrics, 2000);
-    return () => clearInterval(id);
-  }, [boost.fetchMetrics]);
+  useFocusAwareInterval(() => void boost.fetchMetrics(), 2000);
 
   useEffect(() => {
     void boost.fetchSystemMemory();
   }, [boost.fetchSystemMemory]);
 
-  useEffect(() => {
-    const intervalMs = boost.isCleaningRam ? 250 : 1000;
-    const id = setInterval(() => {
-      void boost.fetchSystemMemory();
-    }, intervalMs);
-    return () => clearInterval(id);
-  }, [boost.fetchSystemMemory, boost.isCleaningRam]);
+  useFocusAwareInterval(
+    () => void boost.fetchSystemMemory(),
+    boost.isCleaningRam ? 250 : 1000,
+  );
 
   const applyChanges = useCallback(async () => {
     if (validationError || isApplying || isRestarting) return;

@@ -4,6 +4,7 @@ import { useAuthStore } from "../../stores/authStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useServerStore } from "../../stores/serverStore";
 import { useBoostStore } from "../../stores/boostStore";
+import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useOptimizationStore } from "../../stores/optimizationStore";
 import { useNetworkStore } from "../../stores/networkStore";
@@ -143,9 +144,8 @@ export function HomeTab() {
 
   useEffect(() => {
     void fetchMetrics();
-    const id = window.setInterval(() => void fetchMetrics(), 4000);
-    return () => window.clearInterval(id);
   }, [fetchMetrics]);
+  useFocusAwareInterval(() => void fetchMetrics(), 4000);
 
   useEffect(() => {
     void loadActive();

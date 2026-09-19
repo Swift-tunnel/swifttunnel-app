@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 import { BoostTab } from "../boost/BoostTab";
 import { Button } from "../ui";
 import { useBoostStore } from "../../stores/boostStore";
+import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
 
 /** Optional bundled override: drop an image at `src/assets/games/<id>.<ext>`
@@ -170,9 +171,8 @@ export function GamesTab() {
   // Keep the running indicator current while browsing the library.
   useEffect(() => {
     void fetchMetrics();
-    const id = setInterval(() => void fetchMetrics(), 3000);
-    return () => clearInterval(id);
   }, [fetchMetrics]);
+  useFocusAwareInterval(() => void fetchMetrics(), 3000);
 
   // Deep-link: search can request a game (e.g. "ffs" → Roblox → Optimize).
   useEffect(() => {

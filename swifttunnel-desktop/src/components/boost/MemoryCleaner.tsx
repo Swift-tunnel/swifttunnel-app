@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, Spinner, Chip } from "../ui";
 import { useBoostStore } from "../../stores/boostStore";
+import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { systemRestartAsAdmin } from "../../lib/commands";
 import { notify } from "../../lib/notifications";
 import {
@@ -39,10 +40,11 @@ export function MemoryCleaner() {
   // cleaning), same cadence the boost page used.
   useEffect(() => {
     void fetchSystemMemory();
-    const intervalMs = isCleaning ? 250 : 1000;
-    const id = setInterval(() => void fetchSystemMemory(), intervalMs);
-    return () => clearInterval(id);
   }, [fetchSystemMemory, isCleaning]);
+  useFocusAwareInterval(
+    () => void fetchSystemMemory(),
+    isCleaning ? 250 : 1000,
+  );
 
   async function onRestartAsAdmin() {
     try {
