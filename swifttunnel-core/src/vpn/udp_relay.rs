@@ -132,6 +132,25 @@ const PING_IDLE_THRESHOLD: Duration = Duration::from_secs(2);
 const PING_IDLE_INTERVAL: Duration = Duration::from_millis(250);
 const PING_SAMPLE_WINDOW: usize = 1024;
 
+fn sender_wait_timeout(
+    ping_enabled: bool,
+    last_data_at: Option<Instant>,
+    next_ping_at: Instant,
+    now: Instant,
+) -> Duration {
+    // recv_timeout wakes immediately when a packet arrives. Without active
+    // telemetry, only the bounded stop check needs a timer. An expired ping
+    // deadline otherwise turns an empty channel into a busy loop.
+    if !ping_enabled
+        || !last_data_at.is_some_and(|last| now.duration_since(last) < PING_IDLE_THRESHOLD)
+    {
+        return Duration::from_millis(50);
+    }
+    next_ping_at
+        .saturating_duration_since(now)
+        .min(Duration::from_millis(50))
+}
+
 /// Grace period after relay switch: accept packets from BOTH old and new relay.
 /// This eliminates the inbound blackout while the new relay establishes session.
 const RELAY_SWITCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
@@ -854,9 +873,12 @@ impl UdpRelay {
 
                         // Wait for outbound work, but wake periodically to service ping timing.
                         let now = Instant::now();
-                        let timeout = next_ping_at
-                            .saturating_duration_since(now)
-                            .min(Duration::from_millis(50));
+                        let timeout = sender_wait_timeout(
+                            sender_ping.enabled.load(Ordering::Acquire),
+                            last_data_at,
+                            next_ping_at,
+                            now,
+                        );
 
                         match outbound_rx.recv_timeout(timeout) {
                             Ok(job) => {
@@ -2470,6 +2492,31 @@ impl RelayContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inactive_ping_timer_does_not_spin_the_sender() {
+        let now = Instant::now();
+        let expired = now - Duration::from_secs(1);
+        for (enabled, last_data) in [
+            (false, Some(now)),
+            (true, None),
+            (true, Some(now - PING_IDLE_THRESHOLD)),
+        ] {
+            assert_eq!(
+                sender_wait_timeout(enabled, last_data, expired, now),
+                Duration::from_millis(50),
+                "inactive telemetry must wait for data or the stop check"
+            );
+        }
+        assert_eq!(
+            sender_wait_timeout(true, Some(now), expired, now),
+            Duration::ZERO
+        );
+        assert_eq!(
+            sender_wait_timeout(true, Some(now), now + Duration::from_millis(12), now),
+            Duration::from_millis(12)
+        );
+    }
 
     #[test]
     fn auth_ack_status_round_trips_including_rebinding() {
