@@ -786,10 +786,11 @@ pub fn rotate_log_if_needed(log_path: &std::path::Path) -> std::io::Result<bool>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundedCommandOutput {
     pub success: bool,
-    /// True when the child was still running at the deadline and was killed.
+    /// True when the child or its output streams did not finish by the deadline.
     pub timed_out: bool,
     /// Process exit code. Callers that branch on specific codes need this;
     /// 3010 from a driver install means "reboot required", not failure.
+    /// None if execution or output capture failed or exceeded its deadline.
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
@@ -811,10 +812,7 @@ pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
     args: &[S],
     timeout: Duration,
 ) -> BoundedCommandOutput {
-    use std::io::Read;
-    use std::time::Instant;
-
-    let mut child = match hidden_command(program)
+    let child = match hidden_command(program)
         .args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -831,6 +829,161 @@ pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
             };
         }
     };
+
+    collect_command_output(child, program, timeout)
+}
+
+// Windows pipes are drained by their sole reader using only the number of
+// bytes already available. A descendant can keep a write handle open after
+// its parent exits, so waiting for EOF on reader threads is not bounded.
+#[cfg(windows)]
+fn drain_available_pipe<P: std::io::Read + std::os::windows::io::AsRawHandle>(
+    pipe: &mut Option<P>,
+    output: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, HANDLE};
+    use windows::Win32::System::Pipes::PeekNamedPipe;
+
+    let Some(reader) = pipe.as_mut() else {
+        return Ok(false);
+    };
+    // Bound each pass so a continuously chatty stdout cannot starve stderr or
+    // the deadline check. Cap capture as well, without stopping pipe draining.
+    const PASS_BYTES: usize = 64 * 1024;
+    const CAPTURE_BYTES: usize = 4 * 1024 * 1024;
+    let mut total = 0;
+    let mut truncated = false;
+    while total < PASS_BYTES {
+        let mut available = 0;
+        let peek = unsafe {
+            PeekNamedPipe(
+                HANDLE(reader.as_raw_handle()),
+                None,
+                0,
+                None,
+                Some(&mut available),
+                None,
+            )
+        };
+        if let Err(error) = peek {
+            if error.code() == windows::core::HRESULT::from_win32(ERROR_BROKEN_PIPE.0) {
+                *pipe = None;
+                return Ok(truncated);
+            }
+            return Err(std::io::Error::other(error));
+        }
+        if available == 0 {
+            break;
+        }
+        let mut buffer = [0u8; 8192];
+        let requested = (available as usize)
+            .min(buffer.len())
+            .min(PASS_BYTES - total);
+        let count = reader.read(&mut buffer[..requested])?;
+        if count == 0 {
+            *pipe = None;
+            break;
+        }
+        let captured = count.min(CAPTURE_BYTES.saturating_sub(output.len()));
+        output.extend_from_slice(&buffer[..captured]);
+        truncated |= captured < count;
+        total += count;
+    }
+    Ok(truncated)
+}
+
+#[cfg(windows)]
+fn collect_command_output(
+    mut child: std::process::Child,
+    program: &str,
+    timeout: Duration,
+) -> BoundedCommandOutput {
+    use std::time::Instant;
+
+    let started = Instant::now();
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut status = None;
+    let mut truncated = false;
+    let mut timed_out = false;
+    let mut failure = None;
+    loop {
+        match (
+            drain_available_pipe(&mut stdout_pipe, &mut stdout),
+            drain_available_pipe(&mut stderr_pipe, &mut stderr),
+        ) {
+            (Ok(out), Ok(err)) => truncated |= out || err,
+            (Err(error), _) | (_, Err(error)) => {
+                failure = Some(format!("Failed to read {program} output: {error}"));
+                break;
+            }
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(value) => status = value,
+                Err(error) => {
+                    failure = Some(format!("Failed while waiting for {program}: {error}"));
+                    break;
+                }
+            }
+        }
+        if status.is_some() && stdout_pipe.is_none() && stderr_pipe.is_none() {
+            break;
+        }
+        if started.elapsed() >= timeout {
+            timed_out = true;
+            failure = Some(format!(
+                "{program} did not finish within {:.3}s (process or output streams)",
+                timeout.as_secs_f64()
+            ));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5).min(timeout - started.elapsed().min(timeout)));
+    }
+    if status.is_none() {
+        // Stop only the process we started. Do not wait on descendants or leave
+        // blocked reader threads behind. Closing our pipes releases capture.
+        if let Err(error) = child.kill() {
+            failure = Some(format!(
+                "{}; could not stop {program}: {error}",
+                failure.unwrap_or_default()
+            ));
+        }
+        let _ = child.try_wait();
+    }
+    if truncated {
+        failure = Some(format!(
+            "{}; command output exceeded the 4 MiB per-stream capture limit",
+            failure.unwrap_or_default()
+        ));
+    }
+    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if let Some(message) = &failure {
+        stderr.push_str(&format!("\n{message}"));
+    }
+    BoundedCommandOutput {
+        success: failure.is_none() && status.is_some_and(|value| value.success()),
+        timed_out,
+        exit_code: if failure.is_none() {
+            status.and_then(|value| value.code())
+        } else {
+            None
+        },
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr,
+    }
+}
+
+#[cfg(not(windows))]
+fn collect_command_output(
+    mut child: std::process::Child,
+    program: &str,
+    timeout: Duration,
+) -> BoundedCommandOutput {
+    use std::io::Read;
+    use std::time::Instant;
 
     // Read both pipes on their own threads, starting now.
     //
@@ -858,8 +1011,8 @@ pub fn run_hidden_command_with_timeout<S: AsRef<std::ffi::OsStr>>(
         })
     });
 
-    // Both readers end on their own once the pipe closes, which happens when
-    // the child exits or is killed, so neither join can outlive the child.
+    // Legacy non-Windows collector. Unlike the Windows implementation above,
+    // its EOF waits are not bounded if descendants retain the pipe handles.
     let collect = |handle: Option<std::thread::JoinHandle<String>>| -> String {
         handle.and_then(|h| h.join().ok()).unwrap_or_default()
     };
@@ -1319,6 +1472,128 @@ mod tests {
             elapsed < Duration::from_secs(15),
             "returned after {elapsed:?}; the deadline is what stops the UI hanging"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess fixture, invoked by the inherited-pipe regression"]
+    fn inherited_pipe_holder_fixture() {
+        println!("descendant has stdout");
+        eprintln!("descendant has stderr");
+        std::thread::sleep(Duration::from_secs(5));
+    }
+
+    #[cfg(windows)]
+    fn spawn_inherited_pipe_holder() {
+        let exe = std::env::current_exe().unwrap();
+        let _child = hidden_command(exe.to_str().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "utils::tests::inherited_pipe_holder_fixture",
+                "--nocapture",
+            ])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .unwrap();
+        // Dropping Child does not terminate it. This models a helper that
+        // starts a descendant retaining both inherited output handles.
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess fixture, invoked by the inherited-pipe regression"]
+    fn exited_parent_fixture() {
+        spawn_inherited_pipe_holder();
+        println!("parent ready");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess fixture, invoked by the inherited-pipe regression"]
+    fn hanging_parent_fixture() {
+        spawn_inherited_pipe_holder();
+        println!("parent ready");
+        std::thread::sleep(Duration::from_secs(5));
+    }
+
+    #[cfg(windows)]
+    fn assert_inherited_pipes_respect_deadline(fixture: &str) {
+        let started = std::time::Instant::now();
+        let exe = std::env::current_exe().unwrap();
+        let result = run_hidden_command_with_timeout(
+            exe.to_str().unwrap(),
+            &["--ignored", "--exact", fixture, "--nocapture"],
+            Duration::from_millis(500),
+        );
+        assert!(result.stdout.contains("parent ready"), "{result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "inherited pipe defeated the deadline: {:?}",
+            started.elapsed()
+        );
+        assert!(result.timed_out, "{result:?}");
+        assert!(!result.success);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inherited_pipes_after_parent_exit_respect_deadline() {
+        assert_inherited_pipes_respect_deadline("utils::tests::exited_parent_fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inherited_pipes_after_parent_timeout_respect_deadline() {
+        assert_inherited_pipes_respect_deadline("utils::tests::hanging_parent_fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "subprocess fixture, invoked by the output-limit regression"]
+    fn excessive_output_fixture() {
+        use std::io::Write;
+        let block = [b'x'; 8192];
+        for _ in 0..640 {
+            std::io::stdout().write_all(&block).unwrap();
+            std::io::stderr().write_all(&block).unwrap();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn excessive_output_is_drained_but_reported_as_incomplete() {
+        let exe = std::env::current_exe().unwrap();
+        let result = run_hidden_command_with_timeout(
+            exe.to_str().unwrap(),
+            &[
+                "--ignored",
+                "--exact",
+                "utils::tests::excessive_output_fixture",
+                "--nocapture",
+            ],
+            Duration::from_secs(30),
+        );
+        assert!(!result.timed_out, "must keep draining: {result:?}");
+        assert_eq!(result.exit_code, None);
+        assert!(
+            !result.success,
+            "truncated output cannot be treated as complete"
+        );
+        assert_eq!(result.stdout.len(), 4 * 1024 * 1024);
+        assert!(result.stderr.len() < 4 * 1024 * 1024 + 256);
+        assert!(result.stderr.contains("capture limit"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn completed_helper_preserves_reboot_required_exit_code() {
+        let result =
+            run_hidden_command_with_timeout("cmd", &["/C", "exit /b 3010"], Duration::from_secs(5));
+        assert_eq!(result.exit_code, Some(3010));
+        assert!(!result.success);
+        assert!(!result.timed_out);
     }
 
     #[cfg(windows)]

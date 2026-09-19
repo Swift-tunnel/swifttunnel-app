@@ -20,6 +20,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Memory",
     # VPN/Network features
     "Win32_System_IO",
+    "Win32_System_Pipes",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
