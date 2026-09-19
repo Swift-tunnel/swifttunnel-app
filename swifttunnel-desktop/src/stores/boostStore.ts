@@ -21,7 +21,7 @@ import { notify } from "../lib/notifications";
 
 // Each option is boolean or absent, so at most nine native requests can be
 // pending in this window. Slow samplers must not queue another job every tick.
-const pendingMetrics = new Map<string, Promise<void>>();
+const pendingMetrics = new Map<string, Promise<boolean>>();
 
 interface BoostStore {
   // Metrics
@@ -53,7 +53,8 @@ interface BoostStore {
   cpuCount: number;
 
   // Actions
-  fetchMetrics: (options?: BoostMetricsOptions) => Promise<void>;
+  /** False means the displayed sample is stale; never use it to authorize work. */
+  fetchMetrics: (options?: BoostMetricsOptions) => Promise<boolean>;
   fetchSystemMemory: () => Promise<void>;
   fetchSystemInfo: () => Promise<void>;
   updateConfig: (configJson: string) => Promise<Config>;
@@ -105,10 +106,12 @@ export const useBoostStore = create<BoostStore>((set) => ({
           robloxForeground: m.roblox_foreground,
           processId: m.process_id,
         });
+        return true;
       } catch (error) {
         reportError("Failed to fetch performance metrics", error, {
           dedupeKey: "boost-fetch-metrics",
         });
+        return false;
       }
     })().finally(() => {
       pendingMetrics.delete(key);

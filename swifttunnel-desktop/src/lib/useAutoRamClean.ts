@@ -43,13 +43,13 @@ export function useAutoRamClean() {
       try {
         // Confirm Roblox is actually in front (not a rotate-on-exit re-read,
         // which fires when its window has already closed).
-        await fetchMetrics();
-        if (disposed || !useBoostStore.getState().robloxForeground) return;
-        lastClean = now;
+        const fresh = await fetchMetrics();
+        if (!fresh || disposed || !autoCleanRef.current || !useBoostStore.getState().robloxForeground) return;
+        lastClean = Date.now();
         const result = await boostCleanRam();
         // No toast when nothing was freed - e.g. diskless internet-cafe PCs,
         // where the backend deliberately skips cleaning to avoid freezing.
-        if (!disposed && result.freed_mb > 0) await showRamOverlay(result.freed_mb);
+        if (!disposed && autoCleanRef.current && result.freed_mb > 0) await showRamOverlay(result.freed_mb);
       } catch {
         // best-effort; never surface an error in-game
       } finally {

@@ -45,6 +45,14 @@ describe("stores/boostStore", () => {
 
   const metrics = { fps: 60, cpu_usage: 10, ram_usage: 100, ram_total: 1000, ping: 20, roblox_running: true, roblox_foreground: true, process_id: 123 };
 
+  it("distinguishes a fresh metrics result from a retained stale sample", async () => {
+    boostGetMetrics.mockResolvedValueOnce(metrics).mockRejectedValueOnce(new Error("sampler failed"));
+    const store = await loadStore();
+    await expect(store.getState().fetchMetrics()).resolves.toBe(true);
+    await expect(store.getState().fetchMetrics()).resolves.toBe(false);
+    expect(store.getState().robloxForeground).toBe(true);
+  });
+
   it("shares unfinished metrics work across repeated component polls", async () => {
     let release!: (value: typeof metrics) => void;
     boostGetMetrics.mockReturnValue(new Promise(resolve => { release = resolve; }));
