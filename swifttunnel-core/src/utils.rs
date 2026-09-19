@@ -193,8 +193,7 @@ pub fn normalize_guid_ascii_lowercase(value: &str) -> Option<String> {
     }
 
     // Fallback: raw GUID without braces somewhere in the string.
-    for start in 0..=bytes.len().saturating_sub(36) {
-        let candidate = &bytes[start..start + 36];
+    for (start, candidate) in bytes.windows(36).enumerate() {
         if is_guid_ascii(candidate) {
             return trimmed
                 .get(start..start + 36)
@@ -1179,6 +1178,21 @@ mod tests {
     fn test_with_retry_sync_success() {
         let result: Result<i32, &str> = with_retry_sync(3, || Ok(42));
         assert_eq!(result, Ok(42));
+    }
+
+    #[test]
+    fn test_normalize_guid_rejects_short_or_malformed_adapter_preferences() {
+        for input in ["", " ", "auto", "Wi-Fi", "{}", "{bad}", "é", "无线网络"] {
+            assert_eq!(normalize_guid_ascii_lowercase(input), None, "{input:?}");
+        }
+        let valid = "12345678-1234-1234-1234-1234567890AB";
+        for end in 1..valid.len() {
+            assert_eq!(normalize_guid_ascii_lowercase(&valid[..end]), None);
+        }
+        assert_eq!(
+            normalize_guid_ascii_lowercase(&format!("无线 {valid} end")),
+            Some(valid.to_ascii_lowercase())
+        );
     }
 
     #[test]

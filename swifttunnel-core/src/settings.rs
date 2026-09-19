@@ -583,6 +583,28 @@ mod tests {
     }
 
     #[test]
+    fn test_settings_sanitize_discards_malformed_adapter_preferences() {
+        let mut settings = AppSettings {
+            preferred_physical_adapter_guid: Some("Wi-Fi".to_string()),
+            network_binding_overrides: HashMap::from([
+                ("bad".to_string(), "auto".to_string()),
+                (
+                    "good".to_string(),
+                    "{AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE}".to_string(),
+                ),
+            ]),
+            ..Default::default()
+        };
+        settings.sanitize_in_place();
+        assert!(settings.preferred_physical_adapter_guid.is_none());
+        assert_eq!(settings.network_binding_overrides.len(), 1);
+        assert_eq!(
+            settings.network_binding_overrides["good"],
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        );
+    }
+
+    #[test]
     fn test_settings_sanitize_normalizes_preferred_physical_adapter_guid() {
         let mut settings = AppSettings {
             preferred_physical_adapter_guid: Some(
