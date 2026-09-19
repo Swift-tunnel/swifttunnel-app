@@ -151,6 +151,21 @@ fn sender_wait_timeout(
         .min(Duration::from_millis(50))
 }
 
+fn note_sender_activity(
+    kind: OutboundJobKind,
+    addr: SocketAddr,
+    now: Instant,
+    last_relay_addr: &mut Option<SocketAddr>,
+    last_data_at: &mut Option<Instant>,
+) {
+    // RTT reports and DNS requests are control traffic. Counting them as
+    // game activity lets each pong keep its own 20 Hz probe loop alive.
+    if kind == OutboundJobKind::Data {
+        *last_relay_addr = Some(addr);
+        *last_data_at = Some(now);
+    }
+}
+
 /// Grace period after relay switch: accept packets from BOTH old and new relay.
 /// This eliminates the inbound blackout while the new relay establishes session.
 const RELAY_SWITCH_GRACE_PERIOD: Duration = Duration::from_secs(2);
@@ -903,8 +918,13 @@ impl UdpRelay {
                                     continue;
                                 }
 
-                                last_relay_addr = Some(job.addr);
-                                last_data_at = Some(Instant::now());
+                                note_sender_activity(
+                                    job.kind,
+                                    job.addr,
+                                    Instant::now(),
+                                    &mut last_relay_addr,
+                                    &mut last_data_at,
+                                );
 
                                 // Send and release buffer slot.
                                 let bytes = unsafe { sender_pool.buffer(job.buf_idx) };
@@ -2516,6 +2536,45 @@ mod tests {
             sender_wait_timeout(true, Some(now), now + Duration::from_millis(12), now),
             Duration::from_millis(12)
         );
+    }
+
+    #[test]
+    fn control_traffic_cannot_keep_game_ping_telemetry_active() {
+        let now = Instant::now();
+        let game_relay = "127.0.0.1:10001".parse().unwrap();
+        let control_relay = "127.0.0.1:10002".parse().unwrap();
+        let mut last_relay = None;
+        let mut last_data = None;
+        note_sender_activity(
+            OutboundJobKind::Data,
+            game_relay,
+            now,
+            &mut last_relay,
+            &mut last_data,
+        );
+        let later = now + PING_IDLE_THRESHOLD + Duration::from_millis(1);
+        note_sender_activity(
+            OutboundJobKind::Control,
+            control_relay,
+            later,
+            &mut last_relay,
+            &mut last_data,
+        );
+        assert_eq!(last_relay, Some(game_relay));
+        assert_eq!(last_data, Some(now));
+        assert_eq!(
+            sender_wait_timeout(true, last_data, now, later),
+            Duration::from_millis(50)
+        );
+        note_sender_activity(
+            OutboundJobKind::Data,
+            control_relay,
+            later,
+            &mut last_relay,
+            &mut last_data,
+        );
+        assert_eq!(last_relay, Some(control_relay));
+        assert_eq!(last_data, Some(later));
     }
 
     #[test]
