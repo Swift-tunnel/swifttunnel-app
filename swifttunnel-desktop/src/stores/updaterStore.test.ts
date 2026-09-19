@@ -44,6 +44,18 @@ async function loadStore() {
   return (await import("./updaterStore")).useUpdaterStore;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+const available = {
+  current_version: "1.0.0", available_version: "1.5.1",
+  release_tag: "v1.5.1", release_notes: "Test release", channel: "Stable",
+};
+
 describe("stores/updaterStore", () => {
   beforeEach(() => {
     mockSettingsStore.settings.update_channel = "Stable";
@@ -73,6 +85,66 @@ describe("stores/updaterStore", () => {
     });
 
     vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+  });
+
+  it("does not start duplicate native installs", async () => {
+    updaterCheckChannel.mockResolvedValue(available);
+    const install = deferred<{ reboot_required: boolean }>();
+    updaterInstallChannel.mockReturnValue(install.promise);
+    const store = await loadStore();
+    await store.getState().checkForUpdates();
+    const first = store.getState().installUpdate();
+    const second = store.getState().installUpdate();
+    install.resolve({ reboot_required: false });
+    await Promise.all([first, second]);
+    expect(updaterInstallChannel).toHaveBeenCalledOnce();
+  });
+
+  it("keeps installation progress when a background check is requested", async () => {
+    updaterCheckChannel.mockResolvedValue(available);
+    const install = deferred<{ reboot_required: boolean }>();
+    updaterInstallChannel.mockReturnValue(install.promise);
+    const store = await loadStore();
+    await store.getState().checkForUpdates();
+    const installing = store.getState().installUpdate();
+    await store.getState().checkForUpdates();
+    const status = store.getState().status;
+    install.resolve({ reboot_required: false });
+    await installing;
+    expect(status).toBe("installing");
+    expect(updaterCheckChannel).toHaveBeenCalledOnce();
+  });
+
+  it.each(["success", "failure"])("ignores an older check's %s after installation starts", async (outcome) => {
+    updaterCheckChannel.mockResolvedValueOnce(available);
+    const install = deferred<{ reboot_required: boolean }>();
+    updaterInstallChannel.mockReturnValue(install.promise);
+    const store = await loadStore();
+    await store.getState().checkForUpdates();
+    const check = deferred<typeof available>();
+    updaterCheckChannel.mockReturnValueOnce(check.promise);
+    const checking = store.getState().checkForUpdates();
+    const installing = store.getState().installUpdate();
+    if (outcome === "success") check.resolve(available);
+    else check.reject(new Error("late check failure"));
+    await checking;
+    const status = store.getState().status;
+    install.resolve({ reboot_required: false });
+    await installing;
+    expect(status).toBe("installing");
+  });
+
+  it("retains the newest check when checks finish out of order", async () => {
+    const old = deferred<typeof available>();
+    updaterCheckChannel.mockReturnValueOnce(old.promise).mockResolvedValueOnce({
+      ...available, available_version: "1.5.2", release_tag: "v1.5.2",
+    });
+    const store = await loadStore();
+    const first = store.getState().checkForUpdates();
+    await store.getState().checkForUpdates();
+    old.resolve(available);
+    await first;
+    expect(store.getState().availableVersion).toBe("1.5.2");
   });
 
   it("marks up_to_date when no update is available and persists last_check", async () => {

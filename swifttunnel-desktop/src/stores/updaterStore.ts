@@ -21,6 +21,7 @@ interface PendingUpdate {
 }
 
 let pendingUpdate: PendingUpdate | null = null;
+let updaterGeneration = 0;
 const WHATS_NEW_DISMISSED_KEY = "swifttunnel:whats-new-dismissed-release";
 
 function releaseId(version: string, tag: string | null) {
@@ -66,7 +67,7 @@ interface UpdaterStore {
   handleUpdaterDone: () => void;
 }
 
-export const useUpdaterStore = create<UpdaterStore>((set) => ({
+export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
   status: "idle",
   currentVersion: __APP_VERSION__,
   availableVersion: null,
@@ -78,12 +79,15 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
   error: null,
 
   checkForUpdates: async (manual = false, autoInstall = false) => {
+    if (get().status === "installing") return;
+    const generation = ++updaterGeneration;
     try {
       set({ status: "checking", error: null });
 
       const settingsStore = useSettingsStore.getState();
       const channel = settingsStore.settings.update_channel;
       const update = await updaterCheckChannel(channel);
+      if (generation !== updaterGeneration) return;
       const checkedAt = Math.floor(Date.now() / 1000);
 
       settingsStore.update({
@@ -139,6 +143,7 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
           "SwiftTunnel Update",
           `Updating to v${update.available_version}, restarting...`,
         );
+        if (generation !== updaterGeneration) return;
         await useUpdaterStore.getState().installUpdate();
         return;
       }
@@ -151,6 +156,7 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
         return;
       }
     } catch (e) {
+      if (generation !== updaterGeneration) return;
       set({
         status: "error",
         error: String(e),
@@ -159,7 +165,10 @@ export const useUpdaterStore = create<UpdaterStore>((set) => ({
   },
 
   installUpdate: async () => {
-    if (!pendingUpdate) return;
+    if (!pendingUpdate || get().status === "installing") return;
+    // Installing the offered version supersedes checks already in flight.
+    // Keep its channel/version fixed and prevent a second native install.
+    ++updaterGeneration;
 
     try {
       rememberDismissedRelease(pendingUpdate.version, pendingUpdate.releaseTag);
