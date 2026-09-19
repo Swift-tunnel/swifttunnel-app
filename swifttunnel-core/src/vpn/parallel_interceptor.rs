@@ -4498,6 +4498,9 @@ impl ParallelInterceptor {
             "route".into(),
             "prefix=::/0".into(),
             format!("interface={if_index}"),
+            // Without an explicit store, netsh also deletes saved routes.
+            // Temporary tunnel steering must never erase persistent config.
+            "store=active".into(),
         ]
     }
 
@@ -9838,6 +9841,7 @@ mod tests {
                 "route",
                 "prefix=::/0",
                 "interface=12",
+                "store=active",
             ]
         );
     }
