@@ -297,9 +297,9 @@ impl Ipv6Marker {
             }
             DisableMethod::BindingDisable => match self.originally_enabled {
                 Some(false) => {
-                    "Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false 2>$null".to_string()
+                    "Disable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -Confirm:$false -ErrorAction Stop".to_string()
                 }
-                _ => "Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 2>$null"
+                _ => "Enable-NetAdapterBinding -Name $adapter -ComponentId ms_tcpip6 -ErrorAction Stop"
                     .to_string(),
             },
         }
@@ -895,6 +895,87 @@ pub fn recover_ipv6_on_startup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn recorded_ipv6_legacy_binding_errors_cannot_report_recovery_success() {
+        // Shadow the real cmdlets. This exercises PowerShell error semantics
+        // without querying or changing any adapter on the test machine.
+        let mocks = r#"
+            function Enable-NetAdapterBinding {
+                [CmdletBinding()]
+                param([string]$Name, [string]$ComponentId)
+                Write-Error 'synthetic binding failure'
+            }
+            function Disable-NetAdapterBinding {
+                [CmdletBinding(SupportsShouldProcess=$true)]
+                param([string]$Name, [string]$ComponentId)
+                Write-Error 'synthetic binding failure'
+            }
+        "#;
+        for originally_enabled in [Some(true), Some(false), None] {
+            let marker = Ipv6Marker {
+                adapter_name: "Synthetic adapter".into(),
+                originally_enabled,
+                method: DisableMethod::BindingDisable,
+            };
+            let script = format!("{mocks}\n{}", build_restore_script(&marker));
+            let output = crate::run_hidden_command_with_timeout(
+                "powershell",
+                &["-NoProfile", "-NonInteractive", "-Command", &script],
+                Duration::from_secs(30),
+            );
+            assert!(!output.timed_out, "synthetic recovery timed out");
+            assert!(
+                !output.success,
+                "failed binding restore reported success: {originally_enabled:?}"
+            );
+            assert!(!output.stdout.contains("IPv6 restored"));
+            assert!(output.stderr.contains("synthetic binding failure"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recorded_ipv6_legacy_binding_success_preserves_requested_state() {
+        let mocks = r#"
+            function Enable-NetAdapterBinding {
+                [CmdletBinding()]
+                param([string]$Name, [string]$ComponentId)
+                Write-Output 'binding enabled'
+            }
+            function Disable-NetAdapterBinding {
+                [CmdletBinding(SupportsShouldProcess=$true)]
+                param([string]$Name, [string]$ComponentId)
+                Write-Output 'binding disabled'
+            }
+        "#;
+        for originally_enabled in [Some(true), Some(false), None] {
+            let marker = Ipv6Marker {
+                adapter_name: "Synthetic adapter".into(),
+                originally_enabled,
+                method: DisableMethod::BindingDisable,
+            };
+            let script = format!("{mocks}\n{}", build_restore_script(&marker));
+            let output = crate::run_hidden_command_with_timeout(
+                "powershell",
+                &["-NoProfile", "-NonInteractive", "-Command", &script],
+                Duration::from_secs(30),
+            );
+            assert!(
+                output.success,
+                "synthetic restore failed: {}",
+                output.stderr
+            );
+            assert!(output.stdout.contains("IPv6 restored"));
+            let expected = if originally_enabled == Some(false) {
+                "binding disabled"
+            } else {
+                "binding enabled"
+            };
+            assert!(output.stdout.contains(expected));
+        }
+    }
 
     #[test]
     fn recorded_ipv6_block_requires_a_saved_record_before_installing() {
