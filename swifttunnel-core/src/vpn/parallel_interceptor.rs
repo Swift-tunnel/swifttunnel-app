@@ -56,8 +56,9 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    delete_ipv6_marker, has_ipv6_binding_native, install_recorded_ipv6_block,
-    remove_winpkfilter_ipv6_block_filters, restore_ipv6_from_marker, write_ipv6_marker_winpkfilter,
+    delete_ipv6_marker, finish_recorded_ipv6_restore, has_ipv6_binding_native,
+    install_recorded_ipv6_block, remove_winpkfilter_ipv6_block_filters, restore_ipv6_from_marker,
+    write_ipv6_marker_winpkfilter,
 };
 #[cfg(test)]
 use super::process_cache::DNS_PORT;
@@ -4543,7 +4544,7 @@ impl ParallelInterceptor {
 
     /// Re-enable IPv6 router discovery so the default route is re-learned via RA.
     #[cfg(windows)]
-    fn restore_ipv6_default_route(if_index: u32) {
+    fn restore_ipv6_default_route(if_index: u32) -> bool {
         let restored = crate::run_hidden_command_with_timeout(
             "netsh",
             &Self::ipv6_router_discovery_args(if_index, true),
@@ -4557,10 +4558,13 @@ impl ParallelInterceptor {
                 restored.stderr.trim()
             );
         }
+        restored.success
     }
 
     #[cfg(not(windows))]
-    fn restore_ipv6_default_route(_if_index: u32) {}
+    fn restore_ipv6_default_route(_if_index: u32) -> bool {
+        false
+    }
 
     /// Block public IPv6 egress while the IPv4-only tunnel is active.
     ///
@@ -4600,40 +4604,26 @@ impl ParallelInterceptor {
             }
         );
 
-        match restore_ipv6_from_marker() {
-            Some(true) => {
-                log::info!("IPv6 restored on {}", friendly_name);
-                delete_ipv6_marker();
-            }
-            Some(false) => {
-                log::warn!("Failed to restore IPv6 state - will retry on next launch if needed");
-            }
-            None => {
-                // No marker found — likely a marker-write race or manual
-                // tampering. Best-effort: remove SwiftTunnel's IPv6 drop
-                // entries anyway (idempotent, and entries owned by other
-                // WinpkFilter consumers are preserved).
-                if remove_winpkfilter_ipv6_block_filters().is_ok() {
-                    log::info!(
-                        "WinpkFilter IPv6 block filters removed on {}",
-                        friendly_name
-                    );
-                    delete_ipv6_marker();
-                } else {
-                    log::warn!(
-                        "Failed to clear WinpkFilter IPv6 block filters — restart SwiftTunnel to retry cleanup if connectivity is affected"
-                    );
-                }
-            }
+        let if_index = self.physical_adapter_if_index;
+        let restored = finish_recorded_ipv6_restore(
+            &mut self.ipv6_was_disabled,
+            || {
+                restore_ipv6_from_marker().unwrap_or_else(|| {
+                    // Legacy missing-marker fallback only removes our filter shapes.
+                    remove_winpkfilter_ipv6_block_filters().is_ok()
+                })
+            },
+            || if_index.is_none_or(Self::restore_ipv6_default_route),
+            delete_ipv6_marker,
+        );
+        if restored {
+            log::info!("IPv6 cleanup completed on {}", friendly_name);
+        } else {
+            log::warn!(
+                "IPv6 cleanup incomplete on {}; recovery remains pending",
+                friendly_name
+            );
         }
-
-        // Re-enable IPv6 router discovery so the default route is re-learned (we
-        // steered it off in disable_ipv6 to force instant IPv4 fallback).
-        if let Some(if_index) = self.physical_adapter_if_index {
-            Self::restore_ipv6_default_route(if_index);
-        }
-
-        self.ipv6_was_disabled = false;
     }
 
     /// Start parallel interception

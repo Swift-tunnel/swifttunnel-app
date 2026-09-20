@@ -503,15 +503,40 @@ pub(crate) fn install_recorded_ipv6_block(
     match install() {
         Ok(()) => Ok(()),
         Err(error) => {
-            if let Err(cleanup_error) = cleanup() {
-                log::warn!("IPv6 filter cleanup after install failure: {cleanup_error}");
+            match cleanup() {
+                Ok(()) => {
+                    clear_record();
+                    *restore_pending = false;
+                }
+                Err(cleanup_error) => {
+                    return Err(format!(
+                        "IPv6 filter install failed: {error}. Cleanup also failed: {cleanup_error}. Recovery remains pending"
+                    ));
+                }
             }
-            clear_record();
-            *restore_pending = false;
             Err(format!(
                 "Failed to install WinpkFilter IPv6 block filters: {error}"
             ))
         }
+    }
+}
+
+pub(crate) fn finish_recorded_ipv6_restore(
+    restore_pending: &mut bool,
+    restore_filters: impl FnOnce() -> bool,
+    restore_route: impl FnOnce() -> bool,
+    clear_record: impl FnOnce(),
+) -> bool {
+    // Attempt both, even if one fails. Retain retry state until both complete.
+    let filters_restored = restore_filters();
+    let route_restored = restore_route();
+    if filters_restored && route_restored {
+        clear_record();
+        *restore_pending = false;
+        true
+    } else {
+        *restore_pending = true;
+        false
     }
 }
 
@@ -888,6 +913,82 @@ mod tests {
         assert!(result.is_err());
         assert!(!installed.get());
         assert!(!pending);
+    }
+
+    #[test]
+    fn recorded_ipv6_block_keeps_recovery_when_install_cleanup_fails() {
+        let mut pending = false;
+        let cleared = std::cell::Cell::new(false);
+        assert!(
+            install_recorded_ipv6_block(
+                &mut pending,
+                || Ok(()),
+                || Err("partial filter install".into()),
+                || Err("driver unavailable".into()),
+                || cleared.set(true),
+            )
+            .is_err()
+        );
+        assert!(pending, "failed cleanup must remain retryable");
+        assert!(
+            !cleared.get(),
+            "failed cleanup must preserve its recovery record"
+        );
+    }
+
+    #[test]
+    fn recorded_ipv6_block_clears_record_after_successful_install_cleanup() {
+        let mut pending = false;
+        let cleared = std::cell::Cell::new(false);
+        assert!(
+            install_recorded_ipv6_block(
+                &mut pending,
+                || Ok(()),
+                || Err("partial filter install".into()),
+                || Ok(()),
+                || cleared.set(true),
+            )
+            .is_err()
+        );
+        assert!(!pending);
+        assert!(cleared.get());
+    }
+
+    #[test]
+    fn recorded_ipv6_restore_retains_failed_steps_until_successful_retry() {
+        for (filters_ok, route_ok) in [(false, false), (false, true), (true, false)] {
+            let mut pending = true;
+            let steps = std::cell::RefCell::new(Vec::new());
+            assert!(!finish_recorded_ipv6_restore(
+                &mut pending,
+                || {
+                    steps.borrow_mut().push("filters");
+                    filters_ok
+                },
+                || {
+                    steps.borrow_mut().push("route");
+                    route_ok
+                },
+                || steps.borrow_mut().push("clear"),
+            ));
+            assert!(pending);
+            assert_eq!(*steps.borrow(), ["filters", "route"]);
+            steps.borrow_mut().clear();
+            assert!(finish_recorded_ipv6_restore(
+                &mut pending,
+                || {
+                    steps.borrow_mut().push("filters");
+                    true
+                },
+                || {
+                    steps.borrow_mut().push("route");
+                    true
+                },
+                || steps.borrow_mut().push("clear"),
+            ));
+            assert!(!pending);
+            assert_eq!(*steps.borrow(), ["filters", "route", "clear"]);
+        }
     }
 
     #[test]
