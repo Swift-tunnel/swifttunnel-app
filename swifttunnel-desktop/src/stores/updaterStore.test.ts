@@ -35,7 +35,7 @@ vi.mock("../lib/notifications", () => ({
 
 vi.mock("./settingsStore", () => ({
   useSettingsStore: {
-    getState: () => mockSettingsStore,
+    getState: () => ({ ...mockSettingsStore }),
   },
 }));
 
@@ -98,6 +98,23 @@ describe("stores/updaterStore", () => {
     install.resolve({ reboot_required: false });
     await Promise.all([first, second]);
     expect(updaterInstallChannel).toHaveBeenCalledOnce();
+  });
+
+  it("preserves preferences changed while an update check is pending", async () => {
+    const check = deferred<typeof available>();
+    updaterCheckChannel.mockReturnValue(check.promise);
+    const store = await loadStore();
+    const checking = store.getState().checkForUpdates();
+    // Zustand replaces snapshots when settings are edited during the request.
+    mockSettingsStore.settings = {
+      ...mockSettingsStore.settings,
+      update_settings: { auto_check: false, last_check: null },
+    };
+    check.resolve(available);
+    await checking;
+    expect(mockSettingsStore.update).toHaveBeenCalledWith({
+      update_settings: { auto_check: false, last_check: 1_700_000_000 },
+    });
   });
 
   it("keeps installation progress when a background check is requested", async () => {

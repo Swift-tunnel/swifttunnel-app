@@ -90,13 +90,16 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       if (generation !== updaterGeneration) return;
       const checkedAt = Math.floor(Date.now() / 1000);
 
-      settingsStore.update({
+      // The request can outlive a preference edit. Only add the timestamp to
+      // the current settings, not the snapshot captured before the request.
+      const currentSettingsStore = useSettingsStore.getState();
+      currentSettingsStore.update({
         update_settings: {
-          ...settingsStore.settings.update_settings,
+          ...currentSettingsStore.settings.update_settings,
           last_check: checkedAt,
         },
       });
-      void settingsStore.save();
+      void currentSettingsStore.save();
 
       if (!update.available_version) {
         pendingUpdate = null;
