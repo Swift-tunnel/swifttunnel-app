@@ -56,8 +56,8 @@ use serde::Serialize;
 use crate::process_names::process_name_matches_any_tunnel_app;
 
 use super::ipv6_recovery::{
-    delete_ipv6_marker, has_ipv6_binding_native, remove_winpkfilter_ipv6_block_filters,
-    restore_ipv6_from_marker, write_ipv6_marker_winpkfilter,
+    delete_ipv6_marker, has_ipv6_binding_native, install_recorded_ipv6_block,
+    remove_winpkfilter_ipv6_block_filters, restore_ipv6_from_marker, write_ipv6_marker_winpkfilter,
 };
 #[cfg(test)]
 use super::process_cache::DNS_PORT;
@@ -4429,10 +4429,13 @@ impl ParallelInterceptor {
         // because removal only touches entries matching SwiftTunnel's filter
         // signature. Stale entries from a previous session are replaced by the
         // install merge itself.
-        write_ipv6_marker_winpkfilter(&friendly_name);
-        self.ipv6_was_disabled = true;
-
-        match installer(&physical_name) {
+        match install_recorded_ipv6_block(
+            &mut self.ipv6_was_disabled,
+            || write_ipv6_marker_winpkfilter(&friendly_name),
+            || installer(&physical_name),
+            remove_winpkfilter_ipv6_block_filters,
+            delete_ipv6_marker,
+        ) {
             Ok(()) => {
                 log::info!(
                     "Public IPv6 blocked on {} via WinpkFilter static filters — game traffic will use IPv4",
@@ -4452,19 +4455,11 @@ impl ParallelInterceptor {
                     friendly_name,
                     e
                 );
-                if let Err(cleanup_error) = remove_winpkfilter_ipv6_block_filters() {
-                    log::debug!(
-                        "Failed to clean WinpkFilter IPv6 filters after install error: {}",
-                        cleanup_error
-                    );
-                }
-                delete_ipv6_marker();
-                self.ipv6_was_disabled = false;
                 log::warn!(
                     "Refusing to continue without IPv6 outbound block. IPv6 traffic may bypass VPN."
                 );
                 Err(VpnError::SplitTunnelSetupFailed(format!(
-                    "Failed to install WinpkFilter IPv6 block filters. SwiftTunnel is IPv4-only; leaving IPv6 unblocked could let game traffic bypass the tunnel. Details: {e}"
+                    "Could not safely prepare the IPv6 block. SwiftTunnel is IPv4-only, so the connection was stopped. Details: {e}"
                 )))
             }
         }

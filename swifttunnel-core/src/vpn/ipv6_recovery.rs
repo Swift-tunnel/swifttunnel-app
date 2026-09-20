@@ -468,7 +468,9 @@ pub fn write_ipv6_marker(adapter_name: &str) {
         originally_enabled: query_ipv6_binding_enabled(adapter_name),
         method: DisableMethod::BindingDisable,
     };
-    write_marker(&marker);
+    if let Err(error) = write_marker(&marker) {
+        log::warn!("Failed to save IPv6 recovery record: {error}");
+    }
 }
 
 /// Write a marker indicating the firewall-rule method was used to block IPv6.
@@ -476,36 +478,95 @@ pub fn write_ipv6_marker(adapter_name: &str) {
 /// `netsh advfirewall firewall delete rule` to clean up.
 pub fn write_ipv6_marker_firewall(adapter_name: &str) {
     let marker = Ipv6Marker::for_firewall_rule(adapter_name.trim().to_string());
-    write_marker(&marker);
+    if let Err(error) = write_marker(&marker) {
+        log::warn!("Failed to save IPv6 recovery record: {error}");
+    }
 }
 
 /// Write a marker indicating WinpkFilter static filters were used to block
 /// IPv6. Used by the modern disable path so a crash-recovery pass can clear
 /// the driver filter table.
-pub fn write_ipv6_marker_winpkfilter(adapter_name: &str) {
+pub fn write_ipv6_marker_winpkfilter(adapter_name: &str) -> std::io::Result<()> {
     let marker = Ipv6Marker::for_winpkfilter_static_filter(adapter_name.trim().to_string());
-    write_marker(&marker);
+    write_marker(&marker)
 }
 
-fn write_marker(marker: &Ipv6Marker) {
-    if let Some(marker_path) = get_marker_path() {
-        if let Some(parent) = marker_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-
-        let payload = serde_json::to_vec(marker)
-            .unwrap_or_else(|_| marker.adapter_name().as_bytes().to_vec());
-
-        if let Err(e) = fs::write(&marker_path, payload) {
-            log::warn!("Failed to write IPv6 marker file: {}", e);
-        } else {
-            log::debug!(
-                "IPv6 marker written for adapter: {} (method: {:?})",
-                marker.adapter_name(),
-                marker.method()
-            );
+pub(crate) fn install_recorded_ipv6_block(
+    restore_pending: &mut bool,
+    write_record: impl FnOnce() -> std::io::Result<()>,
+    install: impl FnOnce() -> Result<(), String>,
+    cleanup: impl FnOnce() -> Result<(), String>,
+    clear_record: impl FnOnce(),
+) -> Result<(), String> {
+    write_record().map_err(|error| format!("Cannot save IPv6 recovery record: {error}"))?;
+    *restore_pending = true;
+    match install() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(cleanup_error) = cleanup() {
+                log::warn!("IPv6 filter cleanup after install failure: {cleanup_error}");
+            }
+            clear_record();
+            *restore_pending = false;
+            Err(format!(
+                "Failed to install WinpkFilter IPv6 block filters: {error}"
+            ))
         }
     }
+}
+
+fn write_marker(marker: &Ipv6Marker) -> std::io::Result<()> {
+    let path = get_marker_path()
+        .ok_or_else(|| std::io::Error::other("IPv6 recovery directory is unavailable"))?;
+    write_marker_at(&path, marker)
+}
+
+fn write_marker_at(path: &std::path::Path, marker: &Ipv6Marker) -> std::io::Result<()> {
+    use std::io::Write;
+    if marker.adapter_name().trim().is_empty() {
+        return Err(std::io::Error::other(
+            "IPv6 recovery record requires an adapter name",
+        ));
+    }
+    let payload = serde_json::to_vec(marker).map_err(std::io::Error::other)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("No recovery directory"))?;
+    fs::create_dir_all(parent)?;
+    let staged = parent.join(format!(".ipv6-{:032x}.tmp", rand::random::<u128>()));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    let result = (|| {
+        file.write_all(&payload)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows::Win32::Storage::FileSystem::{
+                MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+            };
+            let from: Vec<u16> = staged.as_os_str().encode_wide().chain(Some(0)).collect();
+            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            unsafe {
+                MoveFileExW(
+                    windows::core::PCWSTR(from.as_ptr()),
+                    windows::core::PCWSTR(to.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            }
+            .map_err(std::io::Error::other)?;
+        }
+        #[cfg(not(windows))]
+        fs::rename(&staged, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result
 }
 
 /// Delete IPv6 marker file
@@ -809,6 +870,89 @@ pub fn recover_ipv6_on_startup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_ipv6_block_requires_a_saved_record_before_installing() {
+        let mut pending = false;
+        let installed = std::cell::Cell::new(false);
+        let result = install_recorded_ipv6_block(
+            &mut pending,
+            || Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            || {
+                installed.set(true);
+                Ok(())
+            },
+            || panic!("no filters to clean up"),
+            || panic!("must not clear an existing recovery record"),
+        );
+        assert!(result.is_err());
+        assert!(!installed.get());
+        assert!(!pending);
+    }
+
+    #[test]
+    fn recorded_ipv6_block_installs_only_after_readable_atomic_record() {
+        let dir =
+            std::env::temp_dir().join(format!("SwiftTunnel-ipv6-{:032x}", rand::random::<u128>()));
+        let path = dir.join(IPV6_MARKER_FILE);
+        let marker = Ipv6Marker::for_winpkfilter_static_filter("Test adapter".into());
+        let mut pending = false;
+        install_recorded_ipv6_block(
+            &mut pending,
+            || write_marker_at(&path, &marker),
+            || {
+                let saved: Ipv6Marker = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                assert_eq!(saved, marker);
+                Ok(())
+            },
+            || panic!("successful install does not need cleanup"),
+            || panic!("record must remain until recovery"),
+        )
+        .unwrap();
+        assert!(pending);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recorded_ipv6_block_failed_replace_preserves_record_and_prevents_install() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("SwiftTunnel-ipv6-{:032x}", rand::random::<u128>()));
+        let path = dir.join(IPV6_MARKER_FILE);
+        let old = Ipv6Marker::for_winpkfilter_static_filter("Original adapter".into());
+        write_marker_at(&path, &old).unwrap();
+        let original = fs::read(&path).unwrap();
+        let next = Ipv6Marker::for_winpkfilter_static_filter("New adapter".into());
+        let mut pending = false;
+        {
+            let _lock = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1)
+                .open(&path)
+                .unwrap();
+            assert!(
+                install_recorded_ipv6_block(
+                    &mut pending,
+                    || write_marker_at(&path, &next),
+                    || panic!("failed save must prevent filter install"),
+                    || panic!("existing recovery work must be preserved"),
+                    || panic!("existing record must be preserved"),
+                )
+                .is_err()
+            );
+            assert!(!pending);
+            assert_eq!(fs::read(&path).unwrap(), original);
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        }
+        write_marker_at(&path, &next).unwrap();
+        let saved: Ipv6Marker = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, next);
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
 
     #[test]
     fn test_marker_path() {
