@@ -70,36 +70,42 @@ pub async fn run_speed_test(
 
     // === DOWNLOAD ===
     let _ = progress_tx.send(SpeedTestProgress::DownloadStarted);
-    let download_mbps = match run_download_test(&client, &progress_tx).await {
-        Ok(mbps) => {
-            info!("Download test complete: {:.2} Mbps", mbps);
-            let _ = progress_tx.send(SpeedTestProgress::DownloadComplete(mbps));
-            mbps
-        }
-        Err(e) => {
-            error!("Download test failed: {}", e);
-            let _ = progress_tx.send(SpeedTestProgress::Error(format!("Download failed: {}", e)));
-            return Err(e);
-        }
-    };
+    let download_url = format!("{}?bytes={}", DOWNLOAD_URL, DOWNLOAD_PER_REQUEST_BYTES);
+    let warmup = Duration::from_secs_f32(WARMUP_SECS);
+    let measurement = Duration::from_secs_f32(MEASURE_SECS);
+    let download_mbps =
+        match run_download_test(&client, &progress_tx, &download_url, warmup, measurement).await {
+            Ok(mbps) => {
+                info!("Download test complete: {:.2} Mbps", mbps);
+                let _ = progress_tx.send(SpeedTestProgress::DownloadComplete(mbps));
+                mbps
+            }
+            Err(e) => {
+                error!("Download test failed: {}", e);
+                let _ =
+                    progress_tx.send(SpeedTestProgress::Error(format!("Download failed: {}", e)));
+                return Err(e);
+            }
+        };
 
     // Brief pause between phases.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // === UPLOAD ===
     let _ = progress_tx.send(SpeedTestProgress::UploadStarted);
-    let upload_mbps = match run_upload_test(&client, &progress_tx).await {
-        Ok(mbps) => {
-            info!("Upload test complete: {:.2} Mbps", mbps);
-            let _ = progress_tx.send(SpeedTestProgress::UploadComplete(mbps));
-            mbps
-        }
-        Err(e) => {
-            error!("Upload test failed: {}", e);
-            let _ = progress_tx.send(SpeedTestProgress::Error(format!("Upload failed: {}", e)));
-            return Err(e);
-        }
-    };
+    let upload_mbps =
+        match run_upload_test(&client, &progress_tx, UPLOAD_URL, warmup, measurement).await {
+            Ok(mbps) => {
+                info!("Upload test complete: {:.2} Mbps", mbps);
+                let _ = progress_tx.send(SpeedTestProgress::UploadComplete(mbps));
+                mbps
+            }
+            Err(e) => {
+                error!("Upload test failed: {}", e);
+                let _ = progress_tx.send(SpeedTestProgress::Error(format!("Upload failed: {}", e)));
+                return Err(e);
+            }
+        };
 
     let results = SpeedTestResults {
         download_mbps,
@@ -119,26 +125,29 @@ pub async fn run_speed_test(
 async fn run_download_test(
     client: &Client,
     progress_tx: &Sender<SpeedTestProgress>,
+    url: &str,
+    warmup: Duration,
+    measurement: Duration,
 ) -> Result<f32, String> {
-    let url = format!("{}?bytes={}", DOWNLOAD_URL, DOWNLOAD_PER_REQUEST_BYTES);
     debug!("Download: spawning {} parallel streams", STREAM_COUNT);
 
     let counter = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let mut handles = Vec::with_capacity(STREAM_COUNT);
+    // JoinSet aborts its workers if this phase is cancelled or unwinds.
+    let mut workers = tokio::task::JoinSet::new();
     for _ in 0..STREAM_COUNT {
         let client = client.clone();
-        let url = url.clone();
+        let url = url.to_owned();
         let counter = counter.clone();
         let stop = stop.clone();
-        handles.push(tokio::spawn(async move {
+        workers.spawn(async move {
             download_worker(client, url, counter, stop).await;
-        }));
+        });
     }
 
     // Warm-up: discarded. Keep the UI animating so it doesn't look frozen.
-    let warmup_deadline = Instant::now() + Duration::from_secs_f32(WARMUP_SECS);
+    let warmup_deadline = Instant::now() + warmup;
     while Instant::now() < warmup_deadline {
         tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
         let _ = progress_tx.send(SpeedTestProgress::DownloadProgress(0.0, 0.0));
@@ -147,7 +156,7 @@ async fn run_download_test(
     // Measurement.
     let start_bytes = counter.load(Ordering::Relaxed);
     let measure_start = Instant::now();
-    let measure_deadline = measure_start + Duration::from_secs_f32(MEASURE_SECS);
+    let measure_deadline = measure_start + measurement;
 
     while Instant::now() < measure_deadline {
         tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
@@ -158,7 +167,7 @@ async fn run_download_test(
         } else {
             0.0
         };
-        let progress = (elapsed / MEASURE_SECS).min(1.0);
+        let progress = (elapsed / measurement.as_secs_f32()).min(1.0);
         let _ = progress_tx.send(SpeedTestProgress::DownloadProgress(mbps, progress));
     }
 
@@ -168,9 +177,9 @@ async fn run_download_test(
 
     // Shut the workers down.
     stop.store(true, Ordering::Relaxed);
-    for h in handles {
-        let _ = h.await;
-    }
+    // A stop flag cannot wake a worker awaiting HTTP headers or another chunk.
+    // Measurement is finished, so cancel outstanding I/O and join the workers.
+    workers.shutdown().await;
 
     if total_bytes == 0 {
         return Err("No data received during measurement window".to_string());
@@ -212,24 +221,28 @@ async fn download_worker(
 async fn run_upload_test(
     client: &Client,
     progress_tx: &Sender<SpeedTestProgress>,
+    url: &str,
+    warmup: Duration,
+    measurement: Duration,
 ) -> Result<f32, String> {
     debug!("Upload: spawning {} parallel streams", STREAM_COUNT);
 
     let counter = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let mut handles = Vec::with_capacity(STREAM_COUNT);
+    let mut workers = tokio::task::JoinSet::new();
     for _ in 0..STREAM_COUNT {
         let client = client.clone();
+        let url = url.to_owned();
         let counter = counter.clone();
         let stop = stop.clone();
-        handles.push(tokio::spawn(async move {
-            upload_worker(client, counter, stop).await;
-        }));
+        workers.spawn(async move {
+            upload_worker(client, url, counter, stop).await;
+        });
     }
 
     // Warm-up.
-    let warmup_deadline = Instant::now() + Duration::from_secs_f32(WARMUP_SECS);
+    let warmup_deadline = Instant::now() + warmup;
     while Instant::now() < warmup_deadline {
         tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
         let _ = progress_tx.send(SpeedTestProgress::UploadProgress(0.0, 0.0));
@@ -238,7 +251,7 @@ async fn run_upload_test(
     // Measurement.
     let start_bytes = counter.load(Ordering::Relaxed);
     let measure_start = Instant::now();
-    let measure_deadline = measure_start + Duration::from_secs_f32(MEASURE_SECS);
+    let measure_deadline = measure_start + measurement;
 
     while Instant::now() < measure_deadline {
         tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
@@ -249,7 +262,7 @@ async fn run_upload_test(
         } else {
             0.0
         };
-        let progress = (elapsed / MEASURE_SECS).min(1.0);
+        let progress = (elapsed / measurement.as_secs_f32()).min(1.0);
         let _ = progress_tx.send(SpeedTestProgress::UploadProgress(mbps, progress));
     }
 
@@ -258,9 +271,7 @@ async fn run_upload_test(
     let mbps = (total_bytes as f32 * 8.0) / (elapsed * 1_000_000.0);
 
     stop.store(true, Ordering::Relaxed);
-    for h in handles {
-        let _ = h.await;
-    }
+    workers.shutdown().await;
 
     if total_bytes == 0 {
         return Err("No data sent during measurement window".to_string());
@@ -269,7 +280,12 @@ async fn run_upload_test(
     Ok(mbps)
 }
 
-async fn upload_worker(client: Client, counter: Arc<AtomicU64>, stop: Arc<AtomicBool>) {
+async fn upload_worker(
+    client: Client,
+    url: String,
+    counter: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+) {
     while !stop.load(Ordering::Relaxed) {
         let counter_for_stream = counter.clone();
         let stop_for_stream = stop.clone();
@@ -286,7 +302,7 @@ async fn upload_worker(client: Client, counter: Arc<AtomicU64>, stop: Arc<Atomic
         let body = reqwest::Body::wrap_stream(body_stream);
 
         match client
-            .post(UPLOAD_URL)
+            .post(&url)
             .header("Content-Type", "application/octet-stream")
             .body(body)
             .send()
@@ -316,6 +332,94 @@ pub fn format_speed(mbps: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn stalled_phase_releases_workers(upload: bool, cancel: bool) {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (drain_tx, drain_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            for _ in 0..STREAM_COUNT {
+                sockets.push(listener.accept().await.unwrap().0);
+            }
+            ready_tx.send(()).unwrap();
+            // Never send response headers. Start draining only after cleanup,
+            // so the upload test does not generate an unbounded local load.
+            let _ = drain_rx.await;
+            for mut socket in sockets {
+                let mut buffer = [0; 4096];
+                loop {
+                    match socket.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            }
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .http1_only()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut phase = tokio::spawn(async move {
+            let measurement = if cancel {
+                Duration::from_secs(30)
+            } else {
+                Duration::from_millis(200)
+            };
+            if upload {
+                run_upload_test(&client, &tx, &url, Duration::ZERO, measurement).await
+            } else {
+                run_download_test(&client, &tx, &url, Duration::ZERO, measurement).await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(3), ready_rx)
+            .await
+            .expect("workers must connect to the local fixture")
+            .unwrap();
+        if cancel {
+            phase.abort();
+            assert!(phase.await.unwrap_err().is_cancelled());
+        } else {
+            let completion = tokio::time::timeout(Duration::from_secs(2), &mut phase).await;
+            if completion.is_err() {
+                phase.abort();
+            }
+            assert!(
+                completion.is_ok(),
+                "measurement waited for a stalled HTTP response"
+            );
+        }
+        drain_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("test workers kept their sockets open after cleanup")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn speed_workers_stop_stalled_download_after_measurement() {
+        stalled_phase_releases_workers(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn speed_workers_stop_stalled_upload_after_measurement() {
+        stalled_phase_releases_workers(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn speed_workers_stop_download_when_phase_is_cancelled() {
+        stalled_phase_releases_workers(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn speed_workers_stop_upload_when_phase_is_cancelled() {
+        stalled_phase_releases_workers(true, true).await;
+    }
 
     #[test]
     fn test_format_speed_gbps() {
