@@ -32,10 +32,11 @@ interface NetworkStore {
   runStabilityTest: (durationSecs?: number) => Promise<void>;
   runSpeedTest: () => Promise<void>;
   runBufferbloatTest: () => Promise<void>;
+  runAllTests: (durationSecs?: number) => Promise<void>;
   reset: () => void;
 }
 
-export const useNetworkStore = create<NetworkStore>((set) => ({
+export const useNetworkStore = create<NetworkStore>((set, get) => ({
   stabilityStatus: "idle",
   stabilityResult: null,
   stabilityError: null,
@@ -45,6 +46,16 @@ export const useNetworkStore = create<NetworkStore>((set) => ({
   bufferbloatStatus: "idle",
   bufferbloatResult: null,
   bufferbloatError: null,
+
+  runAllTests: async (durationSecs = 10) => {
+    const state = get();
+    if ([state.stabilityStatus, state.speedStatus, state.bufferbloatStatus].includes("running")) return;
+    // Idle latency must be sampled without our speed-test traffic. Bufferbloat
+    // then controls its own idle and loaded phases without competing tests.
+    await get().runStabilityTest(durationSecs);
+    await get().runSpeedTest();
+    await get().runBufferbloatTest();
+  },
 
   runStabilityTest: async (durationSecs = 10) => {
     try {

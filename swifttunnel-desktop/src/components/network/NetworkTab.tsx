@@ -84,9 +84,7 @@ export function NetworkTab() {
 
   function runAll() {
     if (anyRunning) return;
-    void net.runStabilityTest(duration);
-    void net.runSpeedTest();
-    void net.runBufferbloatTest();
+    void net.runAllTests(duration);
   }
 
   const grade = net.bufferbloatResult?.grade ?? null;
