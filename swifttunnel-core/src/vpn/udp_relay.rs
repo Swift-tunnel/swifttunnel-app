@@ -510,6 +510,8 @@ pub struct RelayPingSnapshot {
     pub enabled: bool,
     pub sent: u64,
     pub received: u64,
+    /// Expired control probes as a percentage of resolved probes. Pending
+    /// probes are excluded; this is not a game-packet loss measurement.
     pub loss_pct: f32,
     pub last_rtt_ms: Option<u32>,
     pub p50_rtt_ms: Option<u32>,
@@ -521,77 +523,142 @@ pub struct RelayPingSnapshot {
 /// answering pings (switch to an unreachable relay, network drop) must show
 /// up as "no data" in the UI instead of freezing on the last good value.
 const PING_RTT_FRESHNESS_MS: u64 = 5_000;
+// A probe is unresolved until this deadline. This measures relay control
+// probes, not loss of game packets. Keep pending state bounded independently.
+const PING_RESPONSE_TIMEOUT_MS: u64 = 5_000;
+const MAX_PENDING_PINGS: usize = 256;
 
 struct PingMetrics {
     enabled: AtomicBool,
-    sent: AtomicU64,
-    received: AtomicU64,
-    last_rtt_ms: AtomicU64,
-    /// `now_mono_ms()` of the most recent recorded pong. 0 = never.
-    last_rtt_at_ms: AtomicU64,
-    samples: parking_lot::Mutex<VecDeque<u32>>,
+    sequence: AtomicU32,
+    state: parking_lot::Mutex<PingState>,
 }
 
-impl PingMetrics {
-    fn new() -> Self {
+struct PingState {
+    relay_addr: SocketAddr,
+    sent: u64,
+    received: u64,
+    expired: u64,
+    pending: VecDeque<(u32, u64)>,
+    last_rtt: Option<(u64, u32)>,
+    samples: VecDeque<u32>,
+}
+
+impl PingState {
+    fn new(relay_addr: SocketAddr) -> Self {
         Self {
-            enabled: AtomicBool::new(false),
-            sent: AtomicU64::new(0),
-            received: AtomicU64::new(0),
-            last_rtt_ms: AtomicU64::new(0),
-            last_rtt_at_ms: AtomicU64::new(0),
-            samples: parking_lot::Mutex::new(VecDeque::with_capacity(PING_SAMPLE_WINDOW)),
+            relay_addr,
+            sent: 0,
+            received: 0,
+            expired: 0,
+            pending: VecDeque::with_capacity(MAX_PENDING_PINGS),
+            last_rtt: None,
+            samples: VecDeque::with_capacity(PING_SAMPLE_WINDOW),
         }
     }
 
-    fn record_rtt_ms(&self, rtt_ms: u32) {
-        self.received.fetch_add(1, Ordering::Relaxed);
-        self.last_rtt_ms.store(rtt_ms as u64, Ordering::Relaxed);
-        self.last_rtt_at_ms.store(now_mono_ms(), Ordering::Relaxed);
+    fn expire(&mut self, now_ms: u64) {
+        let before = self.pending.len();
+        self.pending
+            .retain(|(_, sent_at)| now_ms.saturating_sub(*sent_at) < PING_RESPONSE_TIMEOUT_MS);
+        self.expired += (before - self.pending.len()) as u64;
+    }
+}
 
-        let mut samples = self.samples.lock();
-        if samples.len() >= PING_SAMPLE_WINDOW {
-            samples.pop_front();
+impl PingMetrics {
+    fn new(relay_addr: SocketAddr) -> Self {
+        Self {
+            enabled: AtomicBool::new(false),
+            sequence: AtomicU32::new(0),
+            state: parking_lot::Mutex::new(PingState::new(relay_addr)),
         }
-        samples.push_back(rtt_ms);
+    }
+
+    fn next_sequence(&self) -> u32 {
+        self.sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+    }
+
+    // Register before send so a fast reply cannot beat registration. A local
+    // send error cancels the record rather than counting as network loss.
+    fn begin_probe(&self, addr: SocketAddr, seq: u32, sent_at: u64) {
+        let mut state = self.state.lock();
+        if state.relay_addr != addr {
+            return;
+        }
+        state.expire(sent_at);
+        if state.pending.len() < MAX_PENDING_PINGS && !state.pending.contains(&(seq, sent_at)) {
+            state.pending.push_back((seq, sent_at));
+            state.sent += 1;
+        }
+    }
+
+    fn cancel_probe(&self, addr: SocketAddr, seq: u32, sent_at: u64) {
+        let mut state = self.state.lock();
+        if state.relay_addr == addr
+            && let Some(index) = state.pending.iter().position(|key| *key == (seq, sent_at))
+        {
+            state.pending.remove(index);
+            state.sent -= 1;
+        }
+    }
+
+    fn record_pong(&self, addr: SocketAddr, seq: u32, sent_at: u64, now_ms: u64) -> Option<u32> {
+        let mut state = self.state.lock();
+        if state.relay_addr != addr || now_ms < sent_at {
+            return None;
+        }
+        state.expire(now_ms);
+        let index = state
+            .pending
+            .iter()
+            .position(|key| *key == (seq, sent_at))?;
+        state.pending.remove(index);
+        let rtt_ms = (now_ms - sent_at) as u32;
+        state.received += 1;
+        state.last_rtt = Some((now_ms, rtt_ms));
+        if state.samples.len() >= PING_SAMPLE_WINDOW {
+            state.samples.pop_front();
+        }
+        state.samples.push_back(rtt_ms);
+        Some(rtt_ms)
     }
 
     /// Clear all RTT state. Called on relay switch so the old relay's
     /// readings can never be reported as the new relay's ping.
-    fn reset(&self) {
-        self.last_rtt_ms.store(0, Ordering::Relaxed);
-        self.last_rtt_at_ms.store(0, Ordering::Relaxed);
-        self.sent.store(0, Ordering::Relaxed);
-        self.received.store(0, Ordering::Relaxed);
-        self.samples.lock().clear();
+    fn reset(&self, relay_addr: SocketAddr) {
+        // Sequence numbers remain session-wide across resets and keepalives.
+        *self.state.lock() = PingState::new(relay_addr);
     }
 
     fn snapshot(&self) -> RelayPingSnapshot {
+        self.snapshot_at(now_mono_ms())
+    }
+
+    fn snapshot_at(&self, now_ms: u64) -> RelayPingSnapshot {
         let enabled = self.enabled.load(Ordering::Acquire);
-        let sent = self.sent.load(Ordering::Relaxed);
-        let received = self.received.load(Ordering::Relaxed);
-        let loss_pct = if sent == 0 {
+        let mut state = self.state.lock();
+        state.expire(now_ms);
+        let sent = state.sent;
+        let received = state.received;
+        let resolved = state.expired + received;
+        let loss_pct = if resolved == 0 {
             0.0
         } else {
-            let lost = sent.saturating_sub(received);
-            (lost as f32) * 100.0 / (sent as f32)
+            (state.expired as f32) * 100.0 / (resolved as f32)
         };
-        let last_rtt_raw = self.last_rtt_ms.load(Ordering::Relaxed);
-        let last_rtt_at = self.last_rtt_at_ms.load(Ordering::Relaxed);
-        let rtt_is_fresh =
-            last_rtt_at != 0 && now_mono_ms().saturating_sub(last_rtt_at) <= PING_RTT_FRESHNESS_MS;
-        let last_rtt_ms = if last_rtt_raw == 0 || !rtt_is_fresh {
-            None
-        } else {
-            Some(last_rtt_raw as u32)
-        };
+        let last_rtt_ms = state.last_rtt.and_then(|(at, rtt)| {
+            (now_ms.saturating_sub(at) <= PING_RTT_FRESHNESS_MS).then_some(rtt)
+        });
+        let rtt_is_fresh = last_rtt_ms.is_some();
 
         let mut p50_rtt_ms: Option<u32> = None;
         let mut p99_rtt_ms: Option<u32> = None;
         let sample_count;
 
         {
-            let samples = self.samples.lock();
+            let samples = &state.samples;
             sample_count = samples.len();
             // Percentiles share the freshness gate: once the relay stops
             // answering, stale medians are as misleading as a stale last_rtt.
@@ -695,8 +762,6 @@ pub struct UdpRelay {
     /// Consecutive inbound packets that failed to inject into the local stack since the
     /// last successful inject. Used to detect data-plane failure that pongs would otherwise mask.
     inject_error_streak: AtomicU32,
-    /// Sequence number for explicit keepalive PING frames.
-    keepalive_ping_seq: AtomicU32,
     /// Last time the current relay provided liveness evidence.
     last_receive_time: parking_lot::Mutex<Option<Instant>>,
     /// First outbound activity since creation or relay switch.
@@ -846,7 +911,7 @@ impl UdpRelay {
         // Dedicated sender thread: eliminates multi-threaded Winsock send contention.
         let outbound_pool = Arc::new(OutboundPool::new(OUTBOUND_POOL_SLOTS));
         let (outbound_tx, outbound_rx) = channel::bounded::<OutboundJob>(OUTBOUND_QUEUE_CAP);
-        let ping = Arc::new(PingMetrics::new());
+        let ping = Arc::new(PingMetrics::new(relay_addr));
         let send_errors = Arc::new(AtomicU64::new(0));
         let stale_queue_drops = Arc::new(AtomicU64::new(0));
         let send_unreachable_streak = Arc::new(AtomicU32::new(0));
@@ -878,7 +943,6 @@ impl UdpRelay {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut last_relay_addr: Option<SocketAddr> = None;
                     let mut last_data_at: Option<Instant> = None;
-                    let mut ping_seq: u32 = 0;
                     let mut next_ping_at = Instant::now() + PING_INTERVAL;
 
                     loop {
@@ -974,7 +1038,7 @@ impl UdpRelay {
                             continue;
                         }
 
-                        ping_seq = ping_seq.wrapping_add(1);
+                        let ping_seq = sender_ping.next_sequence();
                         let client_ts_mono_ms = now_mono_ms();
 
                         let mut frame = [0u8; PING_FRAME_LEN];
@@ -985,6 +1049,7 @@ impl UdpRelay {
                         frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
                             .copy_from_slice(&client_ts_mono_ms.to_be_bytes());
 
+                        sender_ping.begin_probe(relay_addr, ping_seq, client_ts_mono_ms);
                         match sender_socket.send_to(&frame, relay_addr) {
                             Ok(_) => {
                                 record_relay_send_success(
@@ -993,6 +1058,7 @@ impl UdpRelay {
                                 );
                             }
                             Err(e) => {
+                                sender_ping.cancel_probe(relay_addr, ping_seq, client_ts_mono_ms);
                                 record_relay_send_error(
                                     &sender_send_errors,
                                     &sender_relay_health,
@@ -1004,7 +1070,6 @@ impl UdpRelay {
                                 );
                             }
                         }
-                        sender_ping.sent.fetch_add(1, Ordering::Relaxed);
                         next_ping_at = now + PING_INTERVAL;
                     }
 
@@ -1109,7 +1174,6 @@ impl UdpRelay {
             relay_health,
             unanswered_keepalives: AtomicU32::new(0),
             inject_error_streak: AtomicU32::new(0),
-            keepalive_ping_seq: AtomicU32::new(0),
             last_receive_time: parking_lot::Mutex::new(None),
             first_outbound_time: parking_lot::Mutex::new(None),
             sender_panicked,
@@ -1133,10 +1197,7 @@ impl UdpRelay {
     }
 
     fn build_ping_frame(&self) -> [u8; PING_FRAME_LEN] {
-        let seq = self
-            .keepalive_ping_seq
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
+        let seq = self.ping.next_sequence();
         let client_ts_mono_ms = now_mono_ms();
 
         let mut frame = [0u8; PING_FRAME_LEN];
@@ -1599,7 +1660,9 @@ impl UdpRelay {
 
     /// Enable or disable control-plane ping telemetry.
     pub fn set_ping_enabled(&self, enabled: bool) {
-        self.ping.enabled.store(enabled, Ordering::Release);
+        if self.ping.enabled.swap(enabled, Ordering::AcqRel) != enabled {
+            self.ping.reset(self.relay_addr());
+        }
     }
 
     pub fn ping_snapshot(&self) -> RelayPingSnapshot {
@@ -1819,10 +1882,14 @@ impl UdpRelay {
                                         frame_buffer[SESSION_ID_LEN + 12],
                                     ]);
                                     let now_ms = now_mono_ms();
-                                    if now_ms >= client_ts_mono_ms {
-                                        let rtt_ms = (now_ms - client_ts_mono_ms) as u32;
-                                        self.ping.record_rtt_ms(rtt_ms);
-
+                                    let seq = u32::from_be_bytes(
+                                        frame_buffer[SESSION_ID_LEN + 1..SESSION_ID_LEN + 5]
+                                            .try_into()
+                                            .expect("validated pong length"),
+                                    );
+                                    if let Some(rtt_ms) =
+                                        self.ping.record_pong(from, seq, client_ts_mono_ms, now_ms)
+                                    {
                                         // Report RTT to the relay that sent this pong, routed
                                         // through the sender thread to avoid blocking the receive path.
                                         let rtt_us = rtt_ms.saturating_mul(1000);
@@ -2268,7 +2335,7 @@ impl UdpRelay {
         // Reset RTT telemetry: the old relay's readings must never be shown
         // as the new relay's ping. The UI reports "no data" until the first
         // pong from the new relay arrives.
-        self.ping.reset();
+        self.ping.reset(new_addr);
         log::info!(
             "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
             old_addr,
@@ -2512,6 +2579,109 @@ impl RelayContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_ping_is_not_packet_loss() {
+        let addr = "127.0.0.1:10001".parse().unwrap();
+        let metrics = PingMetrics::new(addr);
+        metrics.begin_probe(addr, 1, 100);
+        assert_eq!(metrics.snapshot_at(101).loss_pct, 0.0);
+    }
+
+    #[test]
+    fn probe_loss_counts_only_expired_probes_and_matches_replies_once() {
+        let addr = "127.0.0.1:10001".parse().unwrap();
+        let metrics = PingMetrics::new(addr);
+        metrics.begin_probe(addr, 1, 100);
+        metrics.begin_probe(addr, 2, 100);
+        assert_eq!(metrics.record_pong(addr, 1, 100, 100), Some(0));
+        assert_eq!(metrics.record_pong(addr, 1, 100, 101), None);
+        assert_eq!(metrics.record_pong(addr, 2, 101, 102), None);
+        assert_eq!(metrics.record_pong(addr, 2, 100, 99), None);
+        let pending = metrics.snapshot_at(101);
+        assert_eq!(
+            (pending.sent, pending.received, pending.sample_count),
+            (2, 1, 1)
+        );
+        assert_eq!(pending.last_rtt_ms, Some(0));
+        assert_eq!(pending.loss_pct, 0.0);
+        let deadline = 100 + PING_RESPONSE_TIMEOUT_MS;
+        assert_eq!(metrics.snapshot_at(deadline - 1).loss_pct, 0.0);
+        assert_eq!(metrics.snapshot_at(deadline).loss_pct, 50.0);
+        assert_eq!(metrics.record_pong(addr, 2, 100, deadline + 1), None);
+        let stale = metrics.snapshot_at(deadline + 1);
+        assert_eq!(stale.sample_count, 1);
+        assert_eq!(stale.last_rtt_ms, None);
+        assert_eq!(stale.p50_rtt_ms, None);
+        assert_eq!(stale.p99_rtt_ms, None);
+    }
+
+    #[test]
+    fn local_probe_send_failure_is_not_relay_loss_and_pending_memory_is_bounded() {
+        let addr = "127.0.0.1:10001".parse().unwrap();
+        let metrics = PingMetrics::new(addr);
+        metrics.begin_probe(addr, 1, 100);
+        metrics.cancel_probe(addr, 1, 100);
+        let snap = metrics.snapshot_at(100 + PING_RESPONSE_TIMEOUT_MS);
+        assert_eq!((snap.sent, snap.received, snap.loss_pct), (0, 0, 0.0));
+        for seq in 0..MAX_PENDING_PINGS as u32 + 10 {
+            metrics.begin_probe(addr, seq, 10_000);
+        }
+        assert_eq!(metrics.state.lock().pending.len(), MAX_PENDING_PINGS);
+        assert_eq!(metrics.snapshot_at(10_000).sent, MAX_PENDING_PINGS as u64);
+        assert_eq!(metrics.snapshot_at(15_000).loss_pct, 100.0);
+        assert!(metrics.state.lock().pending.is_empty());
+    }
+
+    #[test]
+    fn switching_relay_rejects_old_probe_registration_and_old_replies() {
+        let old_addr = "127.0.0.1:10001".parse().unwrap();
+        let new_addr = "127.0.0.1:10002".parse().unwrap();
+        let metrics = PingMetrics::new(old_addr);
+        let old_seq = metrics.next_sequence();
+        metrics.begin_probe(old_addr, old_seq, 100);
+        metrics.reset(new_addr);
+        metrics.begin_probe(old_addr, old_seq, 100);
+        assert_eq!(metrics.record_pong(old_addr, old_seq, 100, 120), None);
+        assert_eq!(metrics.record_pong(new_addr, old_seq, 100, 120), None);
+        assert_eq!(metrics.snapshot_at(120).sent, 0);
+        let new_seq = metrics.next_sequence();
+        assert_ne!(old_seq, new_seq);
+        metrics.begin_probe(new_addr, new_seq, 120);
+        assert_eq!(metrics.record_pong(new_addr, new_seq, 120, 130), Some(10));
+        assert_eq!(metrics.snapshot_at(130).received, 1);
+    }
+
+    #[test]
+    fn unsolicited_pong_does_not_count_as_a_probe_response() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        relay.set_ping_enabled(true);
+        let server = bind_fake_relay(&relay);
+        let frame = make_pong_frame(&relay);
+        server.send_to(&frame, relay_loopback_addr(&relay)).unwrap();
+        let mut buffer = [0u8; 1600];
+        relay.receive_inbound(&mut buffer).unwrap();
+        assert_eq!(relay.ping_snapshot().received, 0);
+
+        let sent_at = u64::from_be_bytes(
+            frame[SESSION_ID_LEN + 5..SESSION_ID_LEN + 13]
+                .try_into()
+                .unwrap(),
+        );
+        relay
+            .ping
+            .begin_probe(server.local_addr().unwrap(), 1, sent_at);
+        for _ in 0..2 {
+            server.send_to(&frame, relay_loopback_addr(&relay)).unwrap();
+            relay.receive_inbound(&mut buffer).unwrap();
+        }
+        let snapshot = relay.ping_snapshot();
+        assert_eq!(
+            (snapshot.sent, snapshot.received, snapshot.sample_count),
+            (1, 1, 1)
+        );
+        assert_eq!(snapshot.loss_pct, 0.0);
+    }
 
     #[test]
     fn inactive_ping_timer_does_not_spin_the_sender() {
@@ -3128,7 +3298,10 @@ mod tests {
         assert!(relay.last_receive_time.lock().is_some());
 
         let snap = relay.ping_snapshot();
-        assert!(snap.received >= 1);
+        assert_eq!(
+            snap.received, 0,
+            "liveness alone is not a measured probe reply"
+        );
     }
 
     #[test]
