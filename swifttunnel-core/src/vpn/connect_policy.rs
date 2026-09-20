@@ -28,6 +28,28 @@ use crate::vpn::parallel_interceptor::{
 };
 use crate::vpn::servers::DynamicServerList;
 
+/// Wait for startup network recovery before starting another driver operation.
+pub async fn wait_for_startup_recovery(
+    mut done: tokio::sync::watch::Receiver<bool>,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    if *done.borrow() {
+        return Ok(());
+    }
+    log::info!("Connect requested before startup network recovery finished; waiting");
+    match tokio::time::timeout(timeout, done.wait_for(|ready| *ready)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(_)) => Err(
+            "Startup network recovery stopped before completion. Restart SwiftTunnel and try again."
+                .into(),
+        ),
+        Err(_) => Err(
+            "Startup network recovery is still running. Wait a moment and try connecting again."
+                .into(),
+        ),
+    }
+}
+
 // ── Adapter binding ─────────────────────────────────────────────────────────
 
 /// Why an adapter cannot carry game traffic, or `None` when it can.
@@ -203,6 +225,56 @@ pub fn build_available_servers(sl: &DynamicServerList) -> Vec<(String, SocketAdd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_recovery_timeout_must_not_allow_connect() {
+        let (_sender, receiver) = tokio::sync::watch::channel(false);
+        assert!(
+            wait_for_startup_recovery(receiver, std::time::Duration::ZERO)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_closed_signal_must_not_allow_connect() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        drop(sender);
+        assert!(
+            wait_for_startup_recovery(receiver, std::time::Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_completed_signal_allows_connect() {
+        let (sender, receiver) = tokio::sync::watch::channel(true);
+        drop(sender);
+        assert!(
+            wait_for_startup_recovery(receiver, std::time::Duration::ZERO)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_waits_for_actual_completion_and_allows_retry() {
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        assert!(
+            wait_for_startup_recovery(receiver.clone(), std::time::Duration::ZERO)
+                .await
+                .is_err()
+        );
+        let waiting = wait_for_startup_recovery(receiver, std::time::Duration::from_secs(2));
+        tokio::pin!(waiting);
+        tokio::select! {
+            result = &mut waiting => panic!("connect proceeded before recovery: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+        }
+        sender.send(true).unwrap();
+        assert!(waiting.await.is_ok());
+    }
     use crate::vpn::servers::{DynamicGamingRegion, DynamicServerInfo, ServerListSource};
 
     fn make_server(region: &str, ip: &str) -> DynamicServerInfo {
