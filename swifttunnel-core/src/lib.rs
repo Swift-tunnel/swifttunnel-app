@@ -7,6 +7,7 @@ pub mod auth;
 pub mod autostart;
 pub mod discord_rpc;
 pub mod diskless;
+mod etw_lifecycle;
 pub mod firewall_fixer;
 pub mod fps_monitor;
 pub mod geolocation;

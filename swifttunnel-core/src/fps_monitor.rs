@@ -382,7 +382,9 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
         log::info!("ETW FPS monitor running (DXGI present trace)");
 
         let handles = [trace_handle];
-        let result = ProcessTrace(&handles, None, None);
+        let result = crate::etw_lifecycle::process_trace_unless_stopped(&shared.stop_flag, || {
+            ProcessTrace(&handles, None, None)
+        });
 
         let _ = CloseTrace(trace_handle);
         drop(Box::from_raw(context_ptr));

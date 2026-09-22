@@ -314,7 +314,9 @@ fn run_etw_session(
 
         // Process events (this blocks until trace is closed or error)
         let handles = [trace_handle];
-        let result = ProcessTrace(&handles, None, None);
+        let result = crate::etw_lifecycle::process_trace_unless_stopped(&stop_flag, || {
+            ProcessTrace(&handles, None, None)
+        });
 
         // Clean up
         let _ = CloseTrace(trace_handle);
