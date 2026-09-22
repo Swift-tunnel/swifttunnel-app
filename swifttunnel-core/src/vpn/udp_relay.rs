@@ -1623,7 +1623,11 @@ impl UdpRelay {
             };
             let attempt_deadline = (Instant::now() + attempt_timeout).min(deadline);
             loop {
-                if let Some((from, status)) = *self.last_auth_ack.lock()
+                // Release the guard before handling the response. An if-let
+                // scrutinee keeps its temporary guard through the body, which
+                // deadlocked when the Replay branch tried to lock it again.
+                let ack = self.last_auth_ack.lock().take();
+                if let Some((from, status)) = ack
                     && from == target
                 {
                     log::info!(
@@ -1634,7 +1638,6 @@ impl UdpRelay {
                     );
                     if status == RelayAuthAckStatus::Replay {
                         saw_replay = true;
-                        *self.last_auth_ack.lock() = None;
                         continue;
                     }
                     return Ok(Some(status));
@@ -3383,6 +3386,50 @@ mod tests {
         );
         assert!(relay.last_auth_ack.lock().is_none());
         assert!(!RelayAuthAckStatus::ReauthRequired.is_authenticated());
+    }
+
+    #[test]
+    fn mid_session_replay_finishes_with_rejection_instead_of_deadlocking() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let target = server.local_addr().unwrap();
+        let relay = Arc::new(UdpRelay::new(target).unwrap());
+        let worker_relay = Arc::clone(&relay);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        // A native mutex deadlock cannot be cancelled by a Tokio timeout.
+        // Observe completion from another thread so a regression fails boundedly.
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = runtime
+                .block_on(worker_relay.authenticate_addr_with_ticket("local-test-ticket", target));
+            let _ = done_tx.send(result);
+        });
+        let mut buffer = [0u8; 1600];
+        let (len, client) = server.recv_from(&mut buffer).unwrap();
+        assert_eq!(buffer[SESSION_ID_LEN], AUTH_HELLO_FRAME_TYPE);
+        assert!(len > SESSION_ID_LEN + 3);
+        let mut ack = relay.session_id.to_vec();
+        ack.extend_from_slice(&[AUTH_ACK_FRAME_TYPE, RelayAuthAckStatus::Replay as u8]);
+        server.send_to(&ack, client).unwrap();
+        assert!(
+            relay
+                .receive_inbound_payload(&mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        let result = done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("mid-session replay stalled past the handshake deadline")
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(result, Some(RelayAuthAckStatus::Replay));
+        assert!(relay.last_auth_ack.lock().is_none());
+        assert!((**relay.pending_auth_addr.load()).is_none());
     }
 
     #[test]
