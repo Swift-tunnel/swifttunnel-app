@@ -695,10 +695,9 @@ pub struct UdpRelay {
     previous_relay_addr: ArcSwap<Option<SocketAddr>>,
     /// When the last relay switch occurred (for grace period calculation)
     switch_time: ArcSwap<Option<Instant>>,
-    /// Relay address currently being pre-authenticated for an auto-route
-    /// switch. While set, AUTH_ACK frames from this address are accepted and
-    /// recorded; all other traffic from it is still rejected so an
-    /// un-switched relay can never inject data packets.
+    /// Relay currently authenticating for renewal or an auto-route switch.
+    /// AUTH_ACK frames are recorded. Data is accepted only if this is already
+    /// the current relay, never merely because it is the pending target.
     pending_auth_addr: ArcSwap<Option<SocketAddr>>,
     /// Last auth ack observed by the inbound receiver thread, with its source
     /// address. Mid-session authentication polls this because the inbound
@@ -1587,14 +1586,18 @@ impl UdpRelay {
         let _auth_guard = self.auth_handshake_lock.lock().await;
         *self.last_auth_ack.lock() = None;
         self.pending_auth_addr.store(Arc::new(Some(target)));
-
-        let result = self.authenticate_addr_inner(token, target).await;
-
-        // Always clear the pending window so the target cannot keep a
-        // permanent AUTH_ACK acceptance slot if the switch is aborted.
-        self.pending_auth_addr.store(Arc::new(None));
-        *self.last_auth_ack.lock() = None;
-        result
+        // The future can be dropped by disconnect, lease termination, or a
+        // cancelled route switch. Cleanup must also run on those paths, before
+        // releasing the handshake lock to another authentication attempt.
+        struct PendingAuthWindow<'a>(&'a UdpRelay);
+        impl Drop for PendingAuthWindow<'_> {
+            fn drop(&mut self) {
+                self.0.pending_auth_addr.store(Arc::new(None));
+                *self.0.last_auth_ack.lock() = None;
+            }
+        }
+        let _pending_window = PendingAuthWindow(self);
+        self.authenticate_addr_inner(token, target).await
     }
 
     async fn authenticate_addr_inner(
@@ -1811,14 +1814,13 @@ impl UdpRelay {
     ) -> Result<Option<&'a [u8]>> {
         match self.socket.recv_from(frame_buffer) {
             Ok((len, from)) => {
-                // A relay being pre-authenticated for an auto-route switch may
-                // only deliver AUTH_ACK frames. Everything else from it is
-                // dropped: until the switch commits it is not a valid source
-                // of tunnel data.
+                // A candidate may deliver only authentication responses until
+                // a route switch commits. Renewal of the current relay must
+                // still pass its data, telemetry, and reauthentication hints.
                 if let Some(pending) = **self.pending_auth_addr.load()
                     && from == pending
                 {
-                    if len >= SESSION_ID_LEN + 2
+                    if len == SESSION_ID_LEN + 2
                         && frame_buffer[..SESSION_ID_LEN] == self.session_id
                         && frame_buffer[SESSION_ID_LEN] == AUTH_ACK_FRAME_TYPE
                     {
@@ -1826,9 +1828,12 @@ impl UdpRelay {
                             .unwrap_or(RelayAuthAckStatus::BadFormat);
                         if status != RelayAuthAckStatus::ReauthRequired {
                             *self.last_auth_ack.lock() = Some((from, status));
+                            return Ok(None);
                         }
                     }
-                    return Ok(None);
+                    if from != **self.relay_addr.load() {
+                        return Ok(None);
+                    }
                 }
 
                 // Verify it's from our relay server (current or previous during grace period)
@@ -3386,6 +3391,124 @@ mod tests {
         );
         assert!(relay.last_auth_ack.lock().is_none());
         assert!(!RelayAuthAckStatus::ReauthRequired.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn auth_window_keeps_current_relay_data_and_rebind_hints() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let target = server.local_addr().unwrap();
+        let relay = UdpRelay::new(target).unwrap();
+        let mut auth = Box::pin(relay.authenticate_addr_with_ticket("local-test-ticket", target));
+        assert!(futures_util::poll!(auth.as_mut()).is_pending());
+        let destination = relay_loopback_addr(&relay);
+        let mut frame = relay.session_id.to_vec();
+        frame.extend_from_slice(&[0x45, 0, 0, 20]);
+        server.send_to(&frame, destination).unwrap();
+        let mut buffer = [0u8; 1600];
+        assert_eq!(
+            relay.receive_inbound_payload(&mut buffer).unwrap(),
+            Some(&frame[8..])
+        );
+
+        frame.truncate(SESSION_ID_LEN);
+        frame.extend_from_slice(&[
+            AUTH_ACK_FRAME_TYPE,
+            RelayAuthAckStatus::ReauthRequired as u8,
+        ]);
+        server.send_to(&frame, destination).unwrap();
+        assert!(
+            relay
+                .receive_inbound_payload(&mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            relay.wait_for_lease_refresh(Duration::from_secs(120)),
+        )
+        .await
+        .expect("renewing the current relay must not swallow a rebind hint");
+        assert!(relay.last_auth_ack.lock().is_none());
+
+        frame[SESSION_ID_LEN + 1] = RelayAuthAckStatus::Ok as u8;
+        server.send_to(&frame, destination).unwrap();
+        assert!(
+            relay
+                .receive_inbound_payload(&mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(auth.await.unwrap(), Some(RelayAuthAckStatus::Ok));
+    }
+
+    #[tokio::test]
+    async fn auth_window_cancellation_clears_pending_target_and_response() {
+        let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let target = server.local_addr().unwrap();
+        let relay = UdpRelay::new(target).unwrap();
+        let mut auth = Box::pin(relay.authenticate_addr_with_ticket("local-test-ticket", target));
+        assert!(futures_util::poll!(auth.as_mut()).is_pending());
+        assert_eq!(**relay.pending_auth_addr.load(), Some(target));
+        *relay.last_auth_ack.lock() = Some((target, RelayAuthAckStatus::Ok));
+        drop(auth);
+        assert_eq!(**relay.pending_auth_addr.load(), None);
+        assert!(relay.last_auth_ack.lock().is_none());
+        assert!(relay.auth_handshake_lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn auth_window_candidate_cannot_deliver_data_or_rebind_hints() {
+        let current = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let candidate = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let relay = UdpRelay::new(current.local_addr().unwrap()).unwrap();
+        let mut auth =
+            Box::pin(relay.authenticate_addr_with_ticket(
+                "local-test-ticket",
+                candidate.local_addr().unwrap(),
+            ));
+        assert!(futures_util::poll!(auth.as_mut()).is_pending());
+        let mut buffer = [0u8; 1600];
+        for payload in [
+            vec![0x45, 0, 0, 20],
+            vec![
+                AUTH_ACK_FRAME_TYPE,
+                RelayAuthAckStatus::ReauthRequired as u8,
+            ],
+        ] {
+            let mut frame = relay.session_id.to_vec();
+            frame.extend_from_slice(&payload);
+            candidate
+                .send_to(&frame, relay_loopback_addr(&relay))
+                .unwrap();
+            assert!(
+                relay
+                    .receive_inbound_payload(&mut buffer)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                relay.wait_for_lease_refresh(Duration::from_secs(120))
+            )
+            .await
+            .is_err()
+        );
+        assert!(relay.last_auth_ack.lock().is_none());
+        let mut frame = relay.session_id.to_vec();
+        frame.extend_from_slice(&[AUTH_ACK_FRAME_TYPE, RelayAuthAckStatus::Ok as u8]);
+        candidate
+            .send_to(&frame, relay_loopback_addr(&relay))
+            .unwrap();
+        assert!(
+            relay
+                .receive_inbound_payload(&mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(auth.await.unwrap(), Some(RelayAuthAckStatus::Ok));
+        assert_eq!(**relay.relay_addr.load(), current.local_addr().unwrap());
     }
 
     #[test]
