@@ -1168,6 +1168,24 @@ async fn authenticate_switch_target(
     }
 }
 
+/// Keep renewal work owned by the connection whose tickets it renews.
+async fn run_relay_renewal_until_terminal(
+    mut state: watch::Receiver<ConnectionState>,
+    renewal: impl std::future::Future<Output = ()>,
+) {
+    tokio::select! {
+        // Prefer termination when both work and a terminal state are ready.
+        // Dropping renewal also cancels pending auth/API waits and retry sleeps.
+        biased;
+        _ = state.wait_for(|current| matches!(current,
+            ConnectionState::Disconnected | ConnectionState::Disconnecting | ConnectionState::Error(_)
+        )) => {
+            log::debug!("Relay lease renewal stopped with its connection");
+        }
+        _ = renewal => {}
+    }
+}
+
 /// VPN connection state
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ConnectionState {
@@ -3086,32 +3104,94 @@ impl VpnConnection {
                 let session_id = relay_for_refresh.session_id_hex();
                 let state_for_refresh = Arc::clone(&self.state);
                 let terminal_cleanup_requested = Arc::clone(&self.terminal_cleanup_requested);
+                let refresh_state = self.state.subscribe();
 
-                self.relay_lease_refresh_handle = Some(tokio::spawn(async move {
-                    let mut delay = RELAY_LEASE_REFRESH_INTERVAL;
-                    let mut last_attempt = tokio::time::Instant::now() - Duration::from_secs(5);
-                    loop {
-                        relay_for_refresh.wait_for_lease_refresh(delay).await;
-                        // The hint is not an authorization. Bound API work even
-                        // if control frames are duplicated or spoofed.
-                        tokio::time::sleep_until(last_attempt + Duration::from_secs(5)).await;
-                        last_attempt = tokio::time::Instant::now();
+                self.relay_lease_refresh_handle = Some(tokio::spawn(
+                    run_relay_renewal_until_terminal(refresh_state, async move {
+                        let mut delay = RELAY_LEASE_REFRESH_INTERVAL;
+                        let mut last_attempt = tokio::time::Instant::now() - Duration::from_secs(5);
+                        loop {
+                            relay_for_refresh.wait_for_lease_refresh(delay).await;
+                            // The hint is not an authorization. Bound API work even
+                            // if control frames are duplicated or spoofed.
+                            tokio::time::sleep_until(last_attempt + Duration::from_secs(5)).await;
+                            last_attempt = tokio::time::Instant::now();
 
-                        let (region, addr) = router_for_refresh
-                            .as_ref()
-                            .and_then(|router| router.current_relay())
-                            .unwrap_or_else(|| (fallback_region.clone(), fallback_addr));
+                            let (region, addr) = router_for_refresh
+                                .as_ref()
+                                .and_then(|router| router.current_relay())
+                                .unwrap_or_else(|| (fallback_region.clone(), fallback_addr));
 
-                        let access_token = {
-                            let manager = auth_manager.lock().await;
-                            match manager.get_access_token().await {
-                                Ok(token) => token,
+                            let access_token = {
+                                let manager = auth_manager.lock().await;
+                                match manager.get_access_token().await {
+                                    Ok(token) => token,
+                                    Err(error) => {
+                                        if let Some(message) =
+                                            terminal_relay_lease_error_message(&error)
+                                        {
+                                            log::warn!(
+                                                "Relay lease ended because the session is no longer authorized: {error}"
+                                            );
+                                            terminal_cleanup_requested
+                                                .store(true, Ordering::SeqCst);
+                                            relay_for_refresh.stop();
+                                            let _ = state_for_refresh
+                                                .send_replace(ConnectionState::Error(message));
+                                            break;
+                                        }
+                                        log::warn!(
+                                            "Relay lease refresh could not obtain access token: {error}"
+                                        );
+                                        delay = RELAY_LEASE_RETRY_INTERVAL;
+                                        continue;
+                                    }
+                                }
+                            };
+
+                            let client = AuthClient::new();
+
+                            match client
+                                .get_relay_ticket(&access_token, &region, &session_id)
+                                .await
+                            {
+                                Ok(ticket) => {
+                                    record_free_tier_quota(&ticket);
+                                    match relay_for_refresh
+                                        .authenticate_addr_with_ticket(&ticket.token, addr)
+                                        .await
+                                    {
+                                        Ok(Some(status)) if status.is_authenticated() => {
+                                            log::debug!(
+                                                "Renewed relay lease for {region} at {addr}"
+                                            );
+                                            delay = RELAY_LEASE_REFRESH_INTERVAL;
+                                        }
+                                        Ok(Some(status)) => {
+                                            log::warn!(
+                                                "Relay lease renewal was rejected by {addr}: {}",
+                                                status.as_str()
+                                            );
+                                            delay = RELAY_LEASE_RETRY_INTERVAL;
+                                        }
+                                        Ok(None) => {
+                                            log::warn!("Relay lease renewal timed out for {addr}");
+                                            delay = RELAY_LEASE_RETRY_INTERVAL;
+                                        }
+                                        Err(error) => {
+                                            log::warn!(
+                                                "Relay lease re-authentication failed for {addr}: {error}"
+                                            );
+                                            delay = RELAY_LEASE_RETRY_INTERVAL;
+                                        }
+                                    }
+                                }
                                 Err(error) => {
                                     if let Some(message) =
                                         terminal_relay_lease_error_message(&error)
                                     {
                                         log::warn!(
-                                            "Relay lease ended because the session is no longer authorized: {error}"
+                                            "Relay lease ended because the server rejected the session: {error}"
                                         );
                                         terminal_cleanup_requested.store(true, Ordering::SeqCst);
                                         relay_for_refresh.stop();
@@ -3119,67 +3199,13 @@ impl VpnConnection {
                                             .send_replace(ConnectionState::Error(message));
                                         break;
                                     }
-                                    log::warn!(
-                                        "Relay lease refresh could not obtain access token: {error}"
-                                    );
+                                    log::warn!("Relay lease refresh failed for {region}: {error}");
                                     delay = RELAY_LEASE_RETRY_INTERVAL;
-                                    continue;
                                 }
-                            }
-                        };
-
-                        let client = AuthClient::new();
-
-                        match client
-                            .get_relay_ticket(&access_token, &region, &session_id)
-                            .await
-                        {
-                            Ok(ticket) => {
-                                record_free_tier_quota(&ticket);
-                                match relay_for_refresh
-                                    .authenticate_addr_with_ticket(&ticket.token, addr)
-                                    .await
-                                {
-                                    Ok(Some(status)) if status.is_authenticated() => {
-                                        log::debug!("Renewed relay lease for {region} at {addr}");
-                                        delay = RELAY_LEASE_REFRESH_INTERVAL;
-                                    }
-                                    Ok(Some(status)) => {
-                                        log::warn!(
-                                            "Relay lease renewal was rejected by {addr}: {}",
-                                            status.as_str()
-                                        );
-                                        delay = RELAY_LEASE_RETRY_INTERVAL;
-                                    }
-                                    Ok(None) => {
-                                        log::warn!("Relay lease renewal timed out for {addr}");
-                                        delay = RELAY_LEASE_RETRY_INTERVAL;
-                                    }
-                                    Err(error) => {
-                                        log::warn!(
-                                            "Relay lease re-authentication failed for {addr}: {error}"
-                                        );
-                                        delay = RELAY_LEASE_RETRY_INTERVAL;
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                if let Some(message) = terminal_relay_lease_error_message(&error) {
-                                    log::warn!(
-                                        "Relay lease ended because the server rejected the session: {error}"
-                                    );
-                                    terminal_cleanup_requested.store(true, Ordering::SeqCst);
-                                    relay_for_refresh.stop();
-                                    let _ = state_for_refresh
-                                        .send_replace(ConnectionState::Error(message));
-                                    break;
-                                }
-                                log::warn!("Relay lease refresh failed for {region}: {error}");
-                                delay = RELAY_LEASE_RETRY_INTERVAL;
                             }
                         }
-                    }
-                }));
+                    }),
+                ));
             } else {
                 log::warn!("Relay lease refresh unavailable because no auth manager is attached");
             }
@@ -3518,6 +3544,103 @@ impl Drop for VpnConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn lease_lifecycle_rejects_work_after_terminal_state() {
+        for terminal in [
+            ConnectionState::Disconnected,
+            ConnectionState::Disconnecting,
+            ConnectionState::Error("relay lost".into()),
+        ] {
+            let (_tx, rx) = watch::channel(terminal);
+            let requested = std::sync::atomic::AtomicBool::new(false);
+            run_relay_renewal_until_terminal(rx, async {
+                requested.store(true, Ordering::SeqCst);
+            })
+            .await;
+            assert!(
+                !requested.load(Ordering::SeqCst),
+                "terminal session requested another ticket"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_lifecycle_error_cancels_pending_work_and_releases_auth_lock() {
+        let (tx, rx) = watch::channel(ConnectionState::ConfiguringSplitTunnel);
+        let lock = Arc::new(Mutex::new(()));
+        let owned_lock = lock.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut task = tokio::spawn(run_relay_renewal_until_terminal(rx, async move {
+            let _guard = owned_lock.lock().await;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        started_rx.await.unwrap();
+        assert!(lock.try_lock().is_err());
+        tx.send_replace(ConnectionState::Error("relay lost".into()));
+        let finished = tokio::time::timeout(Duration::from_secs(1), &mut task).await;
+        if finished.is_err() {
+            task.abort();
+            let _ = task.await;
+        }
+        assert!(finished.is_ok(), "renewal continued after relay failure");
+        assert!(lock.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn lease_lifecycle_stops_when_state_owner_disappears() {
+        let (tx, rx) = watch::channel(ConnectionState::ConfiguringSplitTunnel);
+        drop(tx);
+        let requested = std::sync::atomic::AtomicBool::new(false);
+        run_relay_renewal_until_terminal(rx, async {
+            requested.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(!requested.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn lease_lifecycle_allows_setup_work_to_complete() {
+        let (_tx, rx) = watch::channel(ConnectionState::ConfiguringSplitTunnel);
+        let requested = std::sync::atomic::AtomicBool::new(false);
+        run_relay_renewal_until_terminal(rx, async {
+            requested.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(requested.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn lease_lifecycle_keeps_renewal_alive_across_connected_updates() {
+        let (tx, rx) = watch::channel(ConnectionState::ConfiguringSplitTunnel);
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let mut task = tokio::spawn(run_relay_renewal_until_terminal(rx, async {
+            finish_rx.await.unwrap();
+        }));
+        for region in ["singapore", "tokyo"] {
+            tx.send_replace(ConnectionState::Connected {
+                since: Instant::now(),
+                server_region: region.into(),
+                server_endpoint: "127.0.0.1:51821".into(),
+                assigned_ip: "10.0.0.2".into(),
+                relay_auth_mode: "ticket".into(),
+                split_tunnel_active: true,
+                tunneled_processes: Vec::new(),
+                relay_status: None,
+            });
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), &mut task)
+                    .await
+                    .is_err()
+            );
+        }
+        finish_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     /// These are process-wide statics, so the quota tests must not overlap.
     static QUOTA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
