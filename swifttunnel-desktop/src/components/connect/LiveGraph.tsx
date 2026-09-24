@@ -1,11 +1,8 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useId, useMemo } from "react";
 
 export type DataSample = { t: number; up: number; down: number };
 
-/**
- * Cadence at which ConnectTab pushes new samples. The scroll animation is
- * time-based, so a late sample degrades gracefully instead of stuttering.
- */
+/** Cadence at which ConnectTab pushes new samples. */
 export const SAMPLE_INTERVAL_MS = 500;
 
 /** Number of samples kept and displayed (60 × 500ms = a 30s window). */
@@ -14,34 +11,7 @@ export const MAX_SAMPLES = 60;
 /** EMA factor per sample (~2s time constant at the 500ms cadence). */
 const EMA_ALPHA = 0.2;
 
-/**
- * Vertical rescale easing per 60fps frame. The scale snaps outward instantly
- * when the line would clip, and eases back down smoothly.
- */
-const Y_LERP_PER_FRAME = 0.08;
-const REFERENCE_FRAME_MS = 1000 / 60;
 const MIN_Y_MAX_BYTES = 8 * 1024;
-
-/**
- * Frame budget while the app window does not have focus (~5fps).
- *
- * An occluded Tauri window is not "hidden" as far as the WebView is concerned,
- * so rAF keeps firing at full rate behind a fullscreen game and this loop kept
- * rebuilding SVG path strings 60 times a second for a chart nobody could see.
- * Users found the workaround before the cause: switching to another tab
- * unmounts this component, and the in-game stutter went away.
- *
- * Throttled rather than paused, because "not focused" also covers a second
- * monitor where the graph is perfectly visible and freezing it would look
- * broken. At 5fps the chart still moves and the per-frame cost drops ~12x.
- */
-const UNFOCUSED_FRAME_BUDGET_MS = 200;
-
-/**
- * Ceiling on the delta fed to the easing maths. Without it, resuming after the
- * window was hidden for minutes hands the lerp an enormous dt.
- */
-const MAX_FRAME_DELTA_MS = 1000;
 
 function formatRate(bytesPerSec: number): string {
   if (bytesPerSec < 1024) return `${Math.round(bytesPerSec)} B/s`;
@@ -81,6 +51,18 @@ interface LiveGraphProps {
   onDisable?: () => void;
 }
 
+/**
+ * Throughput over the last 30 seconds.
+ *
+ * Drawn once per sample and never in between. It used to animate every
+ * frame (a requestAnimationFrame scroll, a pulsing SVG tip, a pinging dot),
+ * which kept WebView2 redrawing at the monitor's refresh rate for as long as
+ * the tunnel was up. The SVG pulse even kept going behind a fullscreen game,
+ * because pausing CSS animations does not reach SMIL. That is GPU time taken
+ * from the game the tunnel is supposed to be helping, so the chart is now a
+ * still picture that is replaced twice a second, and only while the window is
+ * in front (ConnectTab holds new samples back while it is not).
+ */
 export function LiveGraph({
   samples,
   height = 160,
@@ -98,13 +80,12 @@ export function LiveGraph({
   const plotH = H - PAD_T - PAD_B;
   const stepWidth = plotW / (MAX_SAMPLES - 1);
 
-  const scrollRef = useRef<SVGGElement>(null);
-  const lineRef = useRef<SVGPathElement>(null);
-  const areaRef = useRef<SVGPathElement>(null);
-  const tipRef = useRef<SVGGElement>(null);
-  const peakRef = useRef<HTMLSpanElement>(null);
-  const animYMaxRef = useRef(MIN_Y_MAX_BYTES);
-  const peakTextRef = useRef("");
+  // Two graphs on screen must not share gradient, clip and mask ids.
+  const uid = useId().replace(/:/g, "");
+  const fillId = `lg-fill-${uid}`;
+  const clipId = `lg-clip-${uid}`;
+  const edgeId = `lg-edge-${uid}`;
+  const maskId = `lg-mask-${uid}`;
 
   const smoothed = useMemo(() => {
     if (samples.length === 0) return [] as number[];
@@ -121,108 +102,25 @@ export function LiveGraph({
 
   const currentRate = smoothed.length > 0 ? smoothed[smoothed.length - 1] : 0;
 
-  // Latest data for the animation loop, refreshed on every render so the
-  // loop itself never has to be re-created when a sample arrives.
-  const frameData = useRef({ smoothed, lastSampleT: 0 });
-  frameData.current = {
-    smoothed,
-    lastSampleT: samples.length > 0 ? samples[samples.length - 1].t : 0,
-  };
+  const shape = useMemo(() => {
+    if (smoothed.length < 2) return null;
+    const peak = Math.max(...smoothed);
+    // Headroom above the busiest moment in the window, so the line never
+    // touches the top edge. It rescales only when that moment changes.
+    const yMax = Math.max(MIN_Y_MAX_BYTES, peak * 1.25);
+    const N = smoothed.length;
+    const pts: [number, number][] = smoothed.map((v, i) => [
+      PAD_L + plotW - (N - 1 - i) * stepWidth,
+      PAD_T + plotH - (Math.min(v, yMax) / yMax) * plotH,
+    ]);
+    const line = buildLinePath(pts);
+    const bottomY = PAD_T + plotH;
+    const rightX = PAD_L + plotW;
+    const area = `${line} L${rightX.toFixed(2)},${bottomY.toFixed(2)} L${pts[0][0].toFixed(2)},${bottomY.toFixed(2)} Z`;
+    return { line, area, tip: pts[N - 1], peak };
+  }, [smoothed, plotW, plotH, stepWidth]);
 
-  const active = samples.length >= 2;
-
-  useEffect(() => {
-    if (!active) {
-      // Fresh session: don't inherit the previous session's scale.
-      animYMaxRef.current = MIN_Y_MAX_BYTES;
-      peakTextRef.current = "";
-      return;
-    }
-    let raf = 0;
-    let lastFrame = performance.now();
-    let lastPaint = 0;
-
-    const renderFrame = (nowFrame: number) => {
-      raf = requestAnimationFrame(renderFrame);
-
-      // Skip the work, not the callback: an empty rAF tick costs nothing, while
-      // the path rebuild below is the expensive part that was competing with a
-      // fullscreen game for frames.
-      if (
-        !document.hasFocus() &&
-        nowFrame - lastPaint < UNFOCUSED_FRAME_BUDGET_MS
-      ) {
-        return;
-      }
-      lastPaint = nowFrame;
-
-      const dt = Math.min(
-        MAX_FRAME_DELTA_MS,
-        Math.max(0.1, nowFrame - lastFrame),
-      );
-      lastFrame = nowFrame;
-      const { smoothed, lastSampleT } = frameData.current;
-
-      if (smoothed.length >= 2) {
-        // Y scale: snap outward so the line never clips, ease back down.
-        const target = Math.max(MIN_Y_MAX_BYTES, Math.max(...smoothed) * 1.25);
-        let yMax = animYMaxRef.current;
-        if (target > yMax) {
-          yMax = target;
-        } else {
-          const f = 1 - Math.pow(1 - Y_LERP_PER_FRAME, dt / REFERENCE_FRAME_MS);
-          yMax += (target - yMax) * f;
-          if (yMax - target < target * 0.001) yMax = target;
-        }
-        animYMaxRef.current = yMax;
-
-        const N = smoothed.length;
-        const toX = (i: number) => PAD_L + plotW - (N - 1 - i) * stepWidth;
-        const toY = (v: number) =>
-          PAD_T + plotH - (Math.min(v, yMax) / yMax) * plotH;
-        const pts: [number, number][] = smoothed.map((v, i) => [
-          toX(i),
-          toY(v),
-        ]);
-
-        const line = buildLinePath(pts);
-        const bottomY = PAD_T + plotH;
-        const rightX = PAD_L + plotW;
-        const area = `${line} L${rightX.toFixed(2)},${bottomY.toFixed(2)} L${pts[0][0].toFixed(2)},${bottomY.toFixed(2)} Z`;
-
-        lineRef.current?.setAttribute("d", line);
-        areaRef.current?.setAttribute("d", area);
-
-        // Time-based scroll: a fresh sample starts one step beyond the right
-        // edge of the plot and slides into view over one sample interval.
-        const phase = Math.min(
-          1,
-          Math.max(0, (Date.now() - lastSampleT) / SAMPLE_INTERVAL_MS),
-        );
-        const offset = (1 - phase) * stepWidth;
-        if (scrollRef.current) {
-          scrollRef.current.style.transform = `translate3d(${offset}px, 0, 0)`;
-        }
-
-        const tip = pts[N - 1];
-        tipRef.current?.setAttribute(
-          "transform",
-          `translate(${tip[0].toFixed(2)}, ${tip[1].toFixed(2)})`,
-        );
-
-        const peakText = `→ ${formatRate(yMax)} peak`;
-        if (peakText !== peakTextRef.current && peakRef.current) {
-          peakTextRef.current = peakText;
-          peakRef.current.textContent = peakText;
-        }
-      }
-    };
-
-    raf = requestAnimationFrame(renderFrame);
-    return () => cancelAnimationFrame(raf);
-  }, [active, plotW, plotH, stepWidth]);
-
-  if (!active) {
+  if (!shape) {
     return (
       <div
         className="relative flex flex-col justify-between overflow-hidden rounded-[var(--radius-card)] px-4 py-4"
@@ -235,8 +133,8 @@ export function LiveGraph({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <span
-              className="h-1.5 w-1.5 animate-pulse rounded-full"
-              style={{ backgroundColor: "var(--color-text-primary)" }}
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ backgroundColor: "var(--color-text-muted)" }}
             />
             <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
               Throughput · Live
@@ -246,20 +144,10 @@ export function LiveGraph({
             Sampling…
           </span>
         </div>
-        <div className="flex flex-col items-center gap-2 self-center">
-          <div
-            className="h-8 w-32 rounded"
-            style={{
-              background:
-                "linear-gradient(90deg, transparent, var(--color-bg-elevated), transparent)",
-              backgroundSize: "200% 100%",
-              animation: "sweep-shine 2s linear infinite",
-            }}
-          />
-          <span className="font-mono text-[10px] text-text-dimmed">
-            Warming up throughput monitor
-          </span>
-        </div>
+        <span className="self-center font-mono text-[10px] text-text-dimmed">
+          Warming up throughput monitor
+        </span>
+        <span />
       </div>
     );
   }
@@ -275,14 +163,12 @@ export function LiveGraph({
       <div className="absolute inset-x-0 top-0 z-10 flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-1.5">
           <span
-            className="relative h-1.5 w-1.5 rounded-full"
-            style={{ backgroundColor: "var(--color-text-primary)" }}
-          >
-            <span
-              className="absolute inset-0 animate-ping rounded-full opacity-60"
-              style={{ backgroundColor: "var(--color-text-primary)" }}
-            />
-          </span>
+            className="h-1.5 w-1.5 rounded-full"
+            style={{
+              backgroundColor: "var(--color-text-primary)",
+              boxShadow: "0 0 6px rgba(255, 255, 255, 0.55)",
+            }}
+          />
           <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted">
             Throughput · Live
           </span>
@@ -313,33 +199,26 @@ export function LiveGraph({
         style={{ display: "block" }}
       >
         <defs>
-          <linearGradient id="lg-fill" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id={fillId} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor={fillColor} stopOpacity="0.5" />
             <stop offset="60%" stopColor={fillColor} stopOpacity="0.12" />
             <stop offset="100%" stopColor={fillColor} stopOpacity="0" />
           </linearGradient>
-          <filter id="lg-glow" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur stdDeviation="1.1" result="b" />
-            <feMerge>
-              <feMergeNode in="b" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-          <clipPath id="lg-clip">
+          <clipPath id={clipId}>
             <rect x={PAD_L} y={0} width={plotW} height={H} />
           </clipPath>
-          <linearGradient id="lg-edge" x1="0" y1="0" x2="1" y2="0">
+          <linearGradient id={edgeId} x1="0" y1="0" x2="1" y2="0">
             <stop offset="0%" stopColor="white" stopOpacity="0" />
             <stop offset="10%" stopColor="white" stopOpacity="1" />
             <stop offset="100%" stopColor="white" stopOpacity="1" />
           </linearGradient>
-          <mask id="lg-mask">
+          <mask id={maskId}>
             <rect
               x={PAD_L}
               y={0}
               width={plotW}
               height={H}
-              fill="url(#lg-edge)"
+              fill={`url(#${edgeId})`}
             />
           </mask>
         </defs>
@@ -359,50 +238,33 @@ export function LiveGraph({
           />
         ))}
 
-        <g clipPath="url(#lg-clip)" mask="url(#lg-mask)">
-          {/* Geometry (path d, tip position, scroll offset) is driven from a
-              requestAnimationFrame loop, not React renders, so the chart
-              scrolls and rescales continuously between samples. */}
-          <g ref={scrollRef} style={{ willChange: "transform" }}>
-            <path ref={areaRef} fill="url(#lg-fill)" />
-            <path
-              ref={lineRef}
-              fill="none"
-              stroke={lineColor}
-              strokeWidth="1.75"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              filter="url(#lg-glow)"
+        <g clipPath={`url(#${clipId})`} mask={`url(#${maskId})`}>
+          <path d={shape.area} fill={`url(#${fillId})`} />
+          <path
+            d={shape.line}
+            fill="none"
+            stroke={lineColor}
+            strokeWidth="1.75"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          <g
+            transform={`translate(${shape.tip[0].toFixed(2)}, ${shape.tip[1].toFixed(2)})`}
+          >
+            <circle r="6" fill={fillColor} opacity="0.18" />
+            <circle
+              r="2.5"
+              fill={fillColor}
+              stroke="var(--color-bg-card)"
+              strokeWidth="1.5"
             />
-            <g ref={tipRef}>
-              <circle r="4" fill={fillColor} opacity="0.3">
-                <animate
-                  attributeName="r"
-                  values="4;10;4"
-                  dur="2s"
-                  repeatCount="indefinite"
-                />
-                <animate
-                  attributeName="opacity"
-                  values="0.35;0;0.35"
-                  dur="2s"
-                  repeatCount="indefinite"
-                />
-              </circle>
-              <circle
-                r="2.5"
-                fill={fillColor}
-                stroke="var(--color-bg-card)"
-                strokeWidth="1.5"
-              />
-            </g>
           </g>
         </g>
       </svg>
 
       <div className="pointer-events-none absolute bottom-1.5 left-3 right-3 flex justify-between font-mono text-[9px] text-text-dimmed">
         <span>0</span>
-        <span ref={peakRef} />
+        <span>→ {formatRate(shape.peak)} peak</span>
       </div>
     </div>
   );

@@ -299,24 +299,12 @@ body {
   transform-origin: 50% 50%;
 }
 
-/* — Connected ring soft pulse — */
-@keyframes ring-pulse {
-  0% {
-    opacity: 0.55;
-    transform: scale(1);
-  }
-  100% {
-    opacity: 0;
-    transform: scale(1.32);
-  }
-}
-.ring-pulse {
-  animation: ring-pulse 2.2s ease-out infinite;
-}
-
-/* — Plasma orb: breathing white-hot core with two counter-rotating,
- * blurred energy bands. clip-path (not overflow:hidden) — Chromium fails
- * to clip blurred, composited children with rounded overflow. — */
+/* Plasma orb: white-hot core with two blurred energy bands, held still.
+ * It used to breathe and spin for as long as the window was open, which kept
+ * the compositor redrawing blurred, blended layers every frame, connected or
+ * not. A status lamp does not need to move to read as on.
+ * clip-path (not overflow:hidden): Chromium fails to clip blurred children
+ * with rounded overflow. */
 .plasma-orb {
   position: relative;
   border-radius: 50%;
@@ -330,7 +318,7 @@ body {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
-/* white-hot breathing core */
+/* white-hot core */
 .plasma-orb .core {
   position: absolute;
   inset: 22%;
@@ -343,15 +331,12 @@ body {
   );
   filter: blur(2px);
   mix-blend-mode: screen;
-  animation: core-breathe calc(var(--orb-speed, 6s) * 0.55) ease-in-out
-    infinite;
 }
 
-/* swirling energy bands. Each band carries its own clip-path: the conic
- * gradient paints the element's full square box, and once the band is
- * promoted to a compositor layer (animated transform + blur) Chromium
- * stops honoring the parent's clip — clip-path here applies after the
- * blur, inside the band's own layer, so no square edge can leak. */
+/* energy bands. Each band carries its own clip-path: the conic gradient
+ * paints the element's full square box, and a blurred band can escape the
+ * parent's clip. clip-path here applies after the blur, so no square edge
+ * can leak. */
 .plasma-orb .band {
   position: absolute;
   inset: -8%;
@@ -372,7 +357,6 @@ body {
   );
   filter: blur(5px);
   opacity: 0.85;
-  animation: orb-rotate calc(var(--orb-speed, 6s) * 0.8) linear infinite;
 }
 .plasma-orb .band-2 {
   inset: 8%;
@@ -387,7 +371,7 @@ body {
   );
   filter: blur(4px);
   opacity: 0.75;
-  animation: orb-rotate-rev calc(var(--orb-speed, 6s) * 1.25) linear infinite;
+  transform: rotate(-35deg);
 }
 
 /* glass sheen */
@@ -404,28 +388,6 @@ body {
   pointer-events: none;
 }
 
-@keyframes orb-rotate {
-  to {
-    transform: rotate(360deg);
-  }
-}
-@keyframes orb-rotate-rev {
-  to {
-    transform: rotate(-360deg);
-  }
-}
-@keyframes core-breathe {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 0.95;
-  }
-  50% {
-    transform: scale(1.22);
-    opacity: 1;
-  }
-}
-
 /* — Keyframes — */
 @keyframes pulse-opacity {
   0%, 100% { opacity: 1; }
@@ -437,36 +399,16 @@ body {
   100% { transform: translateX(200%); }
 }
 
-/* Route-diagram boosted leg: a highlight travelling along the line, so the
-   relay→game hop reads as traffic actively flowing rather than a static rule.
-   Directional on purpose — a plain opacity pulse reads as "loading". */
-@keyframes route-flow {
-  0% { background-position: -140% 0; }
-  100% { background-position: 240% 0; }
-}
-
+/* Route-diagram boosted leg: lit green, brightest toward the game, so the
+   relay→game hop reads as the carrying path. It used to run a highlight along
+   the line forever, and background-position cannot be animated on the
+   compositor, so that was a main-thread repaint every frame while connected. */
 .route-leg-boosted {
   background-image: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--color-status-connected) 10%, transparent) 0%,
-    color-mix(in srgb, var(--color-status-connected) 55%, transparent) 45%,
-    color-mix(in srgb, var(--color-status-connected) 10%, transparent) 100%
+    color-mix(in srgb, var(--color-status-connected) 14%, transparent) 0%,
+    color-mix(in srgb, var(--color-status-connected) 55%, transparent) 100%
   );
-  background-color: color-mix(
-    in srgb,
-    var(--color-status-connected) 12%,
-    transparent
-  );
-  background-size: 55% 100%;
-  background-repeat: no-repeat;
-  animation: route-flow 2.4s linear infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .route-leg-boosted {
-    animation: none;
-    background-size: 100% 100%;
-  }
 }
 
 @keyframes status-breath {
@@ -744,8 +686,10 @@ body {
   letter-spacing: -0.055em;
 }
 
-/* — Aurora bloom. A slow, soft light source behind hero surfaces so they have
-     atmosphere instead of being flat rectangles. — */
+/* Aurora bloom. A soft light source behind hero surfaces so they have
+     atmosphere instead of being flat rectangles. It holds still: it used to
+     drift on an 18s loop, which kept the compositor producing frames for the
+     whole time the window was open. */
 .aurora {
   position: absolute;
   inset: -40% -10% auto -10%;
@@ -755,42 +699,12 @@ body {
     radial-gradient(46% 60% at 22% 40%, rgba(255, 255, 255, 0.11), transparent 70%),
     radial-gradient(40% 55% at 74% 30%, rgba(255, 255, 255, 0.07), transparent 72%);
   filter: blur(14px);
-  /* Promote to its own layer so the blur is rasterised once and the drift
-     below is a texture move rather than a repaint. */
-  will-change: transform;
-  animation: aurora-drift 18s ease-in-out infinite alternate;
-}
-/* Translate only, deliberately.
- *
- * This used to end on `scale(1.08)`. Scaling changes the rasterisation scale
- * of the layer, so the compositor had to re-rasterise AND re-apply a 14px
- * blur over a 320px-tall element every single frame, for the whole time the
- * app was open. That one keyframe was the largest single contributor to the
- * GPU process sitting at ~33% of a CPU core while idle.
- *
- * A translate is handled entirely on the compositor against the cached
- * texture, so the same drift is close to free. The 8% zoom it replaces was
- * imperceptible on an 18s ease-in-out background wash.
- */
-@keyframes aurora-drift {
-  0% {
-    transform: translate3d(-3%, 0, 0);
-  }
-  100% {
-    transform: translate3d(4%, 3%, 0);
-  }
 }
 .aurora-live {
   background:
     radial-gradient(46% 60% at 22% 40%, rgba(52, 211, 154, 0.16), transparent 70%),
     radial-gradient(40% 55% at 74% 30%, rgba(255, 255, 255, 0.08), transparent 72%);
 }
-@media (prefers-reduced-motion: reduce) {
-  .aurora {
-    animation: none;
-  }
-}
-
 /* — Circular icon orb. Replaces square icon tiles: lit from the top-left like
      a physical indicator lamp rather than a flat rounded rect. — */
 .icon-orb {
@@ -884,23 +798,3 @@ html.app-idle *::after {
     transition: none;
   }
 }
-
-/* — SwiftTunnel Lite: no motion —
- *
- * Lite exists because the full app was measured taking roughly a third of a CPU
- * core plus GPU time to animate a window, and players reported it as lost frames
- * in game. Pausing on blur (see lib/animationIdle.ts) fixed that for the full
- * app; Lite goes further and never starts.
- *
- * Animations only. Transitions are left alone: they are one-shot and short, and
- * removing them makes every state change jump.
- */
-/* Everything stops except a marked subtree.
- *
- * Blanket-killing motion also killed the connection orb, and an app that
- * gives no sign it is doing anything while it connects reads as frozen. So
- * the rule spares [data-lite-motion] and its descendants, which is the status
- * ring and nothing else. That one is worth its cost: it runs only while the
- * state is changing, not for the whole time the window is open, which is what
- * the idle animations were doing.
- */

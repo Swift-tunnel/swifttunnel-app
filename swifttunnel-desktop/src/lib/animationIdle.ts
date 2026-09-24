@@ -1,10 +1,12 @@
 /**
  * Stop the interface animating while the window is not in front.
  *
- * The UI has a fair amount of continuous motion: a drifting aurora wash,
- * rotating orbs, a route-flow dash, spinner rings and a panel sweep. All of it
- * is declared `infinite`, so the compositor repaints every frame for as long as
- * the app is open.
+ * The steady states no longer loop at all: the orb, the aurora wash and the
+ * route line hold still, because the connected state is on screen for whole
+ * sessions. What is left moves only while something is changing (the
+ * connecting arc, busy spinners, the sweep over a running network test), but
+ * it is still declared `infinite`, so the compositor repaints every frame
+ * until it stops.
  *
  * WebView2 does not throttle that when the window goes to the background, and
  * measurably does not stop it when the window is *minimised* either: with the
@@ -16,7 +18,7 @@
  * `animation-play-state: paused` is the right lever rather than `display:none`
  * or unmounting: the compositor stops producing frames, but every element
  * keeps its layout and its current position, so restoring the window resumes
- * mid-drift instead of snapping.
+ * mid-motion instead of snapping.
  *
  * Transitions are deliberately left alone. They are one-shot and short, and
  * disabling them mid-flight makes state changes jump.

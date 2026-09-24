@@ -166,12 +166,6 @@ function ConnectionCard({ collapsed }: { collapsed: boolean }) {
 
   const dot = (
     <span className="relative flex h-1.5 w-1.5 shrink-0">
-      {isConnected && (
-        <span
-          className="absolute inset-0 animate-ping rounded-full opacity-60"
-          style={{ backgroundColor: dotColor(vpnState) }}
-        />
-      )}
       <span
         className="relative h-1.5 w-1.5 rounded-full"
         style={{

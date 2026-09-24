@@ -1,9 +1,12 @@
 import type { VpnState } from "../../lib/types";
 
-/** Animated connection ring around a fluid orb.
- *  idle: dashed hairline, grey drifting blobs · connecting: spinning arc,
- *  brighter faster fluid · connected: glowing green ring + green fluid ·
- *  error: red ring, dim red fluid */
+/** Connection ring around a glowing orb.
+ *  idle: dashed hairline, grey orb · connecting: spinning arc, bright orb ·
+ *  connected: glowing green ring + green orb · error: red ring, dim red orb.
+ *
+ *  Only the connecting arc moves, and only while the state is changing. The
+ *  connected state is shown for the whole session, often behind a game, so
+ *  it is drawn once and then left alone. */
 export function StatusRing({
   state,
   size = 84,
@@ -22,22 +25,8 @@ export function StatusRing({
     <div
       className="relative shrink-0 select-none"
       style={{ width: size, height: size }}
-      // Lite stops all motion except inside this subtree. The ring is the one
-      // thing worth animating there: it only moves while the connection state
-      // is changing, and a connect button that gives no sign of working reads
-      // as a frozen app.
-      data-lite-motion=""
       aria-hidden
     >
-      {/* Connected: expanding pulse halo behind the ring */}
-      {isConnected && (
-        <span
-          className="ring-pulse absolute inset-0 rounded-full"
-          style={{
-            border: "1.5px solid var(--color-status-connected)",
-          }}
-        />
-      )}
 
       <svg
         width={size}
@@ -118,11 +107,6 @@ export function StatusRing({
                     ? "#f2f2f2"
                     : "#b8b8b8",
               opacity: isConnected ? 1 : isError ? 0.8 : 0.95,
-              "--orb-speed": isTransitioning
-                ? "1.8s"
-                : isConnected
-                  ? "4.5s"
-                  : "7s",
               transition: "color 0.4s ease, opacity 0.4s ease",
             } as React.CSSProperties
           }

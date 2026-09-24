@@ -41,12 +41,6 @@ export function StatusChip({ state, full }: StatusChipProps) {
       }}
     >
       <span className="relative flex h-1.5 w-1.5 shrink-0">
-        {isConnected && (
-          <span
-            className="absolute inset-0 animate-ping rounded-full opacity-60"
-            style={{ backgroundColor: color }}
-          />
-        )}
         <span
           className="relative h-1.5 w-1.5 rounded-full"
           style={{

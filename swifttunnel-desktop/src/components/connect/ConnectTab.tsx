@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -11,6 +11,8 @@ import {
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
+import { useLiveUpdates } from "../../lib/useLiveUpdates";
+import { vpnGetThroughput } from "../../lib/commands";
 import { RouteDiagram } from "./RouteDiagram";
 import {
   isConnectActionBusy,
@@ -44,8 +46,6 @@ export function ConnectTab() {
   const vpnRegion = useVpnStore((s) => s.region);
   const serverEndpoint = useVpnStore((s) => s.serverEndpoint);
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
-  const bytesUp = useVpnStore((s) => s.bytesUp);
-  const bytesDown = useVpnStore((s) => s.bytesDown);
   const ping = useVpnStore((s) => s.ping);
   const connectedAt = useVpnStore((s) => s.connectedAt);
   const driverSetupState = useVpnStore((s) => s.driverSetupState);
@@ -100,7 +100,13 @@ export function ConnectTab() {
   const cachedLatency = getLatency(settings.selected_region);
 
   const [dataHistory, setDataHistory] = useState<DataSample[]>([]);
-  const [elapsed, setElapsed] = useState(0);
+  // Every sample lands here first; state (and so a redraw) only follows while
+  // the window is in front. In game they keep piling up, so the graph shows
+  // the match on the way back without being redrawn behind the game.
+  const samplesRef = useRef<DataSample[]>([]);
+  const live = useLiveUpdates();
+  const liveRef = useRef(live);
+  liveRef.current = live;
   const prevBytesRef = useRef<{ up: number; down: number; t: number } | null>(
     null,
   );
@@ -128,6 +134,7 @@ export function ConnectTab() {
     // a throughput IPC call every 500ms plus a state update that re-renders
     // the tab. This is what the setting is actually for.
     if (!isConnected || !showLiveGraph) {
+      samplesRef.current = [];
       setDataHistory([]);
       prevBytesRef.current = null;
       return;
@@ -137,33 +144,50 @@ export function ConnectTab() {
     // against each other and produce zero/double-rate spikes in the graph.
     let cancelled = false;
     let inFlight = false;
+    const readTotals = async (): Promise<{ up: number; down: number } | null> => {
+      if (liveRef.current) {
+        await fetchThroughput();
+        const { bytesUp, bytesDown } = useVpnStore.getState();
+        return { up: bytesUp, down: bytesDown };
+      }
+      // In game: read the counters without publishing them to the store,
+      // which would redraw the totals for nobody.
+      try {
+        const stats = await vpnGetThroughput();
+        return stats ? { up: stats.bytes_up, down: stats.bytes_down } : null;
+      } catch {
+        return null;
+      }
+    };
     const sample = async () => {
       if (inFlight) return;
       inFlight = true;
+      let totals: { up: number; down: number } | null = null;
       try {
-        await fetchThroughput();
+        totals = await readTotals();
       } finally {
         inFlight = false;
       }
-      if (cancelled) return;
-      const { bytesUp, bytesDown } = useVpnStore.getState();
+      if (cancelled || !totals) return;
       const now = Date.now();
       const prev = prevBytesRef.current;
       if (prev) {
         const dtMs = Math.max(1, now - prev.t);
-        const up = Math.max(0, ((bytesUp - prev.up) / dtMs) * 1000);
-        const down = Math.max(0, ((bytesDown - prev.down) / dtMs) * 1000);
-        setDataHistory((h) =>
-          [...h, { t: now, up, down }].slice(-MAX_SAMPLES),
-        );
+        const up = Math.max(0, ((totals.up - prev.up) / dtMs) * 1000);
+        const down = Math.max(0, ((totals.down - prev.down) / dtMs) * 1000);
+        samplesRef.current = [
+          ...samplesRef.current,
+          { t: now, up, down },
+        ].slice(-MAX_SAMPLES);
+        if (liveRef.current) setDataHistory(samplesRef.current);
       }
-      prevBytesRef.current = { up: bytesUp, down: bytesDown, t: now };
+      prevBytesRef.current = { up: totals.up, down: totals.down, t: now };
     };
     void sample();
     // Sampled through a plain interval because the closure owns per-tick
-    // state (prevBytesRef). Deliberately not focus-aware: the graph is most
-    // useful for the period you were playing, which is exactly when the window
-    // is not in front.
+    // state (prevBytesRef). Deliberately kept sampling in game: the graph is
+    // most useful for the period you were playing, which is exactly when the
+    // window is not in front. Only the drawing waits.
     const id = setInterval(() => void sample(), SAMPLE_INTERVAL_MS);
     return () => {
       cancelled = true;
@@ -171,6 +195,13 @@ export function ConnectTab() {
       prevBytesRef.current = null;
     };
   }, [isConnected, showLiveGraph, fetchThroughput]);
+
+  // Back in front: draw what piled up meanwhile and refresh the totals.
+  useEffect(() => {
+    if (!live || !isConnected) return;
+    setDataHistory(samplesRef.current);
+    void fetchThroughput();
+  }, [live, isConnected, fetchThroughput]);
 
   useFocusAwareInterval(() => void fetchState(), 2000, {
     enabled: isConnected || isTransitioning,
@@ -186,19 +217,6 @@ export function ConnectTab() {
     void fetchPing();
   }, [isConnected, fetchPing]);
   useFocusAwareInterval(() => void fetchPing(), 3000, { enabled: isConnected });
-
-  useEffect(() => {
-    if (connectedAt === null) {
-      setElapsed(0);
-      return;
-    }
-    setElapsed(Math.floor((Date.now() - connectedAt) / 1000));
-    const id = setInterval(
-      () => setElapsed(Math.floor((Date.now() - connectedAt) / 1000)),
-      1000,
-    );
-    return () => clearInterval(id);
-  }, [connectedAt]);
 
   function selectRegion(regionId: string) {
     update({ selected_region: regionId, auto_routing_enabled: false });
@@ -445,7 +463,7 @@ export function ConnectTab() {
           />
           <HeroStat
             label="Session"
-            value={isConnected ? formatElapsed(elapsed) : "—"}
+            value={isConnected ? <SessionClock connectedAt={connectedAt} /> : "—"}
             divider
           />
           <HeroStat
@@ -503,9 +521,14 @@ export function ConnectTab() {
           )}
 
           <div className="grid grid-cols-4 overflow-hidden rounded-[var(--radius-card)] surface-card">
-            <MetricCell label="Upload" value={formatBytes(bytesUp)} mono divider />
-            <MetricCell label="Download" value={formatBytes(bytesDown)} mono divider />
-            <MetricCell label="Session" value={formatElapsed(elapsed)} mono divider />
+            <TransferCell direction="up" />
+            <TransferCell direction="down" />
+            <MetricCell
+              label="Session"
+              value={<SessionClock connectedAt={connectedAt} />}
+              mono
+              divider
+            />
             <MetricCell
               label="Ping"
               value={ping !== null ? `${ping}` : "—"}
@@ -665,6 +688,48 @@ export function ConnectTab() {
 
 // ── Sub-components ──
 
+/**
+ * Session length, in its own component so the once-a-second tick re-renders
+ * one text node instead of the whole tab. It stops ticking while the player
+ * is in game and catches up the moment the window is back in front.
+ */
+function SessionClock({ connectedAt }: { connectedAt: number | null }) {
+  const live = useLiveUpdates();
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (connectedAt === null || !live) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [connectedAt, live]);
+
+  const seconds =
+    connectedAt === null ? 0 : Math.max(0, Math.floor((now - connectedAt) / 1000));
+  return <>{formatElapsed(seconds)}</>;
+}
+
+/**
+ * Upload or download total. Subscribed here rather than in ConnectTab so a
+ * counter update repaints one number, not the tab. While the player is in
+ * game it holds the last value: the overlay polls the same counters every
+ * second, and redrawing them behind the game helps no one.
+ */
+function TransferCell({ direction }: { direction: "up" | "down" }) {
+  const live = useLiveUpdates();
+  const bytes = useVpnStore((s) => (direction === "up" ? s.bytesUp : s.bytesDown));
+  const shown = useRef(bytes);
+  if (live) shown.current = bytes;
+  return (
+    <MetricCell
+      label={direction === "up" ? "Upload" : "Download"}
+      value={formatBytes(shown.current)}
+      mono
+      divider
+    />
+  );
+}
+
 function HeroStat({
   label,
   value,
@@ -673,7 +738,7 @@ function HeroStat({
   divider,
 }: {
   label: string;
-  value: string;
+  value: ReactNode;
   unit?: string;
   color?: string;
   divider?: boolean;
@@ -829,7 +894,7 @@ function MetricCell({
   divider,
 }: {
   label: string;
-  value: string;
+  value: ReactNode;
   hint?: string;
   mono?: boolean;
   valueColor?: string;
