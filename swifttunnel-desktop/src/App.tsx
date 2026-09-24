@@ -7,7 +7,6 @@ import {
 } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/shell/AppShell";
-import { HomeTab } from "./components/home/HomeTab";
 import { StartupScreen } from "./components/shell/StartupScreen";
 import { LoginScreen } from "./components/auth/LoginScreen";
 import { BannedScreen } from "./components/auth/BannedScreen";
@@ -36,7 +35,6 @@ import { reportError } from "./lib/errors";
 import { addTunneledMs } from "./lib/tunnelTime";
 import {
   authUpdateRequired,
-  closeSplash,
   systemLaunchedFromStartup,
   systemStartupRecoveryDone,
 } from "./lib/commands";
@@ -49,8 +47,6 @@ import type { TabId } from "./lib/types";
 
 function tabComponent(tab: TabId) {
   switch (tab) {
-    case "home":
-      return <HomeTab />;
     case "connect":
       return <ConnectTab />;
     case "optimization":
@@ -96,6 +92,9 @@ function App() {
   // network state at launch (see lib.rs recover_stale_network_state), so users
   // land on a working connection instead of a leftover-broken one.
   const [recovering, setRecovering] = useState(true);
+  // What the self-heal is doing right now, when it is something slow enough to
+  // name on the loading screen (see STARTUP_RECOVERY_STAGE).
+  const [recoveryStage, setRecoveryStage] = useState<string | null>(null);
 
   // Forced-update gate. The native core latches a "please update" message when
   // the server locks this build out (old-build lockout); we poll it so an old
@@ -158,9 +157,6 @@ function App() {
             await getCurrentWindow().show();
           } catch {}
         }
-      } finally {
-        // The main window (or its attempt) is up, retire the boot splash.
-        void closeSplash();
       }
     };
 
@@ -275,6 +271,8 @@ function App() {
     let cancelled = false;
     let minElapsed = false;
     let recovered = false;
+    let repairing = false;
+    let repairTimer: number | undefined;
     const reveal = () => {
       if (!cancelled && minElapsed && recovered) setRecovering(false);
     };
@@ -283,9 +281,28 @@ function App() {
       minElapsed = true;
       reveal();
     }, 1000);
+    // A driver repair keeps the app from connecting until it finishes, so the
+    // screen waits for it (still bounded, and saying so) instead of dropping
+    // into an app that cannot connect yet.
     const maxTimer = window.setTimeout(() => {
-      if (!cancelled) setRecovering(false);
+      if (cancelled) return;
+      if (repairing) {
+        repairTimer = window.setTimeout(() => {
+          if (!cancelled) setRecovering(false);
+        }, 78_000);
+        return;
+      }
+      setRecovering(false);
     }, 12000);
+
+    let unlistenStage: (() => void) | undefined;
+    void listen<string>("startup-recovery-stage", (event) => {
+      if (event.payload === "driver_repair") repairing = true;
+      setRecoveryStage(event.payload);
+    }).then((u) => {
+      if (cancelled) u();
+      else unlistenStage = u;
+    });
 
     void systemStartupRecoveryDone()
       .then((done) => {
@@ -309,7 +326,9 @@ function App() {
       cancelled = true;
       window.clearTimeout(minTimer);
       window.clearTimeout(maxTimer);
+      window.clearTimeout(repairTimer);
       unlisten?.();
+      unlistenStage?.();
     };
   }, []);
 
@@ -525,7 +544,6 @@ function App() {
       }
 
       const map: Record<string, TabId> = {
-        "0": "home",
         "1": "connect",
         "2": "optimization",
         "3": "games",
@@ -559,7 +577,25 @@ function App() {
     isLoading ||
     (authState === "logged_in" && !serversLoaded)
   ) {
-    return <StartupScreen />;
+    return (
+      <StartupScreen
+        steps={[
+          { label: "Loading your settings", done: isSettingsLoaded },
+          { label: "Signing you in", done: !isLoading },
+          {
+            label: "Loading relays",
+            done: serversLoaded || authState !== "logged_in",
+          },
+          {
+            label:
+              recoveryStage === "driver_repair"
+                ? "Repairing the network driver. This can take a minute."
+                : "Checking your network",
+            done: !recovering,
+          },
+        ]}
+      />
+    );
   }
 
   // Old-build lockout takes precedence over everything else, a walled-off

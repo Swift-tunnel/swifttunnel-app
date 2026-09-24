@@ -14,6 +14,10 @@ pub const ROBLOX_GAME_JOINED: &str = "roblox-game-joined";
 /// Fired once the startup network self-heal (stale-state recovery) has finished,
 /// so the UI can drop its "preparing your connection" screen.
 pub const STARTUP_RECOVERY_COMPLETE: &str = "startup-recovery-complete";
+/// Fired with a stage name while the startup self-heal does something slow, so
+/// the loading screen can say what it is waiting for. "driver_repair" means the
+/// network driver is being reinstalled, which takes up to a minute.
+pub const STARTUP_RECOVERY_STAGE: &str = "startup-recovery-stage";
 
 /// Emitted when Roblox joins a game server (parsed from the Roblox log). Drives
 /// the optional auto RAM clean + in-game overlay, and game-aware UI.

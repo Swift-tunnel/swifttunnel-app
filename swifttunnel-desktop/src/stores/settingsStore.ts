@@ -3,6 +3,7 @@ import type { AppSettings, TabId } from "../lib/types";
 import { settingsLoad, settingsSave } from "../lib/commands";
 import { DEFAULT_SETTINGS, mergeAppSettings } from "../lib/settings";
 import { reportError } from "../lib/errors";
+import { NAV_ITEMS } from "../components/shell/nav";
 
 // Native saves perform filesystem and system work on blocking workers. Keep
 // one in flight so an older snapshot cannot finish after a newer preference.
@@ -12,13 +13,12 @@ let saveTail: Promise<void> = Promise.resolve();
  * Keep the restored tab inside what this build actually has.
  *
  * Both clients share one settings file, so a Lite install can be handed a
- * persisted tab for a page it does not ship, and would otherwise open on a
+ * persisted tab for a page it does not ship, and a settings file from before
+ * the Home page was removed still names it. Either would otherwise open on a
  * blank content area with nothing selected in the sidebar.
  */
-function sanitiseTab(tab: TabId | undefined): TabId {
-  const fallback: TabId = "home";
-  if (!tab) return fallback;
-  return tab;
+function sanitiseTab(tab: string | undefined): TabId {
+  return NAV_ITEMS.some((item) => item.id === tab) ? (tab as TabId) : "connect";
 }
 
 interface SettingsStore {
@@ -35,7 +35,7 @@ interface SettingsStore {
 
 export const useSettingsStore = create<SettingsStore>((set, get) => ({
   settings: DEFAULT_SETTINGS,
-  activeTab: "home",
+  activeTab: "connect",
   isLoaded: false,
 
   load: async () => {
@@ -51,7 +51,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         // A build that dropped a page must not restore it from a settings
         // file written by the full app: both clients share one account and
         // one settings store.
-        activeTab: sanitiseTab(persistedTab as TabId | undefined),
+        activeTab: sanitiseTab(persistedTab),
         isLoaded: true,
       });
     } catch (error) {

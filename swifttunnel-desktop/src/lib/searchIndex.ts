@@ -35,7 +35,6 @@ export interface SearchEntry {
  */
 const icon = (tab: TabId): string => navItemFor(tab).icon;
 
-const homeIcon = /* @__PURE__ */ icon("home");
 const connectIcon = /* @__PURE__ */ icon("connect");
 const networkIcon = /* @__PURE__ */ icon("network");
 const optimizeIcon = /* @__PURE__ */ icon("optimization");
@@ -46,14 +45,6 @@ const settingsIcon = /* @__PURE__ */ icon("settings");
 
 // ── Top-level tabs ──
 const TABS: SearchEntry[] = [
-  {
-    id: "tab-home",
-    tab: "home",
-    label: "Home",
-    section: "Go to page",
-    icon: homeIcon,
-    keywords: "home dashboard summary overview welcome start landing",
-  },
   {
     id: "tab-connect",
     tab: "connect",
@@ -245,6 +236,15 @@ const OPTS: SearchEntry[] = OPTIMIZATIONS.map((def) => ({
 
 // Actions that aren't a plain page, dispatch an event or deep-link to a control.
 const ACTIONS: SearchEntry[] = [
+  {
+    id: "action-presets",
+    tab: "optimization",
+    anchor: "presets",
+    label: "Presets",
+    section: "Optimize",
+    icon: optimizeIcon,
+    keywords: "preset presets save share import export code config settings copy",
+  },
   {
     id: "action-language",
     tab: "settings",

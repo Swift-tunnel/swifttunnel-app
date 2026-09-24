@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { Slider } from "../ui";
 
-/** Shared FPS target control used by the boost page and the Home dashboard, so
- *  the two stay visually and behaviourally identical. Slider range 30–1010; the
- *  last notch (1010) is the "uncapped" position (target_fps = 99999). */
+/** FPS target control on the boost page. Slider range 30–1010; the last notch
+ *  (1010) is the "uncapped" position (target_fps = 99999). */
 export function FpsSlider({
   value,
   onChange,

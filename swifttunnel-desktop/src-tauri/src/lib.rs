@@ -653,7 +653,6 @@ pub fn run() {
             commands::auth::auth_logout,
             commands::auth::auth_refresh_profile,
             commands::auth::auth_update_required,
-            commands::system::close_splash,
             commands::system::ensure_overlay_window,
             // VPN
             commands::vpn::vpn_get_state,
@@ -829,31 +828,8 @@ pub fn run() {
             // Window starts hidden via tauri.conf.json ("visible": false).
             // The frontend will call getCurrentWindow().show() after React loads,
             // unless launched_from_startup is true (user clicks tray to reveal).
-
-            // Boot splash: interactive launches only. On silent auto-start with
-            // Windows the app lives in the tray, so the splash must never flash
-            // over the desktop. Declared visible:false in tauri.conf.json and
-            // shown here, before any slow work runs.
-            if let Some(splash) = app.get_webview_window("splash") {
-                if launched_from_startup {
-                    let _ = splash.close();
-                } else {
-                    let _ = splash.show();
-                }
-            }
-
-            // Boot splash safety net: the frontend closes it once the main window
-            // is shown (close_splash), but if the frontend never loads, retire it
-            // after a bit so it can't sit alwaysOnTop forever.
-            {
-                let splash_handle = app.handle().clone();
-                runtime.spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-                    if let Some(splash) = splash_handle.get_webview_window("splash") {
-                        let _ = splash.close();
-                    }
-                });
-            }
+            // Its first screen is the loading screen, so there is no separate
+            // boot splash window.
 
             // Set up system tray
             if let Err(e) = tray::setup_tray(app.handle()) {

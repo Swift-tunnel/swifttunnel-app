@@ -1,15 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { SwiftLogo } from "../common/SwiftLogo";
+import { startupProgress, type StartupStep } from "../../lib/startup";
 
 /**
  * Branded loading screen shown at launch while the backend runs its network
  * self-heal and the initial auth/settings/server pre-fetch complete (see
- * App.tsx `recovering || isLoading`). Dismissed once the app is ready (or a
- * short cap), so it never hangs.
+ * App.tsx). It is the first thing the window shows; there is no separate boot
+ * splash.
  *
- * Styled after a two-line "logo + did-you-know" loader: the mark breathes, a
- * hairline progress shimmer runs underneath, and a rotating tip keeps the wait
- * from feeling dead without ever claiming a fake percentage.
+ * The bar is real: it fills one step at a time as each piece of startup
+ * actually finishes, and the line under it names the step still running, so a
+ * slow step (a driver repair, say) reads as work rather than a hang. App.tsx
+ * caps the wait, so it never traps the user. A rotating tip keeps it from
+ * feeling dead.
  */
 const TIPS: string[] = [
   "SwiftTunnel only routes your game traffic, everything else stays on your ISP at full speed.",
@@ -22,7 +25,7 @@ const TIPS: string[] = [
 
 const TIP_INTERVAL_MS = 4200;
 
-export function StartupScreen() {
+export function StartupScreen({ steps }: { steps: StartupStep[] }) {
   // Start on a random tip so relaunches don't always open on the same line.
   const [index, setIndex] = useState(() =>
     Math.floor(Math.random() * TIPS.length),
@@ -49,10 +52,12 @@ export function StartupScreen() {
     return () => window.clearInterval(cycle);
   }, []);
 
+  const { done: doneCount, fraction: progress, current } = startupProgress(steps);
+
   return (
     <div className="relative flex h-screen w-screen select-none flex-col items-center justify-center overflow-hidden bg-bg-base">
       {/* Brand dot field + radial wash behind the mark so it reads as the focal
-          point (matches the boot splash and in-app cards). */}
+          point (matches the in-app cards). */}
       <div
         aria-hidden="true"
         className="pointer-events-none absolute inset-0"
@@ -85,13 +90,27 @@ export function StartupScreen() {
           SwiftTunnel
         </span>
 
-        {/* Hairline progress shimmer, indeterminate, no fake percentage */}
-        <div className="mt-6 h-[3px] w-40 overflow-hidden rounded-full bg-bg-elevated">
-          <div className="startup-progress h-full w-1/3 rounded-full bg-accent-primary" />
+        {/* Real progress, one step per piece of startup that has finished.
+            It only moves when a step completes, so it costs nothing between. */}
+        <div
+          className="mt-6 h-[3px] w-48 overflow-hidden rounded-full bg-bg-elevated"
+          role="progressbar"
+          aria-label="Starting SwiftTunnel"
+          aria-valuemin={0}
+          aria-valuemax={steps.length}
+          aria-valuenow={doneCount}
+        >
+          <div
+            className="h-full rounded-full bg-accent-primary transition-[width] duration-500 ease-out"
+            style={{ width: `${progress * 100}%` }}
+          />
         </div>
+        <p className="mt-2.5 h-4 text-[11.5px] text-text-muted">
+          {current ?? "Ready"}
+        </p>
 
         {/* Did-you-know rotator */}
-        <div className="mt-9 flex h-16 max-w-[380px] flex-col items-center px-6 text-center">
+        <div className="mt-8 flex h-16 max-w-[380px] flex-col items-center px-6 text-center">
           <span className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-accent-primary">
             Did you know?
           </span>
@@ -110,13 +129,8 @@ export function StartupScreen() {
           50% { transform: scale(1.04); opacity: 1; }
         }
         .startup-breathe { animation: startup-breathe 3.2s ease-in-out infinite; }
-        @keyframes startup-progress {
-          0% { transform: translateX(-140%); }
-          100% { transform: translateX(440%); }
-        }
-        .startup-progress { animation: startup-progress 1.35s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
         @media (prefers-reduced-motion: reduce) {
-          .startup-breathe, .startup-progress { animation: none; }
+          .startup-breathe { animation: none; }
         }
       `}</style>
     </div>

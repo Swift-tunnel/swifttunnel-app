@@ -24,16 +24,6 @@ static DRIVER_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-/// Close the boot splash window once the main UI is up (invoked from the
-/// frontend after the main window is shown). No-op if it's already gone.
-#[tauri::command]
-pub fn close_splash(app: tauri::AppHandle) {
-    use tauri::Manager;
-    if let Some(splash) = app.get_webview_window("splash") {
-        let _ = splash.close();
-    }
-}
-
 /// Create an overlay window on first use.
 ///
 /// Both overlay windows used to be declared in `tauri.conf.json`, which means
@@ -1264,6 +1254,12 @@ pub(crate) async fn system_startup_repair_driver_if_needed(
             StartupDriverRepairDecision::Repair => {
                 log::warn!(
                     "Startup driver recovery found a repairable driver issue; running automatic repair"
+                );
+                // The loading screen waits on this and says why.
+                let _ = tauri::Emitter::emit(
+                    &app,
+                    crate::events::STARTUP_RECOVERY_STAGE,
+                    "driver_repair",
                 );
                 system_repair_driver(app, state).await.map(Some)
             }

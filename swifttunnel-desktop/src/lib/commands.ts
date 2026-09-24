@@ -54,9 +54,6 @@ export const authRefreshProfile = () => invoke<void>("auth_refresh_profile");
 export const authUpdateRequired = () =>
   invoke<string | null>("auth_update_required");
 
-// Retire the boot splash window once the main window is up.
-export const closeSplash = () => invoke<void>("close_splash");
-
 // ── VPN ──
 
 export const vpnGetState = () => invoke<VpnStateResponse>("vpn_get_state");

@@ -566,7 +566,6 @@ export interface UpdaterProgressEvent {
 // ── Tabs ──
 
 export type TabId =
-  | "home"
   | "connect"
   | "optimization"
   | "games"

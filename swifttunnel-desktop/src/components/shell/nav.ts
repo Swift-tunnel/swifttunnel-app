@@ -18,13 +18,6 @@ const ALL_SECTIONS: NavSection[] = [
     label: "Tunnel",
     items: [
       {
-        id: "home",
-        label: "Home",
-        description: "Your SwiftTunnel at a glance",
-        shortcut: "0",
-        icon: "M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z M9 22V12h6v10",
-      },
-      {
         id: "connect",
         label: "Connect",
         description: "Route game traffic through the fastest relay",

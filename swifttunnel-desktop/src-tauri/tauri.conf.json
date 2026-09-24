@@ -14,22 +14,6 @@
     "withGlobalTauri": false,
     "windows": [
       {
-        "label": "splash",
-        "url": "splash.html",
-        "title": "SwiftTunnel",
-        "width": 460,
-        "height": 300,
-        "decorations": false,
-        "transparent": true,
-        "center": true,
-        "resizable": false,
-        "skipTaskbar": true,
-        "alwaysOnTop": true,
-        "shadow": false,
-        "focus": true,
-        "visible": false
-      },
-      {
         "label": "main",
         "title": "SwiftTunnel",
         "width": 1020,

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
+import { PresetsPanel, PresetsDialog, type PresetMode } from "./PresetsCard";
 import { showRamOverlay } from "../overlay/RamOverlay";
 import { useOptimizationStore } from "../../stores/optimizationStore";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
@@ -640,6 +641,7 @@ function AutoRamCleanRow() {
 export function OptimizationTab() {
   const loadActive = useOptimizationStore((s) => s.loadActive);
   const [view, setView] = useState<"boost" | "speedup">("boost");
+  const [presetMode, setPresetMode] = useState<PresetMode>(null);
   const deepLinkAnchor = useDeepLinkStore((s) => s.anchor);
 
   // Reflect which optimizations are already applied (persisted on disk).
@@ -720,6 +722,17 @@ export function OptimizationTab() {
       ) : (
         <SpeedUpView />
       )}
+
+      {/* Presets carry both sub-tabs' settings, so they sit under either. */}
+      <div data-search-anchor="presets">
+        <PresetsPanel
+          animate={false}
+          delay={0}
+          onCreate={() => setPresetMode("create")}
+          onImport={() => setPresetMode("import")}
+        />
+      </div>
+      <PresetsDialog mode={presetMode} onClose={() => setPresetMode(null)} />
     </div>
   );
 }
