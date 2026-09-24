@@ -52,15 +52,6 @@ const ETW_OPCODE_START: u8 = 1;
 /// Session behind the in-game overlay's FPS readout.
 const OVERLAY_SESSION_NAME: &str = "SwiftTunnelFpsMonitor";
 
-/// Session behind the frame rate in the tunnel's periodic load log line.
-///
-/// Every monitor needs a name of its own. Starting a session first stops any
-/// session already running under that name (a leftover from a crash), so two
-/// monitors sharing one name stopped each other: with the overlay showing FPS
-/// while connected and Roblox open, one of them read 0 for the rest of the
-/// session, or both kept restarting and re-enabling the DXGI provider in every
-/// running process each time.
-pub const TUNNEL_LOG_SESSION_NAME: &str = "SwiftTunnelFpsLog";
 const TRACE_MATCH_ANY_KEYWORD_ALL: u64 = u64::MAX;
 
 /// Sanity ceiling so a delayed buffer flush can't briefly report absurd FPS.
@@ -75,7 +66,7 @@ struct FpsShared {
     /// Most recent presents-per-second sample.
     current_fps: AtomicU32,
     stop_flag: AtomicBool,
-    /// ETW session this monitor owns (see `TUNNEL_LOG_SESSION_NAME`).
+    /// ETW session this monitor owns.
     session_name: &'static str,
 }
 
@@ -111,8 +102,8 @@ impl FpsRuntime {
 /// DEMAND-DRIVEN: the ETW callback fires for every present from every process
 /// system-wide, which is real overhead on weak machines — so nothing runs
 /// until `set_enabled(true)` and `set_enabled(false)` tears the session down
-/// again. The overlay enables its monitor while it shows FPS; the tunnel's
-/// load log enables another while connected with Roblox open.
+/// again. The overlay enables its monitor while it shows FPS. Connecting a
+/// tunnel does not start an additional trace for diagnostic logging.
 pub struct FpsMonitor {
     runtime: std::sync::Mutex<Option<FpsRuntime>>,
     target_pid: AtomicU32,
@@ -559,14 +550,12 @@ mod tests {
     }
 
     #[test]
-    fn overlay_and_tunnel_log_trace_under_different_sessions() {
+    fn separately_named_monitors_do_not_share_session_identity() {
         // Each session start stops whatever runs under its name, so a shared
         // name makes the two monitors stop each other.
-        assert_ne!(FpsMonitor::new().session_name, TUNNEL_LOG_SESSION_NAME);
-        assert_eq!(
-            FpsMonitor::named(TUNNEL_LOG_SESSION_NAME).session_name,
-            TUNNEL_LOG_SESSION_NAME
-        );
+        let other = FpsMonitor::named("SwiftTunnelFpsTest");
+        assert_ne!(FpsMonitor::new().session_name, other.session_name);
+        assert_eq!(other.session_name, "SwiftTunnelFpsTest");
     }
 
     #[test]

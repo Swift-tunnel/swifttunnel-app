@@ -4827,14 +4827,6 @@ impl ParallelInterceptor {
                 let mut last_system = system_cpu_time_100ns();
                 let mut last_at = Instant::now();
 
-                // Frames, measured from outside the game by counting DXGI
-                // presents. Without this the line says what the tunnel costs
-                // but not whether it cost anything that matters, which is the
-                // entire question a frame rate report asks.
-                //
-                // Only runs while Roblox is actually running: no game means no
-                // frames to count and no reason to pay for an ETW session, and
-                // it keeps the measurement off machines that are not playing.
                 // Once, at the top. The query spawns PowerShell and the answer
                 // does not change under us during a session.
                 let offload_off = offload_adapter
@@ -4847,24 +4839,19 @@ impl ParallelInterceptor {
                     );
                 }
 
-                // Its own session name: the overlay may be tracing FPS at the
-                // same time, and a shared name makes the two stop each other.
-                let fps_monitor = crate::fps_monitor::FpsMonitor::named(
-                    crate::fps_monitor::TUNNEL_LOG_SESSION_NAME,
-                );
-                let mut process_lookup = crate::performance_monitor::PerformanceMonitor::new();
+                // Diagnostics must not start a graphics trace just because a
+                // tunnel is connected. The optional overlay owns FPS sampling;
+                // these load counters only read already-published worker data.
 
                 loop {
                     // Wake often enough to notice a disconnect, report rarely.
                     for _ in 0..(EVERY.as_secs() * 2) {
                         if stop.load(Ordering::Relaxed) {
-                            fps_monitor.set_enabled(false);
                             return;
                         }
                         thread::sleep(Duration::from_millis(500));
                     }
                     if stop.load(Ordering::Relaxed) {
-                        fps_monitor.set_enabled(false);
                         return;
                     }
 
@@ -4897,18 +4884,6 @@ impl ParallelInterceptor {
                     last_packets = packets;
                     last_bytes = bytes;
 
-                    // Point the counter at the live game, or shut it down.
-                    let roblox_pid = process_lookup.get_roblox_pid().unwrap_or(0);
-                    fps_monitor.set_target_pid(roblox_pid);
-                    fps_monitor.set_enabled(roblox_pid != 0);
-                    let fps = match (roblox_pid, fps_monitor.current_fps()) {
-                        (0, _) => "Roblox not running".to_string(),
-                        // The sampler needs a second of presents before it can
-                        // answer, so the first cycle after a launch reads zero.
-                        (_, 0) => "Roblox running, frames not sampled yet".to_string(),
-                        (_, frames) => format!("Roblox at {frames} fps"),
-                    };
-
                     let system = match (last_system, system_cpu_time_100ns()) {
                         (Some((busy_before, total_before)), Some((busy, total))) => {
                             last_system = Some((busy, total));
@@ -4930,7 +4905,7 @@ impl ParallelInterceptor {
 
                     log::info!(
                         "load: tunnel using {:.0}% of one core ({:.0}% of {} cores, {} workers), \
-                         machine {} busy, {:.0} pkt/s, {:.2} MB/s, on {}{}, {}",
+                         machine {} busy, {:.0} pkt/s, {:.2} MB/s, on {}{}",
                         ours_cores * 100.0,
                         ours_cores * 100.0 / cores.max(1) as f64,
                         cores,
@@ -4944,7 +4919,6 @@ impl ParallelInterceptor {
                         } else {
                             ""
                         },
-                        fps,
                     );
                 }
             }));
