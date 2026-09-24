@@ -4,25 +4,20 @@ import type { TabId } from "../lib/types";
 
 export interface NavTarget {
   tab: TabId;
-  /** Game to auto-open inside the Games tab (e.g. "roblox"). */
-  game?: string;
   /** `data-search-anchor` to reveal, scroll to, and flash for 2s. */
   anchor?: string;
 }
 
 interface DeepLinkState {
-  /** Game the Games tab should open (consumed + cleared by GamesTab). */
-  game: string | null;
   /** Anchor a carousel should page to so the target card is on-screen. */
   anchor: string | null;
   navigateTo: (target: NavTarget) => void;
-  clearGame: () => void;
 }
 
 /**
  * Scroll a search target into view and flash a highlight ring for ~2s. Polls,
- * because the element may mount a few frames after we switch tabs, open a game,
- * or a carousel pages to it.
+ * because the element may mount a few frames after we switch tabs or a
+ * carousel pages to it.
  */
 function flashAnchor(anchor: string) {
   const selector = `[data-search-anchor="${CSS.escape(anchor)}"]`;
@@ -44,11 +39,10 @@ function flashAnchor(anchor: string) {
 }
 
 export const useDeepLinkStore = create<DeepLinkState>((set) => ({
-  game: null,
   anchor: null,
-  navigateTo: ({ tab, game, anchor }) => {
+  navigateTo: ({ tab, anchor }) => {
     useSettingsStore.getState().setTab(tab);
-    set({ game: game ?? null, anchor: anchor ?? null });
+    set({ anchor: anchor ?? null });
     if (anchor) {
       flashAnchor(anchor);
       // Clear the anchor after the flash so a later re-render can't yank a
@@ -59,5 +53,4 @@ export const useDeepLinkStore = create<DeepLinkState>((set) => ({
       );
     }
   },
-  clearGame: () => set({ game: null }),
 }));

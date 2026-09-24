@@ -8,8 +8,6 @@ import type { TabId } from "./types";
 export interface SearchEntry {
   id: string;
   tab: TabId;
-  /** Game to auto-open in the Games tab (deep-link into Roblox → Optimize). */
-  game?: string;
   /** `data-search-anchor` to reveal + flash after navigating. */
   anchor?: string;
   /** If set, selecting dispatches this window event instead of navigating. */
@@ -77,7 +75,7 @@ const TABS: SearchEntry[] = [
     label: "Games",
     section: "Go to page",
     icon: gamesIcon,
-    keywords: "games library roblox per-game tuning graphics boost",
+    keywords: "games roblox fps unlock graphics boost fflags",
   },
   {
     id: "tab-ingame",
@@ -197,7 +195,6 @@ const BOOST_SETTINGS: { anchor: string; label: string; keywords: string }[] = [
 const BOOST: SearchEntry[] = BOOST_SETTINGS.map((s) => ({
   id: `boost-${s.anchor}`,
   tab: "games",
-  game: "roblox",
   anchor: s.anchor,
   label: s.label,
   section: "Roblox · Optimize",

@@ -61,7 +61,7 @@ export function CommandPalette() {
     if (entry.event) {
       window.dispatchEvent(new Event(entry.event));
     } else {
-      navigateTo({ tab: entry.tab, game: entry.game, anchor: entry.anchor });
+      navigateTo({ tab: entry.tab, anchor: entry.anchor });
     }
     setOpen(false);
   };

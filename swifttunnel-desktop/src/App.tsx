@@ -12,7 +12,7 @@ import { LoginScreen } from "./components/auth/LoginScreen";
 import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
 import { OptimizationTab } from "./components/optimization/OptimizationTab";
-import { GamesTab } from "./components/games/GamesTab";
+import { BoostTab } from "./components/boost/BoostTab";
 import { InGameTab } from "./components/ingame/InGameTab";
 import { NetworkTab } from "./components/network/NetworkTab";
 import { RepairTab } from "./components/repair/RepairTab";
@@ -52,7 +52,9 @@ function tabComponent(tab: TabId) {
     case "optimization":
       return <OptimizationTab />;
     case "games":
-      return <GamesTab />;
+      // Straight to Roblox: it is the only supported game, so a library page
+      // holding one card was just an extra click before the settings.
+      return <BoostTab />;
     case "ingame":
       return <InGameTab />;
     case "network":
