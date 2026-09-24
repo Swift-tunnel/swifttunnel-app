@@ -19,6 +19,18 @@ type CloseToTrayDeps = {
 // - Falls back to a real close if hide fails (without infinite recursion)
 export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
   let closing = false;
+  let handling = false;
+  let pendingSave: Promise<void> | null = null;
+
+  const persist = async () => {
+    try {
+      await deps.persistWindowState();
+    } catch (error) {
+      reportError("Failed to persist window state before close", error, {
+        dedupeKey: "close-to-tray-persist",
+      });
+    }
+  };
 
   return async (event: CloseRequestedEvent) => {
     if (deps.isDisposed?.()) return;
@@ -28,47 +40,42 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
 
     // Must be synchronous: Tauri doesn't await async close handlers.
     event.preventDefault();
+    if (handling) return;
+    handling = true;
 
-    try {
-      await deps.persistWindowState();
-    } catch (error) {
-      reportError("Failed to persist window state before close", error, {
-        dedupeKey: "close-to-tray-persist",
-      });
-    }
-
+    // Begin capturing geometry before hiding, but do not wait for the settings
+    // save. Native settings updates can wait behind an ongoing VPN connection.
+    // Hiding keeps the process alive, so the save can finish in the background.
+    const saving = pendingSave ?? persist().finally(() => { pendingSave = null; });
+    pendingSave = saving;
     const shouldMinimizeToTray = deps.shouldMinimizeToTray?.() ?? true;
-    if (!shouldMinimizeToTray) {
-      // User wants X to actually close the app.
-      closing = true;
-      try {
-        await deps.close();
-      } catch (error) {
-        reportError("Failed to close window", error, {
-          dedupeKey: "close-to-tray-close",
-        });
-        closing = false;
-      }
-      return;
-    }
-
     try {
-      await deps.hide();
-    } catch (error) {
-      reportError("Failed to hide window to tray", error, {
-        dedupeKey: "close-to-tray-hide",
-      });
-      // If we can't hide to tray, fall back to closing normally.
+      if (shouldMinimizeToTray) {
+        try {
+          await deps.hide();
+          return;
+        } catch (error) {
+          reportError("Failed to hide window to tray", error, {
+            dedupeKey: "close-to-tray-hide",
+          });
+          // If hiding fails, fall back to a real close.
+        }
+      }
+
+      // A real close ends the process, so retain the save-before-exit order.
+      await saving;
+      if (deps.isDisposed?.()) return;
       closing = true;
       try {
         await deps.close();
       } catch (closeError) {
-        reportError("Failed to close window after tray hide fallback", closeError, {
-          dedupeKey: "close-to-tray-fallback-close",
+        reportError("Failed to close window", closeError, {
+          dedupeKey: "close-to-tray-close",
         });
-        // If close fails (rare), allow future close attempts to retry.
         closing = false;
       }
+    } finally {
+      handling = false;
     }
   };
 }

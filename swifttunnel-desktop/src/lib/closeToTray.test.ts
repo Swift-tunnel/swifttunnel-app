@@ -29,7 +29,9 @@ describe("createCloseToTrayHandler", () => {
 
     // Before any awaits resolve, preventDefault must already have been called.
     expect(preventDefault).toHaveBeenCalledTimes(1);
-    expect(hide).not.toHaveBeenCalled();
+    // Saving settings can wait behind a connection operation. The window
+    // should already be hidden while that save is pending.
+    expect(hide).toHaveBeenCalledTimes(1);
     expect(close).not.toHaveBeenCalled();
 
     persistGate.resolve();
@@ -59,6 +61,41 @@ describe("createCloseToTrayHandler", () => {
     expect(close).not.toHaveBeenCalled();
   });
 
+  it("coalesces repeated close requests while the tray save is pending", async () => {
+    const persistGate = deferred<void>();
+    const persistWindowState = vi.fn(() => persistGate.promise);
+    const hide = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+    const preventDefault = vi.fn();
+    const handler = createCloseToTrayHandler({ persistWindowState, hide, close });
+    const first = handler({ preventDefault });
+    await handler({ preventDefault });
+    expect(preventDefault).toHaveBeenCalledTimes(2);
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(persistWindowState).toHaveBeenCalledTimes(1);
+    await first;
+    // Reopening the tray window must not disable X while the old save is
+    // still pending. Hide again without queuing another settings operation.
+    await handler({ preventDefault });
+    expect(hide).toHaveBeenCalledTimes(2);
+    expect(persistWindowState).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    persistGate.resolve();
+  });
+
+  it("still hides when persisting geometry fails", async () => {
+    const hide = vi.fn(async () => {});
+    const close = vi.fn(async () => {});
+    const handler = createCloseToTrayHandler({
+      persistWindowState: async () => { throw new Error("save failed"); },
+      hide,
+      close,
+    });
+    await handler({ preventDefault: vi.fn() });
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+  });
+
   it("closes the app when minimize_to_tray is disabled", async () => {
     const preventDefault = vi.fn();
     const persistWindowState = vi.fn(async () => {});
@@ -78,6 +115,37 @@ describe("createCloseToTrayHandler", () => {
     expect(persistWindowState).toHaveBeenCalledTimes(1);
     expect(hide).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for persistence before a real exit", async () => {
+    const persistGate = deferred<void>();
+    const close = vi.fn(async () => {});
+    const handler = createCloseToTrayHandler({
+      persistWindowState: () => persistGate.promise,
+      hide: vi.fn(async () => {}),
+      close,
+      shouldMinimizeToTray: () => false,
+    });
+    const pending = handler({ preventDefault: vi.fn() });
+    expect(close).not.toHaveBeenCalled();
+    persistGate.resolve();
+    await pending;
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows retry after a failed real close", async () => {
+    const close = vi.fn().mockRejectedValueOnce(new Error("close failed")).mockResolvedValue(undefined);
+    const handler = createCloseToTrayHandler({
+      persistWindowState: async () => {},
+      hide: async () => {},
+      close,
+      shouldMinimizeToTray: () => false,
+    });
+    const preventDefault = vi.fn();
+    await handler({ preventDefault });
+    await handler({ preventDefault });
+    expect(preventDefault).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledTimes(2);
   });
 
   it("falls back to a real close if hide fails (without recursion)", async () => {
