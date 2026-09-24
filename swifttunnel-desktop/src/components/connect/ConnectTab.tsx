@@ -351,8 +351,12 @@ export function ConnectTab() {
   return (
     <div className="flex w-full flex-col gap-4 pb-6">
       {/* ── Hero: command deck ── */}
+      {/* overflow-clip, not overflow-hidden: the glow below reaches past the
+          right edge, and a hidden-overflow box is still scrollable from code.
+          Focusing the button scrolled it sideways and cut off the left side
+          at narrower window sizes. A clip box cannot scroll at all. */}
       <section
-        className={`corner-frame relative overflow-hidden rounded-[var(--radius-card)] surface-card ${isConnected ? "connected-ambience" : ""}`}
+        className={`corner-frame relative overflow-clip rounded-[var(--radius-card)] surface-card ${isConnected ? "connected-ambience" : ""}`}
       >
         <div
           className="dot-grid pointer-events-none absolute inset-0"

@@ -280,9 +280,13 @@ export function RepairTab() {
   return (
     <div className="flex w-full flex-col gap-4 pb-6">
       {/* ── Hero: one-click repair ── */}
+      {/* overflow-clip, not overflow-hidden: the glow below reaches past the
+          right edge, and a hidden-overflow box is still scrollable from code.
+          Focusing the button scrolled it sideways and cut off the left side
+          at narrower window sizes. A clip box cannot scroll at all. */}
       <section
         data-search-anchor="repair_run"
-        className="corner-frame relative overflow-hidden rounded-[var(--radius-card)] surface-card"
+        className="corner-frame relative overflow-clip rounded-[var(--radius-card)] surface-card"
         style={{ padding: "20px 22px" }}
       >
         <div className="aurora" aria-hidden />
