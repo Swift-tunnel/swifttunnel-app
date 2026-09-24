@@ -49,7 +49,18 @@ const DXGI_PROVIDER_GUID: GUID = GUID::from_values(
 const DXGI_PRESENT_TASKS: &[u16] = &[9, 80, 468, 482];
 const ETW_OPCODE_START: u8 = 1;
 
-const SESSION_NAME: &str = "SwiftTunnelFpsMonitor";
+/// Session behind the in-game overlay's FPS readout.
+const OVERLAY_SESSION_NAME: &str = "SwiftTunnelFpsMonitor";
+
+/// Session behind the frame rate in the tunnel's periodic load log line.
+///
+/// Every monitor needs a name of its own. Starting a session first stops any
+/// session already running under that name (a leftover from a crash), so two
+/// monitors sharing one name stopped each other: with the overlay showing FPS
+/// while connected and Roblox open, one of them read 0 for the rest of the
+/// session, or both kept restarting and re-enabling the DXGI provider in every
+/// running process each time.
+pub const TUNNEL_LOG_SESSION_NAME: &str = "SwiftTunnelFpsLog";
 const TRACE_MATCH_ANY_KEYWORD_ALL: u64 = u64::MAX;
 
 /// Sanity ceiling so a delayed buffer flush can't briefly report absurd FPS.
@@ -64,6 +75,8 @@ struct FpsShared {
     /// Most recent presents-per-second sample.
     current_fps: AtomicU32,
     stop_flag: AtomicBool,
+    /// ETW session this monitor owns (see `TUNNEL_LOG_SESSION_NAME`).
+    session_name: &'static str,
 }
 
 /// The live ETW session + sampler threads for one enabled stretch.
@@ -80,7 +93,7 @@ impl FpsRuntime {
         // when there's no ETW thread (e.g. inert test runtimes) so we don't
         // fire a stray `ControlTraceW` at an unrelated session.
         if self.etw_thread.is_some() {
-            stop_existing_session();
+            stop_existing_session(self.shared.session_name);
         }
         if let Some(h) = self.etw_thread.take() {
             let _ = h.join();
@@ -97,19 +110,28 @@ impl FpsRuntime {
 ///
 /// DEMAND-DRIVEN: the ETW callback fires for every present from every process
 /// system-wide, which is real overhead on weak machines — so nothing runs
-/// until `set_enabled(true)` (the in-game overlay being on), and disabling the
-/// overlay tears the session down again.
+/// until `set_enabled(true)` and `set_enabled(false)` tears the session down
+/// again. The overlay enables its monitor while it shows FPS; the tunnel's
+/// load log enables another while connected with Roblox open.
 pub struct FpsMonitor {
     runtime: std::sync::Mutex<Option<FpsRuntime>>,
     target_pid: AtomicU32,
+    session_name: &'static str,
 }
 
 impl FpsMonitor {
-    /// An idle monitor: no ETW session, no threads, FPS reads 0.
+    /// The overlay's monitor, idle: no ETW session, no threads, FPS reads 0.
     pub fn new() -> Self {
+        Self::named(OVERLAY_SESSION_NAME)
+    }
+
+    /// An idle monitor that traces under its own ETW session name. Any other
+    /// monitor running at the same time must use a different name.
+    pub fn named(session_name: &'static str) -> Self {
         Self {
             runtime: std::sync::Mutex::new(None),
             target_pid: AtomicU32::new(0),
+            session_name,
         }
     }
 
@@ -128,7 +150,7 @@ impl FpsMonitor {
         if !enabled {
             if let Some(mut active) = runtime.take() {
                 active.stop();
-                log::info!("FPS monitor stopped (overlay disabled)");
+                log::info!("FPS monitor stopped ({})", self.session_name);
             }
             return;
         }
@@ -138,6 +160,7 @@ impl FpsMonitor {
             present_count: AtomicU64::new(0),
             current_fps: AtomicU32::new(0),
             stop_flag: AtomicBool::new(false),
+            session_name: self.session_name,
         });
 
         let etw_thread = {
@@ -156,7 +179,7 @@ impl FpsMonitor {
                 .ok()
         };
 
-        log::info!("FPS monitor started (overlay enabled)");
+        log::info!("FPS monitor started ({})", self.session_name);
         *runtime = Some(FpsRuntime {
             shared,
             etw_thread,
@@ -292,10 +315,11 @@ fn supervise_etw_session(shared: Arc<FpsShared>) {
 /// Run one real-time ETW session, blocking in `ProcessTrace` until stopped.
 #[allow(clippy::field_reassign_with_default)]
 fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
-    stop_existing_session();
+    stop_existing_session(shared.session_name);
 
     unsafe {
-        let session_name_wide: Vec<u16> = SESSION_NAME
+        let session_name_wide: Vec<u16> = shared
+            .session_name
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -403,10 +427,10 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
     Ok(())
 }
 
-/// Stop any existing session with our name (left over from a crash / restart).
-fn stop_existing_session() {
+/// Stop any existing session with this name (left over from a crash / restart).
+fn stop_existing_session(session_name: &str) {
     unsafe {
-        let session_name_wide: Vec<u16> = SESSION_NAME
+        let session_name_wide: Vec<u16> = session_name
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -477,11 +501,13 @@ impl FpsMonitor {
                     present_count: AtomicU64::new(0),
                     current_fps: AtomicU32::new(0),
                     stop_flag: AtomicBool::new(true),
+                    session_name: OVERLAY_SESSION_NAME,
                 }),
                 etw_thread: None,
                 sampler_thread: None,
             })),
             target_pid: AtomicU32::new(0),
+            session_name: OVERLAY_SESSION_NAME,
         }
     }
 
@@ -530,6 +556,17 @@ mod tests {
         let monitor = FpsMonitor::inert_active();
         // Default target is 0 (no game) -> never reports FPS.
         assert_eq!(monitor.current_fps(), 0);
+    }
+
+    #[test]
+    fn overlay_and_tunnel_log_trace_under_different_sessions() {
+        // Each session start stops whatever runs under its name, so a shared
+        // name makes the two monitors stop each other.
+        assert_ne!(FpsMonitor::new().session_name, TUNNEL_LOG_SESSION_NAME);
+        assert_eq!(
+            FpsMonitor::named(TUNNEL_LOG_SESSION_NAME).session_name,
+            TUNNEL_LOG_SESSION_NAME
+        );
     }
 
     #[test]

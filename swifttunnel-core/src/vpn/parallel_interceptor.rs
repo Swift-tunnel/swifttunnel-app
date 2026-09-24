@@ -4847,7 +4847,11 @@ impl ParallelInterceptor {
                     );
                 }
 
-                let fps_monitor = crate::fps_monitor::FpsMonitor::new();
+                // Its own session name: the overlay may be tracing FPS at the
+                // same time, and a shared name makes the two stop each other.
+                let fps_monitor = crate::fps_monitor::FpsMonitor::named(
+                    crate::fps_monitor::TUNNEL_LOG_SESSION_NAME,
+                );
                 let mut process_lookup = crate::performance_monitor::PerformanceMonitor::new();
 
                 loop {
