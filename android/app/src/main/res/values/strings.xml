@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SwiftTunnel Dev</string>
+    <string name="brand">SwiftTunnel</string>
+    <string name="eyebrow">ANDROID PREVIEW</string>
+    <string name="headline">Your game. A better route.</string>
+    <string name="intro">A native Android client for Roblox. Choose a region and check your setup.</string>
+    <string name="not_connected">Not connected</string>
+    <string name="preview_notice">This development build does not route traffic. Mobile sign-in and the encrypted tunnel are still being built.</string>
+    <string name="check_setup">Check setup</string>
+    <string name="check_title">Connection checklist</string>
+    <string name="regions_title">Choose your region</string>
+    <string name="refresh">Refresh regions</string>
+    <string name="refreshing">Loading regions…</string>
+    <string name="no_regions">No regions are listed right now. Refresh to try again.</string>
+    <string name="list_error">Could not refresh regions. Check your connection and try again.</string>
+    <string name="cached_list">Previously loaded regions are shown for reference.</string>
+    <string name="unknown_load">Load unknown</string>
+    <string name="busy">Busy</string>
+    <string name="available">Listed as available</string>
+    <string name="unavailable">Unavailable</string>
+    <string name="selected">Selected</string>
+    <string name="selection">Selected region: %1$s</string>
+    <string name="none_selected">Select an available region below.</string>
+    <string name="scope_title">Built for Roblox</string>
+    <string name="scope_body">The mobile tunnel will handle Roblox only. Other apps will keep using your normal connection.</string>
+    <string name="check_offline">Internet: unavailable. Reconnect to Wi-Fi or mobile data.</string>
+    <string name="check_online">Internet: available</string>
+    <string name="check_roblox_missing">Roblox: not installed or disabled. Install or enable Roblox first.</string>
+    <string name="check_roblox_present">Roblox: installed</string>
+    <string name="check_region_missing">Region: select an available region.</string>
+    <string name="check_region_ready">Region: selected</string>
+    <string name="check_catalog_stale">Region list: refresh required before connecting.</string>
+    <string name="check_catalog_fresh">Region list: recently refreshed</string>
+    <string name="check_transport_pending">Tunnel: encrypted Android transport is not available in this build. No VPN has been started.</string>
+    <string name="close">Close</string>
+</resources>

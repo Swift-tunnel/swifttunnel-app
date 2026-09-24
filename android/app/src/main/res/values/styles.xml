@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SwiftTunnel" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#FAFAFA</item>
+        <item name="android:windowBackground">#060606</item>
+        <item name="android:navigationBarColor">#060606</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:colorControlHighlight">#343438</item>
+    </style>
+</resources>
