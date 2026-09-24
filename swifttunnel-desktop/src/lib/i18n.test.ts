@@ -40,6 +40,29 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("runtime translation lifecycle", () => {
+  it("does not request or persist translations for changing live measurements", async () => {
+    const node = text("1.0 MB/s");
+    nodes.push(node);
+    const i18n = await import("./i18n");
+    const samples = ["<1m", "2h 14m", "47m", "23 ms", "120 FPS", "1.2 GB"];
+    for (let i = 0; i < 120; i++) samples.push(`${i}.5 KB/s`);
+    for (const sample of samples) {
+      node.nodeValue = sample;
+      await i18n.applyLanguage("fr");
+      expect(node.nodeValue).toBe(sample);
+    }
+    expect(invoke).not.toHaveBeenCalled();
+    expect(storage.has("st.i18n.fr")).toBe(false);
+  });
+
+  it("still translates prose containing a number", async () => {
+    const node = text("Retry in 3 seconds");
+    nodes.push(node);
+    const i18n = await import("./i18n");
+    await i18n.applyLanguage("fr");
+    expect(node.nodeValue).toBe("FR:Retry in 3 seconds");
+  });
+
   it("translates the new connection status when React reuses a text node", async () => {
     const node = text("Disconnected");
     nodes.push(node);

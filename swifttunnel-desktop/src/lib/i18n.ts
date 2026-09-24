@@ -98,6 +98,10 @@ function persistCache(lang: string) {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VERSION_RE = /^v?\d+(\.\d+)+$/i;
 const URL_RE = /^(https?:\/\/|www\.)\S+$/i;
+// Live counters are data, not sentences. Translating each new throughput,
+// ping or quota value creates continuous requests and grows the persisted
+// cache during a connection. Keep the units as rendered by the formatter.
+const MEASUREMENT_RE = /^[<>~]?\s*(?:\d+(?:[.,]\d+)*\s*(?:[kmgt]?i?b(?:\/s)?|ms|fps|[smhd])\s*)+$/i;
 
 function isProtectedIdentifier(t: string): boolean {
   if (EMAIL_RE.test(t)) return true;
@@ -110,6 +114,7 @@ function isProtectedIdentifier(t: string): boolean {
 function translatable(value: string): boolean {
   const t = value.trim();
   if (t.length < 2) return false;
+  if (MEASUREMENT_RE.test(t)) return false;
   if (!(/\p{L}/u.test(t) && /[a-zA-Z]/.test(t))) return false;
   return !isProtectedIdentifier(t);
 }
