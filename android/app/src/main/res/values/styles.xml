@@ -1,11 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.SwiftTunnel" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:fontFamily">sans</item>
-        <item name="android:colorAccent">#FAFAFA</item>
-        <item name="android:windowBackground">#060606</item>
-        <item name="android:navigationBarColor">#060606</item>
+        <item name="android:fontFamily">@font/geist</item>
+        <item name="android:colorAccent">@color/accent_primary</item>
+        <item name="android:windowBackground">@color/bg_base</item>
+        <item name="android:navigationBarColor">@color/bg_base</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
+        <item name="android:alertDialogTheme">@style/Theme.SwiftTunnel.Dialog</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:colorControlHighlight">#343438</item>
+        <item name="android:colorControlHighlight">@color/bg_active</item>
+    </style>
+    <style name="Theme.SwiftTunnel.Dialog" parent="android:style/Theme.Material.Dialog.Alert">
+        <item name="android:fontFamily">@font/geist</item>
+        <item name="android:colorAccent">@color/accent_primary</item>
+        <item name="android:windowBackground">@drawable/panel_background</item>
+        <item name="android:textColorPrimary">@color/text_primary</item>
+        <item name="android:textColorSecondary">@color/text_secondary</item>
     </style>
 </resources>

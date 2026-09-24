@@ -2,16 +2,19 @@ package net.swifttunnel.mobile
 
 import android.app.AlertDialog
 import android.content.pm.PackageManager
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
+import android.content.res.ColorStateList
+import android.graphics.drawable.RippleDrawable
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.View
+import android.view.Gravity
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.RadioButton
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -22,6 +25,7 @@ import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : ComponentActivity() {
     private val model: CatalogViewModel by viewModels()
+    private val uiTheme by lazy { SwiftTheme(this) }
     private val preferences by lazy { getSharedPreferences("mobile", MODE_PRIVATE) }
     private var selectedId: String? = null
     private lateinit var regionList: LinearLayout
@@ -37,7 +41,8 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(24), dp(24), dp(24), dp(32))
         }
         val scroll = ScrollView(this).apply {
-            setBackgroundColor(Color.rgb(6, 6, 6))
+            setBackgroundColor(uiTheme.color(R.color.bg_base))
+            isFillViewport = true
             addView(content)
             ViewCompat.setOnApplyWindowInsetsListener(this) { view, insets ->
                 val bars = insets.getInsets(
@@ -48,16 +53,28 @@ class MainActivity : ComponentActivity() {
             }
         }
         setContentView(scroll)
-        content.addView(label(getString(R.string.brand), 22, true))
-        content.addView(label(getString(R.string.eyebrow), 11).apply { setPadding(0, dp(30), 0, dp(10)) })
+        val branding = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        branding.addView(ImageView(this).apply {
+            setImageResource(R.drawable.swift_logo)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(dp(42), dp(42)).apply { marginEnd = dp(8) })
+        branding.addView(label(getString(R.string.brand), 21, true), LinearLayout.LayoutParams(0, -2, 1f))
+        branding.addView(uiTheme.caption(getString(R.string.preview_badge)).apply {
+            background = uiTheme.surface(R.color.bg_sidebar, 6, R.color.border_subtle)
+            setPadding(dp(9), dp(7), dp(9), dp(7))
+        })
+        content.addView(branding)
+        content.addView(uiTheme.caption(getString(R.string.eyebrow)).apply { setPadding(0, dp(32), 0, dp(10)) })
         content.addView(label(getString(R.string.headline), 34, true))
         content.addView(label(getString(R.string.intro), 16).apply { setPadding(0, dp(12), 0, dp(24)) })
         val status = card()
+        status.addView(uiTheme.caption(getString(R.string.connection_label)))
         status.addView(label(getString(R.string.not_connected), 24, true))
         selectedLabel = label(getString(R.string.none_selected), 15)
         status.addView(selectedLabel)
         status.addView(label(getString(R.string.preview_notice), 14).apply { setPadding(0, dp(12), 0, dp(12)) })
-        status.addView(button(getString(R.string.check_setup)) { showChecklist() })
+        status.addView(uiTheme.button(getString(R.string.check_setup), primary = true) { showChecklist() })
         content.addView(status)
         content.addView(label(getString(R.string.regions_title), 22, true).apply { setPadding(0, dp(28), 0, dp(8)) })
         catalogMessage = label("", 14).apply { accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE }
@@ -67,6 +84,7 @@ class MainActivity : ComponentActivity() {
         refreshButton = button(getString(R.string.refresh)) { model.refresh() }
         content.addView(refreshButton)
         val scope = card().apply {
+            addView(uiTheme.caption(getString(R.string.roblox_only)))
             addView(label(getString(R.string.scope_title), 18, true))
             addView(label(getString(R.string.scope_body), 14))
         }
@@ -95,16 +113,60 @@ class MainActivity : ComponentActivity() {
                 region.activeUsers == null -> getString(R.string.unknown_load)
                 else -> getString(R.string.available)
             }
-            val selected = if (selectedId == region.id) "  /  ${getString(R.string.selected)}" else ""
-            regionList.addView(button("${region.name}  /  ${region.countryCode}\n$status$selected") {
+            val selected = selectedId == region.id
+            val enabled = region.available && !state.loading && !state.failed
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = dp(80)
+                setPadding(dp(16), dp(16), dp(16), dp(16))
+                background = RippleDrawable(ColorStateList.valueOf(0x22ffffff),
+                    uiTheme.surface(
+                        if (selected) R.color.bg_elevated else R.color.bg_card,
+                        12,
+                        if (selected) R.color.accent_primary else R.color.border_subtle,
+                    ), null)
+                layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) }
+                isEnabled = enabled
+                isSelected = selected
+                alpha = if (enabled) 1f else 0.5f
+                contentDescription = getString(R.string.region_row_description, region.name, status)
+                accessibilityDelegate = object : View.AccessibilityDelegate() {
+                    override fun onInitializeAccessibilityNodeInfo(host: View, info: AccessibilityNodeInfo) {
+                        super.onInitializeAccessibilityNodeInfo(host, info)
+                        info.className = RadioButton::class.java.name
+                        info.isCheckable = true
+                        info.isChecked = selected
+                    }
+                }
+            }
+            row.addView(uiTheme.caption(region.countryCode).apply {
+                gravity = Gravity.CENTER
+                background = uiTheme.surface(R.color.bg_sidebar, 7, R.color.border_default)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(14) })
+            row.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+                addView(label(region.name, 16, true))
+                addView(label(status, 12))
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            row.addView(RadioButton(this).apply {
+                isChecked = selected
+                buttonTintList = ColorStateList.valueOf(uiTheme.color(
+                    if (selected) R.color.accent_primary else R.color.text_muted))
+                isClickable = false
+                isFocusable = false
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            })
+            row.setOnClickListener {
                 selectedId = region.id
                 preferences.edit { putString("region", region.id) }
                 render(model.state.value!!)
-            }.apply {
-                isEnabled = region.available && !state.loading && !state.failed
-                isSelected = selectedId == region.id
-                contentDescription = text
-            })
+            }
+            row.isClickable = enabled
+            row.isFocusable = enabled
+            regionList.addView(row)
         }
     }
 
@@ -137,34 +199,8 @@ class MainActivity : ComponentActivity() {
             .show()
     }
 
-    private fun label(value: String, size: Int, bold: Boolean = false) = TextView(this).apply {
-        text = value
-        textSize = size.toFloat()
-        setTextColor(if (bold) Color.rgb(245, 245, 245) else Color.rgb(180, 180, 184))
-        if (bold) setTypeface(typeface, Typeface.BOLD)
-        setLineSpacing(dp(3).toFloat(), 1f)
-        setPadding(0, dp(4), 0, dp(4))
-    }
-
-    private fun button(value: String, action: () -> Unit) = Button(this).apply {
-        text = value
-        isAllCaps = false
-        minHeight = dp(56)
-        setPadding(dp(12), dp(10), dp(12), dp(10))
-        setOnClickListener { action() }
-        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
-    }
-
-    private fun card() = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(dp(20), dp(20), dp(20), dp(20))
-        background = GradientDrawable().apply {
-            setColor(Color.rgb(27, 27, 29))
-            cornerRadius = dp(20).toFloat()
-            setStroke(dp(1), Color.rgb(52, 52, 58))
-        }
-        layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(16) }
-    }
-
-    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+    private fun label(value: String, size: Int, bold: Boolean = false) = uiTheme.text(value, size, bold)
+    private fun button(value: String, action: () -> Unit) = uiTheme.button(value, action = action)
+    private fun card() = uiTheme.card()
+    private fun dp(value: Int) = uiTheme.dp(value)
 }

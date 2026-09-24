@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors swifttunnel-desktop/src/styles/globals.css. -->
+    <color name="bg_base">#060606</color>
+    <color name="bg_sidebar">#161617</color>
+    <color name="bg_card">#1B1B1D</color>
+    <color name="bg_elevated">#242428</color>
+    <color name="bg_active">#343438</color>
+    <color name="accent_primary">#FAFAFA</color>
+    <color name="text_primary">#F5F5F5</color>
+    <color name="text_secondary">#C4C4C4</color>
+    <color name="text_muted">#8A8A8A</color>
+    <color name="border_default">#34343A</color>
+    <color name="border_subtle">#262628</color>
+</resources>

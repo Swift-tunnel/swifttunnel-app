@@ -3,6 +3,10 @@
     <string name="app_name">SwiftTunnel Dev</string>
     <string name="brand">SwiftTunnel</string>
     <string name="eyebrow">ANDROID PREVIEW</string>
+    <string name="connection_label">YOUR CONNECTION</string>
+    <string name="preview_badge">PREVIEW</string>
+    <string name="roblox_only">ROBLOX ONLY</string>
+    <string name="region_row_description">%1$s, %2$s</string>
     <string name="headline">Your game. A better route.</string>
     <string name="intro">A native Android client for Roblox. Choose a region and check your setup.</string>
     <string name="not_connected">Not connected</string>
@@ -19,7 +23,6 @@
     <string name="busy">Busy</string>
     <string name="available">Listed as available</string>
     <string name="unavailable">Unavailable</string>
-    <string name="selected">Selected</string>
     <string name="selection">Selected region: %1$s</string>
     <string name="none_selected">Select an available region below.</string>
     <string name="scope_title">Built for Roblox</string>
