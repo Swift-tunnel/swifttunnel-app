@@ -128,7 +128,7 @@ export function TopBar() {
         {/* Game-status chip, Medal's "Waiting For Game": solid gamepad, no
             border, subtle inset pill. */}
         <div
-          className="hidden shrink-0 items-center gap-2 rounded-[9px] px-3 py-1.5 sm:flex"
+          className="hidden shrink-0 items-center gap-2 rounded-[9px] px-3 py-1.5 min-[900px]:flex"
           style={{ backgroundColor: "var(--color-bg-base)" }}
         >
           <Icon
