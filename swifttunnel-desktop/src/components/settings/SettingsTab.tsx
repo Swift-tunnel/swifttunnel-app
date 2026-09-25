@@ -245,7 +245,7 @@ export function SettingsTab() {
         <Row
           label="Live connection graph"
           anchorId="show_live_graph"
-          desc="Turn off to reduce lag. The graph redraws constantly, which costs FPS if you keep SwiftTunnel open while playing"
+          desc="Your traffic over the last 30 seconds on the Connect tab. It only redraws when the window is in front"
         >
           <Toggle
             enabled={settings.show_live_graph}
