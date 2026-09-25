@@ -20,6 +20,7 @@ import {
   Row,
   ErrorBanner,
   Dialog,
+  type WatermarkProps,
 } from "../ui";
 import { FpsSlider } from "./FpsSlider";
 import {
@@ -639,7 +640,11 @@ export function BoostTab() {
       </section>
 
       {/* ── Roblox ── */}
-      <Section title="Roblox" tag={`${rblxCount} / 4 on`}>
+      <Section
+        title="Roblox"
+        tag={`${rblxCount} / 4 on`}
+        watermark={{ icon: "roblox", at: "top-right", size: 150, rotate: -14, opacity: 0.055 }}
+      >
         <SettingRow
           title="Unlock FPS"
           anchorId="unlock_fps"
@@ -731,7 +736,11 @@ export function BoostTab() {
       </Section>
 
       {/* ── System + Network side-by-side ── */}
-      <Section title="Country Ban" tag={`${countryBanCount} / 1 on`}>
+      <Section
+        title="Country Ban"
+        tag={`${countryBanCount} / 1 on`}
+        watermark={{ icon: "globe", at: "right", size: 140, fade: true }}
+      >
         <SettingRow
           title="Bypass Country Ban"
           anchorId="country_ban"
@@ -999,10 +1008,12 @@ export function BoostTab() {
 function Section({
   title,
   tag,
+  watermark,
   children,
 }: {
   title: string;
   tag?: string;
+  watermark?: WatermarkProps;
   children: ReactNode;
 }) {
   // Group title now titles the panel it belongs to, rather than floating above
@@ -1011,6 +1022,7 @@ function Section({
     <Panel
       flush
       eyebrow={title}
+      watermark={watermark}
       className="overflow-hidden"
       actions={
         tag ? (

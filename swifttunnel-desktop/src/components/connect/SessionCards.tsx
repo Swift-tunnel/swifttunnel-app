@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { useBoostStore } from "../../stores/boostStore";
 import { useServerStore } from "../../stores/serverStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { Button, Icon } from "../ui";
+import { Button, Watermark } from "../ui";
 import {
   averagePing,
   jitter,
@@ -69,7 +69,8 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
   const jit = stats ? jitter(stats) : null;
 
   return (
-    <div className="flex flex-col gap-4 rounded-[var(--radius-card)] surface-card p-5">
+    <div className="relative isolate flex flex-col gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card p-5">
+      <Watermark icon="pulse" at="right" size={150} rotate={-8} fade />
       <div className="flex items-center justify-between gap-3">
         <span className="text-[13.5px] font-semibold text-text-primary">
           {live ? "This session" : "Last session"}
@@ -140,14 +141,9 @@ function RobloxCard() {
   const setTab = useSettingsStore((s) => s.setTab);
 
   return (
-    <div className="relative flex flex-col gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card p-5">
+    <div className="relative isolate flex flex-col gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card p-5">
       {/* Big faded Roblox mark in the corner, like the game cards in ExitLag. */}
-      <Icon
-        name="roblox"
-        size={168}
-        className="pointer-events-none absolute -bottom-12 -right-10"
-        style={{ color: "var(--color-text-primary)", opacity: 0.045 }}
-      />
+      <Watermark icon="roblox" size={168} opacity={0.045} />
       <div className="relative flex items-center justify-between gap-3">
         <span className="text-[13.5px] font-semibold text-text-primary">Roblox</span>
         <span

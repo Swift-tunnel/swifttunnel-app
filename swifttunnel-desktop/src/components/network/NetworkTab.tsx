@@ -116,6 +116,7 @@ export function NetworkTab() {
     <div className="flex w-full flex-col gap-4 pb-6">
       {/* ── Console head: overall grade, then per-instrument state ── */}
       <Panel
+        watermark={{ icon: "diagnostics", at: "right", size: 190, rotate: 10, fade: true }}
         grid
         aurora
         corners

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip, Icon } from "../ui";
+import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip, Icon, Watermark } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
 import { PresetsPanel, PresetsDialog, type PresetMode } from "./PresetsCard";
 import { showRamOverlay } from "../overlay/RamOverlay";
@@ -888,9 +888,10 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
 
   return (
     <section
-      className="corner-frame relative flex items-center justify-between gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card"
+      className="corner-frame relative isolate flex items-center justify-between gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card"
       style={{ padding: "16px 20px" }}
     >
+      <Watermark icon="optimize" at="bottom-right" size={150} rotate={14} opacity={0.07} />
       <div
         aria-hidden="true"
         className="dot-grid pointer-events-none absolute inset-0"

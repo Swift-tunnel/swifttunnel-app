@@ -40,7 +40,7 @@ import {
 import { COMMUNITY_URL } from "../../lib/maintenance";
 import { resetTranslationCache } from "../../lib/i18n";
 import type { Config } from "../../lib/types";
-import { Button, Spinner, Readout, StatRail, Icon } from "../ui";
+import { Button, Spinner, Readout, StatRail, Icon, Watermark } from "../ui";
 
 const LAST_REPAIR_STORAGE_KEY = "swifttunnel.lastRepairAll.v1";
 
@@ -286,9 +286,10 @@ export function RepairTab() {
           at narrower window sizes. A clip box cannot scroll at all. */}
       <section
         data-search-anchor="repair_run"
-        className="corner-frame relative overflow-clip rounded-[var(--radius-card)] surface-card"
+        className="corner-frame relative isolate overflow-clip rounded-[var(--radius-card)] surface-card"
         style={{ padding: "20px 22px" }}
       >
+        <Watermark icon="repair" at="bottom-right" size={170} rotate={-18} />
         <div className="aurora" aria-hidden />
         <div className="dot-grid pointer-events-none absolute inset-0 opacity-70" />
         <div className="relative flex items-start justify-between gap-4">
@@ -495,9 +496,7 @@ export function RepairTab() {
                             ? "var(--color-latency-bad)"
                             : entry.tone === "warn"
                               ? "var(--color-latency-fair)"
-                              : entry.tone === "good"
-                                ? "var(--color-latency-excellent)"
-                                : "var(--color-text-secondary)",
+                              : "var(--color-text-secondary)",
                       }}
                       title={entry.value}
                     >

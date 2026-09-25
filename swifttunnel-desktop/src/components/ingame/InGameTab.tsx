@@ -88,6 +88,7 @@ export function InGameTab() {
         aurora
         corners
         anchorId="overlay_enabled"
+        watermark={{ icon: "ingame", at: "right", size: 180, rotate: -6, fade: true }}
         eyebrow="In-Game Overlay"
         title={
           <span className="flex items-center gap-2">

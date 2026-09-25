@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Watermark, type WatermarkProps } from "./Watermark";
 
 /* ──────────────────────────────────────────────────────────────────────────
    Telemetry console primitives.
@@ -32,6 +33,8 @@ export interface PanelProps {
   className?: string;
   /** Deep-link / search target. */
   anchorId?: string;
+  /** Big faded icon behind the panel's content. */
+  watermark?: WatermarkProps;
 }
 
 export function Panel({
@@ -48,6 +51,7 @@ export function Panel({
   flush,
   className,
   anchorId,
+  watermark,
 }: PanelProps) {
   const glow =
     status === "connected"
@@ -61,8 +65,8 @@ export function Panel({
     <section
       data-search-anchor={anchorId}
       className={`instrument ${corners ? "corner-frame" : ""} ${glow} ${
-        className ?? ""
-      }`}
+        watermark ? "isolate" : ""
+      } ${className ?? ""}`}
     >
       {aurora && (
         <div className="pointer-events-none absolute inset-0 overflow-hidden rounded-[inherit]">
@@ -73,6 +77,7 @@ export function Panel({
         </div>
       )}
       {grid && <div className="grid-layer" aria-hidden />}
+      {watermark && <Watermark {...watermark} />}
       {/* The sweep translates past its own bounds, so it needs its own
           clipping box, clipping the panel itself would eat the corner
           brackets, which sit at -1px. */}

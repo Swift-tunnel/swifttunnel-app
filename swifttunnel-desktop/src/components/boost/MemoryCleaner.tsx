@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Spinner, Chip } from "../ui";
+import { Button, Spinner, Chip, Watermark } from "../ui";
 import { useBoostStore } from "../../stores/boostStore";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { systemRestartAsAdmin } from "../../lib/commands";
@@ -81,7 +81,8 @@ export function MemoryCleaner() {
   return (
     <section className="flex flex-col gap-3">
       {/* ── Hero ── */}
-      <div className="corner-frame overflow-hidden rounded-[var(--radius-card)] surface-card px-5 pt-4 pb-3">
+      <div className="corner-frame relative isolate overflow-hidden rounded-[var(--radius-card)] surface-card px-5 pt-4 pb-3">
+        <Watermark icon="memory" at="bottom-right" size={150} rotate={-10} />
         <div className="flex items-start justify-between gap-6">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
@@ -172,7 +173,6 @@ export function MemoryCleaner() {
           <MemStat
             label="Available"
             value={`${formatGbFromMb(availableMb)} GB`}
-            valueColor={color}
             bold
           />
           {systemMem?.standby_mb != null && (

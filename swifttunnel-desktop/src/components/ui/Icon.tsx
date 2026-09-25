@@ -43,6 +43,8 @@ const BIN = "M5 6h14l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z";
 const PANEL =
   "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z";
 const PANEL_RAIL = "M5 4h4v16H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z";
+const RAM = "M3 7h18a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1z";
+const DIAL = "M4 17a8 8 0 1 1 16 0z";
 
 const ICONS = {
   connect: {
@@ -108,6 +110,15 @@ const ICONS = {
     stroke: `${ROCKET_BODY} M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0 M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5`,
   },
   layers: { fill: LAYER_TOP, stroke: `${LAYER_TOP} M3 13l9 5 9-5 M3 17.5l9 5 9-5` },
+  memory: {
+    fill: RAM,
+    stroke: `${RAM} M6.5 10v3 M10.5 10v3 M14.5 10v3 M18.5 10v3 M5 16v2.5 M9 16v2.5 M15 16v2.5 M19 16v2.5`,
+  },
+  gauge: {
+    fill: DIAL,
+    stroke: "M4 17a8 8 0 1 1 16 0z M12 15.5l3.6-4.4",
+    dot: [[12, 15.5, 1.3]],
+  },
   trash: {
     fill: BIN,
     stroke:

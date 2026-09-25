@@ -17,6 +17,7 @@ import {
   Dialog,
   Icon,
   Spinner,
+  Watermark,
 } from "../ui";
 import {
   systemOpenUrl,
@@ -135,7 +136,8 @@ export function SettingsTab() {
   return (
     <div className="flex w-full flex-col gap-4 pb-6">
       {/* ── Account hero ── */}
-      <section className="corner-frame relative overflow-hidden rounded-[var(--radius-card)] surface-card">
+      <section className="corner-frame relative isolate overflow-hidden rounded-[var(--radius-card)] surface-card">
+        <Watermark icon="user" at="right" size={160} fade />
         <div
           className="dot-grid pointer-events-none absolute inset-0"
           style={{ opacity: 0.55 }}
