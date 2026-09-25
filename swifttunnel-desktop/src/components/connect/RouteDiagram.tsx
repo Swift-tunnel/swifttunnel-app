@@ -76,7 +76,7 @@ export function RouteDiagram({
           active={connected}
           badge={
             countryCode ? (
-              <Flag code={countryCode} size={16} />
+              <Flag code={countryCode} size={14} />
             ) : undefined
           }
         />

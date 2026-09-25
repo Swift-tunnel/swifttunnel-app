@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" fill="#d80027"/>
+  <g transform="rotate(0 16 16)">
+  <path d="M16 16C13.3 13.9 12.6 9.8 15 7.3C16.2 6.1 18.3 6.4 18.6 8.2C19 10.9 17.4 13.3 16 16Z" fill="#eeeeee"/>
+  <path d="M16 15.2C15.5 12.9 15.7 10.4 16.8 8.6" fill="none" stroke="#d80027" stroke-width="0.45" stroke-linecap="round"/>
+  </g>
+  <g transform="rotate(72 16 16)">
+  <path d="M16 16C13.3 13.9 12.6 9.8 15 7.3C16.2 6.1 18.3 6.4 18.6 8.2C19 10.9 17.4 13.3 16 16Z" fill="#eeeeee"/>
+  <path d="M16 15.2C15.5 12.9 15.7 10.4 16.8 8.6" fill="none" stroke="#d80027" stroke-width="0.45" stroke-linecap="round"/>
+  </g>
+  <g transform="rotate(144 16 16)">
+  <path d="M16 16C13.3 13.9 12.6 9.8 15 7.3C16.2 6.1 18.3 6.4 18.6 8.2C19 10.9 17.4 13.3 16 16Z" fill="#eeeeee"/>
+  <path d="M16 15.2C15.5 12.9 15.7 10.4 16.8 8.6" fill="none" stroke="#d80027" stroke-width="0.45" stroke-linecap="round"/>
+  </g>
+  <g transform="rotate(216 16 16)">
+  <path d="M16 16C13.3 13.9 12.6 9.8 15 7.3C16.2 6.1 18.3 6.4 18.6 8.2C19 10.9 17.4 13.3 16 16Z" fill="#eeeeee"/>
+  <path d="M16 15.2C15.5 12.9 15.7 10.4 16.8 8.6" fill="none" stroke="#d80027" stroke-width="0.45" stroke-linecap="round"/>
+  </g>
+  <g transform="rotate(288 16 16)">
+  <path d="M16 16C13.3 13.9 12.6 9.8 15 7.3C16.2 6.1 18.3 6.4 18.6 8.2C19 10.9 17.4 13.3 16 16Z" fill="#eeeeee"/>
+  <path d="M16 15.2C15.5 12.9 15.7 10.4 16.8 8.6" fill="none" stroke="#d80027" stroke-width="0.45" stroke-linecap="round"/>
+  </g>
+</svg>

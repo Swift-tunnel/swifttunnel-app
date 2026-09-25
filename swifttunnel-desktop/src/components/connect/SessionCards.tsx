@@ -77,7 +77,7 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
         </span>
         {region && (
           <span className="flex items-center gap-1.5 text-[12px] text-text-muted">
-            <Flag code={region.country_code} size={15} />
+            <Flag code={region.country_code} size={14} />
             {region.name}
           </span>
         )}

@@ -389,7 +389,9 @@ export function ConnectTab() {
             </div>
 
             <div className="mt-2 flex items-center gap-2.5">
-              {heroRegion && <Flag code={heroRegion.country_code} size={26} />}
+              {heroRegion && (
+                <Flag code={heroRegion.country_code} size={20} highlight={isConnected} />
+              )}
               <span
                 className="truncate text-[26px] font-semibold leading-[1.05] text-text-primary"
                 style={{ letterSpacing: "-0.024em" }}
@@ -1102,7 +1104,10 @@ function RegionRow({
         disabled={disabled}
         className="flex min-w-0 flex-1 items-center gap-3 self-stretch text-left disabled:cursor-not-allowed"
       >
-        <Flag code={region.country_code} size={30} />
+        {/* Same width as the Auto row's tile, so the names line up. */}
+        <span className="flex w-7 shrink-0 justify-center">
+          <Flag code={region.country_code} size={20} highlight={selected} />
+        </span>
 
         <span className="flex min-w-0 flex-col gap-[3px] leading-tight">
           <span className="flex items-center gap-2">
