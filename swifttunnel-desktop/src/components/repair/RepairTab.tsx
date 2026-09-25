@@ -40,7 +40,7 @@ import {
 import { COMMUNITY_URL } from "../../lib/maintenance";
 import { resetTranslationCache } from "../../lib/i18n";
 import type { Config } from "../../lib/types";
-import { Button, Spinner, Readout, StatRail } from "../ui";
+import { Button, Spinner, Readout, StatRail, Icon } from "../ui";
 
 const LAST_REPAIR_STORAGE_KEY = "swifttunnel.lastRepairAll.v1";
 
@@ -561,23 +561,16 @@ export function RepairTab() {
 
 function ChevronIcon({ open }: { open: boolean }) {
   return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="var(--color-text-muted)"
-      strokeWidth="2.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+    <Icon
+      name="chevron-right"
+      size={12}
+      strokeWidth={2.2}
       style={{
+        color: "var(--color-text-muted)",
         transform: open ? "rotate(90deg)" : "none",
         transition: "transform 0.15s ease",
       }}
-      aria-hidden
-    >
-      <path d="M9 6l6 6-6 6" />
-    </svg>
+    />
   );
 }
 
@@ -622,19 +615,7 @@ function formatRunForSupport(run: RepairRun): string {
 
 function WrenchIcon() {
   return (
-    <svg
-      width="15"
-      height="15"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="#0a0a0a"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-    </svg>
+    <Icon name="repair" size={15} strokeWidth={2} style={{ color: "#0a0a0a" }} />
   );
 }
 

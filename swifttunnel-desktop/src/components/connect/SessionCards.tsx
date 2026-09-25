@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { useBoostStore } from "../../stores/boostStore";
 import { useServerStore } from "../../stores/serverStore";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { Button } from "../ui";
+import { Button, Icon } from "../ui";
 import {
   averagePing,
   jitter,
@@ -12,7 +12,8 @@ import {
 } from "../../stores/sessionStatsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import { countryFlag, getLatencyColor } from "../../lib/utils";
+import { getLatencyColor } from "../../lib/utils";
+import { Flag } from "../ui/Flag";
 
 function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -76,7 +77,7 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
         </span>
         {region && (
           <span className="flex items-center gap-1.5 text-[12px] text-text-muted">
-            <span>{countryFlag(region.country_code)}</span>
+            <Flag code={region.country_code} size={15} />
             {region.name}
           </span>
         )}
@@ -145,8 +146,15 @@ function RobloxCard() {
   const setTab = useSettingsStore((s) => s.setTab);
 
   return (
-    <div className="flex flex-col gap-4 rounded-[var(--radius-card)] surface-card p-5">
-      <div className="flex items-center justify-between gap-3">
+    <div className="relative flex flex-col gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card p-5">
+      {/* Big faded Roblox mark in the corner, like the game cards in ExitLag. */}
+      <Icon
+        name="roblox"
+        size={168}
+        className="pointer-events-none absolute -bottom-12 -right-10"
+        style={{ color: "var(--color-text-primary)", opacity: 0.045 }}
+      />
+      <div className="relative flex items-center justify-between gap-3">
         <span className="text-[13.5px] font-semibold text-text-primary">Roblox</span>
         <span
           className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.08em]"
@@ -169,7 +177,7 @@ function RobloxCard() {
       </div>
 
       {running ? (
-        <div className="grid grid-cols-3 gap-4 border-t pt-4" style={{ borderColor: "var(--color-border-subtle)" }}>
+        <div className="relative grid grid-cols-3 gap-4 border-t pt-4" style={{ borderColor: "var(--color-border-subtle)" }}>
           <div>
             <Stat label="CPU" value={Math.round(cpu)} unit="%" />
             <Meter fraction={cpu / 100} />
@@ -188,16 +196,16 @@ function RobloxCard() {
           </div>
         </div>
       ) : (
-        <p className="text-[12.5px] leading-relaxed text-text-muted">
+        <p className="relative text-[12.5px] leading-relaxed text-text-muted">
           Start Roblox to see how much CPU and memory it uses.
         </p>
       )}
 
-      <div className="mt-auto flex items-center gap-2 border-t pt-4" style={{ borderColor: "var(--color-border-subtle)" }}>
+      <div className="relative mt-auto flex flex-wrap items-center gap-2 border-t pt-4" style={{ borderColor: "var(--color-border-subtle)" }}>
         <Chip label="FPS cap" value={roblox.unlock_fps ? String(roblox.target_fps) : "60"} />
         <Chip label="Profile" value={profile} />
         <Chip label="Graphics" value={String(roblox.graphics_quality)} />
-        <Button size="sm" className="ml-auto" onClick={() => setTab("games")}>
+        <Button size="sm" className="ml-auto whitespace-nowrap" onClick={() => setTab("games")}>
           Roblox settings
         </Button>
       </div>
@@ -207,7 +215,7 @@ function RobloxCard() {
 
 function Chip({ label, value }: { label: string; value: string }) {
   return (
-    <span className="rounded-[7px] border px-2 py-1 text-[11px] text-text-muted" style={{ borderColor: "var(--color-border-default)", backgroundColor: "var(--color-bg-elevated)" }}>
+    <span className="whitespace-nowrap rounded-[7px] border px-2 py-1 text-[11px] text-text-muted" style={{ borderColor: "var(--color-border-default)", backgroundColor: "var(--color-bg-elevated)" }}>
       {label} <b className="font-semibold text-text-primary">{value}</b>
     </span>
   );

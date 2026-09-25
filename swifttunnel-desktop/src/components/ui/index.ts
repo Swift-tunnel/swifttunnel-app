@@ -1,4 +1,5 @@
 export { Button } from "./Button";
+export { Icon, type IconName } from "./Icon";
 export { Toggle } from "./Toggle";
 export { Segmented } from "./Segmented";
 export { Card } from "./Card";

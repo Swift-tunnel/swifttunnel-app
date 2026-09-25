@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Button, Dialog, Spinner } from "../ui";
+import { Button, Dialog, Spinner, Icon } from "../ui";
 import { useToastStore } from "../../stores/toastStore";
 import { usePresetStore, type SavedPreset } from "../../stores/presetStore";
 import { presetSaveToDownloads, systemOpenUrl } from "../../lib/commands";
@@ -71,10 +71,12 @@ export function PresetsPanel({
       {presets.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-2.5 rounded-[12px] surface-card px-6 py-8 text-center">
           <span className="icon-orb flex h-11 w-11 items-center justify-center">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 3l9 5-9 5-9-5 9-5z" />
-              <path d="M3 13l9 5 9-5" />
-            </svg>
+            <Icon
+              name="layers"
+              size={20}
+              strokeWidth={1.7}
+              style={{ color: "var(--color-accent-primary)" }}
+            />
           </span>
           <div className="text-[13px] font-semibold text-text-primary">
             No presets yet
@@ -201,15 +203,10 @@ function PresetRow({
       )}
 
       <IconBtn onClick={onShare} label="Share preset">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M4 12v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" />
-          <path d="M16 6l-4-4-4 4M12 2v13" />
-        </svg>
+        <Icon name="share" size={14} />
       </IconBtn>
       <IconBtn onClick={onDelete} label="Delete preset">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-        </svg>
+        <Icon name="trash" size={14} />
       </IconBtn>
     </div>
   );

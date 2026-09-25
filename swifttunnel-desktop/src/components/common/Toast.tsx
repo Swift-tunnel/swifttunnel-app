@@ -1,24 +1,13 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { useToastStore } from "../../stores/toastStore";
 import type { ToastType } from "../../stores/toastStore";
+import { Icon, type IconName } from "../ui/Icon";
 
-const ICON_MAP: Record<ToastType, { color: string; path: string }> = {
-  success: {
-    color: "var(--color-status-connected)",
-    path: "M20 6 9 17l-5-5",
-  },
-  error: {
-    color: "var(--color-status-error)",
-    path: "M18 6 6 18M6 6l12 12",
-  },
-  warning: {
-    color: "var(--color-status-warning)",
-    path: "M12 9v4M12 17h.01",
-  },
-  info: {
-    color: "var(--color-accent-primary)",
-    path: "M12 16v-4M12 8h.01",
-  },
+const ICON_MAP: Record<ToastType, { color: string; name: IconName }> = {
+  success: { color: "var(--color-status-connected)", name: "check" },
+  error: { color: "var(--color-status-error)", name: "close" },
+  warning: { color: "var(--color-status-warning)", name: "warning" },
+  info: { color: "var(--color-accent-primary)", name: "info" },
 };
 
 export function ToastContainer() {
@@ -44,19 +33,13 @@ export function ToastContainer() {
                 maxWidth: 360,
               }}
             >
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke={icon.color}
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+              <Icon
+                name={icon.name}
+                size={16}
+                strokeWidth={2.2}
                 className="shrink-0"
-              >
-                <path d={icon.path} />
-              </svg>
+                style={{ color: icon.color }}
+              />
               <span className="flex-1 text-xs font-medium text-text-primary">
                 {toast.message}
               </span>
@@ -74,18 +57,7 @@ export function ToastContainer() {
                 onClick={() => removeToast(toast.id)}
                 className="shrink-0 text-text-dimmed transition-colors hover:text-text-muted"
               >
-                <svg
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M18 6 6 18M6 6l12 12" />
-                </svg>
+                <Icon name="close" size={12} strokeWidth={2} />
               </button>
             </motion.div>
           );

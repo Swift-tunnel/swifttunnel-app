@@ -4,10 +4,11 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useServerStore } from "../../stores/serverStore";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import { countryFlag } from "../../lib/utils";
 import { NAV_SECTIONS, type NavItem } from "./nav";
 import type { VpnState } from "../../lib/types";
 import { SwiftLogo } from "../common/SwiftLogo";
+import { Icon } from "../ui/Icon";
+import { Flag } from "../ui/Flag";
 
 declare const __APP_VERSION__: string;
 
@@ -45,24 +46,7 @@ function stateLabel(state: VpnState): string {
 
 function CollapseIcon({ collapsed }: { collapsed: boolean }) {
   return (
-    <svg
-      width="14"
-      height="14"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.85"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <line x1="9" y1="4" x2="9" y2="20" />
-      {collapsed ? (
-        <path d="M14 9.5l2.5 2.5L14 14.5" />
-      ) : (
-        <path d="M16.5 9.5L14 12l2.5 2.5" />
-      )}
-    </svg>
+    <Icon name={collapsed ? "panel-open" : "panel-close"} size={15} strokeWidth={1.85} />
   );
 }
 
@@ -81,42 +65,32 @@ function NavButton({
     <button
       onClick={() => setTab(item.id)}
       title={`${item.label}, Ctrl+${item.shortcut}`}
-      className={`group flex w-full items-center rounded-[8px] text-left ${
-        collapsed ? "justify-center px-0 py-[3px]" : "gap-2 px-1 py-[3px]"
-      }`}
+      className={`group relative flex w-full items-center rounded-[9px] text-left transition-colors duration-100 ${
+        collapsed ? "justify-center px-0 py-[7px]" : "gap-2.5 px-2.5 py-[7px]"
+      } ${active ? "" : "hover:bg-[color:var(--color-bg-hover)]"}`}
+      style={{
+        backgroundColor: active ? "var(--color-accent-primary-soft-8)" : undefined,
+      }}
       aria-label={item.label}
       aria-current={active ? "page" : undefined}
     >
-      {/* Circular icon well, fills with accent when active, Medal-style. */}
-      <span
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-[background-color] duration-150 ${
-          active ? "" : "group-hover:bg-[color:var(--color-bg-hover)]"
-        }`}
+      {/* Marker bar at the sidebar's edge for the current tab, as in ExitLag. */}
+      {active && (
+        <span
+          aria-hidden
+          className="absolute -left-2 bottom-[7px] top-[7px] w-[3px] rounded-r-full"
+          style={{ backgroundColor: "var(--color-text-primary)" }}
+        />
+      )}
+      <Icon
+        name={item.icon}
+        size={19}
+        active={active}
+        className="shrink-0 transition-colors duration-100 group-hover:text-[color:var(--color-text-secondary)]"
         style={{
-          backgroundColor: active
-            ? "var(--color-accent-primary-soft-12)"
-            : undefined,
-          boxShadow: active
-            ? "inset 0 0 0 1px var(--color-accent-primary-soft-15)"
-            : undefined,
+          color: active ? "var(--color-text-primary)" : "var(--color-text-muted)",
         }}
-      >
-        <svg
-          width="22"
-          height="22"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={
-            active ? "var(--color-text-primary)" : "var(--color-text-muted)"
-          }
-          strokeWidth="1.9"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="transition-colors duration-150 group-hover:stroke-[color:var(--color-text-secondary)]"
-        >
-          <path d={item.icon} />
-        </svg>
-      </span>
+      />
       {!collapsed && (
         <>
           <span
@@ -220,7 +194,7 @@ function ConnectionCard({ collapsed }: { collapsed: boolean }) {
       <span className="flex items-center gap-2">
         {dot}
         <span
-          className="flex-1 truncate text-[10.5px] font-semibold uppercase tracking-[0.08em]"
+          className="flex-1 truncate text-[10px] font-semibold uppercase tracking-[0.06em]"
           style={{
             color: isConnected
               ? "var(--color-status-connected)"
@@ -229,19 +203,17 @@ function ConnectionCard({ collapsed }: { collapsed: boolean }) {
         >
           {stateLabel(vpnState)}
         </span>
-        {isConnected && ping !== null && (
-          <span className="lcd-readout text-[10.5px] text-text-secondary">
-            {ping} ms
-          </span>
-        )}
       </span>
       <span className="flex items-center gap-1.5 truncate text-[11.5px] font-medium text-text-primary">
         {isConnected && region ? (
           <>
-            <span className="text-[12px] leading-none">
-              {countryFlag(region.country_code)}
-            </span>
-            <span className="truncate">{region.name}</span>
+            <Flag code={region.country_code} size={14} />
+            <span className="min-w-0 flex-1 truncate">{region.name}</span>
+            {ping !== null && (
+              <span className="lcd-readout shrink-0 text-[10.5px] text-text-secondary">
+                {ping} ms
+              </span>
+            )}
           </>
         ) : (
           <span className="truncate text-text-dimmed">
@@ -274,7 +246,7 @@ export function Sidebar() {
       data-tauri-drag-region
       className="flex h-full shrink-0 flex-col"
       style={{
-        width: collapsed ? 56 : 200,
+        width: collapsed ? 56 : 176,
         backgroundColor: "var(--color-bg-sidebar)",
         transition: "width 0.18s cubic-bezier(0.4, 0, 0.2, 1)",
       }}
@@ -305,9 +277,9 @@ export function Sidebar() {
         ) : (
           <div className="flex w-full items-center justify-between pl-1 pr-2">
             <div className="flex min-w-0 items-center">
-              <SwiftLogo size={66} className="-mr-1.5 shrink-0" />
+              <SwiftLogo size={56} className="-mr-1 shrink-0" />
               <span
-                className="truncate text-[15px] font-medium leading-none"
+                className="truncate text-[14px] font-semibold leading-none"
                 style={{
                   color: "var(--color-text-primary)",
                   letterSpacing: "-0.015em",

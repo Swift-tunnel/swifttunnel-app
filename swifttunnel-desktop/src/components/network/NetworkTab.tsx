@@ -12,6 +12,7 @@ import {
   Readout,
   StatRail,
   TickRule,
+  Icon,
 } from "../ui";
 
 const DURATIONS = [5, 10, 30, 300] as const;
@@ -489,28 +490,12 @@ function SpeedCard({
   return (
     <div className="instrument-well p-3">
       <div className="flex items-center gap-1.5">
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={color}
-          strokeWidth="2.4"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          {direction === "down" ? (
-            <>
-              <path d="M12 5v14" />
-              <path d="M5 12l7 7 7-7" />
-            </>
-          ) : (
-            <>
-              <path d="M12 19V5" />
-              <path d="M5 12l7-7 7 7" />
-            </>
-          )}
-        </svg>
+        <Icon
+          name={direction === "down" ? "arrow-down" : "arrow-up"}
+          size={12}
+          strokeWidth={2.4}
+          style={{ color }}
+        />
         <span className="eyebrow">{label}</span>
       </div>
       <Readout

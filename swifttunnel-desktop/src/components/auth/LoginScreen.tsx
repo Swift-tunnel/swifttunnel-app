@@ -3,7 +3,7 @@ import { motion } from "framer-motion";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAuthStore } from "../../stores/authStore";
 import { systemOpenUrl } from "../../lib/commands";
-import { Button, Spinner } from "../ui";
+import { Button, Spinner, Icon, type IconName } from "../ui";
 import { SwiftLogo } from "../common/SwiftLogo";
 
 declare const __APP_VERSION__: string;
@@ -11,19 +11,19 @@ declare const __APP_VERSION__: string;
 const OAUTH_TIMEOUT_MS = 120_000;
 const SIGNUP_URL = "https://www.swifttunnel.net/signup";
 
-const FEATURES = [
+const FEATURES: { icon: IconName; title: string; desc: string }[] = [
   {
-    icon: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
+    icon: "shield",
     title: "Split tunneling",
     desc: "Only game traffic routes through the relay",
   },
   {
-    icon: "M13 2L3 14h9l-1 8 10-12h-9l1-8z",
+    icon: "optimize",
     title: "Boost suite",
     desc: "FPS unlock, RAM cleaner, latency tweaks",
   },
   {
-    icon: "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zM2 12h20",
+    icon: "globe",
     title: "Global relay",
     // Hardcoded because the fleet list is only fetched after sign-in. Update
     // alongside PING_ENABLED_REGIONS in the web repo when the fleet changes
@@ -306,20 +306,7 @@ export function LoginScreen() {
                 onClick={startOAuth}
                 disabled={isLoggingIn}
                 leadingIcon={
-                  <svg
-                    width="14"
-                    height="14"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-                    <polyline points="10 17 15 12 10 7" />
-                    <line x1="15" y1="12" x2="3" y2="12" />
-                  </svg>
+                  <Icon name="login" size={14} strokeWidth={2} />
                 }
               >
                 Sign in in browser
@@ -360,18 +347,12 @@ export function LoginScreen() {
                   border: "1px solid var(--color-border-subtle)",
                 }}
               >
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="var(--color-accent-secondary)"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d={feature.icon} />
-                </svg>
+                <Icon
+                  name={feature.icon}
+                  size={14}
+                  strokeWidth={2}
+                  style={{ color: "var(--color-accent-secondary)" }}
+                />
               </div>
               <div>
                 <div className="text-[12px] font-medium text-text-primary">

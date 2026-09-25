@@ -1,5 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { Icon } from "./Icon";
 
 interface DialogProps {
   open: boolean;
@@ -65,19 +66,7 @@ export function Dialog({
             aria-label="Close"
             className="rounded-[4px] p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
           >
-            <svg
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
+            <Icon name="close" size={14} strokeWidth={2} />
           </button>
         </div>
         <div className="px-5 py-4">{children}</div>

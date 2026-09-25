@@ -20,7 +20,7 @@ export function SectionHeader({
   className,
   size = "md",
 }: SectionHeaderProps) {
-  const titleSize = size === "sm" ? "text-[11px]" : "text-[12.5px]";
+  const titleSize = size === "sm" ? "text-[13px]" : "text-[16px]";
   return (
     <div className={`mb-2.5 ${className ?? ""}`}>
       <div className="flex items-center gap-2">

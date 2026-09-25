@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { useAuthStore } from "../../stores/authStore";
-import { Button, Spinner } from "../ui";
+import { Button, Spinner, Icon } from "../ui";
 import { SwiftLogo } from "../common/SwiftLogo";
 
 export function formatBannedAt(bannedAt: string | null) {
@@ -57,19 +57,7 @@ export function BannedScreen() {
               border: "1px solid rgba(244, 63, 94, 0.25)",
             }}
           >
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="rgb(251, 113, 133)"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <path d="m4.9 4.9 14.2 14.2" />
-            </svg>
+            <Icon name="ban" size={20} strokeWidth={2} style={{ color: "rgb(251, 113, 133)" }} />
           </div>
           <div>
             <p className="font-mono text-[9.5px] font-semibold uppercase tracking-[0.18em] text-status-error">
@@ -136,21 +124,7 @@ export function BannedScreen() {
               refreshing ? (
                 <Spinner size={14} color="currentColor" />
               ) : (
-                <svg
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
-                  <path d="M3 21v-5h5" />
-                  <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-                  <path d="M16 8h5V3" />
-                </svg>
+                <Icon name="sync" size={14} strokeWidth={2} />
               )
             }
           >
@@ -161,20 +135,7 @@ export function BannedScreen() {
             size="md"
             onClick={logout}
             leadingIcon={
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-                <polyline points="16 17 21 12 16 7" />
-                <line x1="21" y1="12" x2="9" y2="12" />
-              </svg>
+              <Icon name="logout" size={14} strokeWidth={2} />
             }
           >
             Sign out

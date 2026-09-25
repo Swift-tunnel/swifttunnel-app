@@ -4,7 +4,6 @@ import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
 import {
-  countryFlag,
   formatBytes,
   getLatencyColor,
 } from "../../lib/utils";
@@ -30,6 +29,8 @@ import { StatusRing } from "./StatusRing";
 import { SessionCards } from "./SessionCards";
 import { Button, EmptyState, Tooltip, InfoIcon, Toggle } from "../ui";
 import type { ServerRegion } from "../../lib/types";
+import { Icon } from "../ui/Icon";
+import { Flag } from "../ui/Flag";
 
 type ConnectStatus = ReturnType<typeof resolveConnectStatus>;
 
@@ -388,11 +389,7 @@ export function ConnectTab() {
             </div>
 
             <div className="mt-2 flex items-center gap-2.5">
-              {heroRegion && (
-                <span className="text-[24px] leading-none">
-                  {countryFlag(heroRegion.country_code)}
-                </span>
-              )}
+              {heroRegion && <Flag code={heroRegion.country_code} size={26} />}
               <span
                 className="truncate text-[26px] font-semibold leading-[1.05] text-text-primary"
                 style={{ letterSpacing: "-0.024em" }}
@@ -581,8 +578,8 @@ export function ConnectTab() {
         <div className="mb-2.5 flex items-baseline justify-between">
           <div className="flex items-baseline gap-2">
             <h3
-              className="text-[12.5px] font-semibold text-text-primary"
-              style={{ letterSpacing: "-0.005em" }}
+              className="text-[16px] font-semibold text-text-primary"
+              style={{ letterSpacing: "-0.01em" }}
             >
               Regions
             </h3>
@@ -600,19 +597,7 @@ export function ConnectTab() {
               disabled={serversLoading}
               className="inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 text-[11px] font-medium text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary disabled:pointer-events-none disabled:opacity-50"
             >
-              <svg
-                width="11"
-                height="11"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.4"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <path d="M23 4v6h-6M1 20v-6h6" />
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-              </svg>
+              <Icon name="sync" size={11} strokeWidth={2.4} />
               Refresh
             </button>
           )}
@@ -846,20 +831,13 @@ function RouteAssistPanel({
     >
       <div className="flex min-w-0 items-center gap-3">
         <IconTile active={enabled}>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke={
-              enabled ? "var(--color-text-primary)" : "var(--color-text-muted)"
-            }
-            strokeWidth="1.85"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M3 12h4l3-9 4 18 3-9h4" />
-          </svg>
+          <Icon
+            name="pulse"
+            size={14}
+            style={{
+              color: enabled ? "var(--color-text-primary)" : "var(--color-text-muted)",
+            }}
+          />
         </IconTile>
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -1026,21 +1004,12 @@ function AutoRouteRow({
         />
       )}
       <IconTile active={active}>
-        <svg
-          width="13"
-          height="13"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={active ? "var(--color-text-primary)" : "var(--color-text-muted)"}
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <polyline points="16 3 21 3 21 8" />
-          <line x1="4" y1="20" x2="21" y2="3" />
-          <polyline points="21 16 21 21 16 21" />
-          <line x1="15" y1="15" x2="21" y2="21" />
-        </svg>
+        <Icon
+          name="shuffle"
+          size={14}
+          strokeWidth={2}
+          style={{ color: active ? "var(--color-text-primary)" : "var(--color-text-muted)" }}
+        />
       </IconTile>
       <div className="flex min-w-0 flex-1 flex-col gap-[3px] leading-tight">
         <div className="flex items-center gap-2">
@@ -1133,11 +1102,7 @@ function RegionRow({
         disabled={disabled}
         className="flex min-w-0 flex-1 items-center gap-3 self-stretch text-left disabled:cursor-not-allowed"
       >
-        <IconTile active={selected}>
-          <span className="text-[14px] leading-none">
-            {countryFlag(region.country_code)}
-          </span>
-        </IconTile>
+        <Flag code={region.country_code} size={30} />
 
         <span className="flex min-w-0 flex-col gap-[3px] leading-tight">
           <span className="flex items-center gap-2">
@@ -1254,18 +1219,7 @@ function InlineServerOption({
         }}
       >
         {active ? (
-          <svg
-            width="10"
-            height="10"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
+          <Icon name="check" size={10} strokeWidth={2.5} />
         ) : null}
       </span>
       <span className="flex min-w-0 items-baseline gap-2">
@@ -1326,9 +1280,7 @@ function WhitelistPanel({
                   : "var(--color-text-muted)",
               }}
             >
-              <span className="text-[12px] leading-none">
-                {countryFlag(r.country_code)}
-              </span>
+              <Flag code={r.country_code} size={14} />
               {r.name}
             </button>
           );

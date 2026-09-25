@@ -15,6 +15,8 @@ import {
   Panel,
   Slider,
   Dialog,
+  Icon,
+  Spinner,
 } from "../ui";
 import {
   systemOpenUrl,
@@ -305,19 +307,12 @@ export function SettingsTab() {
             className="flex cursor-pointer items-center gap-2 px-3.5 py-2.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-muted transition-colors hover:text-text-secondary"
             style={{ listStyle: "none" }}
           >
-            <svg
-              width="10"
-              height="10"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
+            <Icon
+              name="chevron-right"
+              size={10}
+              strokeWidth={2.5}
               className="transition-transform duration-150 group-open/diag:rotate-90"
-            >
-              <path d="M9 18l6-6-6-6" />
-            </svg>
+            />
             Adapter diagnostics
           </summary>
           <div
@@ -429,19 +424,13 @@ export function SettingsTab() {
               </span>
               {updaterStatus === "update_available" && (
                 <>
-                  <svg
-                    width="11"
-                    height="11"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="var(--color-text-dimmed)"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
+                  <Icon
+                    name="arrow-right"
+                    size={11}
+                    strokeWidth={2}
                     className="shrink-0"
-                  >
-                    <path d="M5 12h14M12 5l7 7-7 7" />
-                  </svg>
+                    style={{ color: "var(--color-text-dimmed)" }}
+                  />
                   <span
                     className="shrink-0 rounded-[4px] px-1.5 py-1 font-mono text-[11px] font-semibold leading-none"
                     style={{
@@ -801,18 +790,12 @@ function LinkButton({
       }}
     >
       {children}
-      <svg
-        width="10"
-        height="10"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="var(--color-text-dimmed)"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M7 17L17 7M7 7h10v10" />
-      </svg>
+      <Icon
+        name="external"
+        size={10}
+        strokeWidth={2.2}
+        style={{ color: "var(--color-text-dimmed)" }}
+      />
     </button>
   );
 }
@@ -852,51 +835,25 @@ function UpdaterStatusLine({
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       {(status === "checking" || status === "installing") && (
-        <svg
-          className="h-3 w-3 shrink-0 animate-spin"
-          viewBox="0 0 24 24"
-          fill="none"
-        >
-          <circle
-            cx="12"
-            cy="12"
-            r="10"
-            stroke={color}
-            strokeWidth="2.5"
-            strokeDasharray="50"
-            strokeLinecap="round"
-          />
-        </svg>
+        <Spinner size={12} color={color} thickness={2} />
       )}
       {status === "up_to_date" && (
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={color}
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
+        <Icon
+          name="check"
+          size={12}
+          strokeWidth={2.5}
           className="shrink-0"
-        >
-          <path d="M20 6 9 17l-5-5" />
-        </svg>
+          style={{ color }}
+        />
       )}
       {status === "error" && (
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke={color}
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
+        <Icon
+          name="close"
+          size={12}
+          strokeWidth={2.5}
           className="shrink-0"
-        >
-          <path d="M18 6 6 18M6 6l12 12" />
-        </svg>
+          style={{ color }}
+        />
       )}
       <span
         className="truncate text-[11.5px] font-medium"

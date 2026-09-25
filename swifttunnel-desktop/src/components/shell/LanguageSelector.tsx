@@ -1,23 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18nStore } from "../../stores/i18nStore";
 import { LANGUAGES, languageFor } from "../../lib/languages";
+import { Icon } from "../ui/Icon";
 
 function GlobeIcon() {
   return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.9"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <circle cx="12" cy="12" r="9" />
-      <path d="M3 12h18" />
-      <path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18Z" />
-    </svg>
+    <Icon name="globe" size={18} />
   );
 }
 
@@ -106,19 +94,11 @@ export function LanguageSelector() {
               className="flex items-center gap-2 px-3"
               style={{ height: 42, borderBottom: "1px solid var(--color-border-subtle)" }}
             >
-              <svg
-                width="15"
-                height="15"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="var(--color-text-muted)"
-                strokeWidth="1.9"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <circle cx="11" cy="11" r="7" />
-                <path d="m21 21-4.3-4.3" />
-              </svg>
+              <Icon
+                name="search"
+                size={15}
+                style={{ color: "var(--color-text-muted)" }}
+              />
               <input
                 ref={inputRef}
                 value={query}
@@ -166,18 +146,12 @@ export function LanguageSelector() {
                         </span>
                       </span>
                       {selected && (
-                        <svg
-                          width="14"
-                          height="14"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="var(--color-accent-primary)"
-                          strokeWidth="2.4"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M20 6 9 17l-5-5" />
-                        </svg>
+                        <Icon
+                          name="check"
+                          size={14}
+                          strokeWidth={2.4}
+                          style={{ color: "var(--color-accent-primary)" }}
+                        />
                       )}
                     </button>
                   );

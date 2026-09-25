@@ -9,6 +9,7 @@ import { getLatencyColor } from "../../lib/utils";
 import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
 import { navItemFor } from "./nav";
+import { Icon } from "../ui/Icon";
 
 /** `2h 14m` / `47m` / `<1m`, compact enough for a top-bar pill. */
 function formatFreeTier(seconds: number): string {
@@ -127,24 +128,21 @@ export function TopBar() {
         {/* Game-status chip, Medal's "Waiting For Game": solid gamepad, no
             border, subtle inset pill. */}
         <div
-          className="hidden items-center gap-2 rounded-[9px] px-3 py-1.5 sm:flex"
+          className="hidden shrink-0 items-center gap-2 rounded-[9px] px-3 py-1.5 sm:flex"
           style={{ backgroundColor: "var(--color-bg-base)" }}
         >
-          <svg
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill={
-              robloxRunning
-                ? "var(--color-text-secondary)"
-                : "var(--color-text-muted)"
-            }
-            aria-hidden
-          >
-            <path d="M15 5H9a7 7 0 0 0-7 7 4 4 0 0 0 7.24 2.35A2 2 0 0 1 10.83 15h2.34a2 2 0 0 1 1.59.79A4 4 0 1 0 22 12a7 7 0 0 0-7-7ZM9 12H8v1a1 1 0 1 1-2 0v-1H5a1 1 0 1 1 0-2h1V9a1 1 0 1 1 2 0v1h1a1 1 0 1 1 0 2Zm6.5.5a1.25 1.25 0 1 1 1.25-1.25A1.25 1.25 0 0 1 15.5 12.5Zm2.5-3a1.25 1.25 0 1 1 1.25-1.25A1.25 1.25 0 0 1 18 9.5Z" />
-          </svg>
+          <Icon
+            name="games"
+            size={17}
+            active={robloxRunning}
+            style={{
+              color: robloxRunning
+                ? "var(--color-status-connected)"
+                : "var(--color-text-muted)",
+            }}
+          />
           <span
-            className="text-[11px] font-medium leading-none"
+            className="whitespace-nowrap text-[11px] font-medium leading-none"
             style={{
               color: robloxRunning
                 ? "var(--color-text-secondary)"
@@ -167,19 +165,7 @@ export function TopBar() {
           className="flex h-9 w-9 items-center justify-center rounded-full transition-[background-color] duration-150 hover:bg-[color:var(--color-bg-hover)]"
           style={{ color: "var(--color-text-muted)" }}
         >
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.9"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <circle cx="11" cy="11" r="7" />
-            <path d="m21 21-4.3-4.3" />
-          </svg>
+          <Icon name="search" size={19} />
         </button>
 
         {/* Grace takes over the readout once the allowance is spent, so the

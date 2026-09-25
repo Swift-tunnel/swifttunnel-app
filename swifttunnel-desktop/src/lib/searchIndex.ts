@@ -4,6 +4,7 @@ import {
 } from "../components/optimization/optimizationCatalog";
 import { navItemFor } from "../components/shell/nav";
 import type { TabId } from "./types";
+import type { IconName } from "../components/ui/Icon";
 
 export interface SearchEntry {
   id: string;
@@ -17,8 +18,8 @@ export interface SearchEntry {
   section: string;
   /** Space-joined aliases + real terms for matching. */
   keywords: string;
-  /** SVG path for the row icon (borrowed from the destination tab). */
-  icon: string;
+  /** Row icon, borrowed from the destination tab. */
+  icon: IconName;
 }
 
 /**
@@ -31,7 +32,7 @@ export interface SearchEntry {
  * annotation only permits removal where the result goes unused, which in the
  * full app it never does.
  */
-const icon = (tab: TabId): string => navItemFor(tab).icon;
+const icon = (tab: TabId): IconName => navItemFor(tab).icon;
 
 const connectIcon = /* @__PURE__ */ icon("connect");
 const networkIcon = /* @__PURE__ */ icon("network");

@@ -7,6 +7,7 @@ import {
 } from "react";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
 import { searchEntries, type SearchEntry } from "../../lib/searchIndex";
+import { Icon } from "../ui/Icon";
 
 export function CommandPalette() {
   const navigateTo = useDeepLinkStore((s) => s.navigateTo);
@@ -101,19 +102,11 @@ export function CommandPalette() {
             borderBottom: "1px solid var(--color-border-subtle)",
           }}
         >
-          <svg
-            width="17"
-            height="17"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="var(--color-text-muted)"
-            strokeWidth="1.9"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <circle cx="11" cy="11" r="7" />
-            <path d="m21 21-4.3-4.3" />
-          </svg>
+          <Icon
+            name="search"
+            size={17}
+            style={{ color: "var(--color-text-muted)" }}
+          />
           <input
             ref={inputRef}
             value={query}
@@ -158,18 +151,11 @@ export function CommandPalette() {
                     border: "1px solid var(--color-border-subtle)",
                   }}
                 >
-                  <svg
-                    width="15"
-                    height="15"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="var(--color-text-secondary)"
-                    strokeWidth="1.8"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <path d={e.icon} />
-                  </svg>
+                  <Icon
+                    name={e.icon}
+                    size={15}
+                    style={{ color: "var(--color-text-secondary)" }}
+                  />
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[12.5px] font-medium text-text-primary">

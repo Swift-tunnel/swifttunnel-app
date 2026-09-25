@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip } from "../ui";
+import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip, Icon } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
 import { PresetsPanel, PresetsDialog, type PresetMode } from "./PresetsCard";
 import { showRamOverlay } from "../overlay/RamOverlay";
@@ -128,16 +128,7 @@ function CardBadges({ def }: { def: OptimizationDef }) {
             border: "1px solid rgba(245, 158, 11, 0.35)",
           }}
         >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M12 3 2.5 20h19L12 3Z"
-              stroke="#f59e0b"
-              strokeWidth="2"
-              strokeLinejoin="round"
-            />
-            <path d="M12 10v4.5" stroke="#f59e0b" strokeWidth="2" strokeLinecap="round" />
-            <circle cx="12" cy="17.4" r="1.1" fill="#f59e0b" />
-          </svg>
+          <Icon name="warning" size={9} strokeWidth={2.2} style={{ color: "#f59e0b" }} />
         </span>
       </Tooltip>,
     );
@@ -152,21 +143,7 @@ function CardBadges({ def }: { def: OptimizationDef }) {
             border: "1px solid var(--color-border-subtle)",
           }}
         >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M20 12a8 8 0 1 1-2.3-5.6"
-              stroke="var(--color-text-muted)"
-              strokeWidth="2"
-              strokeLinecap="round"
-            />
-            <path
-              d="M20 3v4h-4"
-              stroke="var(--color-text-muted)"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+          <Icon name="refresh" size={9} strokeWidth={2.2} style={{ color: "var(--color-text-muted)" }} />
           Restart PC
         </span>
       </Tooltip>,
@@ -411,15 +388,11 @@ function ChevronButton({
         color: "var(--color-text-secondary)",
       }}
     >
-      <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
-        <path
-          d={direction === "prev" ? "M14.5 5 8 12l6.5 7" : "M9.5 5 16 12l-6.5 7"}
-          stroke="currentColor"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
+      <Icon
+        name={direction === "prev" ? "chevron-left" : "chevron-right"}
+        size={11}
+        strokeWidth={2.4}
+      />
     </button>
   );
 }
@@ -739,22 +712,12 @@ export function OptimizationTab() {
 
 function RocketIcon() {
   return (
-    <svg
-      width="22"
-      height="22"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="var(--color-accent-primary)"
-      strokeWidth="1.7"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" />
-      <path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" />
-      <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
-      <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
-    </svg>
+    <Icon
+      name="rocket"
+      size={22}
+      strokeWidth={1.7}
+      style={{ color: "var(--color-accent-primary)" }}
+    />
   );
 }
 
@@ -864,23 +827,12 @@ function RestoreDefaultsButton() {
       className="flex shrink-0 items-center gap-1.5 rounded-[8px] px-3 py-1.5 text-[11.5px] font-medium transition-colors hover:bg-bg-hover disabled:opacity-45"
       style={{ color: "var(--color-text-muted)" }}
     >
-      <svg
-        width="13"
-        height="13"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
+      <Icon
+        name="sync"
+        size={13}
+        strokeWidth={2}
         className={busy ? "animate-spin" : ""}
-        aria-hidden
-      >
-        <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
-        <path d="M21 3v5h-5" />
-        <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
-        <path d="M3 21v-5h5" />
-      </svg>
+      />
       {busy ? "Restoring…" : "Restore Windows defaults"}
     </button>
   );
@@ -1034,22 +986,16 @@ function SpeedUpSection({
           onClick={() => setOpen((o) => !o)}
           className="flex min-w-0 items-center gap-2"
         >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="var(--color-text-muted)"
-            strokeWidth="2.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+          <Icon
+            name="chevron-right"
+            size={12}
+            strokeWidth={2.2}
             style={{
+              color: "var(--color-text-muted)",
               transform: open ? "rotate(90deg)" : "none",
               transition: "transform 0.15s ease",
             }}
-          >
-            <path d="M9 6l6 6-6 6" />
-          </svg>
+          />
           <span className="text-[13px] font-semibold text-text-primary">
             {category}
           </span>
@@ -1104,18 +1050,7 @@ function SpeedUpItem({ def }: { def: SpeedUpDef }) {
         {isBusy ? (
           <Spinner size={11} color="var(--color-accent-primary)" />
         ) : isActive ? (
-          <svg
-            width="11"
-            height="11"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="#0a0a0a"
-            strokeWidth="3.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M20 6 9 17l-5-5" />
-          </svg>
+          <Icon name="check" size={11} strokeWidth={3.2} style={{ color: "#0a0a0a" }} />
         ) : null}
       </span>
       <span className="min-w-0">

@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
-import { countryFlag, getLatencyColor } from "../../lib/utils";
+import { getLatencyColor } from "../../lib/utils";
+import { Icon } from "../ui/Icon";
+import { Flag } from "../ui/Flag";
 
 /* ──────────────────────────────────────────────────────────────────────────
    Game route diagram, lives inside the connect deck, under the status row.
@@ -57,19 +59,7 @@ export function RouteDiagram({
               color: "var(--color-text-muted)",
             }}
           >
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M21 12a9 9 0 1 1-2.64-6.36" />
-              <path d="M21 3v6h-6" />
-            </svg>
+            <Icon name="refresh" size={13} strokeWidth={2} />
           </button>
         )}
       </div>
@@ -86,9 +76,7 @@ export function RouteDiagram({
           active={connected}
           badge={
             countryCode ? (
-              <span className="text-[13px] leading-none">
-                {countryFlag(countryCode)}
-              </span>
+              <Flag code={countryCode} size={16} />
             ) : undefined
           }
         />
@@ -287,58 +275,15 @@ function Leg({
 }
 
 function UserIcon() {
-  return (
-    <svg
-      width="18"
-      height="18"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.9"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
-    </svg>
-  );
+  return <Icon name="user" size={18} />;
 }
 
-/** Roblox mark: a tilted square with a smaller tilted square cut out.
- *
- *  Built from two axis-aligned squares under one rotate() rather than
- *  hand-written diagonal coordinates, which is what I got wrong first time.
- *  fillRule="evenodd" makes the inner square punch a hole instead of sitting
- *  on top, so it reads correctly on any background, and currentColor keeps it
- *  inheriting the node's connected/idle tint. */
+/** Roblox mark from the shared icon set; currentColor keeps the node's
+ *  connected/idle tint. */
 function RobloxIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        transform="rotate(-13 12 12)"
-        d="M4.2 4.2h15.6v15.6H4.2V4.2Zm5.85 5.85v3.9h3.9v-3.9h-3.9Z"
-      />
-    </svg>
-  );
+  return <Icon name="roblox" size={18} />;
 }
 
 function RouteIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect x="2" y="15" width="6" height="6" rx="1" />
-      <rect x="16" y="3" width="6" height="6" rx="1" />
-      <path d="M5 15V9a3 3 0 0 1 3-3h8" />
-    </svg>
-  );
+  return <Icon name="route" size={12} strokeWidth={2} />;
 }

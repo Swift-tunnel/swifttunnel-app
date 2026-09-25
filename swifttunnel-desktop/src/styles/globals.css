@@ -823,6 +823,7 @@ html.app-idle *::after {
 .surface-card,
 .instrument {
   background: var(--color-bg-card);
+  border-color: transparent;
   box-shadow: none;
 }
 .surface-elevated {

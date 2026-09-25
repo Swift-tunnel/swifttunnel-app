@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Toggle, Chip, Panel, Readout, StatRail } from "../ui";
+import { Toggle, Chip, Panel, Readout, StatRail, Icon } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import type {
@@ -197,15 +197,12 @@ export function InGameTab() {
                             }}
                           >
                             {checked && (
-                              <svg width="9" height="9" viewBox="0 0 12 12" fill="none">
-                                <path
-                                  d="M2.5 6.5L5 9l4.5-5.5"
-                                  stroke="var(--color-bg-base)"
-                                  strokeWidth="2"
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                />
-                              </svg>
+                              <Icon
+                                name="check"
+                                size={9}
+                                strokeWidth={3.6}
+                                style={{ color: "var(--color-bg-base)" }}
+                              />
                             )}
                           </span>
                           <span className="flex-1 truncate text-text-primary">
