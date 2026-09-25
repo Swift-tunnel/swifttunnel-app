@@ -600,7 +600,7 @@ function PingTimeline({ samples }: { samples: PingSample[] }) {
               textAnchor="end"
               fill="var(--color-text-muted)"
               fontSize={9}
-              fontFamily="Azeret Mono, monospace"
+              fontFamily="Nunito Sans, Segoe UI, sans-serif"
             >
               {v}
             </text>
@@ -614,7 +614,7 @@ function PingTimeline({ samples }: { samples: PingSample[] }) {
             textAnchor="middle"
             fill="var(--color-text-muted)"
             fontSize={9}
-            fontFamily="Azeret Mono, monospace"
+            fontFamily="Nunito Sans, Segoe UI, sans-serif"
           >
             {formatTime(t)}
           </text>

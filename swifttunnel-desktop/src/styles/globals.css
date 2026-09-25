@@ -96,18 +96,16 @@ body {
   background-color: var(--color-bg-base);
   color: var(--color-text-primary);
   overflow: hidden;
-  font-family: "Geist", "Inter", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family: "Nunito Sans", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  letter-spacing: -0.01em;
-  font-feature-settings: "ss01", "cv11", "cv05";
 }
 
+/* Numbers use the same font as everything else, with even-width digits. */
 .mono,
 .font-mono {
-  font-family: "Geist Mono", "JetBrains Mono", "Cascadia Code", "Consolas", ui-monospace, monospace;
-  font-feature-settings: "tnum", "zero", "ss02";
-  letter-spacing: -0.01em;
+  font-family: "Nunito Sans", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-variant-numeric: tabular-nums;
 }
 
 /* — Range sliders — */
@@ -485,10 +483,8 @@ body {
 
 /* — Numeric LCD readout — */
 .lcd-readout {
-  font-family: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
-  font-feature-settings: "tnum", "zero";
+  font-family: "Nunito Sans", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
 }
 
 /* — Section eyebrow label — */
@@ -498,7 +494,6 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.14em;
   color: var(--color-text-muted);
-  font-feature-settings: "ss01";
 }
 
 /* — Pill / chip baseline — */
@@ -645,12 +640,11 @@ body {
 
 /* — Mono readout scale. Tabular figures so live values don't jitter. — */
 .readout {
-  font-family: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+  font-family: "Nunito Sans", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum", "zero";
-  font-weight: 600;
+  font-weight: 700;
   line-height: 0.92;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.01em;
   color: var(--color-text-primary);
 }
 .readout-xl {
@@ -694,9 +688,8 @@ body {
 
 /* Huge live numeral — the number you actually came to look at. */
 .display-metric {
-  font-family: "Geist Mono", "JetBrains Mono", ui-monospace, monospace;
+  font-family: "Nunito Sans", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   font-variant-numeric: tabular-nums;
-  font-feature-settings: "tnum", "zero";
   font-size: clamp(40px, 5vw, 68px);
   font-weight: 700;
   line-height: 0.86;
