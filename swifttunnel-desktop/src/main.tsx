@@ -8,6 +8,7 @@ import { installWebviewLockdown, shouldLockDown } from "./lib/webviewLockdown";
 import { installAnimationIdle } from "./lib/animationIdle";
 import { MotionConfig } from "framer-motion";
 import { useSettingsStore } from "./stores/settingsStore";
+import { trackTunnelSessions } from "./stores/sessionStatsStore";
 import "./styles/globals.css";
 
 // Right-click and F12 otherwise expose the page context menu and developer
@@ -43,6 +44,8 @@ if (isOverlay || isStatsOverlay) {
     isIdleEnabled: () =>
       useSettingsStore.getState().settings.idle_when_unfocused,
   });
+  // Session ping stats for the Connect tab, counted whichever tab is open.
+  trackTunnelSessions();
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

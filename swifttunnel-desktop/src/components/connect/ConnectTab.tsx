@@ -27,6 +27,7 @@ import {
 } from "./LiveGraph";
 import { AdapterSelectionPanel } from "./AdapterSelectionPanel";
 import { StatusRing } from "./StatusRing";
+import { SessionCards } from "./SessionCards";
 import { Button, EmptyState, Tooltip, InfoIcon, Toggle } from "../ui";
 import type { ServerRegion } from "../../lib/types";
 
@@ -483,6 +484,8 @@ export function ConnectTab() {
           />
         </div>
       </section>
+
+      <SessionCards />
 
       <AdapterSelectionPanel disabled={isConnected || isTransitioning} />
 

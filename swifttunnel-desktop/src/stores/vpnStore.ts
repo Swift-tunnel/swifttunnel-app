@@ -426,6 +426,9 @@ interface VpnStore {
 
   // Ping (real-time ICMP to relay)
   ping: number | null;
+  /** Bumped on every ping reading, even one equal to the last, so a
+   *  subscriber can count readings rather than changes. */
+  pingReadings: number;
 
   // Temporary free-tier allowance. Both null when no limit applies, either
   // the backend has it switched off, or it predates the feature.
@@ -486,6 +489,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   packetsTunneled: 0,
   packetsBypassed: 0,
   ping: null,
+  pingReadings: 0,
   freeTierRemaining: null,
   freeTierLimit: null,
   freeTierGraceRemaining: null,
@@ -1120,7 +1124,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       // reading flicker to an em dash mid-session. Disconnecting clears the
       // value explicitly, so holding the last good one cannot go stale.
       if (ms !== null && ms !== undefined) {
-        set({ ping: ms });
+        set((s) => ({ ping: ms, pingReadings: s.pingReadings + 1 }));
       }
     } catch (error) {
       reportError("Failed to fetch VPN ping", error, {
