@@ -1,11 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="10.67" height="32" fill="#86868e"/>
-  <rect x="10.67" width="10.67" height="32" fill="#f4f4f5"/>
-  <rect x="21.33" width="10.67" height="32" fill="#505058"/>
-  <path d="M12.3 18c.7 2.3 2.1 3.5 3.7 3.5s3-1.2 3.7-3.5" fill="none" stroke="#86868e" stroke-width="0.9" stroke-linecap="round"/>
-  <polygon points="16.3,14.6 19.6,10.4 19.5,15" fill="#5a5a62"/>
-  <ellipse cx="16.7" cy="16" rx="2.6" ry="2" transform="rotate(-28 16.7 16)" fill="#5a5a62"/>
-  <polygon points="18.3,16.9 20.4,18.6 18,18.4" fill="#5a5a62"/>
-  <circle cx="15" cy="13.4" r="1.2" fill="#5a5a62"/>
-  <polygon points="14,13.1 12.8,13.9 14.2,14.1" fill="#a9a9b0"/>
+  <rect width="10.67" height="32" fill="#6da544"/>
+  <rect x="10.67" width="10.67" height="32" fill="#eeeeee"/>
+  <rect x="21.33" width="10.67" height="32" fill="#d80027"/>
+  <path d="M12.3 18c.7 2.3 2.1 3.5 3.7 3.5s3-1.2 3.7-3.5" fill="none" stroke="#6da544" stroke-width="0.9" stroke-linecap="round"/>
+  <polygon points="16.3,14.6 19.6,10.4 19.5,15" fill="#a2582b"/>
+  <ellipse cx="16.7" cy="16" rx="2.6" ry="2" transform="rotate(-28 16.7 16)" fill="#a2582b"/>
+  <polygon points="18.3,16.9 20.4,18.6 18,18.4" fill="#a2582b"/>
+  <circle cx="15" cy="13.4" r="1.2" fill="#a2582b"/>
+  <polygon points="14,13.1 12.8,13.9 14.2,14.1" fill="#ff9811"/>
 </svg>

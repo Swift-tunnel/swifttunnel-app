@@ -1,35 +1,35 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" fill="#f4f4f5"/>
+  <rect width="32" height="32" fill="#eeeeee"/>
   <g transform="rotate(33.7 16 16)">
-  <path d="M10 16a6 6 0 0 1 12 0z" fill="#505058"/>
-  <path d="M10 16a6 6 0 0 0 12 0z" fill="#2e2e35"/>
-  <circle cx="13" cy="16" r="3" fill="#505058"/>
-  <circle cx="19" cy="16" r="3" fill="#2e2e35"/>
+  <path d="M10 16a6 6 0 0 1 12 0z" fill="#d80027"/>
+  <path d="M10 16a6 6 0 0 0 12 0z" fill="#0052b4"/>
+  <circle cx="13" cy="16" r="3" fill="#d80027"/>
+  <circle cx="19" cy="16" r="3" fill="#0052b4"/>
   </g>
   <g transform="translate(8.01 10.67) rotate(213.7)">
-  <rect x="-2" y="-3" width="1" height="6" fill="#121215"/>
-  <rect x="-0.5" y="-3" width="1" height="6" fill="#121215"/>
-  <rect x="1" y="-3" width="1" height="6" fill="#121215"/>
+  <rect x="-2" y="-3" width="1" height="6" fill="#333333"/>
+  <rect x="-0.5" y="-3" width="1" height="6" fill="#333333"/>
+  <rect x="1" y="-3" width="1" height="6" fill="#333333"/>
   </g>
   <g transform="translate(23.99 10.67) rotate(326.3)">
-  <rect x="-2" y="-3" width="1" height="2.7" fill="#121215"/>
-  <rect x="-2" y="0.3" width="1" height="2.7" fill="#121215"/>
-  <rect x="-0.5" y="-3" width="1" height="6" fill="#121215"/>
-  <rect x="1" y="-3" width="1" height="2.7" fill="#121215"/>
-  <rect x="1" y="0.3" width="1" height="2.7" fill="#121215"/>
+  <rect x="-2" y="-3" width="1" height="2.7" fill="#333333"/>
+  <rect x="-2" y="0.3" width="1" height="2.7" fill="#333333"/>
+  <rect x="-0.5" y="-3" width="1" height="6" fill="#333333"/>
+  <rect x="1" y="-3" width="1" height="2.7" fill="#333333"/>
+  <rect x="1" y="0.3" width="1" height="2.7" fill="#333333"/>
   </g>
   <g transform="translate(8.01 21.33) rotate(146.3)">
-  <rect x="-2" y="-3" width="1" height="6" fill="#121215"/>
-  <rect x="-0.5" y="-3" width="1" height="2.7" fill="#121215"/>
-  <rect x="-0.5" y="0.3" width="1" height="2.7" fill="#121215"/>
-  <rect x="1" y="-3" width="1" height="6" fill="#121215"/>
+  <rect x="-2" y="-3" width="1" height="6" fill="#333333"/>
+  <rect x="-0.5" y="-3" width="1" height="2.7" fill="#333333"/>
+  <rect x="-0.5" y="0.3" width="1" height="2.7" fill="#333333"/>
+  <rect x="1" y="-3" width="1" height="6" fill="#333333"/>
   </g>
   <g transform="translate(23.99 21.33) rotate(33.7)">
-  <rect x="-2" y="-3" width="1" height="2.7" fill="#121215"/>
-  <rect x="-2" y="0.3" width="1" height="2.7" fill="#121215"/>
-  <rect x="-0.5" y="-3" width="1" height="2.7" fill="#121215"/>
-  <rect x="-0.5" y="0.3" width="1" height="2.7" fill="#121215"/>
-  <rect x="1" y="-3" width="1" height="2.7" fill="#121215"/>
-  <rect x="1" y="0.3" width="1" height="2.7" fill="#121215"/>
+  <rect x="-2" y="-3" width="1" height="2.7" fill="#333333"/>
+  <rect x="-2" y="0.3" width="1" height="2.7" fill="#333333"/>
+  <rect x="-0.5" y="-3" width="1" height="2.7" fill="#333333"/>
+  <rect x="-0.5" y="0.3" width="1" height="2.7" fill="#333333"/>
+  <rect x="1" y="-3" width="1" height="2.7" fill="#333333"/>
+  <rect x="1" y="0.3" width="1" height="2.7" fill="#333333"/>
   </g>
 </svg>
