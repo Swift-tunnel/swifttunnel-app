@@ -13,13 +13,13 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const sizeClasses: Record<Size, string> = {
-  sm: "h-7 px-2.5 text-[11px]",
-  md: "h-[34px] px-3.5 text-[12px]",
-  lg: "h-[42px] px-5 text-[13px]",
+  sm: "h-[30px] px-3 text-[11.5px]",
+  md: "h-9 px-4 text-[12.5px]",
+  lg: "h-[42px] px-5 text-[13.5px]",
 };
 
 const baseClasses =
-  "inline-flex select-none items-center justify-center gap-1.5 rounded-[var(--radius-button)] font-medium transition-all duration-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--color-bg-base)] disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex select-none items-center justify-center gap-1.5 rounded-[var(--radius-button)] font-semibold transition-colors duration-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-accent-primary)] focus-visible:ring-offset-2 focus-visible:ring-offset-[color:var(--color-bg-base)] disabled:cursor-not-allowed disabled:opacity-50";
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   function Button(
@@ -46,15 +46,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
 
     switch (variant) {
       case "primary":
-        variantClass = "btn-primary-gloss";
-        variantStyle = { color: "#0a0a0a" };
+        variantClass = "btn-primary-flat";
         break;
       case "secondary":
-        variantStyle = {
-          backgroundColor: "var(--color-bg-elevated)",
-          color: "var(--color-text-primary)",
-          border: "1px solid var(--color-border-default)",
-        };
+        variantClass = "btn-outline";
         break;
       case "ghost":
         variantStyle = {
@@ -63,19 +58,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         };
         break;
       case "destructive":
-        variantStyle = {
-          backgroundColor: "transparent",
-          color: "var(--color-status-error)",
-          border: "1px solid var(--color-status-error-soft-20)",
-        };
+        variantClass = "btn-danger-outline";
         break;
       case "connect":
-        variantStyle = {
-          background: "linear-gradient(180deg, #34d39a 0%, #1fbf86 100%)",
-          color: "#04140e",
-          boxShadow:
-            "inset 0 1px 0 rgba(255,255,255,0.25), 0 1px 2px rgba(0,0,0,0.4), 0 0 0 1px rgba(0,0,0,0.5)",
-        };
+        variantClass = "btn-connect-flat";
         break;
     }
 

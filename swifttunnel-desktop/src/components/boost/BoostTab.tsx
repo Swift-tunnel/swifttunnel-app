@@ -605,13 +605,8 @@ export function BoostTab() {
                 disabled={robloxControlsLocked}
                 className="rounded-[7px] px-3 py-2 text-left transition-all duration-100"
                 style={{
-                  background: sel
-                    ? "linear-gradient(180deg, #ffffff 0%, #ececec 100%)"
-                    : "transparent",
+                  background: sel ? "#fafafa" : "transparent",
                   color: sel ? "#0a0a0a" : "var(--color-text-secondary)",
-                  boxShadow: sel
-                    ? "inset 0 1px 0 rgba(255,255,255,0.9), 0 1px 2px rgba(0,0,0,0.4)"
-                    : "none",
                 }}
                 onMouseEnter={(e) => {
                   if (!sel)

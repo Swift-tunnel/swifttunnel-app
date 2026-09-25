@@ -8,18 +8,18 @@
 
 @theme {
   /* — Surface tiers (only three, so depth reads cleanly) — */
-  --color-bg-base: #060606;
-  --color-bg-sidebar: #161617;
-  --color-bg-card: #1b1b1d;
-  --color-bg-elevated: #242428;
+  --color-bg-base: #111114;
+  --color-bg-sidebar: #0d0d10;
+  --color-bg-card: #19191d;
+  --color-bg-elevated: #202025;
   /* Alias for the elevated surface. Defined because code referenced it before
      it existed, rendering those elements with a transparent background. */
-  --color-surface-raised: #242428;
-  --color-bg-hover: #2a2a2c;
-  --color-bg-active: #343438;
-  --color-bg-input: #1b1b1d;
-  --color-bg-glass: #121212;
-  --color-bg-overlay: rgba(6, 6, 6, 0.72);
+  --color-surface-raised: #202025;
+  --color-bg-hover: #26262c;
+  --color-bg-active: #2e2e35;
+  --color-bg-input: #19191d;
+  --color-bg-glass: #141417;
+  --color-bg-overlay: rgba(10, 10, 12, 0.72);
 
   /* — Emphasis (monochrome) — */
   --color-accent-primary: #fafafa;
@@ -46,17 +46,17 @@
   --color-status-connected-soft-20: rgba(52, 211, 154, 0.22);
 
   /* — Text — */
-  --color-text-primary: #f5f5f5;
-  --color-text-secondary: #c4c4c4;
-  --color-text-muted: #8a8a8a;
-  --color-text-dimmed: #5a5a5a;
+  --color-text-primary: #f4f4f5;
+  --color-text-secondary: #d4d4d8;
+  --color-text-muted: #a1a1aa;
+  --color-text-dimmed: #6b6b75;
 
   /* — Borders — */
-  --color-border-default: #34343a;
-  --color-border-subtle: #262628;
-  --color-border-strong: #444448;
+  --color-border-default: #2f2f37;
+  --color-border-subtle: #26262d;
+  --color-border-strong: #3f3f48;
   --color-border-focus: #ffffff;
-  --color-border-hover: #383838;
+  --color-border-hover: #34343c;
 
   /* — Latency (one notch less saturated) — */
   --color-latency-excellent: #34d39a;
@@ -73,11 +73,11 @@
   --spacing-card-gap: 10px;
 
   /* — Radii — */
-  --radius-card: 18px;
+  --radius-card: 12px;
   /* Alias for small controls/chips. Defined because code referenced it before
      it existed, rendering those elements with no corner radius. */
   --radius-control: 10px;
-  --radius-button: 7px;
+  --radius-button: 8px;
   --radius-input: 7px;
   --radius-sm: 4px;
 
@@ -191,21 +191,38 @@ body {
 }
 
 /* — Primary button gloss — */
-.btn-primary-gloss {
-  background:
-    linear-gradient(180deg, #ffffff 0%, #f0f0f0 100%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.9),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.06),
-    0 1px 2px rgba(0, 0, 0, 0.6),
-    0 0 0 1px rgba(0, 0, 0, 0.4);
+/* Buttons, in the ExitLag client's style: flat fills, 8px corners, a
+   white primary and dark outlined secondaries. Hover only shifts colour. */
+.btn-primary-flat {
+  background: #fafafa;
+  color: #0a0a0a;
 }
-.btn-primary-gloss:hover:not(:disabled) {
-  background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+.btn-primary-flat:hover:not(:disabled) {
+  background: #e4e4e7;
 }
-.btn-primary-gloss:active:not(:disabled) {
-  background: linear-gradient(180deg, #f0f0f0 0%, #ffffff 100%);
-  transform: translateY(0.5px);
+.btn-outline {
+  background: transparent;
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-strong);
+}
+.btn-outline:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+  border-color: #56565e;
+}
+.btn-danger-outline {
+  background: transparent;
+  color: var(--color-status-error);
+  border: 1px solid var(--color-status-error-soft-20);
+}
+.btn-danger-outline:hover:not(:disabled) {
+  background: var(--color-status-error-soft-10);
+}
+.btn-connect-flat {
+  background: #34d39a;
+  color: #04140e;
+}
+.btn-connect-flat:hover:not(:disabled) {
+  background: #4ade9f;
 }
 
 /* — Connected hero ambience: faint radial wash — */
@@ -797,4 +814,47 @@ html.app-idle *::after {
   .meter-fill {
     transition: none;
   }
+}
+
+/* Flat surfaces, in the ExitLag client's style.
+   Charcoal cards with a hairline and nothing else: no lit bezel, no dot grid,
+   no corner brackets, no glow. Only how surfaces are painted changes; every
+   layout stays as it was. */
+.surface-card,
+.instrument {
+  background: var(--color-bg-card);
+  box-shadow: none;
+}
+.surface-elevated {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.instrument-well {
+  background: var(--color-bg-elevated);
+  box-shadow: none;
+}
+.app-atmosphere {
+  background: var(--color-bg-base);
+}
+.dot-grid,
+.grid-layer,
+.aurora,
+.connected-ambience::before,
+.corner-frame::before,
+.corner-frame::after {
+  display: none;
+}
+.icon-orb {
+  background: var(--color-bg-elevated);
+  border-color: var(--color-border-default);
+  box-shadow: none;
+}
+.neon-edge {
+  box-shadow: none;
+}
+.neon-edge-live,
+.glow-connected {
+  box-shadow: inset 0 0 0 1px var(--color-status-connected-soft-20);
+}
+.glow-error {
+  box-shadow: inset 0 0 0 1px var(--color-status-error-soft-20);
 }

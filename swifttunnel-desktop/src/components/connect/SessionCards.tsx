@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 
 import { useBoostStore } from "../../stores/boostStore";
 import { useServerStore } from "../../stores/serverStore";
+import { useSettingsStore } from "../../stores/settingsStore";
+import { Button } from "../ui";
 import {
   averagePing,
   jitter,
@@ -61,6 +63,7 @@ function Meter({ fraction }: { fraction: number }) {
 
 function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolean }) {
   const regions = useServerStore((s) => s.regions);
+  const relay = useVpnStore((s) => s.region);
   const region = stats ? findRegionForVpnRegion(regions, stats.region) : undefined;
   const avg = stats ? averagePing(stats) : null;
   const jit = stats ? jitter(stats) : null;
@@ -103,6 +106,30 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
           )}
         </div>
       )}
+
+      <div className="mt-auto flex items-center gap-2 border-t pt-4" style={{ borderColor: "var(--color-border-subtle)" }}>
+        <span className="text-[11.5px] text-text-muted">
+          {live && relay ? (
+            <>
+              Relay <b className="font-mono font-semibold text-text-primary">{relay}</b>
+            </>
+          ) : (
+            "Pick where your game traffic goes"
+          )}
+        </span>
+        <Button
+          size="sm"
+          variant="secondary"
+          className="ml-auto"
+          onClick={() =>
+            document
+              .getElementById("connect-regions")
+              ?.scrollIntoView({ behavior: "smooth", block: "start" })
+          }
+        >
+          Change region
+        </Button>
+      </div>
     </div>
   );
 }
@@ -113,6 +140,9 @@ function RobloxCard() {
   const ramMb = useBoostStore((s) => s.ramUsage);
   const ramTotalMb = useBoostStore((s) => s.ramTotal);
   const fps = useBoostStore((s) => s.fps);
+  const roblox = useSettingsStore((s) => s.settings.config.roblox_settings);
+  const profile = useSettingsStore((s) => s.settings.config.profile);
+  const setTab = useSettingsStore((s) => s.setTab);
 
   return (
     <div className="flex flex-col gap-4 rounded-[var(--radius-card)] surface-card p-5">
@@ -162,7 +192,24 @@ function RobloxCard() {
           Start Roblox to see how much CPU and memory it uses.
         </p>
       )}
+
+      <div className="mt-auto flex items-center gap-2 border-t pt-4" style={{ borderColor: "var(--color-border-subtle)" }}>
+        <Chip label="FPS cap" value={roblox.unlock_fps ? String(roblox.target_fps) : "60"} />
+        <Chip label="Profile" value={profile} />
+        <Chip label="Graphics" value={String(roblox.graphics_quality)} />
+        <Button size="sm" className="ml-auto" onClick={() => setTab("games")}>
+          Roblox settings
+        </Button>
+      </div>
     </div>
+  );
+}
+
+function Chip({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="rounded-[7px] border px-2 py-1 text-[11px] text-text-muted" style={{ borderColor: "var(--color-border-default)", backgroundColor: "var(--color-bg-elevated)" }}>
+      {label} <b className="font-semibold text-text-primary">{value}</b>
+    </span>
   );
 }
 

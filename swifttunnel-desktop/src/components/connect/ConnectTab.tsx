@@ -577,7 +577,7 @@ export function ConnectTab() {
       )}
 
       {/* ── Regions ── */}
-      <section className="mt-1">
+      <section id="connect-regions" className="mt-1 scroll-mt-4">
         <div className="mb-2.5 flex items-baseline justify-between">
           <div className="flex items-baseline gap-2">
             <h3
