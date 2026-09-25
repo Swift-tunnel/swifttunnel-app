@@ -517,8 +517,9 @@ export function ConnectTab() {
                 update({ show_live_graph: true });
                 saveDebounced();
               }}
-              className="flex items-center justify-center gap-2 rounded-[var(--radius-card)] surface-card px-4 py-2.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-text-muted transition-colors hover:text-text-primary"
+              className="flex items-center justify-center gap-2 rounded-[var(--radius-card)] surface-card px-4 py-3 text-[12.5px] font-semibold text-text-muted transition-colors hover:text-text-primary"
             >
+              <Icon name="pulse" size={15} strokeWidth={2} />
               Show connection graph
             </button>
           )}

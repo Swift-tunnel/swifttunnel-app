@@ -459,11 +459,11 @@ export interface AppSettings {
    */
   idle_when_unfocused: boolean;
   /**
-   * Draw the live throughput graph on the Connect tab.
+   * Draw the live throughput graph on the Connect tab. Off by default.
    *
-   * The canvas redraw loop and its 500ms sampling are the most expensive
-   * part of the UI. Turning it off stops both, which matters for anyone
-   * who leaves the window open on a second monitor while playing.
+   * Its redraw and 500ms sampling are the most expensive part of the UI.
+   * Off stops both, which matters for anyone who leaves the window open on
+   * a second monitor while playing.
    */
   show_live_graph: boolean;
 }

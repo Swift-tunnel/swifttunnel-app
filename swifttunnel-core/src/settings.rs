@@ -217,15 +217,26 @@ pub struct AppSettings {
 
     /// Draw the live throughput graph on the Connect tab.
     ///
-    /// The graph is the most expensive thing in the UI: a canvas redrawn on
-    /// a requestAnimationFrame loop, fed by a throughput sample every 500ms.
-    /// That is fine while someone is looking at it, and pure cost for anyone
-    /// who keeps the window open on a second monitor while playing, where it
-    /// competes with the game for GPU and CPU.
+    /// The graph is the most expensive thing in the UI: it redraws with a
+    /// throughput sample every 500ms. That is fine while someone is looking
+    /// at it, and pure cost for anyone who keeps the window open on a second
+    /// monitor while playing, where it competes with the game for GPU and CPU.
     ///
-    /// On by default. Turning it off stops both the redraw and the sampling.
+    /// Off by default; people who want it turn it on from the Connect tab or
+    /// Settings. Off stops both the redraw and the sampling.
     #[serde(default = "default_show_live_graph")]
     pub show_live_graph: bool,
+    /// Whether the one-time "graph off" migration has run.
+    ///
+    /// The graph shipped on by default, so every existing settings file has it
+    /// saved as on. Switching it off for those installs has to happen exactly
+    /// once, for the same reason as `fps_unlock_migrated`: forcing it on every
+    /// load would leave no way to turn the graph back on.
+    ///
+    /// Absent in files written before this existed, so serde defaults it to
+    /// false and those installs get migrated on their next launch.
+    #[serde(default)]
+    pub live_graph_off_migrated: bool,
 
     /// Lifetime milliseconds spent tunnelling.
     ///
@@ -266,7 +277,7 @@ fn default_auto_routing() -> bool {
 }
 
 fn default_show_live_graph() -> bool {
-    true
+    false
 }
 
 fn default_idle_when_unfocused() -> bool {
@@ -336,6 +347,8 @@ impl Default for AppSettings {
             enable_country_ban: false,
             idle_when_unfocused: default_idle_when_unfocused(),
             show_live_graph: default_show_live_graph(),
+            // A fresh install already starts with the graph off.
+            live_graph_off_migrated: true,
             total_tunneled_ms: 0,
         }
     }
@@ -371,6 +384,14 @@ impl AppSettings {
             self.config.roblox_settings.target_fps =
                 self.config.roblox_settings.target_fps.max(300);
             self.fps_unlock_migrated = true;
+        }
+
+        // One-time: hide the live graph for installs from before it defaulted
+        // off. It shipped on, so every existing settings file has it saved as
+        // on. Marker-guarded like the frame cap, so turning it back on sticks.
+        if !self.live_graph_off_migrated {
+            self.show_live_graph = false;
+            self.live_graph_off_migrated = true;
         }
 
         self.selected_game_presets = default_game_presets();
@@ -757,6 +778,50 @@ mod tests {
 
         assert!(
             !settings.config.roblox_settings.unlock_fps,
+            "a migration that already ran must not override a later choice"
+        );
+    }
+
+    /// An install from before the graph defaulted off has it saved as on.
+    /// The next launch turns it off, once.
+    #[test]
+    fn the_live_graph_migration_turns_it_off_for_an_existing_install() {
+        let json = r#"{"theme":"dark","config":{},"optimizations_active":false,"show_live_graph":true}"#;
+        let mut settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(
+            !settings.live_graph_off_migrated,
+            "a file written before the marker existed must read as unmigrated"
+        );
+
+        settings.sanitize_in_place();
+
+        assert!(!settings.show_live_graph);
+        assert!(settings.live_graph_off_migrated);
+    }
+
+    /// A fresh install starts with the graph off and nothing to migrate.
+    #[test]
+    fn the_live_graph_is_off_for_a_fresh_install() {
+        let mut settings = AppSettings::default();
+        assert!(!settings.show_live_graph);
+
+        settings.sanitize_in_place();
+
+        assert!(!settings.show_live_graph);
+    }
+
+    /// Once is once: turning the graph back on after the migration sticks.
+    #[test]
+    fn the_live_graph_migration_does_not_run_twice() {
+        let mut settings = AppSettings::default();
+        settings.sanitize_in_place();
+
+        // The player turns it back on.
+        settings.show_live_graph = true;
+        settings.sanitize_in_place();
+
+        assert!(
+            settings.show_live_graph,
             "a migration that already ran must not override a later choice"
         );
     }
