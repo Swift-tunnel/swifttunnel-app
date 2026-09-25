@@ -1,19 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="10.67" fill="#ff9811"/>
-  <rect y="10.67" width="32" height="10.67" fill="#eeeeee"/>
-  <rect y="21.33" width="32" height="10.67" fill="#6da544"/>
-  <circle cx="16" cy="16" r="3.9" fill="none" stroke="#0052b4" stroke-width="0.8"/>
-  <circle cx="16" cy="16" r="0.9" fill="#0052b4"/>
-  <path d="M12.4 16L19.6 16" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M12.52 15.07L19.48 16.93" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M12.88 14.2L19.12 17.8" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M13.45 13.45L18.55 18.55" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M14.2 12.88L17.8 19.12" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M15.07 12.52L16.93 19.48" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M16 12.4L16 19.6" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M16.93 12.52L15.07 19.48" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M17.8 12.88L14.2 19.12" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M18.55 13.45L13.45 18.55" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M19.12 14.2L12.88 17.8" stroke="#0052b4" stroke-width="0.3"/>
-  <path d="M19.48 15.07L12.52 16.93" stroke="#0052b4" stroke-width="0.3"/>
+  <rect width="32" height="10.67" fill="#a9a9b0"/>
+  <rect y="10.67" width="32" height="10.67" fill="#f4f4f5"/>
+  <rect y="21.33" width="32" height="10.67" fill="#86868e"/>
+  <circle cx="16" cy="16" r="3.9" fill="none" stroke="#2e2e35" stroke-width="0.8"/>
+  <circle cx="16" cy="16" r="0.9" fill="#2e2e35"/>
+  <path d="M12.4 16L19.6 16" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M12.52 15.07L19.48 16.93" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M12.88 14.2L19.12 17.8" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M13.45 13.45L18.55 18.55" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M14.2 12.88L17.8 19.12" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M15.07 12.52L16.93 19.48" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M16 12.4L16 19.6" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M16.93 12.52L15.07 19.48" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M17.8 12.88L14.2 19.12" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M18.55 13.45L13.45 18.55" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M19.12 14.2L12.88 17.8" stroke="#2e2e35" stroke-width="0.3"/>
+  <path d="M19.48 15.07L12.52 16.93" stroke="#2e2e35" stroke-width="0.3"/>
 </svg>

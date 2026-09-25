@@ -5,11 +5,10 @@ import { Icon } from "./Icon";
  *
  * Emoji flags do not render on Windows (they show as two letters), so the
  * flags are our own 32x32 drawings in src/assets/flags, named by lowercase ISO
- * code (sg.svg, in.svg, ...), cropped to a circle here. A light from the
- * top-left and a darker edge give the disc some depth, and a bright rim
- * outlines it. From 18px up a ring sits just outside the disc, green when
- * `highlight` is set, for the region in use. A country without a drawing
- * shows a plain globe.
+ * code (sg.svg, in.svg, ...), drawn in greys to match the app and cropped to
+ * a circle here. A dark outline sets each flag off the card behind it, and
+ * `highlight` adds a light ring outside that, for the region in use. A
+ * country without a drawing shows a plain globe.
  */
 const FLAG_FILES = import.meta.glob<string>("../../assets/flags/*.svg", {
   eager: true,
@@ -25,12 +24,12 @@ function flagUrl(code: string): string | undefined {
   return FLAG_FILES[`../../assets/flags/${ALIASES[key] ?? key}.svg`];
 }
 
-const SHADE =
-  "radial-gradient(circle at 32% 24%, rgba(255,255,255,0.32), rgba(255,255,255,0) 48%), radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 60%, rgba(0,0,0,0.26) 100%)";
-const RIM =
-  "inset 0 1px 0 rgba(255,255,255,0.45), inset 0 0 0 1px rgba(255,255,255,0.22)";
-/** Below this the outer ring crowds the text, so small flags keep the rim only. */
-const RING_MIN_SIZE = 18;
+const OUTLINE = "rgba(0, 0, 0, 0.55)";
+/**
+ * Below this the outline is drawn inside the flag instead, so it cannot be
+ * clipped by a tight row (the sidebar's region line).
+ */
+const OUTER_OUTLINE_MIN_SIZE = 18;
 
 export function Flag({
   code,
@@ -40,12 +39,12 @@ export function Flag({
 }: {
   code: string;
   size?: number;
-  /** Green ring, for the region the tunnel uses or the one selected. */
+  /** Light ring, for the region the tunnel uses or the one selected. */
   highlight?: boolean;
   className?: string;
 }) {
   const url = flagUrl(code);
-  const ring = size >= RING_MIN_SIZE;
+  const outer = size >= OUTER_OUTLINE_MIN_SIZE;
   return (
     <span
       aria-hidden
@@ -53,10 +52,11 @@ export function Flag({
       style={{
         width: size,
         height: size,
-        outline: ring
-          ? `1.5px solid ${highlight ? "var(--color-status-connected)" : "rgba(255, 255, 255, 0.2)"}`
+        boxShadow: outer
+          ? highlight
+            ? `0 0 0 2px ${OUTLINE}, 0 0 0 3.5px var(--color-text-muted)`
+            : `0 0 0 2px ${OUTLINE}`
           : undefined,
-        outlineOffset: ring ? 1.5 : undefined,
       }}
     >
       <span className="relative flex h-full w-full overflow-hidden rounded-full">
@@ -75,7 +75,11 @@ export function Flag({
         )}
         <span
           className="pointer-events-none absolute inset-0 rounded-full"
-          style={{ background: SHADE, boxShadow: RIM }}
+          style={{
+            boxShadow: outer
+              ? "inset 0 0 0 1px rgba(255, 255, 255, 0.1)"
+              : `inset 0 0 0 1.5px ${OUTLINE}`,
+          }}
         />
       </span>
     </span>
