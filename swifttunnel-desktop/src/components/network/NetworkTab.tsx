@@ -22,9 +22,8 @@ type TestStatus = "idle" | "running" | "complete" | "error";
 function qualityColor(q: string): string {
   switch (q.toLowerCase()) {
     case "excellent":
-      return "var(--color-latency-excellent)";
     case "good":
-      return "var(--color-latency-good)";
+      return "var(--color-text-primary)";
     case "fair":
       return "var(--color-latency-fair)";
     case "poor":
@@ -38,9 +37,8 @@ function gradeColor(grade: string): string {
   switch (grade) {
     case "A+":
     case "A":
-      return "var(--color-latency-excellent)";
     case "B":
-      return "var(--color-latency-good)";
+      return "var(--color-text-primary)";
     case "C":
       return "var(--color-latency-fair)";
     case "D":
@@ -282,7 +280,7 @@ export function NetworkTab() {
                   <SpeedCard
                     label="Download"
                     value={net.speedResult.download_mbps.toFixed(1)}
-                    color="var(--color-status-connected)"
+                    color="var(--color-text-primary)"
                     direction="down"
                   />
                   <SpeedCard
@@ -436,7 +434,7 @@ function TestCard({
 function TestState({ label, status }: { label: string; status: TestStatus }) {
   const tone =
     status === "complete"
-      ? "var(--color-status-connected)"
+      ? "var(--color-text-secondary)"
       : status === "running"
         ? "var(--color-accent-primary)"
         : status === "error"

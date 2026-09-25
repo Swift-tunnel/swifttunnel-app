@@ -12,7 +12,6 @@ import {
 } from "../../stores/sessionStatsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import { getLatencyColor } from "../../lib/utils";
 import { Flag } from "../ui/Flag";
 
 function formatDuration(ms: number): string {
@@ -89,13 +88,8 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
         </p>
       ) : (
         <div className="grid grid-cols-4 gap-3 border-t pt-4" style={{ borderColor: "var(--color-border-subtle)" }}>
-          <Stat
-            label="Lowest"
-            value={stats.lowest}
-            unit="ms"
-            color={getLatencyColor(stats.lowest)}
-          />
-          <Stat label="Average" value={avg} unit="ms" color={getLatencyColor(avg)} />
+          <Stat label="Lowest" value={stats.lowest} unit="ms" />
+          <Stat label="Average" value={avg} unit="ms" />
           <Stat label="Jitter" value={jit ?? "Measuring"} unit={jit !== null ? "ms" : undefined} />
           {live ? (
             <Stat label="Readings" value={stats.samples} />
@@ -160,7 +154,7 @@ function RobloxCard() {
           className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.08em]"
           style={{
             color: running
-              ? "var(--color-status-connected)"
+              ? "var(--color-text-secondary)"
               : "var(--color-text-muted)",
           }}
         >

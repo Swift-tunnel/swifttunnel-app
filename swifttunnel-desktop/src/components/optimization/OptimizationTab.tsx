@@ -178,7 +178,7 @@ function CardShell({
       style={{
         border: `1px solid ${
           active
-            ? "var(--color-status-connected-soft-20)"
+            ? "var(--color-border-strong)"
             : "var(--color-border-subtle)"
         }`,
       }}
@@ -188,8 +188,7 @@ function CardShell({
           aria-hidden
           className="absolute inset-y-0 left-0 w-[2px]"
           style={{
-            background: "var(--color-status-connected)",
-            boxShadow: "0 0 12px -2px var(--color-status-connected)",
+            background: "var(--color-text-primary)",
           }}
         />
       )}

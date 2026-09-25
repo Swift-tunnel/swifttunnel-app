@@ -129,7 +129,7 @@ export function SettingsTab() {
       : updaterStatus === "update_available"
         ? "var(--color-accent-primary)"
         : updaterStatus === "up_to_date"
-          ? "var(--color-status-connected)"
+          ? "var(--color-text-secondary)"
           : "var(--color-text-muted)";
 
   return (
@@ -813,7 +813,7 @@ function UpdaterStatusLine({
     status === "checking" || status === "installing"
       ? "var(--color-accent-primary)"
       : status === "up_to_date"
-        ? "var(--color-status-connected)"
+        ? "var(--color-text-secondary)"
         : status === "update_available"
           ? "var(--color-accent-primary)"
           : status === "error"

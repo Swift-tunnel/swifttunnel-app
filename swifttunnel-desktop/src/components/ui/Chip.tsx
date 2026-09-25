@@ -28,9 +28,9 @@ function toneStyle(tone: Tone, color?: string): React.CSSProperties {
       };
     case "connected":
       return {
-        backgroundColor: "var(--color-status-connected-soft-10)",
-        color: "var(--color-status-connected)",
-        border: "1px solid var(--color-status-connected-soft-20)",
+        backgroundColor: "var(--color-bg-elevated)",
+        color: "var(--color-text-secondary)",
+        border: "1px solid var(--color-border-default)",
       };
     case "warning":
       return {

@@ -30,7 +30,7 @@ function resolveState(state: VpnState) {
 }
 
 export function StatusChip({ state, full }: StatusChipProps) {
-  const { label, color, isConnected, isTransitioning } = resolveState(state);
+  const { label, color, isTransitioning } = resolveState(state);
 
   return (
     <div
@@ -45,9 +45,6 @@ export function StatusChip({ state, full }: StatusChipProps) {
           className="relative h-1.5 w-1.5 rounded-full"
           style={{
             backgroundColor: color,
-            boxShadow: isConnected
-              ? "0 0 6px var(--color-status-connected-glow)"
-              : "none",
             animation: isTransitioning
               ? "pulse-opacity 1.2s ease-in-out infinite"
               : "none",

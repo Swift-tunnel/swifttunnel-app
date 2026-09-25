@@ -144,9 +144,6 @@ function ConnectionCard({ collapsed }: { collapsed: boolean }) {
         className="relative h-1.5 w-1.5 rounded-full"
         style={{
           backgroundColor: dotColor(vpnState),
-          boxShadow: isConnected
-            ? "0 0 6px var(--color-status-connected-glow)"
-            : "none",
           animation: isTransitioning
             ? "pulse-opacity 1.2s ease-in-out infinite"
             : "none",
@@ -163,11 +160,7 @@ function ConnectionCard({ collapsed }: { collapsed: boolean }) {
         className="flex h-9 w-full items-center justify-center rounded-[8px] transition-colors duration-100 hover:bg-bg-hover"
         style={{
           backgroundColor: "var(--color-bg-card)",
-          border: `1px solid ${
-            isConnected
-              ? "var(--color-status-connected-soft-20)"
-              : "var(--color-border-subtle)"
-          }`,
+          border: "1px solid var(--color-border-subtle)",
         }}
         aria-label="Open Connect tab"
       >
@@ -182,11 +175,7 @@ function ConnectionCard({ collapsed }: { collapsed: boolean }) {
       className="group flex w-full flex-col gap-1.5 rounded-[8px] px-2.5 py-2.5 text-left transition-colors duration-100"
       style={{
         backgroundColor: "var(--color-bg-card)",
-        border: `1px solid ${
-          isConnected
-            ? "var(--color-status-connected-soft-20)"
-            : "var(--color-border-subtle)"
-        }`,
+        border: "1px solid var(--color-border-subtle)",
         boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
       }}
       aria-label="Open Connect tab"
@@ -197,7 +186,7 @@ function ConnectionCard({ collapsed }: { collapsed: boolean }) {
           className="flex-1 truncate text-[10px] font-semibold uppercase tracking-[0.06em]"
           style={{
             color: isConnected
-              ? "var(--color-status-connected)"
+              ? "var(--color-text-secondary)"
               : "var(--color-text-muted)",
           }}
         >

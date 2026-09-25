@@ -115,9 +115,6 @@ export function InGameTab() {
               size="md"
               value={ov.enabled ? "ON" : "OFF"}
               label="State"
-              tone={
-                ov.enabled ? "var(--color-status-connected)" : undefined
-              }
             />,
             <Readout key="hotkey" size="md" value={ov.hotkey} label="Hotkey" />,
             <Readout

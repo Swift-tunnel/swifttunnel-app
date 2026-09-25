@@ -106,7 +106,7 @@ function CandidateRow({
           <span
             style={{
               color: candidate.is_up
-                ? "var(--color-status-connected)"
+                ? "var(--color-text-secondary)"
                 : "var(--color-text-dimmed)",
             }}
           >

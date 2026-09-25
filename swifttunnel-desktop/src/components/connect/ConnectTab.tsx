@@ -378,9 +378,9 @@ export function ConnectTab() {
                 <span
                   className="pill-base"
                   style={{
-                    backgroundColor: "var(--color-status-connected-soft-10)",
-                    color: "var(--color-status-connected)",
-                    border: "1px solid var(--color-status-connected-soft-20)",
+                    backgroundColor: "var(--color-bg-elevated)",
+                    color: "var(--color-text-secondary)",
+                    border: "1px solid var(--color-border-default)",
                   }}
                 >
                   Live
@@ -460,9 +460,6 @@ export function ConnectTab() {
             label="Relay RTT"
             value={heroLatency !== null ? String(heroLatency) : "—"}
             unit={heroLatency !== null ? "ms" : undefined}
-            color={
-              heroLatency !== null ? getLatencyColor(heroLatency) : undefined
-            }
             divider
           />
           <HeroStat
@@ -540,11 +537,7 @@ export function ConnectTab() {
               value={ping !== null ? `${ping}` : "—"}
               hint={ping !== null ? "ms" : undefined}
               mono
-              valueColor={
-                ping !== null
-                  ? getLatencyColor(ping)
-                  : "var(--color-text-muted)"
-              }
+              valueColor={ping !== null ? undefined : "var(--color-text-muted)"}
             />
           </div>
 
@@ -564,7 +557,6 @@ export function ConnectTab() {
                     className="h-1.5 w-1.5 rounded-full"
                     style={{
                       backgroundColor: "var(--color-status-connected)",
-                      boxShadow: "0 0 4px var(--color-status-connected-glow)",
                     }}
                   />
                   {p}

@@ -1,5 +1,4 @@
 import type { ReactNode } from "react";
-import { getLatencyColor } from "../../lib/utils";
 import { Icon } from "../ui/Icon";
 import { Flag } from "../ui/Flag";
 
@@ -35,7 +34,7 @@ export function RouteDiagram({
   gameName = "Roblox",
   onRefresh,
 }: RouteDiagramProps) {
-  const tone = ping !== null ? getLatencyColor(ping) : "var(--color-text-muted)";
+  const tone = ping !== null ? "var(--color-text-primary)" : "var(--color-text-muted)";
 
   return (
     /* Full width on purpose: the deck footer's stat strip spans the whole
@@ -121,12 +120,12 @@ function Endpoint({
       <div
         className={`flex h-12 w-12 items-center justify-center ${
           tile ? "rounded-[11px] neon-edge" : "icon-orb"
-        } ${active ? "neon-edge-live" : ""}`}
+        }`}
         style={{
           backgroundColor: tile ? "var(--color-bg-elevated)" : undefined,
           border: tile ? "1px solid var(--color-border-default)" : undefined,
           color: active
-            ? "var(--color-status-connected)"
+            ? "var(--color-text-primary)"
             : "var(--color-text-secondary)",
         }}
       >
@@ -155,15 +154,13 @@ function NodeCard({
 }) {
   return (
     <div
-      className={`shrink-0 overflow-hidden rounded-[10px] ${
-        active ? "neon-edge-live" : "neon-edge"
-      }`}
+      className="neon-edge shrink-0 overflow-hidden rounded-[10px]"
       style={{
         minWidth: 158,
         backgroundColor: "var(--color-bg-elevated)",
         border: `1px solid ${
           active
-            ? "var(--color-status-connected)"
+            ? "var(--color-border-strong)"
             : "var(--color-border-default)"
         }`,
       }}
@@ -194,7 +191,7 @@ function NodeCard({
         <span
           style={{
             color: active
-              ? "var(--color-status-connected)"
+              ? "var(--color-text-secondary)"
               : "var(--color-text-dimmed)",
           }}
         >
@@ -207,7 +204,7 @@ function NodeCard({
 
 /** A leg of the route, with its chip sitting on the line.
  *
- *  `boosted` draws a live green flow instead of a latency figure. The
+ *  `boosted` draws a solid line instead of a latency figure. The
  *  relay→game hop has no honest number to show (Roblox drops ICMP, and the
  *  relay is packet-NAT so there is no hop to attribute time to), but the
  *  traffic genuinely is being relayed, so the line says that rather than
@@ -246,10 +243,8 @@ function Leg({
           className="lcd-readout relative rounded-[6px] px-2 py-1 text-[9.5px] font-semibold uppercase leading-none tracking-[0.12em]"
           style={{
             backgroundColor: "var(--color-bg-elevated)",
-            border:
-              "1px solid color-mix(in srgb, var(--color-status-connected) 40%, transparent)",
-            color:
-              "color-mix(in srgb, var(--color-status-connected) 78%, var(--color-text-secondary))",
+            border: "1px solid var(--color-border-default)",
+            color: "var(--color-text-secondary)",
           }}
         >
           {label}

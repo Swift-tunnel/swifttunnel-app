@@ -5,7 +5,6 @@ import { useVpnStore } from "../../stores/vpnStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useAuthStore } from "../../stores/authStore";
-import { getLatencyColor } from "../../lib/utils";
 import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
 import { navItemFor } from "./nav";
@@ -137,7 +136,7 @@ export function TopBar() {
             active={robloxRunning}
             style={{
               color: robloxRunning
-                ? "var(--color-status-connected)"
+                ? "var(--color-text-primary)"
                 : "var(--color-text-muted)",
             }}
           />
@@ -221,7 +220,7 @@ export function TopBar() {
           >
             <span
               className="lcd-readout text-[11px] font-medium leading-none"
-              style={{ color: getLatencyColor(ping) }}
+              style={{ color: "var(--color-text-primary)" }}
             >
               {ping}
             </span>

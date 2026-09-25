@@ -366,11 +366,6 @@ export function RepairTab() {
                   : "—"
               }
               label="Fixed"
-              tone={
-                lastRun?.items.some((i) => i.status === "fixed")
-                  ? "var(--color-status-connected)"
-                  : undefined
-              }
             />,
           ]}
         />
