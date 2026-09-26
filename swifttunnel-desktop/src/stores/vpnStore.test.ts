@@ -1052,7 +1052,7 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().region).toBe("singapore");
   });
 
-  it("pins the next relay and reconnects when a relay stops returning traffic", async () => {
+  it("reconnects the location without pinning when a relay stops returning traffic", async () => {
     const useVpnStore = await loadStore();
     const { useServerStore } = await import("./serverStore");
     const { useSettingsStore } = await import("./settingsStore");
@@ -1076,8 +1076,7 @@ describe("stores/vpnStore", () => {
     useSettingsStore.getState().update({
       selected_region: "singapore",
       selected_game_presets: ["roblox"],
-      auto_routing_enabled: false,
-      forced_servers: {},
+      auto_routing_enabled: true,
     });
     systemCheckDriver.mockResolvedValue(driverStatus());
     vpnConnect.mockResolvedValue(undefined);
@@ -1089,21 +1088,21 @@ describe("stores/vpnStore", () => {
       server_endpoint: "1.2.3.4:51821",
       assigned_ip: null,
       error:
-        "Relay connection failed - SwiftTunnel stopped the session because the relay stopped returning traffic. Please reconnect or choose another relay.",
+        "Relay connection failed - SwiftTunnel stopped the session because the relay stopped returning traffic. Reconnect to continue; SwiftTunnel skips this relay for a few minutes when another is available.",
     });
 
     for (let i = 0; i < 10 && vpnConnect.mock.calls.length === 0; i++) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
-    expect(useSettingsStore.getState().settings.forced_servers.singapore).toBe(
-      "singapore-02",
-    );
-    expect(settingsSave).toHaveBeenCalled();
+    // Nothing is pinned and the player's own settings are left alone: the
+    // core skips the dead relay on the reconnect.
+    expect(useSettingsStore.getState().settings.auto_routing_enabled).toBe(true);
+    expect("forced_servers" in useSettingsStore.getState().settings).toBe(false);
     expect(vpnConnect).toHaveBeenCalledWith("singapore", ["roblox"]);
     expect(notify).toHaveBeenCalledWith(
       "SwiftTunnel",
-      "Relay stopped responding. Switching singapore to singapore-02 and reconnecting.",
+      "Relay stopped responding. Reconnecting to another Singapore relay.",
     );
   });
 

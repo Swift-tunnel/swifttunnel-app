@@ -1001,7 +1001,6 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
                 &snapshot.server_list,
                 &settings.selected_region,
                 settings.auto_routing_enabled,
-                &settings.forced_servers,
             ),
         )
     };
@@ -1028,7 +1027,6 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
         auto_routing,
         available,
         settings.whitelisted_regions.clone(),
-        settings.forced_servers.clone(),
         binding,
         settings.game_process_performance,
         settings.enable_api_tunneling,

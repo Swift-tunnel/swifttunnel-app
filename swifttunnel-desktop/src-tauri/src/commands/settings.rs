@@ -95,13 +95,9 @@ pub async fn settings_save(
     // Push auto-routing settings to the live router so changes apply
     // mid-session instead of waiting for the next connect. Inert when
     // disconnected (no router) or for custom-relay sessions (no lookup task).
-    let (auto_routing_enabled, whitelisted_regions, forced_servers) = {
+    let (auto_routing_enabled, whitelisted_regions) = {
         let s = state.settings.lock();
-        (
-            s.auto_routing_enabled,
-            s.whitelisted_regions.clone(),
-            s.forced_servers.clone(),
-        )
+        (s.auto_routing_enabled, s.whitelisted_regions.clone())
     };
     let auto_router = {
         let vpn = state.vpn_connection.lock().await;
@@ -110,7 +106,6 @@ pub async fn settings_save(
     if let Some(router) = auto_router {
         router.set_enabled(auto_routing_enabled);
         router.set_whitelisted_regions(whitelisted_regions);
-        router.set_forced_servers(forced_servers);
     }
 
     Ok(())

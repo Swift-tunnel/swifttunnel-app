@@ -436,7 +436,6 @@ export interface AppSettings {
   expanded_boost_info: string[];
   selected_game_presets: string[];
   network_test_results: NetworkTestResultsCache;
-  forced_servers: Record<string, string>;
   artificial_latency_ms: number;
   experimental_mode: boolean;
   custom_relay_server: string;

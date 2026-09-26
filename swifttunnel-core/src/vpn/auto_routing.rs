@@ -103,9 +103,6 @@ pub struct AutoRouter {
     /// Whether auto-routing has bypassed VPN for the current game region.
     /// Read by the packet interceptor (AtomicBool for lock-free hot path check).
     auto_routing_bypassed: AtomicBool,
-    /// Pinned server per region (region_id -> server_id).
-    /// When set, auto-routing will only use the pinned server for that region.
-    forced_servers: RwLock<HashMap<String, String>>,
 }
 
 /// An auto-routing event for the UI log
@@ -154,7 +151,6 @@ impl AutoRouter {
             pending_any: AtomicBool::new(false),
             whitelisted_regions: RwLock::new(HashSet::new()),
             auto_routing_bypassed: AtomicBool::new(false),
-            forced_servers: RwLock::new(HashMap::new()),
         }
     }
 
@@ -276,13 +272,6 @@ impl AutoRouter {
         }
     }
 
-    /// Set forced servers (region_id -> server_id).
-    /// When a region has a forced server, auto-routing will only use that server.
-    pub fn set_forced_servers(&self, servers: HashMap<String, String>) {
-        log::info!("Auto-routing: Forced servers updated: {:?}", servers);
-        *self.forced_servers.write() = servers;
-    }
-
     /// Check whether VPN is currently bypassed due to a whitelisted game region.
     /// Lock-free AtomicBool check for use in the packet processing hot path.
     pub fn is_bypassed(&self) -> bool {
@@ -318,11 +307,6 @@ impl AutoRouter {
     /// Snapshot available relay servers for async probing/selection.
     pub fn available_servers_snapshot(&self) -> Vec<(String, SocketAddr, Option<u32>)> {
         self.available_servers.read().clone()
-    }
-
-    /// Get a forced server (if configured) for a SwiftTunnel region id.
-    pub fn forced_server_for_region(&self, region_id: &str) -> Option<String> {
-        self.forced_servers.read().get(region_id).cloned()
     }
 
     /// Set the current relay address (called on connect)
@@ -752,17 +736,12 @@ impl AutoRouter {
         self.auto_routing_bypassed.store(false, Ordering::Release);
 
         let best_st_region = game_region.best_swifttunnel_region()?;
-        // Check if the user has pinned a specific server for this region.
-        // Clone so we don't hold the lock while resolving.
-        let pinned_server = self.forced_servers.read().get(best_st_region).cloned();
-        let pinned_server = pinned_server.as_deref();
 
         let servers = self.available_servers.read();
         let selection = self.relay_selection.read().clone();
         let current_st_region = selection.region;
         let current_relay_addr = selection.address;
-        let candidates =
-            super::connection::relay_candidates_for_region(best_st_region, &servers, pinned_server);
+        let candidates = super::connection::relay_candidates_for_region(best_st_region, &servers);
         if candidates.is_empty() {
             log::warn!(
                 "Auto-routing: No server found for region '{}' (game region: {})",
@@ -772,11 +751,13 @@ impl AutoRouter {
             return None;
         }
 
-        let (resolved_region, resolved_addr, _) = candidates
-            .iter()
-            .min_by_key(|(_, _, latency_ms)| latency_ms.unwrap_or(u32::MAX))
-            .cloned()
-            .expect("candidates checked as non-empty");
+        // The same ranking a fresh connect uses: latency first, then load
+        // among relays a player cannot tell apart, and a full relay passed
+        // over for an open one close by. This is how crowded relays shed
+        // players: at their next game join, never in the middle of one.
+        let (resolved_region, resolved_addr) =
+            super::connection::best_cached_candidate(&candidates)
+                .expect("candidates checked as non-empty");
 
         if candidates.len() == 1
             && current_st_region == resolved_region
@@ -1176,30 +1157,6 @@ mod tests {
             Some((
                 "singapore".to_string(),
                 "54.255.205.216:51821".parse::<SocketAddr>().unwrap()
-            ))
-        );
-    }
-
-    #[test]
-    fn test_forced_server_overrides_within_region() {
-        use std::collections::HashMap;
-
-        let router = AutoRouter::new(true, "singapore");
-        router.set_available_servers(make_servers());
-        router.set_current_relay("54.255.205.216:51821".parse().unwrap(), "singapore");
-
-        // Force singapore -> singapore-02 (even though we're in the right region)
-        router.set_forced_servers(HashMap::from([(
-            "singapore".to_string(),
-            "singapore-02".to_string(),
-        )]));
-
-        let best = router.get_best_server_for_region(&RobloxRegion::Singapore);
-        assert_eq!(
-            best,
-            Some((
-                "singapore-02".to_string(),
-                "203.0.113.2:51821".parse::<SocketAddr>().unwrap()
             ))
         );
     }

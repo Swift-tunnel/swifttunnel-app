@@ -454,7 +454,6 @@ pub async fn vpn_connect(
         custom_relay,
         mut auto_routing,
         whitelisted_regions,
-        forced_servers,
         game_process_performance,
         enable_api_tunneling,
         enable_country_ban,
@@ -466,7 +465,6 @@ pub async fn vpn_connect(
         },
         settings_snapshot.auto_routing_enabled,
         settings_snapshot.whitelisted_regions.clone(),
-        settings_snapshot.forced_servers.clone(),
         settings_snapshot.game_process_performance,
         settings_snapshot.enable_api_tunneling,
         settings_snapshot.enable_country_ban,
@@ -483,7 +481,7 @@ pub async fn vpn_connect(
     let (connect_region, available_servers): (String, Vec<(String, SocketAddr, Option<u32>)>) = {
         let sl = state.server_list.lock();
         (
-            resolve_initial_connect_region(&sl, &region, auto_routing, &forced_servers),
+            resolve_initial_connect_region(&sl, &region, auto_routing),
             build_available_servers(&sl),
         )
     };
@@ -526,7 +524,6 @@ pub async fn vpn_connect(
             auto_routing,
             available_servers,
             whitelisted_regions,
-            forced_servers,
             binding_preference,
             game_process_performance,
             enable_api_tunneling,
@@ -1077,6 +1074,7 @@ mod tests {
             relay_port: Some(port),
             active_users: None,
             busy: false,
+            full: false,
             metered: false,
         }
     }

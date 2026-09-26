@@ -9,8 +9,8 @@
 //!
 //! It used to live in the desktop app's Tauri command layer, where SwiftTunnel
 //! Lite could not reach it. Lite therefore connected with `binding_preference:
-//! None`, an empty `forced_servers`, no latency on any candidate and the raw
-//! saved region, which meant the adapter you picked was ignored, auto-routing
+//! None`, no latency on any candidate and the raw saved region, which meant
+//! the adapter you picked was ignored, auto-routing
 //! had nothing to sort by, and the two clients could disagree about where they
 //! were sending your traffic on the same machine.
 //!
@@ -18,7 +18,6 @@
 //! should be true of a SwiftTunnel connection is true of both, which is the
 //! only way that claim survives contact with a second client.
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::settings::{AdapterBindingMode, AppSettings};
@@ -154,28 +153,12 @@ pub fn current_binding_preference(
 // ── Region and candidate selection ──────────────────────────────────────────
 
 /// The region with the lowest measured round trip.
-///
-/// A region the user has forced to a specific relay is scored by that relay
-/// rather than by the region's best, since the forced one is where the traffic
-/// would actually go.
-pub fn select_best_region_by_latency(
-    sl: &DynamicServerList,
-    forced_servers: &HashMap<String, String>,
-) -> Option<String> {
+pub fn select_best_region_by_latency(sl: &DynamicServerList) -> Option<String> {
     sl.regions()
         .iter()
         .filter_map(|region| {
-            let latency = forced_servers
-                .get(&region.id)
-                .and_then(|server_id| sl.get_latency(server_id))
-                .or_else(|| {
-                    if forced_servers.contains_key(&region.id) {
-                        None
-                    } else {
-                        sl.get_region_best_latency(&region.id)
-                    }
-                });
-            latency.map(|latency| (region.id.clone(), latency))
+            sl.get_region_best_latency(&region.id)
+                .map(|latency| (region.id.clone(), latency))
         })
         .min_by(|(region_a, latency_a), (region_b, latency_b)| {
             latency_a
@@ -190,18 +173,12 @@ pub fn resolve_initial_connect_region(
     sl: &DynamicServerList,
     requested_region: &str,
     auto_routing: bool,
-    forced_servers: &HashMap<String, String>,
 ) -> String {
     if !auto_routing {
         return requested_region.to_string();
     }
 
-    if forced_servers.contains_key(requested_region) {
-        return requested_region.to_string();
-    }
-
-    select_best_region_by_latency(sl, forced_servers)
-        .unwrap_or_else(|| requested_region.to_string())
+    select_best_region_by_latency(sl).unwrap_or_else(|| requested_region.to_string())
 }
 
 /// The relays a connection may use, with their measured round trips.
@@ -290,6 +267,7 @@ mod tests {
             relay_port: Some(8443),
             active_users: None,
             busy: false,
+            full: false,
             metered: false,
         }
     }
@@ -360,24 +338,8 @@ mod tests {
         list.set_latency("tokyo-01", Some(90));
 
         assert_eq!(
-            select_best_region_by_latency(&list, &HashMap::new()),
+            select_best_region_by_latency(&list),
             Some("singapore".to_string())
-        );
-    }
-
-    #[test]
-    fn select_best_region_by_latency_scores_forced_region_by_forced_server() {
-        let mut list = make_dynamic_server_list();
-        // The region's best relay is fast, but the user forced the slow one,
-        // so the region must be scored by what would actually be used.
-        list.set_latency("singapore", Some(10));
-        list.set_latency("singapore-02", Some(200));
-        list.set_latency("tokyo-01", Some(90));
-
-        let forced = HashMap::from([("singapore".to_string(), "singapore-02".to_string())]);
-        assert_eq!(
-            select_best_region_by_latency(&list, &forced),
-            Some("tokyo".to_string())
         );
     }
 
@@ -388,7 +350,7 @@ mod tests {
         list.set_latency("tokyo-01", Some(90));
 
         assert_eq!(
-            resolve_initial_connect_region(&list, "tokyo", false, &HashMap::new()),
+            resolve_initial_connect_region(&list, "tokyo", false),
             "tokyo"
         );
     }
@@ -400,7 +362,7 @@ mod tests {
         list.set_latency("tokyo-01", Some(90));
 
         assert_eq!(
-            resolve_initial_connect_region(&list, "tokyo", true, &HashMap::new()),
+            resolve_initial_connect_region(&list, "tokyo", true),
             "singapore"
         );
     }
@@ -409,20 +371,7 @@ mod tests {
     fn resolve_initial_connect_region_falls_back_without_ping_results() {
         let list = make_dynamic_server_list();
         assert_eq!(
-            resolve_initial_connect_region(&list, "tokyo", true, &HashMap::new()),
-            "tokyo"
-        );
-    }
-
-    #[test]
-    fn resolve_initial_connect_region_keeps_requested_region_with_forced_server() {
-        let mut list = make_dynamic_server_list();
-        list.set_latency("singapore", Some(12));
-        list.set_latency("tokyo-01", Some(90));
-
-        let forced = HashMap::from([("tokyo".to_string(), "tokyo-01".to_string())]);
-        assert_eq!(
-            resolve_initial_connect_region(&list, "tokyo", true, &forced),
+            resolve_initial_connect_region(&list, "tokyo", true),
             "tokyo"
         );
     }

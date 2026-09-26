@@ -136,10 +136,9 @@ pub struct AppSettings {
     /// Cached network test results
     #[serde(default)]
     pub network_test_results: NetworkTestResultsCache,
-    /// Forced server selection per region (region_id -> server_id)
-    /// If a region has an entry, that server will be used instead of auto-selecting best ping
-    #[serde(default)]
-    pub forced_servers: HashMap<String, String>,
+    // forced_servers (a relay pinned per location) was removed: relays are
+    // chosen automatically by latency and load. A saved one is ignored as an
+    // unknown field.
     /// Artificial latency to add to VPN connection (0-100ms)
     /// Used for practice mode to simulate high ping
     #[serde(default)]
@@ -331,7 +330,6 @@ impl Default for AppSettings {
             fps_unlock_migrated: true,
             selected_game_presets: default_game_presets(),
             network_test_results: NetworkTestResultsCache::default(),
-            forced_servers: HashMap::new(),
             artificial_latency_ms: 0,
             experimental_mode: false,
             _routing_mode: serde_json::Value::Null,

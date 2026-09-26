@@ -652,7 +652,6 @@ pub async fn connect_vpn(
         false,
         available_servers,
         settings.whitelisted_regions.clone(),
-        settings.forced_servers.clone(),
         binding_preference,
         settings.game_process_performance,
         resolve_enable_api_tunneling(opts, settings),

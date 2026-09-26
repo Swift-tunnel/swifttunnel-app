@@ -230,14 +230,6 @@ export function ConnectTab() {
     saveDebounced();
   }
 
-  function forceServer(regionId: string, server: string | null) {
-    const cur = { ...settings.forced_servers };
-    if (server) cur[regionId] = server;
-    else delete cur[regionId];
-    update({ forced_servers: cur });
-    saveDebounced();
-  }
-
   function setRouteAssist(enabled: boolean) {
     update({ enable_api_tunneling: enabled });
     saveDebounced();
@@ -649,8 +641,6 @@ export function ConnectTab() {
                 }
                 disabled={isConnected || isTransitioning}
                 onSelect={() => selectRegion(r.id)}
-                forcedServer={settings.forced_servers[r.id]}
-                onForceServer={forceServer}
                 isLast={idx === regions.length - 1}
               />
             ))}
@@ -1046,8 +1036,6 @@ function RegionRow({
   latency,
   disabled,
   onSelect,
-  forcedServer,
-  onForceServer,
   isLast,
 }: {
   region: ServerRegion;
@@ -1056,15 +1044,12 @@ function RegionRow({
   latency: number | null;
   disabled: boolean;
   onSelect: () => void;
-  forcedServer: string | undefined;
-  onForceServer: (regionId: string, server: string | null) => void;
   isLast: boolean;
 }) {
   const [hover, setHover] = useState(false);
   const relayCountLabel = `${region.servers.length} ${
     region.servers.length === 1 ? "relay" : "relays"
   }`;
-  const expanded = selected && region.servers.length > 0;
 
   return (
     <div
@@ -1116,13 +1101,8 @@ function RegionRow({
               </span>
             )}
           </span>
-          <span
-            className="truncate font-mono text-[10px] text-text-dimmed"
-            title={forcedServer ? `Pinned server: ${forcedServer}` : undefined}
-          >
-            {forcedServer
-              ? `Pinned · ${forcedServer}`
-              : relayCountLabel}
+          <span className="truncate font-mono text-[10px] text-text-dimmed">
+            {relayCountLabel}
           </span>
         </span>
 
@@ -1144,95 +1124,7 @@ function RegionRow({
 
       </div>
 
-      {expanded && (
-        <div className="pb-3 pl-[58px] pr-3.5">
-          <div
-            className="w-full max-w-[460px] overflow-hidden rounded-[8px]"
-            style={{
-              backgroundColor: "var(--color-bg-elevated)",
-              border: "1px solid var(--color-border-subtle)",
-            }}
-          >
-            <InlineServerOption
-              label="Auto"
-              description={`Best ${region.name} relay`}
-              active={!forcedServer}
-              disabled={disabled}
-              onClick={() => onForceServer(region.id, null)}
-            />
-            {region.servers.map((srv) => (
-              <InlineServerOption
-                key={srv}
-                label={srv}
-                active={forcedServer === srv}
-                disabled={disabled}
-                mono
-                onClick={() => onForceServer(region.id, srv)}
-              />
-            ))}
-          </div>
-        </div>
-      )}
     </div>
-  );
-}
-
-function InlineServerOption({
-  label,
-  description,
-  active,
-  disabled,
-  mono,
-  onClick,
-}: {
-  label: string;
-  description?: string;
-  active: boolean;
-  disabled: boolean;
-  mono?: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      aria-pressed={active}
-      onClick={onClick}
-      className="flex h-8 w-full items-center gap-2 px-2.5 text-left transition-colors hover:bg-bg-hover disabled:cursor-not-allowed"
-      style={{
-        backgroundColor: active
-          ? "var(--color-bg-hover)"
-          : "transparent",
-        color: active
-          ? "var(--color-text-primary)"
-          : "var(--color-text-secondary)",
-      }}
-    >
-      <span
-        className="flex h-4 w-4 shrink-0 items-center justify-center"
-        style={{
-          color: active
-            ? "var(--color-accent-primary)"
-            : "var(--color-text-dimmed)",
-        }}
-      >
-        {active ? (
-          <Icon name="check" size={10} strokeWidth={2.5} />
-        ) : null}
-      </span>
-      <span className="flex min-w-0 items-baseline gap-2">
-        <span
-          className={`truncate text-[11.5px] font-medium ${mono ? "font-mono" : ""}`}
-        >
-          {label}
-        </span>
-        {description && (
-          <span className="truncate text-[10px] text-text-dimmed">
-            {description}
-          </span>
-        )}
-      </span>
-    </button>
   );
 }
 

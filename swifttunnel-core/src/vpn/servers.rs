@@ -163,6 +163,10 @@ pub struct DynamicServerInfo {
     /// longer preferred when something equally fast is quieter.
     #[serde(default)]
     pub busy: bool,
+    /// Too crowded to take anyone new while its location has a relay with
+    /// room. Absent from older server lists, which reads as not full.
+    #[serde(default)]
+    pub full: bool,
     /// Egress is billed per gigabyte on this host. Only ever used to break a
     /// tie between relays a player cannot tell apart.
     #[serde(default)]
@@ -394,6 +398,7 @@ static RELAY_LOAD: std::sync::RwLock<Option<HashMap<String, RelayLoad>>> =
 pub struct RelayLoad {
     pub active_users: Option<u32>,
     pub busy: bool,
+    pub full: bool,
     pub metered: bool,
 }
 
@@ -406,6 +411,7 @@ fn record_relay_load(servers: &[DynamicServerInfo]) {
                 RelayLoad {
                     active_users: s.active_users,
                     busy: s.busy,
+                    full: s.full,
                     metered: s.metered,
                 },
             )
@@ -435,14 +441,26 @@ pub fn relay_load(region: &str) -> Option<RelayLoad> {
 /// [`RELAY_LOAD_TEST_LOCK`] and clear up after themselves.
 #[cfg(test)]
 pub(crate) fn set_relay_load_for_test(entries: &[(&str, Option<u32>, bool)]) {
+    let fleet: Vec<(&str, Option<u32>, bool, bool)> = entries
+        .iter()
+        .map(|(region, active_users, metered)| (*region, *active_users, *metered, false))
+        .collect();
+    set_relay_fleet_for_test(&fleet);
+}
+
+/// Like [`set_relay_load_for_test`], with each relay's `full` flag as well.
+/// Entries are `(region, active_users, metered, full)`.
+#[cfg(test)]
+pub(crate) fn set_relay_fleet_for_test(entries: &[(&str, Option<u32>, bool, bool)]) {
     let map: HashMap<String, RelayLoad> = entries
         .iter()
-        .map(|(region, active_users, metered)| {
+        .map(|(region, active_users, metered, full)| {
             (
                 (*region).to_string(),
                 RelayLoad {
                     active_users: *active_users,
                     busy: false,
+                    full: *full,
                     metered: *metered,
                 },
             )
@@ -468,6 +486,97 @@ pub(crate) fn clear_relay_load_for_test() {
 /// overwrite one another's fleet state at random.
 #[cfg(test)]
 pub(crate) static RELAY_LOAD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Which relays make up each location, as the server list names them.
+///
+/// The list is the authority. A relay used to belong to whatever location its
+/// id named once the trailing number was dropped, and one misnamed relay
+/// (america-01, listed under "us-east") left a whole location with nothing to
+/// connect to. Unlike occupancy this is fine to take from the on-disk cache:
+/// membership changes when relays are added or removed, not minute to minute.
+static REGION_MEMBERS: std::sync::RwLock<Option<HashMap<String, Vec<String>>>> =
+    std::sync::RwLock::new(None);
+
+fn record_region_members(regions: &[DynamicGamingRegion]) {
+    let map: HashMap<String, Vec<String>> = regions
+        .iter()
+        .map(|region| (region.id.clone(), region.servers.clone()))
+        .collect();
+    if let Ok(mut guard) = REGION_MEMBERS.write() {
+        *guard = Some(map);
+    }
+}
+
+/// The relays the server list puts in a location, or `None` when no list has
+/// been loaded or the location is not in it.
+pub fn region_members(region_id: &str) -> Option<Vec<String>> {
+    REGION_MEMBERS
+        .read()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|m| m.get(region_id).cloned()))
+}
+
+/// Seed location membership directly. Callers must hold
+/// [`RELAY_LOAD_TEST_LOCK`] and clear up with [`clear_region_members_for_test`].
+#[cfg(test)]
+pub(crate) fn set_region_members_for_test(entries: &[(&str, &[&str])]) {
+    let map: HashMap<String, Vec<String>> = entries
+        .iter()
+        .map(|(region, servers)| {
+            (
+                (*region).to_string(),
+                servers.iter().map(|s| (*s).to_string()).collect(),
+            )
+        })
+        .collect();
+    if let Ok(mut guard) = REGION_MEMBERS.write() {
+        *guard = Some(map);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn clear_region_members_for_test() {
+    if let Ok(mut guard) = REGION_MEMBERS.write() {
+        *guard = None;
+    }
+}
+
+/// How long a relay that stopped returning traffic is kept out of the way.
+pub const RELAY_AVOID_FOR: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Relays that just stopped returning traffic, and when they did.
+///
+/// A dead relay used to be sidestepped by pinning its location to the next
+/// relay, which then stayed as a setting nobody chose. Now it is avoided for a
+/// while instead: long enough to reconnect somewhere that works, short enough
+/// that a relay back from a restart is used again.
+static AVOIDED_RELAYS: std::sync::Mutex<Option<HashMap<String, std::time::Instant>>> =
+    std::sync::Mutex::new(None);
+
+/// Keep `region` out of new connections for [`RELAY_AVOID_FOR`].
+pub fn avoid_relay_for_a_while(region: &str) {
+    if let Ok(mut guard) = AVOIDED_RELAYS.lock() {
+        guard
+            .get_or_insert_with(HashMap::new)
+            .insert(region.to_string(), std::time::Instant::now());
+    }
+}
+
+/// Whether `region` stopped returning traffic within [`RELAY_AVOID_FOR`].
+pub fn relay_is_avoided(region: &str) -> bool {
+    AVOIDED_RELAYS
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|m| m.get(region).copied()))
+        .is_some_and(|since| since.elapsed() < RELAY_AVOID_FOR)
+}
+
+#[cfg(test)]
+pub(crate) fn clear_avoided_relays_for_test() {
+    if let Ok(mut guard) = AVOIDED_RELAYS.lock() {
+        *guard = None;
+    }
+}
 
 /// Load server list from API or cache.
 ///
@@ -639,6 +748,7 @@ impl DynamicServerList {
         regions: Vec<DynamicGamingRegion>,
         source: ServerListSource,
     ) {
+        record_region_members(&regions);
         self.servers = servers;
         self.regions = regions;
         self.source = source;
@@ -730,6 +840,7 @@ mod tests {
             relay_port: Some(51820),
             active_users: None,
             busy: false,
+            full: false,
             metered: false,
         }
     }

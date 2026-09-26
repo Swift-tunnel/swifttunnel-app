@@ -72,7 +72,6 @@ const MOCK_SETTINGS: AppSettings = {
     last_stability: null,
     last_speed: null,
   },
-  forced_servers: {},
   artificial_latency_ms: 0,
   experimental_mode: false,
   custom_relay_server: "",

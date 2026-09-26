@@ -20,7 +20,6 @@ const RUST_SETTINGS_FIELDS = [
   "expanded_boost_info",
   "selected_game_presets",
   "network_test_results",
-  "forced_servers",
   "artificial_latency_ms",
   "experimental_mode",
   "custom_relay_server",

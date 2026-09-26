@@ -322,7 +322,7 @@ fn classify_relay_health(
             };
         }
         return RelayHealthAction::Fatal {
-            error_message: "Relay connection failed - SwiftTunnel stopped the session because the relay stopped returning traffic. Please reconnect or choose another relay."
+            error_message: "Relay connection failed - SwiftTunnel stopped the session because the relay stopped returning traffic. Reconnect to continue; SwiftTunnel skips this relay for a few minutes when another is available."
                 .to_string(),
             cleanup_reason: "relay_dead_recovery",
         };
@@ -707,37 +707,76 @@ fn region_matches_candidate(selected_region: &str, server_region: &str) -> bool 
     region_family(server_region) == selected_region
 }
 
+/// Every relay a location may use. Players never pick one themselves: the
+/// relay is chosen for them by latency and load.
+///
+/// The server list names each location's relays, and a relay it lists belongs
+/// there whatever its id says. The id rule (drop the trailing number) still
+/// applies before any list has loaded and to relays a list leaves out.
 pub(crate) fn relay_candidates_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
-    forced_server: Option<&str>,
 ) -> Vec<(String, SocketAddr, Option<u32>)> {
-    // If a specific server is pinned for this region, use it directly
-    if let Some(pinned) = forced_server {
-        if let Some((server_region, relay_addr, latency_ms)) = available_servers
-            .iter()
-            .find(|(server_region, _, _)| server_region == pinned)
-        {
-            log::info!(
-                "Using pinned server '{}' for region '{}'",
-                pinned,
-                selected_region
-            );
-            return vec![(server_region.clone(), *relay_addr, *latency_ms)];
-        }
-        log::warn!(
-            "Pinned server '{}' not found in server list, falling back to best latency",
-            pinned
-        );
-    }
-
+    let members = crate::vpn::servers::region_members(selected_region);
     available_servers
         .iter()
-        .filter(|(server_region, _, _)| region_matches_candidate(selected_region, server_region))
+        .filter(|(server_region, _, _)| {
+            members
+                .as_ref()
+                .is_some_and(|members| members.iter().any(|member| member == server_region))
+                || region_matches_candidate(selected_region, server_region)
+        })
         .map(|(server_region, relay_addr, latency_ms)| {
             (server_region.clone(), *relay_addr, *latency_ms)
         })
         .collect()
+}
+
+/// How much slower an open relay may be and still take a new player from a
+/// full one in the same location. A few milliseconds are not worth a seat on
+/// a saturated box; crossing to a different location never is.
+pub(crate) const FULL_RELAY_DETOUR_MS: u32 = 30;
+
+/// The server list marks a relay full once it is well past its comfortable
+/// load. Unknown means not full: missing telemetry must not invent a crowd.
+fn relay_is_full(region: &str) -> bool {
+    crate::vpn::servers::relay_load(region).is_some_and(|load| load.full)
+}
+
+/// Whether a relay drops behind the rest of its location:
+///
+/// - it stopped returning traffic in the last few minutes and another relay in
+///   the location has not, or
+/// - it is full and an open relay in the location costs at most
+///   [FULL_RELAY_DETOUR_MS] more.
+///
+/// With no such alternative it stays in play, ranked as usual.
+fn passed_over(
+    region: &str,
+    latency_ms: Option<u32>,
+    others: impl Iterator<Item = (String, Option<u32>)>,
+) -> bool {
+    use crate::vpn::servers::relay_is_avoided;
+
+    let family = region_family(region);
+    let neighbours: Vec<(String, Option<u32>)> = others
+        .filter(|(other, _)| other != region && region_family(other) == family)
+        .collect();
+
+    if relay_is_avoided(region) && neighbours.iter().any(|(other, _)| !relay_is_avoided(other)) {
+        return true;
+    }
+    if !relay_is_full(region) {
+        return false;
+    }
+    let Some(own) = latency_ms else {
+        return false;
+    };
+    neighbours.iter().any(|(other, other_ms)| {
+        !relay_is_full(other)
+            && !relay_is_avoided(other)
+            && other_ms.is_some_and(|ms| ms <= own.saturating_add(FULL_RELAY_DETOUR_MS))
+    })
 }
 
 fn sort_ranked_candidates(candidates: &mut [RankedRelayCandidate]) -> RelaySelectionSource {
@@ -762,7 +801,31 @@ fn sort_ranked_candidates(candidates: &mut [RankedRelayCandidate]) -> RelaySelec
     // Computed once over the whole set rather than inside the comparator:
     // "within the band" is a property of the group, not of any pair, and a
     // comparator that cannot see the fastest candidate cannot decide it.
-    let fastest = candidates.iter().filter_map(ranking_latency).min();
+    // Relays that just went dead, and full relays with an open neighbour close
+    // by, drop behind everything; the tie band is measured from the fastest
+    // relay still in the running.
+    let passed_over: std::collections::HashSet<(String, SocketAddr)> = candidates
+        .iter()
+        .filter(|candidate| {
+            passed_over(
+                &candidate.region,
+                ranking_latency(candidate),
+                candidates
+                    .iter()
+                    .map(|other| (other.region.clone(), ranking_latency(other))),
+            )
+        })
+        .map(|candidate| (candidate.region.clone(), candidate.addr))
+        .collect();
+    let is_passed_over = |candidate: &RankedRelayCandidate| {
+        passed_over.contains(&(candidate.region.clone(), candidate.addr))
+    };
+
+    let fastest = candidates
+        .iter()
+        .filter(|candidate| !is_passed_over(candidate))
+        .filter_map(ranking_latency)
+        .min();
 
     candidates.sort_by_cached_key(|candidate| {
         let latency = ranking_latency(candidate);
@@ -782,6 +845,7 @@ fn sort_ranked_candidates(candidates: &mut [RankedRelayCandidate]) -> RelaySelec
 
         (
             latency.is_none(),
+            is_passed_over(candidate),
             u8::from(!in_tie_band),
             load_bucket,
             metered,
@@ -804,6 +868,20 @@ fn sort_ranked_candidates(candidates: &mut [RankedRelayCandidate]) -> RelaySelec
     } else {
         RelaySelectionSource::Deterministic
     }
+}
+
+/// The relay a location's cached latencies and live load point at, ranked
+/// exactly as a fresh connect would rank them, without probing. Used at game
+/// joins, where there is no time to probe.
+pub(crate) fn best_cached_candidate(
+    candidates: &[(String, SocketAddr, Option<u32>)],
+) -> Option<(String, SocketAddr)> {
+    let mut ranked = ranked_candidates_from_raw(candidates.to_vec());
+    sort_ranked_candidates(&mut ranked);
+    ranked
+        .into_iter()
+        .next()
+        .map(|candidate| (candidate.region, candidate.addr))
 }
 
 fn log_resolution_source(source: RelaySelectionSource, candidate: &RankedRelayCandidate) {
@@ -863,10 +941,8 @@ fn ranked_candidates_from_raw(
 async fn ranked_relay_candidates_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
-    forced_server: Option<&str>,
 ) -> Vec<RankedRelayCandidate> {
-    let raw_candidates =
-        relay_candidates_for_region(selected_region, available_servers, forced_server);
+    let raw_candidates = relay_candidates_for_region(selected_region, available_servers);
     let mut candidates = ranked_candidates_from_raw(raw_candidates);
     if candidates.is_empty() {
         return candidates;
@@ -909,18 +985,6 @@ fn sort_candidates_by_latency(candidates: &mut [(String, SocketAddr, Option<u32>
     });
 }
 
-#[allow(dead_code)]
-fn resolved_forced_server(
-    forced_for_region: Option<&str>,
-    relay_candidates: &[(String, SocketAddr, Option<u32>)],
-) -> Option<String> {
-    let forced = forced_for_region?;
-    relay_candidates
-        .iter()
-        .find(|(candidate_region, _, _)| candidate_region == forced)
-        .map(|(candidate_region, _, _)| candidate_region.clone())
-}
-
 fn dedupe_process_names(processes: &[(u32, String)]) -> Vec<String> {
     let mut names: Vec<String> = processes.iter().map(|(_, name)| name.clone()).collect();
     names.sort();
@@ -931,9 +995,8 @@ fn dedupe_process_names(processes: &[(u32, String)]) -> Vec<String> {
 async fn ordered_relay_candidates_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
-    forced_server: Option<&str>,
 ) -> Vec<(String, SocketAddr, Option<u32>)> {
-    ranked_relay_candidates_for_region(selected_region, available_servers, forced_server)
+    ranked_relay_candidates_for_region(selected_region, available_servers)
         .await
         .into_iter()
         .map(|candidate| {
@@ -947,10 +1010,8 @@ async fn ordered_relay_candidates_for_region(
 pub(crate) fn resolve_relay_server_for_region(
     selected_region: &str,
     available_servers: &[(String, SocketAddr, Option<u32>)],
-    forced_server: Option<&str>,
 ) -> Option<(String, SocketAddr)> {
-    let mut candidates =
-        relay_candidates_for_region(selected_region, available_servers, forced_server);
+    let mut candidates = relay_candidates_for_region(selected_region, available_servers);
     sort_candidates_by_latency(&mut candidates);
     pick_lowest_latency_server(candidates.iter())
         .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
@@ -993,14 +1054,32 @@ fn compute_cached_latency_improvement(
     selected_addr: SocketAddr,
     current_addr: SocketAddr,
 ) -> Option<u32> {
-    let selected_latency = available_servers
+    let selected = available_servers
         .iter()
-        .find(|(_, addr, _)| *addr == selected_addr)
-        .and_then(|(_, _, lat)| *lat)?;
-    let current_latency = available_servers
+        .find(|(_, addr, _)| *addr == selected_addr);
+    let current = available_servers
         .iter()
-        .find(|(_, addr, _)| *addr == current_addr)
-        .and_then(|(_, _, lat)| *lat);
+        .find(|(_, addr, _)| *addr == current_addr);
+    let selected_latency = selected.and_then(|(_, _, lat)| *lat)?;
+    let current_latency = current.and_then(|(_, _, lat)| *lat);
+
+    // Moving off a full relay onto an open one in the same location counts as
+    // enough of an upgrade on its own, if it costs at most FULL_RELAY_DETOUR_MS.
+    // This only runs when a new game server is joined, while its packets are
+    // still held, so nobody is moved in the middle of a match.
+    if let (Some((current_region, _, _)), Some((selected_region, _, _))) = (current, selected) {
+        let leaving_full = region_family(current_region) == region_family(selected_region)
+            && relay_is_full(current_region)
+            && !relay_is_full(selected_region);
+        if leaving_full
+            && current_latency.is_none_or(|current| {
+                selected_latency <= current.saturating_add(FULL_RELAY_DETOUR_MS)
+            })
+        {
+            return Some(super::auto_routing::SAME_REGION_UPGRADE_THRESHOLD_MS);
+        }
+    }
+
     match current_latency {
         Some(current_latency) => {
             (current_latency > selected_latency).then_some(current_latency - selected_latency)
@@ -1431,7 +1510,6 @@ impl VpnConnection {
         auto_routing_enabled: bool,
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
-        forced_servers: std::collections::HashMap<String, String>,
         binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
@@ -1519,13 +1597,8 @@ impl VpnConnection {
 
         // Step 1: Resolve initial relay endpoint from available servers
         self.set_state(ConnectionState::FetchingConfig).await;
-        let forced_for_region = forced_servers.get(region).cloned();
-        let relay_candidates = ordered_relay_candidates_for_region(
-            region,
-            &available_servers,
-            forced_for_region.as_deref(),
-        )
-        .await;
+        let relay_candidates =
+            ordered_relay_candidates_for_region(region, &available_servers).await;
         let (resolved_server_region, selected_relay_addr) = match relay_candidates
             .first()
             .map(|(server_region, relay_addr, _)| (server_region.clone(), *relay_addr))
@@ -1685,7 +1758,6 @@ impl VpnConnection {
                     available_servers,
                     relay_candidates,
                     whitelisted_regions,
-                    forced_servers,
                     binding_preference.clone(),
                     process_performance_settings,
                     enable_api_tunneling,
@@ -1786,7 +1858,6 @@ impl VpnConnection {
         available_servers: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         relay_candidates: Vec<(String, std::net::SocketAddr, Option<u32>)>,
         whitelisted_regions: Vec<String>,
-        forced_servers: std::collections::HashMap<String, String>,
         binding_preference: Option<AdapterBindingPreference>,
         process_performance_settings: GameProcessPerformanceSettings,
         enable_api_tunneling: bool,
@@ -2228,9 +2299,6 @@ impl VpnConnection {
         auto_router.set_available_servers(available_servers);
         if !whitelisted_regions.is_empty() {
             auto_router.set_whitelisted_regions(whitelisted_regions);
-        }
-        if !forced_servers.is_empty() {
-            auto_router.set_forced_servers(forced_servers);
         }
 
         // Spawn background task for async region lookups. Spawned for every
@@ -3042,6 +3110,19 @@ impl VpnConnection {
                                     });
 
                                     if transitioned {
+                                        // Keep a relay that stopped returning traffic out of the
+                                        // next connection for a while, so the reconnect lands on
+                                        // another relay in the location when there is one.
+                                        if cleanup_reason == "relay_dead_recovery" {
+                                            if let Some((relay_region, _)) = auto_router_for_monitor
+                                                .as_ref()
+                                                .and_then(|router| router.current_relay())
+                                            {
+                                                crate::vpn::servers::avoid_relay_for_a_while(
+                                                    &relay_region,
+                                                );
+                                            }
+                                        }
                                         {
                                             let mut driver_guard = driver.lock().await;
                                             if let Err(e) = driver_guard.close() {
@@ -3950,6 +4031,140 @@ mod tests {
     }
 
     #[test]
+    fn candidates_follow_the_server_list_over_the_id() {
+        // america-01 sat under "us-east" from 2026-09-20 and the app, filing
+        // relays by id, found nothing for US East. The list is the authority.
+        let _guard = load_test_guard();
+        let available = vec![(
+            "america-99".to_string(),
+            parse_addr("10.9.0.1:51821"),
+            Some(20),
+        )];
+        crate::vpn::servers::set_region_members_for_test(&[("atlantis", &["america-99"])]);
+        let listed = relay_candidates_for_region("atlantis", &available);
+        crate::vpn::servers::clear_region_members_for_test();
+        let unlisted = relay_candidates_for_region("atlantis", &available);
+
+        assert_eq!(listed.len(), 1);
+        assert!(
+            unlisted.is_empty(),
+            "with no list, only the id rule applies"
+        );
+    }
+
+    #[test]
+    fn a_full_relay_gives_way_to_an_open_one_nearby() {
+        // Faster by 25ms, but full: a new player goes to the open twin.
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_fleet_for_test(&[
+            ("atlantis-01", Some(120), false, true),
+            ("atlantis-02", Some(10), false, false),
+        ]);
+        let order = ranked_regions(vec![
+            ranked("atlantis-01", "10.9.0.1", Some(20)),
+            ranked("atlantis-02", "10.9.0.2", Some(45)),
+        ]);
+        crate::vpn::servers::clear_relay_load_for_test();
+
+        assert_eq!(order.first().map(String::as_str), Some("atlantis-02"));
+    }
+
+    #[test]
+    fn a_full_relay_is_kept_when_the_open_one_is_too_far() {
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_fleet_for_test(&[
+            ("atlantis-01", Some(120), false, true),
+            ("atlantis-02", Some(10), false, false),
+        ]);
+        let order = ranked_regions(vec![
+            ranked("atlantis-01", "10.9.0.1", Some(20)),
+            ranked(
+                "atlantis-02",
+                "10.9.0.2",
+                Some(20 + FULL_RELAY_DETOUR_MS + 1),
+            ),
+        ]);
+        crate::vpn::servers::clear_relay_load_for_test();
+
+        assert_eq!(order.first().map(String::as_str), Some("atlantis-01"));
+    }
+
+    #[test]
+    fn a_full_relay_never_sends_anyone_to_another_location() {
+        // 25ms is inside the detour but outside the tie band. Only an open relay
+        // in the same location may take the player; another location may not.
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_fleet_for_test(&[
+            ("atlantis-01", Some(120), false, true),
+            ("lemuria-01", Some(0), false, false),
+        ]);
+        let order = ranked_regions(vec![
+            ranked("atlantis-01", "10.9.0.1", Some(20)),
+            ranked("lemuria-01", "10.9.1.1", Some(45)),
+        ]);
+        crate::vpn::servers::clear_relay_load_for_test();
+
+        assert_eq!(order.first().map(String::as_str), Some("atlantis-01"));
+    }
+
+    #[test]
+    fn a_relay_that_just_went_dead_is_avoided_while_another_answers() {
+        let _guard = load_test_guard();
+        crate::vpn::servers::clear_relay_load_for_test();
+        crate::vpn::servers::avoid_relay_for_a_while("atlantis-01");
+        let order = ranked_regions(vec![
+            ranked("atlantis-01", "10.9.0.1", Some(10)),
+            ranked("atlantis-02", "10.9.0.2", Some(80)),
+        ]);
+        let alone = ranked_regions(vec![ranked("atlantis-01", "10.9.0.1", Some(10))]);
+        crate::vpn::servers::clear_avoided_relays_for_test();
+
+        // Much slower, but it answers: that beats a relay that just stopped.
+        assert_eq!(order.first().map(String::as_str), Some("atlantis-02"));
+        // With nothing else in the location it is still tried.
+        assert_eq!(alone, vec!["atlantis-01".to_string()]);
+    }
+
+    #[test]
+    fn leaving_a_full_relay_counts_as_an_upgrade_at_a_join() {
+        // A same-location switch normally needs a 10ms gain. Moving a player
+        // off a full relay at their next game join is reason enough.
+        let _guard = load_test_guard();
+        crate::vpn::servers::set_relay_fleet_for_test(&[
+            ("atlantis-01", Some(120), false, true),
+            ("atlantis-02", Some(10), false, false),
+        ]);
+        let servers = vec![
+            (
+                "atlantis-01".to_string(),
+                parse_addr("10.9.0.1:51821"),
+                Some(20),
+            ),
+            (
+                "atlantis-02".to_string(),
+                parse_addr("10.9.0.2:51821"),
+                Some(30),
+            ),
+        ];
+        let improvement = compute_cached_latency_improvement(
+            &servers,
+            parse_addr("10.9.0.2:51821"),
+            parse_addr("10.9.0.1:51821"),
+        );
+        let best = best_cached_candidate(&servers);
+        crate::vpn::servers::clear_relay_load_for_test();
+
+        assert_eq!(
+            improvement,
+            Some(crate::vpn::auto_routing::SAME_REGION_UPGRADE_THRESHOLD_MS)
+        );
+        assert_eq!(
+            best.map(|(region, _)| region),
+            Some("atlantis-02".to_string())
+        );
+    }
+
+    #[test]
     fn live_ranking_treats_a_silent_relay_as_full() {
         // mumbai-04 has stopped reporting. Unknown occupancy must rank worst,
         // never best, or a relay becomes most attractive precisely when it has
@@ -4113,7 +4328,7 @@ mod tests {
                     "expected offline message, got: {error_message}"
                 );
                 assert!(
-                    !error_message.contains("choose another relay"),
+                    !error_message.contains("skips this relay"),
                     "must not advise picking another relay when device is offline"
                 );
                 assert_eq!(cleanup_reason, "internet_lost_recovery");
@@ -4128,8 +4343,8 @@ mod tests {
     fn test_dead_relay_with_internet_reachable_still_blames_relay() {
         // Negative test for the offline-detection branch: when the OS
         // confirms the device is online, a dead relay must still be
-        // surfaced as a relay failure (the user really should pick another
-        // relay). This guards against the offline path masking real relay
+        // surfaced as a relay failure (the next connect avoids that relay).
+        // This guards against the offline path masking real relay
         // outages.
         let action = classify_relay_health(
             super::super::udp_relay::RelayHealthState::Dead,
@@ -4144,7 +4359,7 @@ mod tests {
                 cleanup_reason,
             } => {
                 assert!(error_message.contains("relay stopped returning traffic"));
-                assert!(error_message.contains("choose another relay"));
+                assert!(error_message.contains("skips this relay"));
                 assert_eq!(cleanup_reason, "relay_dead_recovery");
             }
             RelayHealthAction::Continue { .. } => panic!("dead relay must not remain connected"),
@@ -4654,7 +4869,7 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("germany", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("germany", &available_servers);
         assert_eq!(
             resolved,
             Some(("germany-01".to_string(), parse_addr("10.0.0.2:51821")))
@@ -4676,7 +4891,7 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("germany", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("germany", &available_servers);
         assert_eq!(
             resolved,
             Some(("germany-01".to_string(), parse_addr("10.0.0.11:51821")))
@@ -4698,7 +4913,7 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("germany", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("germany", &available_servers);
         assert_eq!(resolved, None);
     }
 
@@ -4718,112 +4933,10 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("paris", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("paris", &available_servers);
         assert_eq!(
             resolved,
             Some(("paris-03".to_string(), parse_addr("10.0.2.3:51821")))
-        );
-    }
-
-    #[test]
-    fn test_resolve_relay_server_forced_server_used() {
-        let available_servers = vec![
-            (
-                "germany-01".to_string(),
-                parse_addr("10.0.0.1:51821"),
-                Some(5),
-            ),
-            (
-                "germany-02".to_string(),
-                parse_addr("10.0.0.2:51821"),
-                Some(20),
-            ),
-            (
-                "germany-03".to_string(),
-                parse_addr("10.0.0.3:51821"),
-                Some(50),
-            ),
-        ];
-
-        // Force germany-03 even though it has the worst latency
-        let resolved =
-            resolve_relay_server_for_region("germany", &available_servers, Some("germany-03"));
-        assert_eq!(
-            resolved,
-            Some(("germany-03".to_string(), parse_addr("10.0.0.3:51821")))
-        );
-    }
-
-    #[test]
-    fn test_resolve_relay_server_forced_server_not_found_falls_back() {
-        let available_servers = vec![
-            (
-                "germany-01".to_string(),
-                parse_addr("10.0.0.1:51821"),
-                Some(5),
-            ),
-            (
-                "germany-02".to_string(),
-                parse_addr("10.0.0.2:51821"),
-                Some(20),
-            ),
-        ];
-
-        // Force a server that doesn't exist — should fall back to best latency
-        let resolved =
-            resolve_relay_server_for_region("germany", &available_servers, Some("germany-99"));
-        assert_eq!(
-            resolved,
-            Some(("germany-01".to_string(), parse_addr("10.0.0.1:51821")))
-        );
-    }
-
-    #[test]
-    fn test_resolved_forced_server_matches_selected_region_pin() {
-        let relay_candidates = vec![(
-            "germany-02".to_string(),
-            parse_addr("10.0.0.2:51821"),
-            Some(20),
-        )];
-
-        assert_eq!(
-            resolved_forced_server(Some("germany-02"), &relay_candidates),
-            Some("germany-02".to_string())
-        );
-    }
-
-    #[test]
-    fn test_resolved_forced_server_ignores_stale_pin_after_fallback() {
-        let relay_candidates = vec![
-            (
-                "germany-01".to_string(),
-                parse_addr("10.0.0.1:51821"),
-                Some(5),
-            ),
-            (
-                "germany-02".to_string(),
-                parse_addr("10.0.0.2:51821"),
-                Some(20),
-            ),
-        ];
-
-        assert_eq!(
-            resolved_forced_server(Some("germany-99"), &relay_candidates),
-            None
-        );
-    }
-
-    #[test]
-    fn test_resolved_forced_server_does_not_treat_unrelated_pin_as_active() {
-        let relay_candidates = vec![(
-            "germany-02".to_string(),
-            parse_addr("10.0.0.2:51821"),
-            Some(20),
-        )];
-
-        assert_eq!(
-            resolved_forced_server(Some("singapore-01"), &relay_candidates),
-            None
         );
     }
 
@@ -4851,19 +4964,19 @@ mod tests {
         ];
 
         // "us-east" has no exact match -> falls to prefix "us-east-" -> finds "us-east-nj"
-        let resolved = resolve_relay_server_for_region("us-east", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("us-east", &available_servers);
         assert_eq!(
             resolved,
             Some(("us-east-nj".to_string(), parse_addr("108.61.7.6:51821")))
         );
 
-        let resolved = resolve_relay_server_for_region("us-west", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("us-west", &available_servers);
         assert_eq!(
             resolved,
             Some(("us-west-la".to_string(), parse_addr("45.63.55.139:51821")))
         );
 
-        let resolved = resolve_relay_server_for_region("us-central", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("us-central", &available_servers);
         assert_eq!(
             resolved,
             Some((
@@ -4890,7 +5003,7 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("america", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("america", &available_servers);
         assert_eq!(resolved, None);
     }
 
@@ -4900,11 +5013,8 @@ mod tests {
             ("germany-01".to_string(), parse_addr("10.0.0.1:51821"), None),
             ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), None),
         ];
-        let mut candidates = ranked_candidates_from_raw(relay_candidates_for_region(
-            "germany",
-            &available_servers,
-            None,
-        ));
+        let mut candidates =
+            ranked_candidates_from_raw(relay_candidates_for_region("germany", &available_servers));
         apply_probe_measurements(
             &mut candidates,
             &[RelayProbeMeasurement {
@@ -4931,11 +5041,8 @@ mod tests {
             ),
             ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), None),
         ];
-        let mut candidates = ranked_candidates_from_raw(relay_candidates_for_region(
-            "germany",
-            &available_servers,
-            None,
-        ));
+        let mut candidates =
+            ranked_candidates_from_raw(relay_candidates_for_region("germany", &available_servers));
         apply_probe_measurements(
             &mut candidates,
             &[RelayProbeMeasurement {
@@ -4966,11 +5073,8 @@ mod tests {
                 Some(6),
             ),
         ];
-        let candidates = ranked_candidates_from_raw(relay_candidates_for_region(
-            "germany",
-            &available_servers,
-            None,
-        ));
+        let candidates =
+            ranked_candidates_from_raw(relay_candidates_for_region("germany", &available_servers));
         let resolved = resolve_relay_server_from_candidates(&candidates);
 
         assert_eq!(
@@ -4995,7 +5099,7 @@ mod tests {
             ("tokyo".to_string(), parse_addr("10.0.1.1:51821"), Some(30)),
         ];
 
-        let candidates = relay_candidates_for_region("singapore", &available_servers, None);
+        let candidates = relay_candidates_for_region("singapore", &available_servers);
         assert_eq!(candidates.len(), 2);
         assert!(
             candidates
@@ -5024,7 +5128,7 @@ mod tests {
             ),
         ];
 
-        let resolved = resolve_relay_server_for_region("singapore", &available_servers, None);
+        let resolved = resolve_relay_server_for_region("singapore", &available_servers);
         assert_eq!(
             resolved,
             Some(("singapore-02".to_string(), parse_addr("10.0.0.2:51821")))
@@ -5045,11 +5149,8 @@ mod tests {
                 Some(8),
             ),
         ];
-        let candidates = ranked_candidates_from_raw(relay_candidates_for_region(
-            "germany",
-            &available_servers,
-            None,
-        ));
+        let candidates =
+            ranked_candidates_from_raw(relay_candidates_for_region("germany", &available_servers));
 
         let resolved = resolve_relay_server_from_candidates(&candidates);
         assert_eq!(
@@ -5064,11 +5165,8 @@ mod tests {
             ("germany-02".to_string(), parse_addr("10.0.0.2:51821"), None),
             ("germany-01".to_string(), parse_addr("10.0.0.1:51821"), None),
         ];
-        let candidates = ranked_candidates_from_raw(relay_candidates_for_region(
-            "germany",
-            &available_servers,
-            None,
-        ));
+        let candidates =
+            ranked_candidates_from_raw(relay_candidates_for_region("germany", &available_servers));
 
         let resolved = resolve_relay_server_from_candidates(&candidates);
         assert_eq!(

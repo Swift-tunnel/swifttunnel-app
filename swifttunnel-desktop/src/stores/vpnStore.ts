@@ -294,24 +294,17 @@ function resolveFailoverRegionId(
   return null;
 }
 
-function chooseNextRelayForRegion(
-  regionId: string,
-  currentForcedServer: string | undefined,
-): string | null {
+/**
+ * The location's name when it has another relay to reconnect to, else null.
+ * Which relay is not decided here: the core keeps the one that went dead out
+ * of the next connection for a few minutes.
+ */
+function locationWithAnotherRelay(regionId: string): string | null {
   const region = useServerStore
     .getState()
     .regions.find((candidate) => candidate.id === regionId);
   const relays = region?.servers.filter(Boolean) ?? [];
-  if (relays.length < 2) return null;
-
-  if (currentForcedServer) {
-    const currentIndex = relays.indexOf(currentForcedServer);
-    if (currentIndex >= 0) {
-      return relays[(currentIndex + 1) % relays.length] ?? null;
-    }
-  }
-
-  return relays[1] ?? null;
+  return relays.length >= 2 ? (region?.name ?? regionId) : null;
 }
 
 async function failoverRelayAfterDeadSession(
@@ -331,27 +324,19 @@ async function failoverRelayAfterDeadSession(
   const regionId = resolveFailoverRegionId(event.region, settings.selected_region);
   if (!regionId) return;
 
-  const nextRelay = chooseNextRelayForRegion(
-    regionId,
-    settings.forced_servers[regionId],
-  );
-  if (!nextRelay) return;
+  const locationName = locationWithAnotherRelay(regionId);
+  if (!locationName) return;
 
   relayFailoverInFlight = true;
   lastRelayFailoverAt = now;
   try {
-    settingsStore.update({
-      selected_region: regionId,
-      auto_routing_enabled: false,
-      forced_servers: {
-        ...settings.forced_servers,
-        [regionId]: nextRelay,
-      },
-    });
-    await settingsStore.save();
+    if (settings.selected_region !== regionId) {
+      settingsStore.update({ selected_region: regionId });
+      await settingsStore.save();
+    }
     await notify(
       "SwiftTunnel",
-      `Relay stopped responding. Switching ${regionId} to ${nextRelay} and reconnecting.`,
+      `Relay stopped responding. Reconnecting to another ${locationName} relay.`,
     );
     await connect(regionId, settings.selected_game_presets);
   } catch (error) {
