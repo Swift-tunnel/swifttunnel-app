@@ -38,6 +38,7 @@ import {
   type RepairStatus,
 } from "../../lib/repairCenter";
 import { COMMUNITY_URL } from "../../lib/maintenance";
+import { repairCompletion } from "../../lib/repairCompletion";
 import { resetTranslationCache } from "../../lib/i18n";
 import type { Config } from "../../lib/types";
 import { Button, Spinner, Readout, StatRail, Icon, Watermark } from "../ui";
@@ -139,27 +140,18 @@ export function RepairTab() {
         setProgress(items.length);
       }
 
+      const completion = repairCompletion(items);
       const run: RepairRun = {
-        overall: aggregateStatus(items.map((i) => i.status)),
+        overall: completion.status,
         ranAt: Date.now(),
         items,
       };
       saveRepairRun(run);
       setLastRun(run);
+      setResultOpen(true);
 
-      // Nothing was actually changed, don't force a pointless restart + UAC.
-      if (!items.some((i) => i.changed)) {
-        addToast({
-          type: "success",
-          message: "Everything looks healthy, nothing needed repair.",
-        });
-        return;
-      }
-
-      addToast({
-        type: "success",
-        message: "Repairs complete, restarting SwiftTunnel…",
-      });
+      addToast({ type: completion.type, message: completion.message });
+      if (!completion.restart) return;
       setRestarting(true);
       // Let the toast land, then relaunch elevated (Windows shows the admin
       // prompt on the way back up).
@@ -566,14 +558,6 @@ function ChevronIcon({ open }: { open: boolean }) {
       }}
     />
   );
-}
-
-function aggregateStatus(statuses: RepairStatus[]): RepairStatus {
-  if (statuses.includes("failed")) return "failed";
-  if (statuses.includes("needs_reboot")) return "needs_reboot";
-  if (statuses.includes("partial")) return "partial";
-  if (statuses.includes("fixed")) return "fixed";
-  return "healthy";
 }
 
 function summarize(run: RepairRun): string {
