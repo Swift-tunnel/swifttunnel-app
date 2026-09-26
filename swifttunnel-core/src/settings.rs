@@ -786,7 +786,8 @@ mod tests {
     /// The next launch turns it off, once.
     #[test]
     fn the_live_graph_migration_turns_it_off_for_an_existing_install() {
-        let json = r#"{"theme":"dark","config":{},"optimizations_active":false,"show_live_graph":true}"#;
+        let json =
+            r#"{"theme":"dark","config":{},"optimizations_active":false,"show_live_graph":true}"#;
         let mut settings: AppSettings = serde_json::from_str(json).unwrap();
         assert!(
             !settings.live_graph_off_migrated,
