@@ -1,3 +1,8 @@
+#[path = "artwork.rs"]
+mod artwork;
+#[path = "fonts.rs"]
+mod fonts;
+
 use crate::backend::Event;
 use crate::model::{action_allowed, result_message, Action, Installed, Package};
 use std::cell::RefCell;
@@ -21,7 +26,15 @@ const ACTIONS: [Action; 4] = [
     Action::Uninstall,
 ];
 const LABELS: [&str; 4] = ["Install", "Repair", "Reinstall", "Uninstall"];
-const BG: COLORREF = COLORREF(0x141414);
+// Website design/new-theme, 2bccb79: light petal palette. COLORREF uses BGR.
+const BG: COLORREF = COLORREF(0xfcf7f7);
+const INK: COLORREF = COLORREF(0x140b0a);
+const MUTED: COLORREF = COLORREF(0x765b56);
+const BORDER: COLORREF = COLORREF(0xf2e4e1);
+const CARD: COLORREF = COLORREF(0xfbf0ee);
+const HEIGHT: i32 = 560;
+const BUTTON_TOP: i32 = 444;
+const BUTTON_HEIGHT: i32 = 44;
 
 pub struct State {
     package: Option<Package>,
@@ -94,12 +107,33 @@ unsafe fn text(
     color: COLORREF,
     flags: DRAW_TEXT_FORMAT,
 ) {
+    let face = if weight >= 800 {
+        w!("Figtree ExtraBold")
+    } else if weight >= 600 {
+        w!("Figtree SemiBold")
+    } else {
+        w!("Figtree")
+    };
+    text_face(dc, value, rect, size, color, flags, face, 0, false);
+}
+
+unsafe fn text_face(
+    dc: HDC,
+    value: &str,
+    rect: RECT,
+    size: i32,
+    color: COLORREF,
+    flags: DRAW_TEXT_FORMAT,
+    face: PCWSTR,
+    tracking: i32,
+    outline: bool,
+) {
     let font = CreateFontW(
         -size,
         0,
         0,
         0,
-        weight,
+        400,
         0,
         0,
         0,
@@ -108,14 +142,27 @@ unsafe fn text(
         CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY,
         DEFAULT_PITCH.0 as u32,
-        w!("Segoe UI"),
+        face,
     );
     let old = SelectObject(dc, font.into());
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, color);
     let mut bounds = rect;
     let mut value: Vec<u16> = value.encode_utf16().collect();
+    let previous_spacing = SetTextCharacterExtra(dc, tracking);
+    if outline {
+        let _ = BeginPath(dc);
+    }
     DrawTextW(dc, &mut value, &mut bounds, flags | DT_NOPREFIX);
+    if outline {
+        let _ = EndPath(dc);
+        let pen = CreatePen(PS_SOLID, (size / 40).max(1), color);
+        let previous_pen = SelectObject(dc, pen.into());
+        let _ = StrokePath(dc);
+        SelectObject(dc, previous_pen);
+        let _ = DeleteObject(pen.into());
+    }
+    SetTextCharacterExtra(dc, previous_spacing);
     SelectObject(dc, old);
     let _ = DeleteObject(font.into());
 }
@@ -127,7 +174,32 @@ unsafe fn fill(dc: HDC, rect: &RECT, color: COLORREF) {
 }
 
 unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
+    fonts::install();
     fill(dc, &bounds, BG);
+    artwork::paint(dc, bounds);
+    let panel = RECT {
+        left: scaled(20, dpi),
+        top: scaled(302, dpi),
+        right: bounds.right - scaled(20, dpi),
+        bottom: scaled(502, dpi),
+    };
+    let brush = CreateSolidBrush(CARD);
+    let pen = CreatePen(PS_SOLID, scaled(1, dpi), COLORREF(0xf3d7cf));
+    let previous_brush = SelectObject(dc, brush.into());
+    let previous_pen = SelectObject(dc, pen.into());
+    let _ = RoundRect(
+        dc,
+        panel.left,
+        panel.top,
+        panel.right,
+        panel.bottom,
+        scaled(24, dpi),
+        scaled(24, dpi),
+    );
+    SelectObject(dc, previous_pen);
+    SelectObject(dc, previous_brush);
+    let _ = DeleteObject(pen.into());
+    let _ = DeleteObject(brush.into());
     let x = scaled(36, dpi);
     let right = bounds.right - x;
     let area = |top, bottom| RECT {
@@ -138,53 +210,112 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     };
     text(
         dc,
-        "SWIFTTUNNEL",
-        area(32, 58),
-        scaled(13, dpi),
+        "SwiftTunnel",
+        area(28, 55),
+        scaled(21, dpi),
         600,
-        COLORREF(0xb9b9b9),
+        INK,
         DT_LEFT,
     );
-    text(
+    text_face(
         dc,
-        "A better connection.",
-        area(94, 152),
-        scaled(38, dpi),
-        600,
-        COLORREF(0xfafafa),
+        "WINDOWS / SETUP",
+        area(35, 54),
+        scaled(10, dpi),
+        MUTED,
+        DT_RIGHT,
+        w!("Azeret Mono"),
+        0,
+        false,
+    );
+    fill(dc, &area(72, 73), BORDER);
+    text_face(
+        dc,
+        "01 / INSTALLATION",
+        area(85, 105),
+        scaled(10, dpi),
+        MUTED,
         DT_LEFT,
+        w!("Azeret Mono"),
+        scaled(1, dpi),
+        false,
+    );
+    text_face(
+        dc,
+        "Lower ping.",
+        area(117, 200),
+        scaled(58, dpi),
+        INK,
+        DT_LEFT,
+        w!("Figtree ExtraBold"),
+        -scaled(2, dpi),
+        false,
+    );
+    text_face(
+        dc,
+        "Faster",
+        area(184, 266),
+        scaled(58, dpi),
+        INK,
+        DT_LEFT,
+        w!("Figtree ExtraBold"),
+        -scaled(2, dpi),
+        false,
+    );
+    let signal = RECT {
+        left: scaled(215, dpi),
+        ..area(184, 266)
+    };
+    text_face(
+        dc,
+        "gameplay.",
+        signal,
+        scaled(58, dpi),
+        INK,
+        DT_LEFT,
+        w!("Figtree ExtraBold"),
+        -scaled(2, dpi),
+        true,
     );
     let subtitle = state
         .package
         .as_ref()
-        .map(|p| format!("{}  /  {}  /  OFFLINE SETUP", p.name, p.version))
-        .unwrap_or_else(|| "DESKTOP & LITE  /  OFFLINE SETUP".into());
-    text(
+        .map(|p| {
+            format!(
+                "{}  /  V{}  /  OFFLINE SETUP",
+                p.name.to_uppercase(),
+                p.version
+            )
+        })
+        .unwrap_or_else(|| "BUNDLED PACKAGE  /  OFFLINE SETUP".into());
+    text_face(
         dc,
         &subtitle,
-        area(160, 190),
-        scaled(12, dpi),
-        400,
-        COLORREF(0x999999),
+        area(277, 299),
+        scaled(10, dpi),
+        MUTED,
         DT_LEFT,
+        w!("Azeret Mono"),
+        0,
+        false,
     );
-    fill(dc, &area(221, 222), COLORREF(0x333333));
+
     text(
         dc,
         &state.heading,
-        area(245, 280),
-        scaled(21, dpi),
+        area(320, 352),
+        scaled(24, dpi),
         600,
-        COLORREF(0xfafafa),
+        INK,
         DT_LEFT,
     );
     text(
         dc,
         &state.detail,
-        area(291, 366),
-        scaled(13, dpi),
+        area(365, 424),
+        scaled(14, dpi),
         400,
-        COLORREF(0xb0b0b0),
+        MUTED,
         DT_LEFT | DT_WORDBREAK,
     );
     text(
@@ -196,10 +327,10 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         } else {
             "Your installer stays protected for future updates and repairs."
         },
-        area(441, 478),
-        scaled(11, dpi),
+        area(512, 548),
+        scaled(12, dpi),
         400,
-        COLORREF(0x888888),
+        COLORREF(0xffffff),
         DT_LEFT | DT_WORDBREAK,
     );
 }
@@ -214,27 +345,57 @@ unsafe fn paint_button(
     pressed: bool,
     focused: bool,
 ) {
-    fill(
-        dc,
-        &bounds,
-        if primary {
-            COLORREF(if pressed { 0xcacaca } else { 0xf3f3f3 })
+    fill(dc, &bounds, CARD);
+    let background = if primary {
+        if pressed {
+            COLORREF(0x352b2a)
         } else {
-            COLORREF(if pressed { 0x363636 } else { 0x272727 })
+            INK
+        }
+    } else if pressed {
+        COLORREF(0xf8e9e7)
+    } else {
+        CARD
+    };
+    let brush = CreateSolidBrush(background);
+    let pen = CreatePen(
+        PS_SOLID,
+        scaled(1, dpi),
+        if primary {
+            background
+        } else if disabled {
+            BORDER
+        } else {
+            COLORREF(0xcfc6c3)
         },
     );
+    let old_brush = SelectObject(dc, brush.into());
+    let old_pen = SelectObject(dc, pen.into());
+    let _ = RoundRect(
+        dc,
+        bounds.left,
+        bounds.top,
+        bounds.right,
+        bounds.bottom,
+        scaled(8, dpi),
+        scaled(8, dpi),
+    );
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
+    let _ = DeleteObject(pen.into());
+    let _ = DeleteObject(brush.into());
     text(
         dc,
         label,
         bounds,
-        scaled(13, dpi),
+        scaled(14, dpi),
         600,
         if disabled {
-            COLORREF(0x686868)
+            COLORREF(0xb0a6a1)
         } else if primary {
-            COLORREF(0x151515)
+            COLORREF(0xffffff)
         } else {
-            COLORREF(0xededed)
+            INK
         },
         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
     );
@@ -278,8 +439,8 @@ pub unsafe fn paint_preview(dc: HDC, bounds: RECT, dpi: u32, existing: bool) {
             RECT {
                 left,
                 right: left + scaled(149, dpi),
-                top: scaled(387, dpi),
-                bottom: scaled(427, dpi),
+                top: scaled(BUTTON_TOP, dpi),
+                bottom: scaled(BUTTON_TOP + BUTTON_HEIGHT, dpi),
             },
             dpi,
             if i == 0 && existing { "Update" } else { label },
@@ -318,9 +479,9 @@ unsafe fn layout(hwnd: HWND, state: &State) {
         let _ = MoveWindow(
             *button,
             scaled(36 + i as i32 * 161, dpi),
-            scaled(387, dpi),
+            scaled(BUTTON_TOP, dpi),
             scaled(149, dpi),
-            scaled(40, dpi),
+            scaled(BUTTON_HEIGHT, dpi),
             true,
         );
     }
@@ -369,7 +530,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     let state = &mut *guard;
     match msg {
         WM_CREATE => {
-            let dark = 1i32;
+            let dark = 0i32;
             let _ = DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -501,6 +662,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 }
 
 pub fn run(state: Box<State>) -> Result<i32, String> {
+    fonts::install();
     let state = Box::new(RefCell::new(*state));
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -521,7 +683,7 @@ pub fn run(state: Box<State>) -> Result<i32, String> {
             left: 0,
             top: 0,
             right: scaled(704, dpi),
-            bottom: scaled(488, dpi),
+            bottom: scaled(HEIGHT, dpi),
         };
         let _ = windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi(
             &mut bounds,

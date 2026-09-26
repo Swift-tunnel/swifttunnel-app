@@ -1,0 +1,5 @@
+Petal artwork: swifttunnel-web design/new-theme at 2bccb79
+Source: public/petals/petals-desktop.webp (2400 x 1680)
+Embedded PNG: 1408 x 986, RGBA, resized with sharp for native GDI rendering.
+Theme reference: app/globals.css and components/landing/landing-hero.tsx.
+Fonts: resources/fonts/SOURCES.txt, accompanying SIL Open Font Licenses.

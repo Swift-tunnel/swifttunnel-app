@@ -5,6 +5,7 @@ edition = "2021"
 description = "Desktop and Lite setup with a protected persistent MSI source"
 
 [dependencies]
+png = "0.17"
 swifttunnel-installer-cache = { path = "../swifttunnel-installer-cache" }
 
 [target.'cfg(windows)'.dependencies]
