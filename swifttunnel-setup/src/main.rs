@@ -1,11 +1,12 @@
-//! Normal EXE setup for Desktop and Lite. It retains the embedded MSI in the
-//! protected source cache, then runs the same UI and scoped recovery as the MSI.
-//! Recovery happens inside the selected product's install transaction, after
-//! confirmation. The launcher does not modify other product registrations.
+//! Offline Desktop and Lite setup. A native window owns the controls while a
+//! worker stages the protected MSI and runs product-scoped Windows Installer
+//! transactions. Direct MSI installations retain their existing interface.
 
 #![windows_subsystem = "windows"]
 
-use std::process::Command;
+mod backend;
+mod model;
+mod ui;
 
 /// The installer payload, staged into OUT_DIR by build.rs.
 ///
@@ -24,57 +25,17 @@ fn main() {
 }
 
 fn run() -> i32 {
-    if MSI_BYTES.is_empty() {
-        // A debug build carries no installer. Refuse rather than write a
-        // zero byte file and hand msiexec something meaningless.
-        return fail(
-            concat!(
-                "This copy of the installer is incomplete, so there is nothing to install.",
-                "\n\n",
-                "Download SwiftTunnel again from swifttunnel.net."
-            ),
-            2,
-        );
+    let (commands, receive_commands) = std::sync::mpsc::channel();
+    let (events, receive_events) = std::sync::mpsc::channel();
+    if let Err(error) = std::thread::Builder::new()
+        .name("installer-worker".into())
+        .spawn(move || backend::worker(receive_commands, events))
+    {
+        return fail(&format!("Could not start the installer worker: {error}"), 1);
     }
-
-    let installer = match stage_payload() {
-        Ok(installer) => installer,
-        Err(error) => return fail(&format!("SwiftTunnel could not prepare its protected installer cache.\n\n{error}\n\nCheck free disk space, run setup as administrator, and contact support if this persists."), 1),
-    };
-
-    let status = swifttunnel_installer_cache::windows_installer_path().and_then(|msiexec| {
-        use std::os::windows::process::CommandExt;
-        Command::new(msiexec)
-            .arg("/i")
-            .arg(installer.path())
-            .arg("/norestart")
-            .creation_flags(0x0800_0000)
-            .status()
-    });
-    // Keep the verified handle until msiexec exits. Never prune registered
-    // sources by filename count, including after failed/cancelled installation.
-    drop(installer);
-
-    match status {
-        Ok(s) => {
-            let code = s.code().unwrap_or(1);
-            match code {
-                0 | 1602 => {}, // Success or deliberate cancellation.
-                3010 | 1641 => message_box("Setup completed. Restart Windows before using SwiftTunnel.", false),
-                1618 => { return fail("Another installation is running. Wait for it to finish, then open SwiftTunnel Setup again.", code); }
-                1619 | 1620 => { return fail("Windows could not open this installer package. Download Setup again from swifttunnel.net and contact support if this persists.", code); }
-                // The MSI's failure dialog already explains installation errors.
-                // Keep the exit code for support without showing a second dialog.
-                _ => log_failure(&format!("Windows Installer exited with code {code}.")),
-            }
-            code
-        },
-        Err(error) => fail(
-            &format!(
-                "SwiftTunnel could not start Windows Installer.\n\n{error}\n\nRestart the PC and try again."
-            ),
-            1,
-        ),
+    match ui::run(Box::new(ui::State::new(commands, receive_events))) {
+        Ok(code) => code,
+        Err(error) => fail(&error, 1),
     }
 }
 
@@ -145,13 +106,4 @@ fn log_failure(message: &str) {
             message.as_bytes(),
         );
     }
-}
-
-/// Authenticated embedded bytes enter the same immutable cache as both updaters
-/// and MSI repair. Name/content and handle-sharing tests live in that library,
-/// where they can run without setup's elevation manifest or embedded MSI.
-fn stage_payload() -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
-    swifttunnel_installer_cache::InstallerCache::open()
-        .and_then(|cache| cache.stage(MSI_NAME, MSI_BYTES))
-        .map_err(|error| error.to_string())
 }

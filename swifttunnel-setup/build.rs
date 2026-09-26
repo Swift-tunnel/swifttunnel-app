@@ -1,5 +1,6 @@
 //! Embed the elevation manifest needed to stage a protected installation source.
-//! Product-specific recovery and confirmation are handled inside the MSI.
+//! Product-specific orphan recovery remains inside the MSI. The native launcher
+//! owns maintenance selection and completion reporting.
 
 use std::path::PathBuf;
 

@@ -4622,6 +4622,7 @@ dependencies = [
  "embed-manifest",
  "static_vcruntime",
  "swifttunnel-installer-cache",
+ "windows 0.62.2",
 ]
 
 [[package]]
