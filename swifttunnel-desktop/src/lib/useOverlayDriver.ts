@@ -100,6 +100,7 @@ export function useOverlayDriver() {
     if (!overlay.enabled) {
       void pushOverlayRender({
         enabled: false,
+        forceHide: true,
         metrics: overlay.metrics,
         size: overlay.size,
         color: overlay.color,
@@ -133,13 +134,14 @@ export function useOverlayDriver() {
       await overlayWindowReady;
       if (disposed) return;
       const vpnBefore = useVpnStore.getState();
+      let metricsFresh = false;
       try {
-        await fetchMetrics({
+        metricsFresh = await fetchMetrics({
           overlayWantsFps: cfgBefore.metrics.includes("fps"),
           overlayWantsPing: false,
         });
       } catch {
-        /* keep last values */
+        /* A stale foreground flag must not keep a topmost overlay visible. */
       }
       if (disposed) return;
       const needsThroughput =
@@ -191,10 +193,11 @@ export function useOverlayDriver() {
       wasRunning = b.robloxRunning;
       // Show only while Roblox is the FOREGROUND window (not just running) so
       // it never covers the desktop or apps you've alt-tabbed to.
-      const gate = b.robloxForeground;
+      const gate = metricsFresh && b.robloxForeground;
       const cfg = ovRef.current;
       await pushOverlayRender({
         enabled: gate,
+        forceHide: !cfg.enabled || !metricsFresh,
         metrics: cfg.metrics,
         size: cfg.size,
         color: cfg.color,

@@ -60,7 +60,7 @@ describe("overlay polling under slow native calls", () => {
     h.effects.length = 0;
     h.overlay.enabled = true;
     h.invoke.mockResolvedValue(undefined);
-    h.metrics.mockResolvedValue(undefined);
+    h.metrics.mockResolvedValue(true);
     h.throughput.mockResolvedValue(undefined);
     h.ping.mockResolvedValue(undefined);
     h.push.mockResolvedValue(undefined);
@@ -128,5 +128,25 @@ describe("overlay polling under slow native calls", () => {
     stop();
     expect(h.metrics).toHaveBeenCalledTimes(2);
     expect(h.push).toHaveBeenCalledTimes(2);
+    expect(h.push.mock.calls[0][0]).toMatchObject({ enabled: false, forceHide: true });
+    expect(h.push.mock.calls[1][0]).toMatchObject({ enabled: true, forceHide: false });
+  });
+
+  it("hides stale foreground state when the metrics store reports failure", async () => {
+    h.metrics.mockResolvedValueOnce(false);
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(1_000);
+    stop();
+    expect(h.push.mock.calls[0][0]).toMatchObject({ enabled: false, forceHide: true });
+    expect(h.push.mock.calls[1][0]).toMatchObject({ enabled: true, forceHide: false });
+  });
+
+  it("explicit disable cancels an overlay interaction even without another tick", async () => {
+    h.overlay.enabled = false;
+    start();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.push).toHaveBeenCalledTimes(1);
+    expect(h.push.mock.calls[0][0]).toMatchObject({ enabled: false, forceHide: true });
+    expect(h.metrics).not.toHaveBeenCalled();
   });
 });

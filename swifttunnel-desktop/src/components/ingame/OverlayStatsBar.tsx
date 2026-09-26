@@ -6,6 +6,8 @@ import { OverlayBar } from "./OverlayBar";
 import {
   OVERLAY_RENDER_EVENT,
   emitOverlayPosition,
+  overlayMayInteract,
+  overlayShouldShow,
   type OverlayRenderPayload,
 } from "./overlayBus";
 import { boostCursorPos } from "../../lib/commands";
@@ -53,6 +55,7 @@ export function OverlayStatsBar() {
   const interactiveRef = useRef(false);
   const interactingRef = useRef(false);
   const shownRef = useRef(false);
+  const visibilityTaskRef = useRef<Promise<void> | null>(null);
   // Cursor offset from the window's top-left (physical px) while dragging.
   const dragRef = useRef<{ offX: number; offY: number } | null>(null);
   const prevDownRef = useRef(true); // start "down" so a held click can't grab
@@ -68,6 +71,34 @@ export function OverlayStatsBar() {
       /* ignore */
     }
   }, []);
+
+  // Re-evaluate after interaction ends too: disabling emits only one payload.
+  // Serialize show/hide so a delayed show cannot complete after a newer hide.
+  const syncVisibility = useCallback((): Promise<void> => {
+    if (visibilityTaskRef.current) return visibilityTaskRef.current;
+    const task = (async () => {
+      for (;;) {
+        const wantShown = overlayShouldShow(payloadRef.current, interactingRef.current);
+        if (!wantShown) {
+          dragRef.current = null;
+          interactingRef.current = false;
+          setActive(false);
+          await setInteractive(false);
+        }
+        if (wantShown === shownRef.current) return;
+        try {
+          const win = getCurrentWindow();
+          if (wantShown) await win.show();
+          else await win.hide();
+          shownRef.current = wantShown;
+        } catch {
+          return; // Keep the last confirmed state; the next tick retries.
+        }
+      }
+    })();
+    visibilityTaskRef.current = task.finally(() => { visibilityTaskRef.current = null; });
+    return visibilityTaskRef.current;
+  }, [setInteractive]);
 
   const moveWindow = useCallback((x: number, y: number) => {
     const xi = Math.round(x);
@@ -183,9 +214,12 @@ export function OverlayStatsBar() {
         const m = monitorRef.current;
         let over = false;
 
-        if (m && (shownRef.current || dragRef.current)) {
+        if (m && overlayMayInteract(payloadRef.current) && (shownRef.current || dragRef.current)) {
           const c = await boostCursorPos();
-          if (dragRef.current) {
+          if (disposed) return;
+          if (!overlayMayInteract(payloadRef.current)) {
+            await syncVisibility();
+          } else if (dragRef.current) {
             const next = {
               x: c.x - dragRef.current.offX,
               y: c.y - dragRef.current.offY,
@@ -231,6 +265,7 @@ export function OverlayStatsBar() {
         interactingRef.current = interacting;
         if (!disposed) setActive(interacting);
         await setInteractive(interacting);
+        await syncVisibility();
       } catch {
         /* ignore */
       }
@@ -254,7 +289,7 @@ export function OverlayStatsBar() {
       dragRef.current = null;
       void setInteractive(false);
     };
-  }, [setInteractive, moveWindow]);
+  }, [setInteractive, moveWindow, syncVisibility]);
 
   // Render snapshots from the main window. The bar stays MOUNTED regardless of
   // payload.enabled (visibility is window show/hide only), unmounting it
@@ -269,25 +304,7 @@ export function OverlayStatsBar() {
       setPayload(p);
       applyConfiguredPosition();
 
-      const win = getCurrentWindow();
-      // Never hide while the user is hovering or dragging the bar.
-      const wantShown =
-        (p.enabled && p.metrics.length > 0) || interactingRef.current;
-      if (wantShown !== shownRef.current) {
-        shownRef.current = wantShown;
-        if (!wantShown) {
-          dragRef.current = null;
-          interactingRef.current = false;
-          setActive(false);
-          await setInteractive(false);
-        }
-        try {
-          if (wantShown) await win.show();
-          else await win.hide();
-        } catch {
-          /* ignore */
-        }
-      }
+      await syncVisibility();
     }).then((u) => {
       if (disposed) u();
       else unlisten = u;
@@ -296,7 +313,7 @@ export function OverlayStatsBar() {
       disposed = true;
       unlisten?.();
     };
-  }, [setInteractive, applyConfiguredPosition]);
+  }, [syncVisibility, applyConfiguredPosition]);
 
   // Escape: best-effort safety hatch, cancel a drag and force click-through.
   useEffect(() => {

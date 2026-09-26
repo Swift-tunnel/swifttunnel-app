@@ -14,6 +14,8 @@ export const OVERLAY_POSITION_EVENT = "overlay-position";
 /** Snapshot the main window emits to the stats overlay window each tick. */
 export interface OverlayRenderPayload {
   enabled: boolean;
+  /** Explicit disable or unavailable metrics must also cancel interaction. */
+  forceHide: boolean;
   metrics: OverlayMetric[];
   size: OverlaySize;
   color: string;
@@ -22,6 +24,14 @@ export interface OverlayRenderPayload {
   customX: number | null;
   customY: number | null;
   values: Partial<Record<OverlayMetric, string>>;
+}
+
+export function overlayMayInteract(payload: OverlayRenderPayload | null): boolean {
+  return !!payload && !payload.forceHide && payload.metrics.length > 0;
+}
+
+export function overlayShouldShow(payload: OverlayRenderPayload | null, interacting: boolean): boolean {
+  return overlayMayInteract(payload) && (!!payload?.enabled || interacting);
 }
 
 export interface OverlayPositionPayload {
