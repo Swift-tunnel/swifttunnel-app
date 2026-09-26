@@ -19,6 +19,10 @@ fn main() {
         serde_json::from_str(&std::fs::read_to_string(tauri.join("tauri.conf.json")).unwrap())
             .unwrap();
     let mut engine = handlebars::Handlebars::new();
+    assert_eq!(
+        config["bundle"]["windows"]["webviewInstallMode"]["type"], "offlineInstaller",
+        "Offline Setup must include the WebView runtime prerequisite"
+    );
     // Match the Tauri bundler's XML rendering behavior.
     engine.register_escape_fn(handlebars::no_escape);
     let data = serde_json::json!({
@@ -29,7 +33,12 @@ fn main() {
         "main_binary_path": std::env::current_exe().unwrap().display().to_string(),
         "icon_path": tauri.join("icons/icon.ico").display().to_string(),
         "component_group_refs": ["NsisMigration", "SwiftTunnelLite"],
-        "deep_link_protocols": ["swifttunnel"]
+        "deep_link_protocols": ["swifttunnel"],
+        "install_webview": true,
+        // Exercise the real offline prerequisite authoring without downloading
+        // or executing a runtime installer. The launch condition rejects this MSI.
+        "webview2_installer_path": std::env::current_exe().unwrap().display().to_string(),
+        "webview_installer_args": "/silent"
     });
     let rendered = engine.render_template(&template, &data).unwrap();
     // This fixture uses the real upgrade family to verify authoring. Prevent an

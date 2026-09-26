@@ -44,6 +44,9 @@
       "msi"
     ],
     "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
       "wix": {
         "template": "wix/main.wxs",
         "upgradeCode": "e8a8d9ae-1ddb-53d0-bcf4-8268bddc947d",

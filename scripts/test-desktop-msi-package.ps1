@@ -55,6 +55,21 @@ try {
     & "$PSScriptRoot/check-installer-ui.ps1" -Msi desktop-sequence-fixture.msi
     $fixtureInstaller = New-Object -ComObject WindowsInstaller.Installer
     $fixtureDb = $fixtureInstaller.OpenDatabase((Join-Path $WorkDir 'desktop-sequence-fixture.msi'), 0)
+    $prerequisite = $fixtureDb.OpenView('SELECT `Action`, `Source`, `Target` FROM `CustomAction`')
+    $prerequisite.Execute()
+    $offlineFound = $false
+    while ($row = $prerequisite.Fetch()) {
+        if ($row.StringData(1) -eq 'DownloadAndInvokeBootstrapper') { throw 'Offline MSI must not download WebView' }
+        if ($row.StringData(1) -eq 'InvokeStandalone') {
+            if ($row.StringData(2) -ne 'MicrosoftEdgeWebView2RuntimeInstaller.exe' -or $row.StringData(3) -ne '/silent /install') { throw 'Offline runtime action is not correctly bound' }
+            $offlineFound = $true
+        }
+    }
+    if (-not $offlineFound) { throw 'Missing embedded WebView installation action' }
+    $runtimeSequence = $fixtureDb.OpenView("SELECT ``Condition`` FROM ``InstallExecuteSequence`` WHERE ``Action``='InvokeStandalone'")
+    $runtimeSequence.Execute()
+    $runtimeRow = $runtimeSequence.Fetch()
+    if (-not $runtimeRow -or $runtimeRow.StringData(1).Trim() -ne 'NOT(REMOVE OR WVRTINSTALLED)') { throw 'Runtime must only install when missing and never during uninstall' }
     $guard = $fixtureDb.OpenView('SELECT `Condition` FROM `LaunchCondition`')
     $guard.Execute()
     $guardFound = $false
