@@ -3654,10 +3654,8 @@ pub(crate) async fn system_relaunch_after_startup_repair(
 pub async fn system_restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
-        if swifttunnel_core::is_administrator() {
-            return Ok(());
-        }
-
+        // Repair callers need a new process even when this one is elevated.
+        // Returning success without relaunching leaves their restart UI waiting.
         launch_restart_helper(&app, None).await
     }
 
