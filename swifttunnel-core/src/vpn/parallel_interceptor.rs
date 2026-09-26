@@ -6955,7 +6955,7 @@ fn lookup_tcp_owner_pid(_local_ip: Ipv4Addr, _local_port: u16) -> Option<u32> {
 
 #[cfg(target_os = "windows")]
 fn lookup_process_name_by_pid(pid: u32) -> Option<String> {
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INSUFFICIENT_BUFFER, GetLastError};
     use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
@@ -6965,8 +6965,12 @@ fn lookup_process_name_by_pid(pid: u32) -> Option<String> {
             return None;
         }
 
-        let mut buffer = [0u16; 512];
-        let len = K32GetProcessImageFileNameW(handle, &mut buffer);
+        let mut buffer = vec![0u16; 512];
+        let mut len = K32GetProcessImageFileNameW(handle, &mut buffer);
+        if len == 0 && GetLastError() == ERROR_INSUFFICIENT_BUFFER {
+            buffer.resize(32768, 0);
+            len = K32GetProcessImageFileNameW(handle, &mut buffer);
+        }
         let _ = CloseHandle(handle);
 
         if len == 0 {
@@ -6981,6 +6985,24 @@ fn lookup_process_name_by_pid(pid: u32) -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 fn lookup_process_name_by_pid(_pid: u32) -> Option<String> {
     None
+}
+
+/// Resolve current owners once per PID without retaining names across samples.
+/// A reused PID must not inherit the previous process's tunnel membership.
+fn collect_connection_pid_names(
+    connections: &ahash::AHashMap<ConnectionKey, u32>,
+    mut lookup: impl FnMut(u32) -> Option<String>,
+) -> ahash::AHashMap<u32, String> {
+    let mut attempted = ahash::AHashSet::new();
+    let mut names = ahash::AHashMap::new();
+    for &pid in connections.values() {
+        if attempted.insert(pid) {
+            if let Some(name) = lookup(pid) {
+                names.insert(pid, name);
+            }
+        }
+    }
+    names
 }
 
 /// Cache refresher thread - single writer
@@ -7232,39 +7254,11 @@ fn run_cache_refresher(
                 }
             }
         } else {
-            // Fast path: only look up PIDs from the connection table. Refresh
-            // sysinfo for exactly those PIDs so a reused PID from a decomissioned
-            // tunnel app can't keep its stale name in sysinfo's cache (C7).
-            // This narrow refresh costs one OpenProcess per connection PID
-            // rather than a full process enumeration.
-            let pids_to_refresh: Vec<sysinfo::Pid> = {
-                let mut seen: ahash::AHashSet<u32> =
-                    ahash::AHashSet::with_capacity(connections.len());
-                connections
-                    .values()
-                    .filter(|pid| seen.insert(**pid))
-                    .map(|pid| sysinfo::Pid::from_u32(*pid))
-                    .collect()
-            };
-            if !pids_to_refresh.is_empty() {
-                // `UpdateKind::Always` is load-bearing here: `remove_dead_processes`
-                // only drops PIDs that went dead, but a reused PID stays live
-                // under a new process. Without Always, sysinfo would keep the
-                // old (tunnel-app) exe name for the new (non-tunnel) owner and
-                // the hot path would tunnel that process's traffic.
-                system.refresh_processes_specifics(
-                    ProcessesToUpdate::Some(&pids_to_refresh),
-                    true,
-                    ProcessRefreshKind::new().with_exe(UpdateKind::Always),
-                );
-            }
-            for pid in connections.values() {
-                if !pid_names.contains_key(pid)
-                    && let Some(process) = system.process(sysinfo::Pid::from_u32(*pid))
-                {
-                    pid_names.insert(*pid, process.name().to_string_lossy().into_owned());
-                }
-            }
+            // sysinfo 0.32 queries SystemProcessInformation for the whole
+            // machine even for ProcessesToUpdate::Some. At the 100ms cadence
+            // that repeated enumeration competes with the game. Query only
+            // each current owner's image through a fresh process handle.
+            pid_names = collect_connection_pid_names(&connections, lookup_process_name_by_pid);
         }
 
         // Also log connections owned by tunnel apps
@@ -9648,6 +9642,83 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn connection_name_refresh_deduplicates_even_failed_lookups() {
+        let connections = ahash::AHashMap::from_iter([
+            (
+                ConnectionKey::new(Ipv4Addr::LOCALHOST, 123, Protocol::Tcp),
+                10,
+            ),
+            (
+                ConnectionKey::new(Ipv4Addr::LOCALHOST, 124, Protocol::Tcp),
+                10,
+            ),
+            (
+                ConnectionKey::new(Ipv4Addr::LOCALHOST, 125, Protocol::Udp),
+                20,
+            ),
+        ]);
+        let mut calls = Vec::new();
+        let names = collect_connection_pid_names(&connections, |pid| {
+            calls.push(pid);
+            (pid == 20).then(|| "RobloxPlayerBeta.exe".to_string())
+        });
+        calls.sort();
+        assert_eq!(calls, vec![10, 20]);
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[&20], "RobloxPlayerBeta.exe");
+    }
+
+    #[test]
+    fn connection_name_refresh_does_not_reuse_an_old_tunnel_owner() {
+        let connections = ahash::AHashMap::from_iter([(
+            ConnectionKey::new(Ipv4Addr::LOCALHOST, 123, Protocol::Tcp),
+            10,
+        )]);
+        let first =
+            collect_connection_pid_names(&connections, |_| Some("RobloxPlayerBeta.exe".into()));
+        let reused = collect_connection_pid_names(&connections, |_| Some("other.exe".into()));
+        let gone = collect_connection_pid_names(&connections, |_| None);
+        assert_eq!(first[&10], "RobloxPlayerBeta.exe");
+        assert_eq!(reused[&10], "other.exe");
+        assert!(gone.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Read-only local timing diagnostic, no driver or network changes"]
+    fn measure_connection_owner_refresh_cost() {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let mut system = System::new();
+        let pids = [sysinfo::Pid::from_u32(std::process::id())];
+        let start = Instant::now();
+        for _ in 0..100 {
+            system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&pids),
+                true,
+                ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+            );
+        }
+        let old = start.elapsed();
+        let expected = std::env::current_exe()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let start = Instant::now();
+        for _ in 0..100 {
+            assert_eq!(
+                lookup_process_name_by_pid(std::process::id()).as_deref(),
+                Some(expected.as_str())
+            );
+        }
+        eprintln!(
+            "100 owner refreshes (one PID): sysinfo={old:?}, native={:?}",
+            start.elapsed()
+        );
+    }
+
     use super::*;
     // Tests use AHashMap/AHashSet to match the production ProcessSnapshot types
     use ahash::AHashMap as HashMap;
