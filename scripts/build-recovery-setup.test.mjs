@@ -11,6 +11,7 @@ test("each product and architecture keeps its own payload and recovery asset", (
   for (const flavor of ["desktop", "lite"]) {
     for (const target of ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]) {
       let copied = false;
+      let checked = false;
       const output = buildRecoverySetup({ flavor, target, version: "3.1.6", msi: `${flavor}.msi` }, {
         stat: () => ({ isFile: () => true, size: 2_000_000 }),
         build: (args, env) => {
@@ -19,7 +20,8 @@ test("each product and architecture keeps its own payload and recovery asset", (
           assert.equal(env.SWIFTTUNNEL_SETUP_NAME, flavor === "lite" ? "SwiftTunnelLite-Installer.msi" : "SwiftTunnel-Installer.msi");
           return result;
         },
-        copy: (source, destination) => { assert.equal(source, artifact.executable); copied = true; outputs.add(destination); },
+        checkRuntime: (binary) => { assert.equal(binary, artifact.executable); checked = true; },
+        copy: (source, destination) => { assert.ok(checked); assert.equal(source, artifact.executable); copied = true; outputs.add(destination); },
       });
       assert.ok(copied);
       assert.equal(output.includes("-arm64"), target.startsWith("aarch64"));
@@ -27,6 +29,15 @@ test("each product and architecture keeps its own payload and recovery asset", (
     }
   }
   assert.equal(outputs.size, 4);
+});
+
+test("an unbundled VC runtime dependency prevents releasing the setup", () => {
+  assert.throws(() => buildRecoverySetup({ flavor: "desktop", target: "x86_64-pc-windows-msvc", version: "3.1.6", msi: "desktop.msi" }, {
+    stat: () => ({ isFile: () => true, size: 2_000_000 }),
+    build: () => result,
+    checkRuntime: () => { throw new Error("unbundled Visual C++ runtime"); },
+    copy: () => assert.fail("must not copy a binary that cannot start on clean Windows"),
+  }), /unbundled Visual C\+\+ runtime/);
 });
 
 test("failed builds cannot publish a previous product's executable", () => {

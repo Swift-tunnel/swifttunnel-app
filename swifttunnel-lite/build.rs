@@ -12,6 +12,8 @@ use embed_manifest::manifest::{DpiAwareness, ExecutionLevel};
 use embed_manifest::{embed_manifest, new_manifest};
 
 fn main() {
+    // Like Desktop's tauri-build, avoid requiring a separately installed VC runtime.
+    static_vcruntime::metabuild();
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         // Debug builds run as the invoking user. Elevation is only needed to
         // install and bind the packet filter driver, and an elevated window

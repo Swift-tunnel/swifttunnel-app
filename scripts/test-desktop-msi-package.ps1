@@ -31,6 +31,7 @@ try {
     })
     if ($dlls.Count -ne 1) { throw 'Expected exactly one freshly built action DLL' }
     $dll = $dlls[0]
+    & "$PSScriptRoot/check-vc-runtime.ps1" -Binary $dll
     $pe = [IO.File]::ReadAllBytes($dll)
     $offset = [BitConverter]::ToInt32($pe, 0x3c)
     $machine = [BitConverter]::ToUInt16($pe, $offset + 4)

@@ -607,9 +607,11 @@ jobs:
         run: |
           cargo test -p swifttunnel-msi-actions
           if ($LASTEXITCODE -ne 0) { throw "MSI recovery tests failed" }
+          $targetDir = (cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
           foreach ($t in @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
             cargo build -p swifttunnel-msi-repair --release --target $t
             if ($LASTEXITCODE -ne 0) { throw "MSI repair binary build failed for $t" }
+            & ./scripts/check-vc-runtime.ps1 -Binary "$targetDir/$t/release/swifttunnel-msi-repair.exe"
             & ./scripts/test-desktop-msi-package.ps1 -Target $t -WorkDir "$env:RUNNER_TEMP/desktop-msi-$t"
           }
 

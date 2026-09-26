@@ -91,6 +91,11 @@ const actionDlls = actionOutput.split(/\r?\n/).filter(Boolean).map(line => JSON.
   .flatMap(record => record.filenames.filter(name => name.endsWith(".dll")));
 if (actionDlls.length !== 1) throw new Error("Cargo did not identify one MSI action DLL");
 const actionDll = actionDlls[0];
+for (const binary of [litePath, actionDll]) {
+  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-File",
+    join(repo, "scripts", "check-vc-runtime.ps1"), "-Binary", binary],
+    { cwd: repo, stdio: "inherit", windowsHide: true });
+}
 const pe = readFileSync(actionDll);
 if (pe.readUInt16LE(pe.readUInt32LE(0x3c) + 4) !== (arch === "arm64" ? 0xaa64 : 0x8664)) {
   throw new Error("MSI action DLL architecture mismatch");

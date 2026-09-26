@@ -6,6 +6,8 @@ use std::path::PathBuf;
 use embed_manifest::{embed_manifest, manifest::ExecutionLevel, new_manifest};
 
 fn main() {
+    // Setup must start on a clean Windows installation before prerequisites exist.
+    static_vcruntime::metabuild();
     if std::env::var_os("CARGO_CFG_WINDOWS").is_some() {
         embed_manifest(
             new_manifest("SwiftTunnel.Setup")

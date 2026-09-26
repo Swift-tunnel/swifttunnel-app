@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,9 @@ export function buildRecoverySetup(options, io = {
   }),
   stat: statSync,
   copy: copyFileSync,
+  checkRuntime: (binary) => execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-File",
+    fileURLToPath(new URL("./check-vc-runtime.ps1", import.meta.url)), "-Binary", binary],
+    { stdio: ["ignore", 2, 2], windowsHide: true }),
 }) {
   const plan = setupPlan(options);
   const payload = io.stat(plan.payload);
@@ -56,6 +59,7 @@ export function buildRecoverySetup(options, io = {
   const executable = emittedSetup(result);
   const built = io.stat(executable);
   if (!built.isFile() || built.size < payload.size) throw new Error("Recovery executable lacks its payload");
+  io.checkRuntime(executable);
   io.copy(executable, plan.output);
   return plan.output;
 }

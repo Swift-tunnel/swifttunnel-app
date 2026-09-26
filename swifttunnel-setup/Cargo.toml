@@ -8,6 +8,7 @@ description = "Desktop and Lite setup with a protected persistent MSI source"
 swifttunnel-installer-cache = { path = "../swifttunnel-installer-cache" }
 
 [build-dependencies]
+static_vcruntime = "3"
 embed-manifest = "1.4"
 
 [[bin]]

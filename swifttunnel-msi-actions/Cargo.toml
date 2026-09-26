@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Scoped Desktop and Lite MSI recovery custom actions"
 
+[build-dependencies]
+static_vcruntime = "3"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
