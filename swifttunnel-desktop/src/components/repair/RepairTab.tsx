@@ -33,7 +33,6 @@ import {
   runRepairIssue,
   statusLabel,
   type RepairCenterDeps,
-  type RepairIssueId,
   type RepairReport,
   type RepairStatus,
 } from "../../lib/repairCenter";
@@ -43,21 +42,9 @@ import { resetTranslationCache } from "../../lib/i18n";
 import type { Config } from "../../lib/types";
 import { Button, Spinner, Readout, StatRail, Icon, Watermark } from "../ui";
 
+import { formatRunForSupport, parseRepairRun, summarizeRepairRun, type RepairItemResult, type RepairRun } from "../../lib/repairRun";
+
 const LAST_REPAIR_STORAGE_KEY = "swifttunnel.lastRepairAll.v1";
-
-interface RepairItemResult {
-  id: RepairIssueId;
-  label: string;
-  status: RepairStatus;
-  summary: string;
-  changed: boolean;
-}
-
-interface RepairRun {
-  overall: RepairStatus;
-  ranAt: number;
-  items: RepairItemResult[];
-}
 
 const repairDeps: RepairCenterDeps = {
   now: Date.now,
@@ -133,9 +120,7 @@ export function RepairTab() {
         items.push({
           id: issue.id,
           label: issue.label,
-          status: report.status,
-          summary: report.summary,
-          changed: report.changed,
+          ...report,
         });
         setProgress(items.length);
       }
@@ -291,7 +276,7 @@ export function RepairTab() {
               Repair
             </h2>
             <p className="mt-2 text-[12.5px] leading-snug text-text-muted">
-              Repairs and resets SwiftTunnel completely.
+              Checks common problems and repairs them where possible. Resets SwiftTunnel Roblox tweaks and overlay layout.
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -345,7 +330,7 @@ export function RepairTab() {
             <Readout
               key="checks"
               size="md"
-              value={lastRun ? String(lastRun.items.length) : "—"}
+              value={lastRun ? String(lastRun.items.length) : "-"}
               label="Checks"
             />,
             <Readout
@@ -356,7 +341,7 @@ export function RepairTab() {
                   ? String(
                       lastRun.items.filter((i) => i.status === "fixed").length,
                     )
-                  : "—"
+                  : "-"
               }
               label="Fixed"
             />,
@@ -394,21 +379,37 @@ export function RepairTab() {
         ) : (
           <>
             <p className="mt-2.5 text-[13px] font-medium text-text-primary">
-              {summarize(lastRun)}
+              {summarizeRepairRun(lastRun)}
             </p>
             <div className="mt-3 overflow-hidden rounded-[10px] border border-[color:var(--color-border-subtle)] divide-y divide-[color:var(--color-border-subtle)]">
               {lastRun.items.map((item) => (
                 <div
                   key={item.id}
-                  className="flex items-center gap-3 px-3.5 py-2.5"
+                  className="flex items-start gap-3 px-3.5 py-2.5"
                 >
                   <div className="min-w-0 flex-1">
                     <div className="text-[12px] font-medium text-text-primary">
                       {item.label}
                     </div>
-                    <div className="truncate text-[10.5px] leading-snug text-text-muted">
+                    <div className="break-words text-[10.5px] leading-snug text-text-muted">
                       {item.summary}
                     </div>
+                    {item.nextStep && (
+                      <p className="mt-1 break-words text-[11px] text-text-secondary">{item.nextStep}</p>
+                    )}
+                    {item.entries.length > 0 && (
+                      <details className="mt-2 text-[11px] text-text-muted">
+                        <summary className="cursor-pointer">Details</summary>
+                        <dl className="mt-1 space-y-1">
+                          {item.entries.map((entry, index) => (
+                            <div key={index} className="break-words">
+                              <dt className="inline font-medium">{entry.label}: </dt>
+                              <dd className="inline">{entry.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </details>
+                    )}
                   </div>
                   <span
                     className="shrink-0 text-[9.5px] font-semibold uppercase tracking-[0.08em]"
@@ -560,37 +561,6 @@ function ChevronIcon({ open }: { open: boolean }) {
   );
 }
 
-function summarize(run: RepairRun): string {
-  const count = (set: RepairStatus[]) =>
-    run.items.filter((i) => set.includes(i.status)).length;
-  const parts: string[] = [];
-  const fixed = count(["fixed"]);
-  const healthy = count(["healthy", "checked"]);
-  const partial = count(["partial"]);
-  const reboot = count(["needs_reboot"]);
-  const failed = count(["failed"]);
-  if (fixed) parts.push(`${fixed} fixed`);
-  if (healthy) parts.push(`${healthy} healthy`);
-  if (partial) parts.push(`${partial} partial`);
-  if (reboot) parts.push(`${reboot} need reboot`);
-  if (failed) parts.push(`${failed} failed`);
-  return `Ran ${run.items.length} repairs${
-    parts.length ? `, ${parts.join(", ")}` : ""
-  }.`;
-}
-
-function formatRunForSupport(run: RepairRun): string {
-  return [
-    "SwiftTunnel Repair (all)",
-    `Overall: ${statusLabel(run.overall)}`,
-    `Last run: ${new Date(run.ranAt).toLocaleString()}`,
-    "",
-    ...run.items.map(
-      (i) => `- ${i.label}: ${statusLabel(i.status)}, ${i.summary}`,
-    ),
-  ].join("\n");
-}
-
 function WrenchIcon() {
   return (
     <Icon name="repair" size={15} strokeWidth={2} style={{ color: "#0a0a0a" }} />
@@ -625,18 +595,7 @@ function saveRepairRun(run: RepairRun) {
 
 function loadRepairRun(): RepairRun | null {
   try {
-    const raw = localStorage.getItem(LAST_REPAIR_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      typeof (parsed as RepairRun).ranAt !== "number" ||
-      !Array.isArray((parsed as RepairRun).items)
-    ) {
-      return null;
-    }
-    return parsed as RepairRun;
+    return parseRepairRun(localStorage.getItem(LAST_REPAIR_STORAGE_KEY));
   } catch {
     return null;
   }
