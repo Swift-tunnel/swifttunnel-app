@@ -2,14 +2,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../lib/settings";
 import type { AppSettings } from "../lib/types";
 
-const { settingsLoad, settingsSave } = vi.hoisted(() => ({
+const { settingsLoad, settingsSave, boostResetRobloxSettings } = vi.hoisted(() => ({
   settingsLoad: vi.fn(),
   settingsSave: vi.fn(),
+  boostResetRobloxSettings: vi.fn(),
 }));
 
 vi.mock("../lib/commands", () => ({
   settingsLoad,
   settingsSave,
+  boostResetRobloxSettings,
 }));
 
 async function loadStore() {
@@ -21,6 +23,7 @@ describe("stores/settingsStore", () => {
   beforeEach(() => {
     settingsLoad.mockReset();
     settingsSave.mockReset();
+    boostResetRobloxSettings.mockReset();
   });
 
   it("loads settings and sets activeTab from current_tab", async () => {
@@ -86,6 +89,7 @@ describe("stores/settingsStore", () => {
     const useSettingsStore = await loadStore();
     useSettingsStore.getState().update({ minimize_to_tray: false });
     const first = useSettingsStore.getState().save();
+    await Promise.resolve(); // Let the first write enter IPC before the next edit.
     useSettingsStore.getState().update({ minimize_to_tray: true });
     const second = useSettingsStore.getState().save();
     await Promise.resolve();
@@ -104,6 +108,48 @@ describe("stores/settingsStore", () => {
     await Promise.all([first, second]);
     expect(settingsSave).toHaveBeenCalledTimes(2);
     expect(settingsSave.mock.calls[1][0].minimize_to_tray).toBe(true);
+  });
+
+  it("does not let a save queued during repair restore the old Roblox config", async () => {
+    let finishReset!: () => void;
+    const gate = new Promise<void>((resolve) => { finishReset = resolve; });
+    boostResetRobloxSettings.mockImplementation(async () => {
+      await gate;
+      return structuredClone(DEFAULT_SETTINGS.config.roblox_settings);
+    });
+    settingsSave.mockResolvedValue(undefined);
+    const store = await loadStore();
+    store.getState().update({ config: {
+      ...DEFAULT_SETTINGS.config,
+      roblox_settings: { ...DEFAULT_SETTINGS.config.roblox_settings, ultraboost: true },
+    } });
+    store.getState().setTab("repair");
+    const reset = store.getState().resetRobloxSettings();
+    await Promise.resolve();
+    store.getState().update({ minimize_to_tray: false });
+    const save = store.getState().save();
+    await Promise.resolve();
+    expect(settingsSave).not.toHaveBeenCalled();
+    finishReset();
+    await Promise.all([reset, save]);
+    expect(store.getState().settings.config.roblox_settings.ultraboost).toBe(false);
+    expect(store.getState().activeTab).toBe("repair");
+    expect(settingsSave.mock.calls[0][0].config.roblox_settings.ultraboost).toBe(false);
+    expect(settingsSave.mock.calls[0][0].minimize_to_tray).toBe(false);
+  });
+
+  it("surfaces native reset failure and keeps preferences retryable", async () => {
+    boostResetRobloxSettings.mockRejectedValue(new Error("FFlag file is locked"));
+    settingsSave.mockResolvedValue(undefined);
+    const store = await loadStore();
+    store.getState().update({ config: {
+      ...DEFAULT_SETTINGS.config,
+      roblox_settings: { ...DEFAULT_SETTINGS.config.roblox_settings, ultraboost: true },
+    } });
+    await expect(store.getState().resetRobloxSettings()).rejects.toThrow("FFlag file is locked");
+    expect(store.getState().settings.config.roblox_settings.ultraboost).toBe(true);
+    await store.getState().save();
+    expect(settingsSave).toHaveBeenCalledTimes(1);
   });
 
   it("migrates legacy master network boost into current per-toggle boosts", async () => {

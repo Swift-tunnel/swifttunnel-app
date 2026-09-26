@@ -3,7 +3,6 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useToastStore } from "../../stores/toastStore";
 import { formatErrorMessage } from "../../lib/errors";
 import {
-  boostResetRobloxSettings,
   serverGetLatencies,
   serverRefresh,
   systemCheckDriver,
@@ -48,7 +47,7 @@ const LAST_REPAIR_STORAGE_KEY = "swifttunnel.lastRepairAll.v1";
 
 const repairDeps: RepairCenterDeps = {
   now: Date.now,
-  boostResetRobloxSettings,
+  boostResetRobloxSettings: () => useSettingsStore.getState().resetRobloxSettings(),
   i18nResetCache: resetTranslationCache,
   overlayResetLayout: async () => {
     const store = useSettingsStore.getState();

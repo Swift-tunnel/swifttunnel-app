@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { AppSettings, TabId } from "../lib/types";
-import { settingsLoad, settingsSave } from "../lib/commands";
+import { boostResetRobloxSettings, settingsLoad, settingsSave } from "../lib/commands";
 import { DEFAULT_SETTINGS, mergeAppSettings } from "../lib/settings";
 import { reportError } from "../lib/errors";
 import { NAV_ITEMS } from "../components/shell/nav";
@@ -29,6 +29,7 @@ interface SettingsStore {
   // Actions
   load: () => Promise<void>;
   save: () => Promise<void>;
+  resetRobloxSettings: () => Promise<void>;
   update: (partial: Partial<AppSettings>) => void;
   setTab: (tab: TabId) => void;
 }
@@ -61,10 +62,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   save: async () => {
-    const { settings, activeTab } = get();
-    // Capture at request time, just as IPC serialization did before queueing.
-    const snapshot = structuredClone({ ...settings, current_tab: activeTab });
-    const write = saveTail.then(() => settingsSave(snapshot));
+    // Read after earlier writes and native resets finish. A queued save must
+    // not restore the pre-reset config captured while Repair was still busy.
+    const write = saveTail.then(() => {
+      const { settings, activeTab } = get();
+      return settingsSave(structuredClone({ ...settings, current_tab: activeTab }));
+    });
     // A failed write must not poison the queue or drop subsequent changes.
     saveTail = write.catch(() => {});
     try {
@@ -72,6 +75,20 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     } catch (error) {
       reportError("Failed to save settings", error);
     }
+  },
+
+  resetRobloxSettings: async () => {
+    const reset = saveTail.then(async () => {
+      const roblox_settings = await boostResetRobloxSettings();
+      // Refresh only the reset section, preserving other edits and this tab.
+      set((state) => ({ settings: {
+        ...state.settings,
+        config: { ...state.settings.config, roblox_settings },
+      } }));
+    });
+    saveTail = reset.catch(() => {});
+    // Repair must see a failed reset instead of reporting success.
+    await reset;
   },
 
   update: (partial) => {

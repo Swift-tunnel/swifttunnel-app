@@ -175,6 +175,18 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
 }
 
 describe("repair center logic", () => {
+  it("reports a failed Roblox reset instead of claiming it was fixed", async () => {
+    const deps = makeDeps({
+      boostResetRobloxSettings: vi.fn().mockRejectedValue(new Error("Could not restore settings backup")),
+    });
+    const settings = structuredClone(DEFAULT_SETTINGS);
+    settings.config.roblox_settings.ultraboost = true;
+    const report = await runRepairIssue("roblox_reset", deps, { settings });
+    expect(report.status).toBe("failed");
+    expect(JSON.stringify(report)).toContain("Could not restore settings backup");
+    expect(settings.config.roblox_settings.ultraboost).toBe(true);
+  });
+
   it("runs internet recovery while disconnected even when no error state is present", async () => {
     const deps = makeDeps({
       systemRepairNetwork: vi.fn().mockResolvedValue({

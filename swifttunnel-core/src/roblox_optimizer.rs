@@ -1131,8 +1131,20 @@ impl RobloxOptimizer {
     /// GlobalBasicSettings backup exists, restore it. Backs the Repair tab's
     /// "reset Roblox settings" fix.
     pub fn reset_swifttunnel_changes(&self) -> Result<()> {
-        if let Err(e) = self.remove_all_fflags() {
-            warn!("reset: could not remove FFlags: {}", e);
+        self.reset_swifttunnel_changes_in_paths(
+            Self::get_client_settings_paths_for_removal(),
+            || Self::sync_gpu_preference(false),
+        )
+    }
+
+    fn reset_swifttunnel_changes_in_paths(
+        &self,
+        client_settings_paths: Vec<PathBuf>,
+        restore_gpu: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let mut failures = Vec::new();
+        if let Err(e) = self.remove_all_fflags_in_paths(client_settings_paths) {
+            failures.push(format!("Could not remove FFlags: {e}"));
         }
 
         if self.backup_path.exists() {
@@ -1141,12 +1153,18 @@ impl RobloxOptimizer {
                 let _ = Self::remove_readonly_path(&settings_path);
             }
             if let Err(e) = fs::copy(&self.backup_path, &settings_path) {
-                warn!("reset: could not restore settings backup: {}", e);
+                failures.push(format!("Could not restore settings backup: {e}"));
             }
         }
 
-        let _ = Self::sync_gpu_preference(false);
-        Ok(())
+        if let Err(e) = restore_gpu() {
+            failures.push(format!("Could not restore GPU preference: {e}"));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!("Roblox reset incomplete: {}", failures.join("; "))
+        }
     }
 
     /// Put the Roblox client back to stock, whoever changed it.
@@ -2821,6 +2839,90 @@ mod tests {
             settings_path,
             backup_path,
         }
+    }
+
+    #[test]
+    fn repair_reset_reports_failed_steps_and_continues_other_cleanup() {
+        let dir = std::env::temp_dir().join(format!(
+            "st-repair-reports_failed_steps_and_continues_other_cleanup-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("GlobalBasicSettings.xml");
+        fs::write(&settings, "changed").unwrap();
+        let opt = optimizer_with_path(settings.clone());
+        fs::write(&opt.backup_path, "original").unwrap();
+        let flags = dir.join("ClientSettings");
+        fs::create_dir(&flags).unwrap();
+        fs::write(flags.join("ClientAppSettings.json"), "invalid JSON").unwrap();
+        let error = opt
+            .reset_swifttunnel_changes_in_paths(vec![flags], || {
+                anyhow::bail!("registry unavailable")
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Could not remove FFlags"));
+        assert!(error.contains("registry unavailable"));
+        assert_eq!(fs::read_to_string(settings).unwrap(), "original");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repair_reset_reports_backup_copy_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "st-repair-reports_backup_copy_failure-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("GlobalBasicSettings.xml");
+        fs::create_dir(&settings).unwrap(); // An existing directory cannot be replaced by copy.
+        let opt = optimizer_with_path(settings);
+        fs::write(&opt.backup_path, "original").unwrap();
+        let mut gpu_attempted = false;
+        let result = opt.reset_swifttunnel_changes_in_paths(vec![], || {
+            gpu_attempted = true;
+            Ok(())
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Could not restore settings backup")
+        );
+        assert!(gpu_attempted);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn repair_reset_restores_backup_and_removes_only_owned_flags() {
+        let dir = std::env::temp_dir().join(format!(
+            "st-repair-restores_backup_and_removes_only_owned_flags-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("GlobalBasicSettings.xml");
+        fs::write(&settings, "changed").unwrap();
+        let opt = optimizer_with_path(settings.clone());
+        fs::write(&opt.backup_path, "original").unwrap();
+        let flags = dir.join("ClientSettings");
+        fs::create_dir(&flags).unwrap();
+        let file = flags.join("ClientAppSettings.json");
+        fs::write(
+            &file,
+            serde_json::json!({
+                RobloxOptimizer::FPS_UNLOCK_FFLAG: "240",
+                "UserFlag": "keep"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        opt.reset_swifttunnel_changes_in_paths(vec![flags], || Ok(()))
+            .unwrap();
+        assert_eq!(fs::read_to_string(settings).unwrap(), "original");
+        let remaining: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(file).unwrap()).unwrap();
+        assert_eq!(remaining, serde_json::json!({"UserFlag": "keep"}));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// The backup is the original, not the previous apply.

@@ -1,6 +1,7 @@
 // Mock @tauri-apps/api/core for browser preview
 
 import type { AppSettings } from "../lib/types";
+import { DEFAULT_SETTINGS } from "../lib/settings";
 
 const MOCK_SETTINGS: AppSettings = {
   theme: "dark",
@@ -302,6 +303,10 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   },
 
   boost_update_config: () => ({ warnings: [], applied_config: MOCK_SETTINGS.config }),
+  boost_reset_roblox_settings: () => {
+    MOCK_SETTINGS.config.roblox_settings = structuredClone(DEFAULT_SETTINGS.config.roblox_settings);
+    return MOCK_SETTINGS.config.roblox_settings;
+  },
   boost_sync_effective_config: () => ({
     warnings: [],
     applied_config: MOCK_SETTINGS.config,

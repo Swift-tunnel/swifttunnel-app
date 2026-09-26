@@ -143,7 +143,7 @@ export const boostRestartRoblox = () => invoke<void>("boost_restart_roblox");
 export const boostCloseRoblox = () => invoke<void>("boost_close_roblox");
 
 export const boostResetRobloxSettings = () =>
-  invoke<void>("boost_reset_roblox_settings");
+  invoke<AppSettings["config"]["roblox_settings"]>("boost_reset_roblox_settings");
 
 /**
  * Delete every FFlag file on the machine, ours and any launcher's.
