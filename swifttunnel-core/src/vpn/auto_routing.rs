@@ -45,16 +45,21 @@ const MAX_PENDING_LOOKUPS: usize = 100;
 /// Cap on retained auto-routing events shown in the UI log.
 const MAX_EVENT_LOG_ENTRIES: usize = 20;
 
+#[derive(Clone)]
+struct RelaySelection {
+    region: String,
+    address: Option<SocketAddr>,
+}
+
 /// Auto-routing state
 pub struct AutoRouter {
     /// Whether auto-routing is enabled
     enabled: AtomicBool,
     /// Current detected Roblox game server region
     current_game_region: RwLock<Option<RobloxRegion>>,
-    /// Current relay server address
-    current_relay_addr: RwLock<Option<SocketAddr>>,
-    /// Current SwiftTunnel region name (e.g. "singapore")
-    current_st_region: RwLock<String>,
+    /// Region and endpoint form one selection. Renewal must never obtain a
+    /// ticket for a new region and send it to the old region's endpoint.
+    relay_selection: RwLock<RelaySelection>,
     /// Last time a relay switch occurred
     last_switch_time: RwLock<Instant>,
     /// Number of switches in the current minute window
@@ -125,8 +130,10 @@ impl AutoRouter {
         Self {
             enabled: AtomicBool::new(enabled),
             current_game_region: RwLock::new(None),
-            current_relay_addr: RwLock::new(None),
-            current_st_region: RwLock::new(initial_region.to_string()),
+            relay_selection: RwLock::new(RelaySelection {
+                region: initial_region.to_string(),
+                address: None,
+            }),
             // checked_sub avoids a debug-build panic when the process has
             // been alive for less than MIN_SWITCH_INTERVAL.
             last_switch_time: RwLock::new(
@@ -320,8 +327,10 @@ impl AutoRouter {
 
     /// Set the current relay address (called on connect)
     pub fn set_current_relay(&self, addr: SocketAddr, region: &str) {
-        *self.current_relay_addr.write() = Some(addr);
-        *self.current_st_region.write() = region.to_string();
+        *self.relay_selection.write() = RelaySelection {
+            region: region.to_string(),
+            address: Some(addr),
+        };
         log::info!("Auto-routing: Current relay set to {} ({})", addr, region);
     }
 
@@ -338,12 +347,14 @@ impl AutoRouter {
 
     /// Get the current SwiftTunnel region
     pub fn current_region(&self) -> String {
-        self.current_st_region.read().clone()
+        self.relay_selection.read().region.clone()
     }
 
     pub fn current_relay(&self) -> Option<(String, SocketAddr)> {
-        let addr = *self.current_relay_addr.read();
-        addr.map(|addr| (self.current_st_region.read().clone(), addr))
+        let selection = self.relay_selection.read();
+        selection
+            .address
+            .map(|addr| (selection.region.clone(), addr))
     }
 
     /// Get recent auto-routing events for UI display
@@ -722,7 +733,7 @@ impl AutoRouter {
             let mut log = self.event_log.write();
             log.push_back(AutoRoutingEvent {
                 timestamp: Instant::now(),
-                from_region: self.current_st_region.read().clone(),
+                from_region: self.relay_selection.read().region.clone(),
                 to_region: "BYPASS".to_string(),
                 game_server_region: game_region.display_name().to_string(),
                 reason: format!(
@@ -747,8 +758,9 @@ impl AutoRouter {
         let pinned_server = pinned_server.as_deref();
 
         let servers = self.available_servers.read();
-        let current_st_region = self.current_st_region.read().clone();
-        let current_relay_addr = *self.current_relay_addr.read();
+        let selection = self.relay_selection.read().clone();
+        let current_st_region = selection.region;
+        let current_relay_addr = selection.address;
         let candidates =
             super::connection::relay_candidates_for_region(best_st_region, &servers, pinned_server);
         if candidates.is_empty() {
@@ -808,7 +820,7 @@ impl AutoRouter {
             return None;
         }
 
-        let current_st_region = self.current_st_region.read().clone();
+        let current_st_region = self.relay_selection.read().region.clone();
 
         if self.record_switch(
             &current_st_region,
@@ -834,8 +846,9 @@ impl AutoRouter {
         new_addr: SocketAddr,
         latency_improvement_ms: Option<u32>,
     ) -> bool {
-        let current_region = self.current_st_region.read().clone();
-        let current_addr = *self.current_relay_addr.read();
+        let selection = self.relay_selection.read().clone();
+        let current_region = selection.region;
+        let current_addr = selection.address;
         if current_region == to_region && current_addr == Some(new_addr) {
             return false;
         }
@@ -871,8 +884,9 @@ impl AutoRouter {
         new_addr: SocketAddr,
         latency_improvement_ms: Option<u32>,
     ) -> bool {
-        let current_region = self.current_st_region.read().clone();
-        let current_addr = *self.current_relay_addr.read();
+        let selection = self.relay_selection.read().clone();
+        let current_region = selection.region;
+        let current_addr = selection.address;
         if current_region == to_region && current_addr == Some(new_addr) {
             return false;
         }
@@ -912,8 +926,10 @@ impl AutoRouter {
         }
 
         *self.last_switch_time.write() = now;
-        *self.current_st_region.write() = to_region.to_string();
-        *self.current_relay_addr.write() = Some(new_addr);
+        *self.relay_selection.write() = RelaySelection {
+            region: to_region.to_string(),
+            address: Some(new_addr),
+        };
         *self.current_game_region.write() = Some(game_region.clone());
 
         let reason = if same_region_upgrade {
@@ -971,7 +987,7 @@ impl AutoRouter {
     /// Reset state (call on disconnect)
     pub fn reset(&self) {
         *self.current_game_region.write() = None;
-        *self.current_relay_addr.write() = None;
+        self.relay_selection.write().address = None;
         self.seen_game_servers.write().clear();
         self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
         *self.active_game_server_ip.write() = None;
@@ -1057,6 +1073,38 @@ mod tests {
         // Should always return NoAction when disabled
         let action = router.evaluate_game_server(Ipv4Addr::new(128, 116, 102, 1));
         assert!(matches!(action, AutoRoutingAction::NoAction));
+    }
+
+    #[test]
+    fn relay_snapshot_never_pairs_one_regions_ticket_with_another_address() {
+        let router = std::sync::Arc::new(AutoRouter::new(true, "first"));
+        let first: SocketAddr = "192.0.2.1:51821".parse().unwrap();
+        let second: SocketAddr = "192.0.2.2:51821".parse().unwrap();
+        router.set_current_relay(first, "first");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writer = {
+            let router = router.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..50_000 {
+                    router.set_current_relay(second, "second");
+                    router.set_current_relay(first, "first");
+                }
+            })
+        };
+        barrier.wait();
+        let mut mismatched = false;
+        for _ in 0..100_000 {
+            let (region, addr) = router.current_relay().unwrap();
+            mismatched |=
+                !((region == "first" && addr == first) || (region == "second" && addr == second));
+        }
+        writer.join().unwrap();
+        assert!(
+            !mismatched,
+            "renewal received a region/address pair that was never selected"
+        );
     }
 
     #[test]
