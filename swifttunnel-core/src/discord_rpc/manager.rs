@@ -82,6 +82,14 @@ impl DiscordManager {
             // Block until an activity message arrives (no polling)
             match rx.recv() {
                 Ok(activity) => {
+                    // Shutdown must not start a fresh pipe connection first.
+                    if matches!(activity, DiscordActivity::Shutdown) {
+                        if let Some(ref mut c) = client {
+                            let _ = c.clear_activity();
+                            let _ = c.close();
+                        }
+                        return;
+                    }
                     // Try to connect if not connected and enough time has passed
                     if client.is_none() && last_connect_attempt.elapsed() >= RECONNECT_INTERVAL {
                         last_connect_attempt = Instant::now();
@@ -97,14 +105,7 @@ impl DiscordManager {
                     }
 
                     match activity {
-                        DiscordActivity::Shutdown => {
-                            info!("Discord RPC thread shutting down");
-                            if let Some(ref mut c) = client {
-                                let _ = c.clear_activity();
-                                let _ = c.close();
-                            }
-                            return;
-                        }
+                        DiscordActivity::Shutdown => unreachable!("handled before connecting"),
                         DiscordActivity::Clear => {
                             if let Some(ref mut c) = client {
                                 match c.clear_activity() {
@@ -359,15 +360,20 @@ impl Drop for DiscordManager {
         // Signal shutdown to the background thread
         let _ = self.tx.send(DiscordActivity::Shutdown);
 
-        // Wait for thread to finish with proper timeout
+        // A stalled Discord named pipe must not hang exit or a repair restart.
         if let Some(handle) = self.thread_handle.take() {
-            // Use a separate thread to join with timeout
-            let join_result = std::thread::spawn(move || handle.join());
-
-            // Wait up to 500ms for clean shutdown
-            match join_result.join() {
-                Ok(_) => debug!("Discord RPC thread shut down cleanly"),
-                Err(_) => warn!("Discord RPC thread did not shut down cleanly"),
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while !handle.is_finished() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                match handle.join() {
+                    Ok(()) => debug!("Discord RPC thread shut down cleanly"),
+                    Err(_) => warn!("Discord RPC thread panicked during shutdown"),
+                }
+            } else {
+                // Dropping the handle detaches it; do not create another waiter.
+                warn!("Discord RPC shutdown exceeded 500ms; continuing app shutdown");
             }
         }
     }
@@ -376,6 +382,28 @@ impl Drop for DiscordManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drop_does_not_wait_forever_for_a_stalled_rpc_worker() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut manager = DiscordManager::new(false);
+        manager.thread_handle = Some(thread::spawn(move || {
+            let _ = release_rx.recv();
+        }));
+        let dropper = thread::spawn(move || {
+            drop(manager);
+            let _ = done_tx.send(());
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        // Release even on failure, so the old implementation fails rather than hanging tests.
+        let _ = release_tx.send(());
+        dropper.join().unwrap();
+        assert!(
+            completed,
+            "Discord shutdown waited indefinitely for a blocked pipe worker"
+        );
+    }
 
     #[test]
     fn test_manager_creation() {
