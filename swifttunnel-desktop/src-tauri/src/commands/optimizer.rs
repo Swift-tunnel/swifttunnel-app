@@ -26,30 +26,17 @@ pub async fn boost_get_metrics(
 ) -> Result<PerformanceMetricsResponse, String> {
     let performance_monitor = state.performance_monitor.clone();
     let fps_monitor = state.fps_monitor.clone();
-    let settings_wants_fps = {
-        let settings = state.settings.lock();
-        overlay_wants_metric(&settings, "fps")
-    };
-    let fps_enabled = overlay_wants_fps.unwrap_or(settings_wants_fps);
     tauri::async_runtime::spawn_blocking(move || {
         let mut monitor = performance_monitor.lock();
         let mut metrics = swifttunnel_core::structs::PerformanceMetrics::default();
         monitor.update_metrics(&mut metrics);
 
-        // Point the ETW present counter at the live Roblox PID (or clear it),
-        // then read presents/sec. This is the real in-game FPS, measured from
-        // outside the process — no injection, anti-cheat safe.
-        fps_monitor.set_target_pid(if metrics.roblox_running {
-            metrics.process_id.unwrap_or(0)
-        } else {
-            0
-        });
-        fps_monitor.set_enabled(fps_enabled);
-        let fps = if metrics.roblox_running {
-            fps_monitor.current_fps() as f32
-        } else {
-            0.0
-        };
+        // Only startup and settings changes own ETW enablement. A slow poll
+        // completing after disable must not start a new trace behind the UI.
+        let fps = fps_monitor.sample_for_process(
+            metrics.process_id.filter(|_| metrics.roblox_running),
+            overlay_wants_fps.unwrap_or(true),
+        ) as f32;
 
         PerformanceMetricsResponse {
             fps,
@@ -64,19 +51,6 @@ pub async fn boost_get_metrics(
     })
     .await
     .map_err(|e| format!("Metrics task failed: {}", e))
-}
-
-fn overlay_wants_metric(
-    settings: &swifttunnel_core::settings::AppSettings,
-    metric_id: &str,
-) -> bool {
-    settings.config.overlay.enabled
-        && settings
-            .config
-            .overlay
-            .metrics
-            .iter()
-            .any(|metric| metric == metric_id)
 }
 
 #[derive(Serialize)]

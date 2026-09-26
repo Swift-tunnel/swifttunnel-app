@@ -206,6 +206,17 @@ impl FpsMonitor {
             .map(|active| active.shared.current_fps.load(Ordering::Acquire))
             .unwrap_or(0)
     }
+
+    /// A metrics poll may update its target and read FPS, but must not change
+    /// trace ownership. In-flight polls can finish after settings disable it.
+    pub fn sample_for_process(&self, pid: Option<u32>, requested: bool) -> u32 {
+        self.set_target_pid(pid.unwrap_or(0));
+        if requested && pid.is_some() {
+            self.current_fps()
+        } else {
+            0
+        }
+    }
 }
 
 impl Default for FpsMonitor {
@@ -516,6 +527,27 @@ impl FpsMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_metrics_poll_cannot_restart_a_disabled_trace() {
+        let monitor = FpsMonitor::inert_active();
+        monitor.set_enabled(false);
+        assert_eq!(monitor.sample_for_process(Some(1234), true), 0);
+        assert!(monitor.runtime.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn non_fps_poll_does_not_stop_another_consumers_trace() {
+        let monitor = FpsMonitor::inert_active();
+        monitor.set_target_pid(1234);
+        monitor
+            .test_shared()
+            .current_fps
+            .store(120, Ordering::Release);
+        assert_eq!(monitor.sample_for_process(Some(1234), false), 0);
+        assert!(monitor.runtime.lock().unwrap().is_some());
+        assert_eq!(monitor.sample_for_process(Some(1234), true), 120);
+    }
 
     #[test]
     fn switching_target_resets_the_window() {
