@@ -28,7 +28,7 @@ interface SettingsStore {
 
   // Actions
   load: () => Promise<void>;
-  save: () => Promise<void>;
+  save: (propagateError?: boolean) => Promise<void>;
   resetRobloxSettings: () => Promise<void>;
   update: (partial: Partial<AppSettings>) => void;
   setTab: (tab: TabId) => void;
@@ -61,7 +61,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
-  save: async () => {
+  save: async (propagateError = false) => {
     // Read after earlier writes and native resets finish. A queued save must
     // not restore the pre-reset config captured while Repair was still busy.
     const write = saveTail.then(() => {
@@ -74,6 +74,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       await write;
     } catch (error) {
       reportError("Failed to save settings", error);
+      if (propagateError) throw error;
     }
   },
 

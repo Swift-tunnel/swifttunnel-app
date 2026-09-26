@@ -152,6 +152,14 @@ describe("stores/settingsStore", () => {
     expect(settingsSave).toHaveBeenCalledTimes(1);
   });
 
+  it("lets Repair observe a failed settings save without poisoning subsequent saves", async () => {
+    settingsSave.mockRejectedValueOnce(new Error("settings disk full")).mockResolvedValueOnce(undefined);
+    const store = await loadStore();
+    await expect(store.getState().save(true)).rejects.toThrow("settings disk full");
+    await expect(store.getState().save(true)).resolves.toBeUndefined();
+    expect(settingsSave).toHaveBeenCalledTimes(2);
+  });
+
   it("migrates legacy master network boost into current per-toggle boosts", async () => {
     settingsLoad.mockResolvedValue({
       ...DEFAULT_SETTINGS,

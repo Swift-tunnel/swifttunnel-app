@@ -62,7 +62,7 @@ const repairDeps: RepairCenterDeps = {
       },
     };
     store.update({ config });
-    await store.save();
+    await store.save(true);
   },
   serverGetLatencies,
   serverRefresh,
