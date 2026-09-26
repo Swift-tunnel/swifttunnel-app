@@ -87,6 +87,7 @@ const MAX_DETECTED_GAME_SERVERS: usize = 10_000;
 /// Realtek RTL8821CE), we rebind fresh handles up to this many times before
 /// escalating to `workers_panicked`. Any successful read resets the counter.
 const READER_MAX_REBINDS: u32 = 3;
+const READER_REACQUIRE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Backoff between rebind attempts. Short at first (transient blip) then
 /// grows to give NDIS a moment to resettle after a driver reset.
@@ -179,6 +180,7 @@ struct RebindState {
     attempts: u32,
     max_attempts: u32,
     backoffs: &'static [Duration],
+    reacquire_started: Option<Instant>,
 }
 
 impl RebindState {
@@ -192,6 +194,7 @@ impl RebindState {
             attempts: 0,
             max_attempts,
             backoffs,
+            reacquire_started: None,
         }
     }
 
@@ -204,7 +207,24 @@ impl RebindState {
     fn record_success(&mut self) -> u32 {
         let prior = self.attempts;
         self.attempts = 0;
+        self.reacquire_started = None;
         prior
+    }
+
+    /// Missing adapter handles have a separate settling window. Counting only
+    /// read errors cannot bound this path because no further reads can occur.
+    fn record_acquire_error(&mut self, now: Instant, stop_requested: bool) -> RebindDecision {
+        if stop_requested {
+            return RebindDecision::Stop;
+        }
+        let started = *self.reacquire_started.get_or_insert(now);
+        let remaining =
+            READER_REACQUIRE_TIMEOUT.saturating_sub(now.saturating_duration_since(started));
+        if remaining.is_zero() {
+            RebindDecision::Fatal
+        } else {
+            RebindDecision::Backoff(remaining.min(Duration::from_millis(200)))
+        }
     }
 
     /// Call on a read error. `stop_requested` is the current value of the
@@ -6027,9 +6047,9 @@ fn run_packet_reader(
         }
 
         // Re-acquire handles if a prior read error dropped them. Acquire
-        // failures here are transient (e.g. the device list hasn't re-settled
-        // after a driver reset) and intentionally don't advance the rebind
-        // budget (see `RebindState` for the accounting).
+        // failures may be transient after a driver reset. They have a separate
+        // settling deadline since the read-error budget cannot advance while
+        // there is no handle to read from.
         if bindings.is_none() {
             match ReaderBindings::acquire(physical_name.as_ref()) {
                 Ok(new) => {
@@ -6041,15 +6061,27 @@ fn run_packet_reader(
                     bindings = Some(new);
                 }
                 Err(acquire_err) => {
+                    let backoff = match rebind
+                        .record_acquire_error(Instant::now(), stop_flag.load(Ordering::Acquire))
+                    {
+                        RebindDecision::Stop => break,
+                        RebindDecision::Fatal => {
+                            stop_flag.store(true, Ordering::Release);
+                            return Err(VpnError::SplitTunnel(format!(
+                                "adapter handles could not be restored within {} seconds: {}",
+                                READER_REACQUIRE_TIMEOUT.as_secs(),
+                                acquire_err
+                            )));
+                        }
+                        RebindDecision::Backoff(delay) => delay,
+                    };
                     log::warn!(
                         "Reader: rebind attempt {}/{} failed to re-acquire handles: {} (will retry)",
                         rebind.attempts(),
                         READER_MAX_REBINDS,
                         acquire_err
                     );
-                    // Short interruptible delay so we don't tight-loop on a
-                    // persistently-missing adapter. Doesn't consume budget.
-                    if interruptible_sleep(Duration::from_millis(200), &stop_flag) {
+                    if interruptible_sleep(backoff, &stop_flag) {
                         break;
                     }
                     continue;
@@ -15768,6 +15800,51 @@ mod tests {
         Duration::from_millis(20),
         Duration::from_millis(30),
     ];
+
+    #[test]
+    fn a_missing_adapter_exhausts_recovery_without_further_read_errors() {
+        let mut state = RebindState::new(3, &TEST_BACKOFFS);
+        let now = Instant::now();
+        state.record_error(false);
+        assert!(matches!(
+            state.record_acquire_error(now, false),
+            RebindDecision::Backoff(_)
+        ));
+        for seconds in 1..10 {
+            assert!(matches!(
+                state.record_acquire_error(now + Duration::from_secs(seconds), false),
+                RebindDecision::Backoff(_)
+            ));
+        }
+        assert_eq!(state.attempts(), 1);
+        assert_eq!(
+            state.record_acquire_error(now + READER_REACQUIRE_TIMEOUT, false),
+            RebindDecision::Fatal
+        );
+    }
+
+    #[test]
+    fn recovered_reads_reset_the_adapter_settling_window() {
+        let mut state = RebindState::new(3, &TEST_BACKOFFS);
+        let now = Instant::now();
+        state.record_acquire_error(now, false);
+        state.record_success();
+        assert!(matches!(
+            state.record_acquire_error(now + Duration::from_secs(60), false),
+            RebindDecision::Backoff(_)
+        ));
+    }
+
+    #[test]
+    fn disconnect_during_adapter_recovery_is_not_a_driver_failure() {
+        let mut state = RebindState::new(3, &TEST_BACKOFFS);
+        let now = Instant::now();
+        state.record_acquire_error(now, false);
+        assert_eq!(
+            state.record_acquire_error(now + READER_REACQUIRE_TIMEOUT, true),
+            RebindDecision::Stop
+        );
+    }
 
     #[test]
     fn rebind_state_increments_on_error_and_returns_ordered_backoffs() {
