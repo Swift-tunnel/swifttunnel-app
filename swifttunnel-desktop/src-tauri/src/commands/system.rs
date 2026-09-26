@@ -822,30 +822,6 @@ fn launch_elevated_swifttunnel(exe_path: &str, args: &str) -> Result<(), String>
 }
 
 #[cfg(windows)]
-fn build_launch_uninstaller_after_exit_script(uninstaller_path: &str, current_pid: u32) -> String {
-    let escaped_uninstaller = uninstaller_path.replace('\'', "''");
-
-    format!(
-        "$ErrorActionPreference='Stop'; \
-         $pidToWait={current_pid}; \
-         while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 200 }}; \
-         Start-Process -FilePath '{escaped_uninstaller}'"
-    )
-}
-
-#[cfg(windows)]
-fn build_launch_msi_uninstall_after_exit_script(current_pid: u32) -> String {
-    format!(
-        "$ErrorActionPreference='SilentlyContinue'; \
-         $pidToWait={current_pid}; \
-         while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 200 }}; \
-         $entry = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*' | \
-           Where-Object {{ $_.DisplayName -eq 'SwiftTunnel' }} | Select-Object -First 1; \
-         if ($entry) {{ Start-Process msiexec.exe -ArgumentList '/x',$entry.PSChildName,'/passive' -Wait }}"
-    )
-}
-
-#[cfg(windows)]
 fn install_winpkfilter_driver_from_msi(
     app: &tauri::AppHandle,
     resource_dir: Option<&Path>,
@@ -2866,31 +2842,6 @@ mod tests {
         assert!(args.contains("4242"));
         assert!(args.contains("--startup-repair-relaunched"));
     }
-
-    #[test]
-    fn build_launch_uninstaller_after_exit_script_waits_for_pid_and_escapes_path() {
-        let script = build_launch_uninstaller_after_exit_script(
-            "C:\\Program Files\\Swift'Tunnel\\uninstall.exe",
-            4242,
-        );
-        assert!(script.contains("$pidToWait=4242"));
-        assert!(script.contains("Get-Process -Id $pidToWait"));
-        assert!(
-            script.contains(
-                "Start-Process -FilePath 'C:\\Program Files\\Swift''Tunnel\\uninstall.exe'"
-            )
-        );
-    }
-
-    #[test]
-    fn build_launch_msi_uninstall_after_exit_script_waits_for_pid_and_uses_msiexec() {
-        let script = build_launch_msi_uninstall_after_exit_script(5678);
-        assert!(script.contains("$pidToWait=5678"));
-        assert!(script.contains("Get-Process -Id $pidToWait"));
-        assert!(script.contains("DisplayName -eq 'SwiftTunnel'"));
-        assert!(script.contains("msiexec.exe"));
-        assert!(script.contains("/passive"));
-    }
 }
 
 #[tauri::command]
@@ -3387,6 +3338,27 @@ pub async fn system_uninstall(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
+        // Resolve the product before disconnecting or cleaning up. The native
+        // API includes visible per-user installations and selects Desktop's
+        // upgrade family, not the first display-name match in HKLM.
+        let mut uninstall_command = tauri::async_runtime::spawn_blocking(|| {
+            let exe = std::env::current_exe()
+                .map_err(|e| format!("Failed to locate SwiftTunnel: {e}"))?;
+            let dir = exe.parent().ok_or("Failed to locate the install folder")?;
+            if let Some(code) = swifttunnel_core::msi_uninstall::desktop_product_code(dir)? {
+                let mut command = swifttunnel_core::hidden_command("msiexec.exe");
+                command.args(["/x", &code, "/norestart"]);
+                return Ok::<_, String>(command);
+            }
+            let legacy = dir.join("uninstall.exe");
+            if legacy.is_file() {
+                return Ok(swifttunnel_core::hidden_command(&legacy.to_string_lossy()));
+            }
+            Err("No SwiftTunnel uninstaller was found. Open Windows Settings > Apps, or run the current SwiftTunnel installer to repair the installation first.".to_string())
+        })
+        .await
+        .map_err(|e| format!("Could not check the installation: {e}"))??;
+
         let conn_state = state.vpn_state_handle.borrow().clone();
         if !matches!(
             conn_state,
@@ -3420,29 +3392,12 @@ pub async fn system_uninstall(
             log::warn!("Uninstall pre-cleanup failed; continuing to uninstaller: {e}");
         }
 
-        // Find and launch the appropriate uninstaller (NSIS legacy or MSI).
-        let exe_path =
-            std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {e}"))?;
-        let install_dir = exe_path
-            .parent()
-            .ok_or("Failed to resolve install directory")?;
-        let nsis_uninstaller = install_dir.join("uninstall.exe");
-
-        let uninstall_script = if nsis_uninstaller.exists() {
-            // Legacy NSIS install — launch uninstall.exe after app exits
-            build_launch_uninstaller_after_exit_script(
-                &nsis_uninstaller.to_string_lossy(),
-                std::process::id(),
-            )
-        } else {
-            // MSI install — find product code from registry and run msiexec
-            build_launch_msi_uninstall_after_exit_script(std::process::id())
-        };
-
-        swifttunnel_core::hidden_command("powershell")
-            .args(["-Command", &uninstall_script])
+        // Start the native uninstaller before closing so launch failures reach
+        // the user. Full MSI UI keeps missing-source and installer-busy errors
+        // visible after this process exits.
+        uninstall_command
             .spawn()
-            .map_err(|e| format!("Failed to queue uninstaller launch: {e}"))?;
+            .map_err(|e| format!("Could not start Windows uninstall: {e}"))?;
 
         app.exit(0);
         Ok(())
