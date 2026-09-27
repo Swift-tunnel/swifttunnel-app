@@ -81,8 +81,8 @@ pub(crate) async fn measure(ip: Ipv4Addr, access_token: &str) -> Vec<RouteSample
     let started = Instant::now();
     let result = async {
         let mut response = client
-            .get("https://www.swifttunnel.net/api/vpn/route-measurements")
-            .query(&[("ip", ip.to_string())])
+            .post("https://www.swifttunnel.net/api/vpn/route-measurements")
+            .json(&serde_json::json!({ "ip": ip.to_string() }))
             .bearer_auth(access_token)
             .send()
             .await
