@@ -779,6 +779,13 @@ impl DynamicServerList {
         self.latencies.get(region).and_then(|l| l.latency_ms)
     }
 
+    pub fn get_recent_latency(&self, region: &str) -> Option<u32> {
+        self.latencies
+            .get(region)
+            .filter(|sample| sample.last_measured.elapsed() <= std::time::Duration::from_secs(60))
+            .and_then(|sample| sample.latency_ms)
+    }
+
     /// Set latency for a server
     pub fn set_latency(&mut self, region: &str, latency_ms: Option<u32>) {
         self.latencies.insert(

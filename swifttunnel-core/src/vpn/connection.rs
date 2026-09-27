@@ -2291,9 +2291,10 @@ impl VpnConnection {
         log::debug!("V3: Relay ping telemetry enabled (20Hz when active)");
 
         // Set up auto-routing
-        let auto_router = Arc::new(super::auto_routing::AutoRouter::new(
+        let auto_router = Arc::new(super::auto_routing::AutoRouter::for_connection(
             auto_routing_enabled,
             &selected_relay_region,
+            enable_api_tunneling,
         ));
         auto_router.set_current_relay(relay_addr, &selected_relay_region);
         auto_router.set_available_servers(available_servers);
@@ -2318,252 +2319,312 @@ impl VpnConnection {
                 use crate::geolocation::GameServerRegionLookup;
 
                 while let Some((ip, generation, session_epoch)) = lookup_rx.recv().await {
-                    // Auto Route may have been disabled (settings save) after
-                    // this lookup was queued — release the held packets on the
-                    // current relay instead of resolving.
-                    if !router_for_lookup.is_enabled() {
-                        log::info!(
-                            "Auto-routing: Dropping queued lookup for {} — auto-routing was disabled",
-                            ip
-                        );
-                        router_for_lookup.clear_pending_lookup(ip);
-                        continue;
-                    }
-
-                    // Resolve the region, with one bounded retry for
-                    // transport-level failures only. A definitive "resolver
-                    // answered but no region" is diagnostic, not retryable.
-                    let mut outcome = crate::geolocation::lookup_game_server_region(ip).await;
-                    if outcome == GameServerRegionLookup::Failed
-                        && router_for_lookup.is_current_lookup_session(session_epoch)
-                    {
-                        tokio::time::sleep(Duration::from_millis(250)).await;
-                        outcome = crate::geolocation::lookup_game_server_region(ip).await;
-                    }
-
-                    let (region, location) = match outcome {
-                        GameServerRegionLookup::Resolved(region, location) => (region, location),
-                        GameServerRegionLookup::NoRegion => {
+                    let _release_lookup = router_for_lookup.release_lookup_on_drop(ip);
+                    // A slow resolver, token refresh, or auth lock must not hold a join indefinitely.
+                    let work = async {
+                        // Auto Route may have been disabled (settings save) after
+                        // this lookup was queued , release the held packets on the
+                        // current relay instead of resolving.
+                        if !router_for_lookup.is_enabled() {
                             log::info!(
-                                "Auto-routing: Resolver returned no structured region for {} — releasing packets on current relay",
+                                "Auto-routing: Dropping queued lookup for {} , auto-routing was disabled",
                                 ip
                             );
                             router_for_lookup.clear_pending_lookup(ip);
-                            continue;
+                            return;
                         }
-                        GameServerRegionLookup::Failed => {
-                            log::warn!(
-                                "Auto-routing: Resolver lookup failed for {} (after retry) — releasing packets on current relay",
-                                ip
-                            );
-                            router_for_lookup.clear_pending_lookup(ip);
-                            continue;
+
+                        if router_for_lookup.is_current_lookup_session(session_epoch) {
+                            router_for_lookup.record_route_status("Unknown".into(), &[]);
                         }
-                    };
 
-                    // Re-check after the resolver await: a disable mid-lookup
-                    // must not pin the game server or burn a relay ticket on
-                    // the auth handshake below.
-                    if !router_for_lookup.is_enabled() {
-                        log::info!(
-                            "Auto-routing: Dropping resolved lookup for {} — auto-routing was disabled",
-                            ip
+                        // Resolve the region, with one bounded retry for
+                        // transport-level failures only. A definitive "resolver
+                        // answered but no region" is diagnostic, not retryable.
+                        let (mut outcome, path_samples) = tokio::join!(
+                            crate::geolocation::lookup_game_server_region(ip),
+                            async {
+                                // Authentication and cached reads have a small shared
+                                // deadline. Slow refreshes cannot extend every join.
+                                tokio::time::timeout(Duration::from_millis(1500), async {
+                                    let auth = auth_manager_for_lookup.as_ref()?;
+                                    let token = auth.lock().await.get_access_token().await.ok()?;
+                                    Some(super::route_measurements::measure(ip, &token).await)
+                                })
+                                .await
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default()
+                            },
                         );
-                        router_for_lookup.clear_pending_lookup(ip);
-                        continue;
-                    }
-                    if !router_for_lookup.is_current_lookup_session(session_epoch) {
-                        log::info!(
-                            "Auto-routing: Ignoring stale lookup for {} (generation {}, session {}) after router reset",
-                            ip,
-                            generation,
-                            session_epoch
-                        );
-                        router_for_lookup.clear_pending_lookup(ip);
-                        continue;
-                    }
-                    if !router_for_lookup.should_process_lookup_result(ip) {
-                        log::info!(
-                            "Auto-routing: Ignoring lookup for {} (generation {}) because another game server is active",
-                            ip,
-                            generation
-                        );
-                        router_for_lookup.clear_pending_lookup(ip);
-                        continue;
-                    }
-                    if !router_for_lookup.pin_active_game_server_for_session(ip, session_epoch) {
-                        log::info!(
-                            "Auto-routing: Ignoring lookup for {} (generation {}) after active game server changed",
-                            ip,
-                            generation
-                        );
-                        router_for_lookup.clear_pending_lookup(ip);
-                        continue;
-                    }
-
-                    log::info!(
-                        "Auto-routing: {} resolved to {} ({})",
-                        ip,
-                        location,
-                        region.display_name()
-                    );
-                    let old_region = router_for_lookup.current_region();
-
-                    // Resolve the target relay from cached latency. Any switch
-                    // happens *while this IP's packets are still held*: the game
-                    // server must only ever see traffic from the final relay —
-                    // a post-establishment switch would change the source IP
-                    // mid-session, which Roblox's RakNet drops.
-                    if let Some((selected_region, selected_addr)) =
-                        router_for_lookup.get_best_server_for_region(&region)
-                    {
-                        let cached_improvement =
-                            router_for_lookup.current_relay().and_then(|current| {
-                                let servers = router_for_lookup.available_servers_snapshot();
-                                compute_cached_latency_improvement(
-                                    &servers,
-                                    selected_addr,
-                                    current.1,
-                                )
-                            });
-                        let current_addr = router_for_lookup.current_relay().map(|(_, addr)| addr);
-                        let needs_switch = current_addr != Some(selected_addr);
-
-                        if needs_switch
-                            && router_for_lookup.switch_allowed_precheck(
-                                &selected_region,
-                                selected_addr,
-                                cached_improvement,
-                            )
+                        if outcome == GameServerRegionLookup::Failed
+                            && router_for_lookup.is_current_lookup_session(session_epoch)
                         {
-                            // Authenticate the target relay BEFORE moving any
-                            // traffic. Bans/revocation stay enforced and an
-                            // auth-required relay can never blackhole the
-                            // session. One retry for transport-level failures.
-                            let mut auth_result = match auth_manager_for_lookup.as_ref() {
-                                Some(auth_manager) => {
-                                    authenticate_switch_target(
-                                        auth_manager,
-                                        &relay_for_lookup,
-                                        &selected_region,
-                                        selected_addr,
-                                    )
-                                    .await
-                                }
-                                None => SwitchAuthOutcome::Rejected(
-                                    "no auth manager configured".to_string(),
-                                ),
-                            };
-                            if let SwitchAuthOutcome::Retryable(reason) = &auth_result {
-                                log::warn!(
-                                    "Auto-routing: Relay auth for {} failed ({}), retrying once",
-                                    selected_region,
-                                    reason
-                                );
-                                if let Some(auth_manager) = auth_manager_for_lookup.as_ref() {
-                                    auth_result = authenticate_switch_target(
-                                        auth_manager,
-                                        &relay_for_lookup,
-                                        &selected_region,
-                                        selected_addr,
-                                    )
-                                    .await;
-                                }
+                            tokio::time::sleep(Duration::from_millis(250)).await;
+                            outcome = crate::geolocation::lookup_game_server_region(ip).await;
+                        }
+
+                        let (region, location) = match outcome {
+                            GameServerRegionLookup::Resolved(region, location) => {
+                                (region, location)
                             }
+                            GameServerRegionLookup::NoRegion => {
+                                log::info!(
+                                    "Auto-routing: Resolver returned no structured region for {} , releasing packets on current relay",
+                                    ip
+                                );
+                                router_for_lookup.clear_pending_lookup(ip);
+                                return;
+                            }
+                            GameServerRegionLookup::Failed => {
+                                log::warn!(
+                                    "Auto-routing: Resolver lookup failed for {} (after retry) , releasing packets on current relay",
+                                    ip
+                                );
+                                router_for_lookup.clear_pending_lookup(ip);
+                                return;
+                            }
+                        };
 
-                            // The auth handshake awaited — re-verify this lookup
-                            // still owns the route (and Auto Route wasn't
-                            // disabled meanwhile) before committing.
-                            let still_current =
-                                router_for_lookup.lookup_commit_allowed(ip, session_epoch);
+                        // Re-check after the resolver await: a disable mid-lookup
+                        // must not pin the game server or burn a relay ticket on
+                        // the auth handshake below.
+                        if !router_for_lookup.is_enabled() {
+                            log::info!(
+                                "Auto-routing: Dropping resolved lookup for {} , auto-routing was disabled",
+                                ip
+                            );
+                            router_for_lookup.clear_pending_lookup(ip);
+                            return;
+                        }
+                        if !router_for_lookup.is_current_lookup_session(session_epoch) {
+                            log::info!(
+                                "Auto-routing: Ignoring stale lookup for {} (generation {}, session {}) after router reset",
+                                ip,
+                                generation,
+                                session_epoch
+                            );
+                            router_for_lookup.clear_pending_lookup(ip);
+                            return;
+                        }
+                        if !router_for_lookup.should_process_lookup_result(ip) {
+                            log::info!(
+                                "Auto-routing: Ignoring lookup for {} (generation {}) because another game server is active",
+                                ip,
+                                generation
+                            );
+                            router_for_lookup.clear_pending_lookup(ip);
+                            return;
+                        }
+                        if !router_for_lookup.pin_active_game_server_for_session(ip, session_epoch)
+                        {
+                            log::info!(
+                                "Auto-routing: Ignoring lookup for {} (generation {}) after active game server changed",
+                                ip,
+                                generation
+                            );
+                            router_for_lookup.clear_pending_lookup(ip);
+                            return;
+                        }
 
-                            match auth_result {
-                                SwitchAuthOutcome::Ok if still_current => {
-                                    if let Some((new_addr, new_region)) = router_for_lookup
-                                        .commit_switch(
-                                            ip,
-                                            session_epoch,
-                                            region.clone(),
-                                            selected_region,
+                        log::info!(
+                            "Auto-routing: {} resolved to {} ({})",
+                            ip,
+                            location,
+                            region.display_name()
+                        );
+                        let old_region = router_for_lookup.current_region();
+                        router_for_lookup.record_game_region(region.clone());
+                        let route_allowed = router_for_lookup.apply_game_region_policy(&region);
+                        router_for_lookup.record_route_status(location.clone(), &path_samples);
+
+                        // Resolve the target relay from cached latency. Any switch
+                        // happens *while this IP's packets are still held*: the game
+                        // server must only ever see traffic from the final relay ,
+                        // a post-establishment switch would change the source IP
+                        // mid-session, which Roblox's RakNet drops.
+                        let measured = router_for_lookup.measured_path(&path_samples);
+                        let region_fallback = measured.is_none();
+                        let candidate = if !route_allowed {
+                            None
+                        } else if let Some(choice) = measured {
+                            Some((choice.region, choice.address, Some(choice.improvement_ms)))
+                        } else {
+                            // Preserve the previous regional heuristic during partial
+                            // rollout or ICMP failure. It is not a measured improvement.
+                            router_for_lookup.get_best_server_for_region(&region).map(
+                                |(id, addr)| {
+                                    let improvement = router_for_lookup.current_relay().and_then(
+                                        |(_, current)| {
+                                            compute_cached_latency_improvement(
+                                                &router_for_lookup.available_servers_snapshot(),
+                                                addr,
+                                                current,
+                                            )
+                                        },
+                                    );
+                                    (id, addr, improvement)
+                                },
+                            )
+                        };
+                        if let Some((selected_region, selected_addr, cached_improvement)) =
+                            candidate
+                        {
+                            let current_addr =
+                                router_for_lookup.current_relay().map(|(_, addr)| addr);
+                            let needs_switch = current_addr != Some(selected_addr);
+
+                            if needs_switch
+                                && router_for_lookup.switch_allowed_precheck(
+                                    &selected_region,
+                                    selected_addr,
+                                    cached_improvement,
+                                )
+                            {
+                                // Authenticate the target relay BEFORE moving any
+                                // traffic. Bans/revocation stay enforced and an
+                                // auth-required relay can never blackhole the
+                                // session. One retry for transport-level failures.
+                                let mut auth_result = match auth_manager_for_lookup.as_ref() {
+                                    Some(auth_manager) => {
+                                        authenticate_switch_target(
+                                            auth_manager,
+                                            &relay_for_lookup,
+                                            &selected_region,
                                             selected_addr,
-                                            cached_improvement,
                                         )
-                                    {
-                                        log::info!(
-                                            "Auto-routing: SWITCHING relay {} -> {} (addr: {}, authenticated)",
-                                            old_region,
-                                            new_region,
-                                            new_addr
-                                        );
-                                        relay_for_lookup.switch_relay(new_addr);
-                                        state_for_lookup.send_if_modified(|state| {
-                                            if let ConnectionState::Connected {
-                                                ref mut server_region,
-                                                ref mut server_endpoint,
-                                                ..
-                                            } = *state
-                                            {
-                                                *server_region = new_region.clone();
-                                                *server_endpoint = new_addr.to_string();
-                                                true
-                                            } else {
-                                                false
-                                            }
-                                        });
-                                        if let Err(e) =
-                                            relay_for_lookup.send_keepalive_burst_async().await
+                                        .await
+                                    }
+                                    None => SwitchAuthOutcome::Rejected(
+                                        "no auth manager configured".to_string(),
+                                    ),
+                                };
+                                if let SwitchAuthOutcome::Retryable(reason) = &auth_result {
+                                    log::warn!(
+                                        "Auto-routing: Relay auth for {} failed ({}), retrying once",
+                                        selected_region,
+                                        reason
+                                    );
+                                    if let Some(auth_manager) = auth_manager_for_lookup.as_ref() {
+                                        auth_result = authenticate_switch_target(
+                                            auth_manager,
+                                            &relay_for_lookup,
+                                            &selected_region,
+                                            selected_addr,
+                                        )
+                                        .await;
+                                    }
+                                }
+
+                                // The auth handshake awaited , re-verify this lookup
+                                // still owns the route (and Auto Route wasn't
+                                // disabled meanwhile) before committing.
+                                let still_current =
+                                    router_for_lookup.lookup_commit_allowed(ip, session_epoch);
+
+                                match auth_result {
+                                    SwitchAuthOutcome::Ok if still_current => {
+                                        if let Some((new_addr, new_region)) = router_for_lookup
+                                            .commit_switch(
+                                                ip,
+                                                session_epoch,
+                                                region.clone(),
+                                                selected_region,
+                                                selected_addr,
+                                                cached_improvement,
+                                            )
                                         {
-                                            log::warn!(
-                                                "Auto-routing: Failed to send keepalive burst to new relay: {}",
-                                                e
+                                            log::info!(
+                                                "Auto-routing: SWITCHING relay {} -> {} (addr: {}, authenticated)",
+                                                old_region,
+                                                new_region,
+                                                new_addr
+                                            );
+                                            relay_for_lookup.switch_relay(new_addr);
+                                            state_for_lookup.send_if_modified(|state| {
+                                                if let ConnectionState::Connected {
+                                                    ref mut server_region,
+                                                    ref mut server_endpoint,
+                                                    ..
+                                                } = *state
+                                                {
+                                                    *server_region = new_region.clone();
+                                                    *server_endpoint = new_addr.to_string();
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            });
+                                            if let Err(e) =
+                                                relay_for_lookup.send_keepalive_burst_async().await
+                                            {
+                                                log::warn!(
+                                                    "Auto-routing: Failed to send keepalive burst to new relay: {}",
+                                                    e
+                                                );
+                                            }
+                                            crate::notification::show_relay_switch(
+                                                &old_region,
+                                                &new_region,
+                                                &location,
                                             );
                                         }
-                                        crate::notification::show_relay_switch(
-                                            &old_region,
-                                            &new_region,
-                                            &location,
+                                    }
+                                    SwitchAuthOutcome::Ok => {
+                                        log::info!(
+                                            "Auto-routing: Discarding authenticated switch for {} (lookup no longer current or auto-routing disabled)",
+                                            ip
+                                        );
+                                    }
+                                    SwitchAuthOutcome::Rejected(reason)
+                                    | SwitchAuthOutcome::Retryable(reason) => {
+                                        log::warn!(
+                                            "Auto-routing: Not switching to {} ({}) , staying on authenticated relay {}",
+                                            selected_region,
+                                            reason,
+                                            old_region
                                         );
                                     }
                                 }
-                                SwitchAuthOutcome::Ok => {
-                                    log::info!(
-                                        "Auto-routing: Discarding authenticated switch for {} (lookup no longer current or auto-routing disabled)",
-                                        ip
-                                    );
-                                }
-                                SwitchAuthOutcome::Rejected(reason)
-                                | SwitchAuthOutcome::Retryable(reason) => {
-                                    log::warn!(
-                                        "Auto-routing: Not switching to {} ({}) — staying on authenticated relay {}",
-                                        selected_region,
-                                        reason,
-                                        old_region
-                                    );
-                                }
+                            } else if !needs_switch {
+                                router_for_lookup.record_game_region(region.clone());
+                                log::info!(
+                                    "Auto-routing: Already on best relay for {} ({})",
+                                    location,
+                                    selected_region
+                                );
+                            } else {
+                                log::info!(
+                                    "Auto-routing: Switch to {} for {} skipped by rate limiter",
+                                    selected_region,
+                                    location
+                                );
                             }
-                        } else if !needs_switch {
-                            router_for_lookup.record_game_region(region.clone());
-                            log::info!(
-                                "Auto-routing: Already on best relay for {} ({})",
-                                location,
-                                selected_region
-                            );
                         } else {
                             log::info!(
-                                "Auto-routing: Switch to {} for {} skipped by rate limiter",
-                                selected_region,
+                                "Auto-routing: No switch needed (bypass or no server for {})",
                                 location
                             );
                         }
-                    } else {
-                        log::info!(
-                            "Auto-routing: No switch needed (bypass or no server for {})",
-                            location
+
+                        // Release held packets , the relay is final for this
+                        // game-server connection.
+                        if router_for_lookup.lookup_commit_allowed(ip, session_epoch) {
+                            router_for_lookup.record_route_status(location, &path_samples);
+                            if route_allowed && region_fallback {
+                                router_for_lookup.mark_region_fallback();
+                            }
+                        }
+                        router_for_lookup.clear_pending_lookup(ip);
+                    };
+                    if tokio::time::timeout(Duration::from_secs(7), work)
+                        .await
+                        .is_err()
+                    {
+                        log::warn!(
+                            "Auto-routing: Join deadline reached; keeping the established route"
                         );
                     }
-
-                    // Release held packets — the relay is final for this
-                    // game-server connection.
                     router_for_lookup.clear_pending_lookup(ip);
                 }
                 log::debug!("Auto-routing: Lookup task exiting (channel closed)");

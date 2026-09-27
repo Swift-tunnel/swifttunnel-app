@@ -40,7 +40,7 @@ const GAME_TRAFFIC_UPDATE_GRANULARITY: Duration = Duration::from_millis(250);
 
 /// Cap on outstanding geolocation lookups. If the lookup backend stalls (API
 /// outage, network down) this keeps the pending set from growing without bound.
-const MAX_PENDING_LOOKUPS: usize = 100;
+const MAX_PENDING_LOOKUPS: usize = 1;
 
 /// Cap on retained auto-routing events shown in the UI log.
 const MAX_EVENT_LOG_ENTRIES: usize = 20;
@@ -53,6 +53,10 @@ struct RelaySelection {
 
 /// Auto-routing state
 pub struct AutoRouter {
+    /// TCP Route Assist must stay on one relay for the connection's lifetime.
+    switching_allowed: bool,
+    route_status: RwLock<Option<GameRouteStatus>>,
+    servers_updated_at: RwLock<Instant>,
     /// Whether auto-routing is enabled
     enabled: AtomicBool,
     /// Current detected Roblox game server region
@@ -115,6 +119,26 @@ pub struct AutoRoutingEvent {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GameRouteStatus {
+    pub game_location: String,
+    pub relay: String,
+    pub estimated_path_ms: Option<u32>,
+    pub bypassed: bool,
+    pub selection: String,
+}
+
+pub(crate) struct LookupRelease<'a> {
+    router: &'a AutoRouter,
+    ip: Ipv4Addr,
+}
+
+impl Drop for LookupRelease<'_> {
+    fn drop(&mut self) {
+        self.router.clear_pending_lookup(self.ip);
+    }
+}
+
 /// Result of evaluating a game server IP for auto-routing
 #[derive(Debug)]
 pub enum AutoRoutingAction {
@@ -125,6 +149,9 @@ pub enum AutoRoutingAction {
 impl AutoRouter {
     pub fn new(enabled: bool, initial_region: &str) -> Self {
         Self {
+            switching_allowed: true,
+            route_status: RwLock::new(None),
+            servers_updated_at: RwLock::new(Instant::now()),
             enabled: AtomicBool::new(enabled),
             current_game_region: RwLock::new(None),
             relay_selection: RwLock::new(RelaySelection {
@@ -179,6 +206,7 @@ impl AutoRouter {
     /// non-signals (their connections are already flowing through the
     /// current relay); only joins observed after the enable re-route.
     pub fn set_enabled(&self, enabled: bool) {
+        let enabled = enabled && self.switching_allowed;
         let was_enabled = self.enabled.swap(enabled, Ordering::AcqRel);
         if !enabled {
             self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
@@ -302,6 +330,68 @@ impl AutoRouter {
             );
         }
         *self.available_servers.write() = servers;
+        *self.servers_updated_at.write() = Instant::now();
+    }
+
+    pub fn for_connection(enabled: bool, initial_region: &str, tcp_assist: bool) -> Self {
+        let mut router = Self::new(enabled && !tcp_assist, initial_region);
+        router.switching_allowed = !tcp_assist;
+        router
+    }
+
+    pub fn game_route_status(&self) -> Option<GameRouteStatus> {
+        self.route_status.read().clone()
+    }
+
+    pub(crate) fn record_route_status(
+        &self,
+        location: String,
+        samples: &[super::route_measurements::RouteSample],
+    ) {
+        let Some((relay, address)) = self.current_relay() else {
+            return;
+        };
+        let current_only: Vec<_> = self
+            .available_servers_snapshot()
+            .into_iter()
+            .filter(|(_, addr, _)| *addr == address)
+            .collect();
+        let bypassed = self.is_bypassed();
+        let estimate = (!bypassed
+            && self.servers_updated_at.read().elapsed() <= Duration::from_secs(60))
+        .then(|| super::route_measurements::choose_path(&current_only, samples, address))
+        .flatten()
+        .map(|choice| choice.total_ms);
+        *self.route_status.write() = Some(GameRouteStatus {
+            game_location: location,
+            relay,
+            estimated_path_ms: estimate,
+            bypassed,
+            selection: if estimate.is_some() {
+                "measured"
+            } else {
+                "current"
+            }
+            .into(),
+        });
+    }
+
+    pub(crate) fn mark_region_fallback(&self) {
+        if let Some(status) = self.route_status.write().as_mut() {
+            status.selection = "region_fallback".into();
+            status.estimated_path_ms = None;
+        }
+    }
+
+    pub(crate) fn measured_path(
+        &self,
+        samples: &[super::route_measurements::RouteSample],
+    ) -> Option<super::route_measurements::PathChoice> {
+        if self.servers_updated_at.read().elapsed() > Duration::from_secs(60) {
+            return None;
+        }
+        let (_, address) = self.current_relay()?;
+        super::route_measurements::choose_path(&self.available_servers_snapshot(), samples, address)
     }
 
     /// Snapshot available relay servers for async probing/selection.
@@ -353,18 +443,21 @@ impl AutoRouter {
     /// most once per [`GAME_TRAFFIC_UPDATE_GRANULARITY`] per IP. Uses
     /// try-locks: a missed update under contention only coarsens the
     /// gone-quiet timestamps by one packet interval.
-    fn note_game_traffic(&self, ip: Ipv4Addr) {
+    fn note_game_traffic(&self, ip: Ipv4Addr) -> bool {
         let now = Instant::now();
-        match self.game_traffic.try_read() {
+        let was_quiet = match self.game_traffic.try_read() {
             Some(traffic) => {
                 if let Some(last) = traffic.get(&ip)
                     && now.duration_since(*last) < GAME_TRAFFIC_UPDATE_GRANULARITY
                 {
-                    return;
+                    return false;
                 }
+                traffic
+                    .get(&ip)
+                    .is_none_or(|last| now.duration_since(*last) >= GAME_TRAFFIC_QUIET_HANDOFF)
             }
-            None => return,
-        }
+            None => return false,
+        };
 
         if let Some(mut traffic) = self.game_traffic.try_write() {
             if traffic.len() >= MAX_TRACKED_GAME_TRAFFIC_IPS
@@ -378,6 +471,7 @@ impl AutoRouter {
             }
             traffic.insert(ip, now);
         }
+        was_quiet
     }
 
     /// True when every tracked game-server IP other than `candidate` has been
@@ -459,10 +553,12 @@ impl AutoRouter {
     /// Always returns NoAction — the actual relay switch happens asynchronously
     /// in the background lookup task when the resolver response arrives.
     pub fn evaluate_game_server(&self, game_server_ip: Ipv4Addr) -> AutoRoutingAction {
+        // A destination already sending through the current relay cannot be
+        // reconsidered just because a different, older match became quiet.
         // Track traffic even while disabled: if Auto Route is enabled
         // mid-session, set_enabled(true) uses this history to tell flowing
         // connections apart from fresh joins.
-        self.note_game_traffic(game_server_ip);
+        let candidate_was_quiet = self.note_game_traffic(game_server_ip);
 
         if !self.is_enabled() {
             return AutoRoutingAction::NoAction;
@@ -488,7 +584,7 @@ impl AutoRouter {
             // match / closed that instance), expire the pin so this IP re-routes
             // like a fresh join instead of staying stuck on the old relay. If
             // the route is still live, keep excluding this IP as before.
-            if !self.maybe_expire_quiet_pin() {
+            if !candidate_was_quiet || !self.maybe_expire_quiet_pin() {
                 return AutoRoutingAction::NoAction;
             }
         }
@@ -537,15 +633,11 @@ impl AutoRouter {
             // Blocking write lock is OK here: this runs only once per new game server,
             // and the correctness requirement (holding packets) outweighs the tiny cost.
             let mut pending = self.pending_lookups.write();
-            // Cap pending lookups so a stuck geolocation task (network down, API
-            // outage) can't grow this set without bound. If full, roll back the
-            // seen_game_servers insert above so a future packet can retry once
-            // the pending set drains — otherwise the fast-path `seen.contains()`
-            // check would permanently exclude this IP from auto-routing for the
-            // remainder of the session.
+            // One join at a time. A second candidate goes through the current
+            // relay and stays seen: holding it later would change its source
+            // address after its connection has already established.
             if pending.len() >= MAX_PENDING_LOOKUPS && !pending.contains(&game_server_ip) {
                 drop(pending);
-                self.seen_game_servers.write().remove(&game_server_ip);
                 log::warn!(
                     "Auto-routing: pending_lookups at cap ({}), skipping hold for {}",
                     MAX_PENDING_LOOKUPS,
@@ -603,6 +695,10 @@ impl AutoRouter {
             "Auto-routing: Lookup complete for {}, releasing packets",
             ip
         );
+    }
+
+    pub(crate) fn release_lookup_on_drop(&self, ip: Ipv4Addr) -> LookupRelease<'_> {
+        LookupRelease { router: self, ip }
     }
 
     /// Check whether a lookup result is still allowed to change relay state.
@@ -687,21 +783,13 @@ impl AutoRouter {
         self.is_enabled()
             && self.is_current_lookup_session(session_epoch)
             && self.is_active_game_server(ip)
+            && self.other_game_traffic_quiet(ip)
     }
 
-    /// Resolve the best relay server for a game region.
-    ///
-    /// Returns `None` if:
-    /// - the region is unknown,
-    /// - the region is whitelisted (VPN bypass),
-    /// - already on the desired server,
-    /// - or no matching server exists.
-    pub fn get_best_server_for_region(
-        &self,
-        game_region: &RobloxRegion,
-    ) -> Option<(String, SocketAddr)> {
+    /// Apply the user's region bypass preference before measured selection.
+    pub(crate) fn apply_game_region_policy(&self, game_region: &RobloxRegion) -> bool {
         if *game_region == RobloxRegion::Unknown {
-            return None;
+            return false;
         }
 
         // Check if this game region is whitelisted (user wants to bypass VPN)
@@ -729,12 +817,21 @@ impl AutoRouter {
                 log.pop_front();
             }
 
-            return None;
+            return false;
         }
 
         // Not whitelisted — clear bypass flag and proceed with normal routing
         self.auto_routing_bypassed.store(false, Ordering::Release);
+        true
+    }
 
+    pub(crate) fn get_best_server_for_region(
+        &self,
+        game_region: &RobloxRegion,
+    ) -> Option<(String, SocketAddr)> {
+        if !self.apply_game_region_policy(game_region) {
+            return None;
+        }
         let best_st_region = game_region.best_swifttunnel_region()?;
 
         let servers = self.available_servers.read();
@@ -967,6 +1064,7 @@ impl AutoRouter {
 
     /// Reset state (call on disconnect)
     pub fn reset(&self) {
+        *self.route_status.write() = None;
         *self.current_game_region.write() = None;
         self.relay_selection.write().address = None;
         self.seen_game_servers.write().clear();
@@ -985,6 +1083,79 @@ impl AutoRouter {
 mod tests {
     use super::*;
     use crate::geolocation::RobloxRegion;
+
+    #[test]
+    fn route_assist_connection_cannot_be_enabled_for_switching_later() {
+        let router = AutoRouter::for_connection(true, "mumbai", true);
+        assert!(!router.is_enabled());
+        router.set_enabled(true);
+        assert!(!router.is_enabled());
+        let normal = AutoRouter::for_connection(false, "mumbai", false);
+        normal.set_enabled(true);
+        assert!(normal.is_enabled());
+    }
+
+    #[test]
+    fn saturated_lookup_does_not_retry_a_connection_already_released() {
+        let router = AutoRouter::new(true, "mumbai");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        router.set_lookup_channel(tx);
+        let old = Ipv4Addr::new(128, 116, 1, 1);
+        let next = Ipv4Addr::new(128, 116, 1, 2);
+        router.evaluate_game_server(old);
+        rx.try_recv().unwrap();
+        router
+            .game_traffic
+            .write()
+            .insert(old, Instant::now() - Duration::from_secs(4));
+        router.evaluate_game_server(next);
+        assert!(!router.is_lookup_pending(next));
+        router.clear_pending_lookup(old);
+        router.evaluate_game_server(next);
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(next));
+    }
+
+    #[tokio::test]
+    async fn cancelling_lookup_work_releases_held_packets() {
+        let router = AutoRouter::new(true, "mumbai");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        router.set_lookup_channel(tx);
+        let ip = Ipv4Addr::new(128, 116, 1, 1);
+        router.evaluate_game_server(ip);
+        assert!(router.is_lookup_pending(ip));
+        let result = tokio::time::timeout(Duration::from_millis(1), async {
+            let _release = router.release_lookup_on_drop(ip);
+            std::future::pending::<()>().await;
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(!router.is_lookup_pending(ip));
+    }
+
+    #[test]
+    fn resumed_other_game_blocks_commit_after_auth_wait() {
+        let router = AutoRouter::new(true, "mumbai");
+        let ip = Ipv4Addr::new(128, 116, 1, 1);
+        let epoch = pin_for_commit(&router, ip);
+        assert!(router.lookup_commit_allowed(ip, epoch));
+        router.note_game_traffic(Ipv4Addr::new(128, 116, 1, 2));
+        assert!(!router.lookup_commit_allowed(ip, epoch));
+    }
+
+    #[test]
+    fn stale_client_measurements_and_reset_do_not_show_a_path_estimate() {
+        let router = AutoRouter::new(true, "mumbai");
+        let addr = "127.0.0.1:1".parse().unwrap();
+        router.set_current_relay(addr, "mumbai");
+        router.set_available_servers(vec![("mumbai".into(), addr, Some(10))]);
+        *router.servers_updated_at.write() = Instant::now() - Duration::from_secs(61);
+        assert!(router.measured_path(&[]).is_none());
+        router.record_route_status("Singapore".into(), &[]);
+        assert_eq!(router.game_route_status().unwrap().estimated_path_ms, None);
+        router.reset();
+        assert!(router.game_route_status().is_none());
+    }
 
     fn make_servers() -> Vec<(String, SocketAddr, Option<u32>)> {
         vec![
@@ -1219,6 +1390,7 @@ mod tests {
         let (_, first_generation, first_session_epoch) = rx.try_recv().expect("first lookup");
         assert!(router.is_current_lookup_generation(first_generation));
         assert!(router.is_current_lookup_session(first_session_epoch));
+        router.clear_pending_lookup(first_ip);
 
         // Second candidate only becomes a routing signal once the first IP's
         // traffic has gone quiet.
@@ -1281,6 +1453,8 @@ mod tests {
         let (_, _, epoch) = rx.try_recv().expect("first lookup");
         assert!(router.pin_active_game_server_for_session(first_ip, epoch));
 
+        router.clear_pending_lookup(first_ip);
+
         // Teleport: first connection goes quiet, then the new server appears.
         backdate_game_traffic(&router, first_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
         router.evaluate_game_server(teleport_ip);
@@ -1326,8 +1500,15 @@ mod tests {
         // Player leaves the first match: its connection goes quiet.
         backdate_game_traffic(&router, first_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
 
-        // The next packet for the new match must now re-route: the stale pin is
-        // expired and the server is evaluated like a fresh join.
+        // The overlap connection already established on the current relay.
+        // The old match becoming quiet does not make switching this one safe.
+        router.clear_pending_lookup(first_ip);
+        router.evaluate_game_server(new_match_ip);
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(new_match_ip));
+
+        // Only after this destination also went quiet can it be a fresh join.
+        backdate_game_traffic(&router, new_match_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
         router.evaluate_game_server(new_match_ip);
         let (received_ip, _, _) = rx
             .try_recv()
@@ -1375,6 +1556,7 @@ mod tests {
         let (_, _, epoch) = rx.try_recv().expect("first lookup");
         assert!(router.pin_active_game_server_for_session(first_ip, epoch));
 
+        router.clear_pending_lookup(first_ip);
         backdate_game_traffic(&router, first_ip, GAME_TRAFFIC_QUIET_HANDOFF * 2);
         router.evaluate_game_server(candidate_ip);
         let (_, _, epoch2) = rx.try_recv().expect("handoff lookup");

@@ -193,7 +193,7 @@ pub fn build_available_servers(sl: &DynamicServerList) -> Vec<(String, SocketAdd
             let addr: SocketAddr = format!("{}:{}", s.ip, s.effective_relay_port())
                 .parse()
                 .ok()?;
-            let latency = sl.get_latency(&s.region);
+            let latency = sl.get_recent_latency(&s.region);
             Some((s.region.clone(), addr, latency))
         })
         .collect()

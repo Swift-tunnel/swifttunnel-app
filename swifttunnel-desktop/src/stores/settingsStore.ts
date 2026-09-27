@@ -93,6 +93,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   update: (partial) => {
+    if (partial.auto_routing_enabled === true) {
+      partial = { ...partial, enable_api_tunneling: false, enable_country_ban: false };
+    } else if (partial.enable_api_tunneling === true || partial.enable_country_ban === true) {
+      partial = { ...partial, auto_routing_enabled: false };
+    }
     set((state) => ({
       settings: { ...state.settings, ...partial },
     }));

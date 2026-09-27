@@ -383,6 +383,7 @@ function driverRebootRequiredStatus(reason: string): DriverCheckResponse {
 }
 
 interface VpnStore {
+  gameRoute: { game_location: string; relay: string; estimated_path_ms: number | null; bypassed: boolean; selection?: "measured" | "region_fallback" | "current" } | null;
   state: VpnState;
   region: string | null;
   serverEndpoint: string | null;
@@ -458,6 +459,7 @@ interface VpnStore {
 }
 
 export const useVpnStore = create<VpnStore>((set, get) => ({
+  gameRoute: null,
   state: "disconnected",
   region: null,
   serverEndpoint: null,
@@ -517,6 +519,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
 
         return {
           state: resp.state,
+          gameRoute: nowConnected
+            ? (resp.game_route
+              ? (resp.game_route.relay === resp.region ? resp.game_route : null)
+              : (current.region === resp.region ? current.gameRoute : null))
+            : null,
           region: resp.region,
           serverEndpoint: resp.server_endpoint,
           assignedIp: resp.assigned_ip,
@@ -1161,6 +1168,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
 
       return {
         state: event.state,
+        gameRoute: event.state === "connected" && current.region === event.region ? current.gameRoute : null,
         region: event.region,
         serverEndpoint: event.server_endpoint,
         assignedIp: event.assigned_ip,

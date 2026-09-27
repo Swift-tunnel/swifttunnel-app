@@ -272,7 +272,7 @@ fn default_discord_rpc() -> bool {
 }
 
 fn default_auto_routing() -> bool {
-    false // Off by default (public option in Connect tab)
+    true
 }
 
 fn default_show_live_graph() -> bool {
@@ -393,6 +393,11 @@ impl AppSettings {
         }
 
         self.selected_game_presets = default_game_presets();
+        // Preserve explicit matchmaking/bypass settings from older releases.
+        // Moving their TCP connections to another relay would break them.
+        if self.enable_api_tunneling || self.enable_country_ban {
+            self.auto_routing_enabled = false;
+        }
         // Older releases serialized false as the default even though the app has
         // no user-facing toggle. Keep app-close safe for shared/cafe PCs.
         self.minimize_to_tray = true;
@@ -656,9 +661,24 @@ mod tests {
 
     #[test]
     fn test_settings_auto_routing_default() {
-        // Settings without auto_routing_enabled should default to false (public option, default OFF)
+        // Missing Auto settings opt in; explicit false remains a user choice.
         let json = r#"{"theme": "dark", "config": {}, "optimizations_active": false}"#;
         let loaded: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(loaded.auto_routing_enabled);
+    }
+
+    #[test]
+    fn routing_modes_preserve_explicit_assist_and_manual_choices() {
+        let mut settings = AppSettings {
+            enable_api_tunneling: true,
+            ..AppSettings::default()
+        };
+        settings.sanitize_in_place();
+        assert!(!settings.auto_routing_enabled);
+        assert!(settings.enable_api_tunneling);
+        let json = r#"{"theme":"dark","config":{},"optimizations_active":false,"auto_routing_enabled":false}"#;
+        let mut loaded: AppSettings = serde_json::from_str(json).unwrap();
+        loaded.sanitize_in_place();
         assert!(!loaded.auto_routing_enabled);
     }
 

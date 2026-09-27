@@ -76,7 +76,7 @@ const MOCK_SETTINGS: AppSettings = {
   experimental_mode: false,
   custom_relay_server: "",
   enable_discord_rpc: true,
-  auto_routing_enabled: false,
+  auto_routing_enabled: true,
   whitelisted_regions: [],
   preferred_physical_adapter_guid: null,
   network_binding_overrides: {},

@@ -312,9 +312,18 @@ impl Engine {
             Action::Primary => self.primary(state),
 
             Action::PickAutoRegion => {
-                self.settings(|s| s.auto_routing_enabled = true);
+                self.settings(|s| {
+                    s.auto_routing_enabled = !s.auto_routing_enabled;
+                    if s.auto_routing_enabled {
+                        s.enable_api_tunneling = false;
+                        s.enable_country_ban = false;
+                    }
+                });
             }
             Action::PickRegion(id) => {
+                if state.auto_routing {
+                    return;
+                }
                 self.settings(|s| {
                     s.selected_region = id.clone();
                     s.auto_routing_enabled = false;
@@ -455,9 +464,12 @@ impl Engine {
 
     fn toggle(&self, flag: Flag, state: &mut State) {
         match flag {
-            Flag::RouteAssist => {
-                self.settings(|s| s.enable_api_tunneling = !s.enable_api_tunneling)
-            }
+            Flag::RouteAssist => self.settings(|s| {
+                s.enable_api_tunneling = !s.enable_api_tunneling;
+                if s.enable_api_tunneling {
+                    s.auto_routing_enabled = false;
+                }
+            }),
             Flag::CountryBan => self.settings(|s| s.enable_country_ban = !s.enable_country_ban),
             Flag::RunOnStartup => {
                 // Written to the registry, not just to the settings file. This

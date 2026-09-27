@@ -40,6 +40,7 @@ export type VpnState =
   | "error";
 
 export interface VpnStateResponse {
+  game_route?: { game_location: string; relay: string; estimated_path_ms: number | null; bypassed: boolean; selection?: "measured" | "region_fallback" | "current" };
   state: VpnState;
   region: string | null;
   server_endpoint: string | null;

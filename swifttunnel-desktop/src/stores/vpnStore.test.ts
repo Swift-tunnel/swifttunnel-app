@@ -110,6 +110,20 @@ function disconnectedState() {
 }
 
 describe("stores/vpnStore", () => {
+  it("discards game route details when disconnected or moved to another relay", async () => {
+    const store = await loadStore();
+    vpnGetState.mockResolvedValue({ ...connectedState("mumbai"), game_route: {
+      game_location: "Singapore", relay: "mumbai", estimated_path_ms: 50, bypassed: false,
+    } });
+    await store.getState().fetchState();
+    expect(store.getState().gameRoute?.estimated_path_ms).toBe(50);
+    vpnGetState.mockResolvedValue(connectedState("tokyo"));
+    await store.getState().fetchState();
+    expect(store.getState().gameRoute).toBeNull();
+    vpnGetState.mockResolvedValue(disconnectedState());
+    await store.getState().fetchState();
+    expect(store.getState().gameRoute).toBeNull();
+  });
   beforeEach(() => {
     vi.useRealTimers();
     vpnGetState.mockReset();

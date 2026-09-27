@@ -25,6 +25,8 @@ const VPN_CONNECT_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 #[derive(Serialize)]
 pub struct VpnStateResponse {
     pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game_route: Option<swifttunnel_core::vpn::auto_routing::GameRouteStatus>,
     pub region: Option<String>,
     pub server_endpoint: Option<String>,
     pub assigned_ip: Option<String>,
@@ -39,6 +41,7 @@ pub struct VpnStateResponse {
 fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnStateResponse {
     match conn_state {
         swifttunnel_core::vpn::ConnectionState::Disconnected => VpnStateResponse {
+            game_route: None,
             state: "disconnected".to_string(),
             region: None,
             server_endpoint: None,
@@ -50,6 +53,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             relay_status: None,
         },
         swifttunnel_core::vpn::ConnectionState::FetchingConfig => VpnStateResponse {
+            game_route: None,
             state: "fetching_config".to_string(),
             region: None,
             server_endpoint: None,
@@ -61,6 +65,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             relay_status: None,
         },
         swifttunnel_core::vpn::ConnectionState::ConfiguringSplitTunnel => VpnStateResponse {
+            game_route: None,
             state: "configuring_split_tunnel".to_string(),
             region: None,
             server_endpoint: None,
@@ -81,6 +86,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             relay_status,
             ..
         } => VpnStateResponse {
+            game_route: None,
             state: "connected".to_string(),
             region: Some(server_region),
             server_endpoint: Some(server_endpoint),
@@ -92,6 +98,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             relay_status,
         },
         swifttunnel_core::vpn::ConnectionState::Disconnecting => VpnStateResponse {
+            game_route: None,
             state: "disconnecting".to_string(),
             region: None,
             server_endpoint: None,
@@ -103,6 +110,7 @@ fn map_vpn_state(conn_state: swifttunnel_core::vpn::ConnectionState) -> VpnState
             relay_status: None,
         },
         swifttunnel_core::vpn::ConnectionState::Error(msg) => VpnStateResponse {
+            game_route: None,
             state: "error".to_string(),
             region: None,
             server_endpoint: None,
@@ -382,7 +390,15 @@ pub async fn vpn_get_state(state: State<'_, AppState>) -> Result<VpnStateRespons
     // Read the inner state Arc directly so we don't have to wait on the
     // outer vpn_connection mutex while a connect or disconnect is mid-flight.
     let conn_state = state.vpn_state_handle.borrow().clone();
-    Ok(map_vpn_state(conn_state))
+    let mut response = map_vpn_state(conn_state);
+    if response.state == "connected" {
+        if let Ok(vpn) = state.vpn_connection.try_lock() {
+            response.game_route = vpn
+                .auto_router()
+                .and_then(|router| router.game_route_status());
+        }
+    }
+    Ok(response)
 }
 
 #[tauri::command]

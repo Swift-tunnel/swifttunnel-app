@@ -20,6 +20,23 @@ async function loadStore() {
 }
 
 describe("stores/settingsStore", () => {
+  it("makes Auto and Route Assist exclusive in either toggle order", async () => {
+    const store = await loadStore();
+    store.getState().update({ enable_api_tunneling: true });
+    expect(store.getState().settings.auto_routing_enabled).toBe(false);
+    store.getState().update({ auto_routing_enabled: true });
+    expect(store.getState().settings.enable_api_tunneling).toBe(false);
+    store.getState().update({ enable_api_tunneling: true });
+    expect(store.getState().settings.auto_routing_enabled).toBe(false);
+  });
+
+  it("preserves a saved Route Assist choice when migrating Auto defaults", async () => {
+    settingsLoad.mockResolvedValue({ ...DEFAULT_SETTINGS, auto_routing_enabled: true, enable_api_tunneling: true });
+    const store = await loadStore();
+    await store.getState().load();
+    expect(store.getState().settings.enable_api_tunneling).toBe(true);
+    expect(store.getState().settings.auto_routing_enabled).toBe(false);
+  });
   beforeEach(() => {
     settingsLoad.mockReset();
     settingsSave.mockReset();

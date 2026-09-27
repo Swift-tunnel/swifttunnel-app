@@ -31,6 +31,7 @@ pub mod process_cache;
 pub mod process_performance;
 pub mod process_tracker;
 pub mod process_watcher;
+pub(crate) mod route_measurements;
 pub mod routes;
 pub mod servers;
 pub mod split_tunnel;

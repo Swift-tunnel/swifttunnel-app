@@ -306,7 +306,7 @@ fn region_label(state: &State) -> String {
 fn regions(state: &State) -> Vec<Item> {
     let mut rows = vec![
         Row::new("Automatic")
-            .sub("Pick the fastest relay at connect time")
+            .sub("Measured gameplay paths. Turn off to choose a region.")
             .right(Right::Tick(state.auto_routing))
             .action(Action::PickAutoRegion),
     ];
@@ -320,7 +320,8 @@ fn regions(state: &State) -> Vec<Item> {
                 } else {
                     Right::Latency(region.ping_ms)
                 })
-                .action(Action::PickRegion(region.id.clone())),
+                .action(Action::PickRegion(region.id.clone()))
+                .disabled(state.auto_routing),
         );
     }
 

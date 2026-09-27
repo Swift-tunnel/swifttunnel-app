@@ -46,6 +46,7 @@ function formatElapsed(s: number): string {
 export function ConnectTab() {
   const vpnState = useVpnStore((s) => s.state);
   const vpnRegion = useVpnStore((s) => s.region);
+  const gameRoute = useVpnStore((s) => s.gameRoute);
   const serverEndpoint = useVpnStore((s) => s.serverEndpoint);
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
   const ping = useVpnStore((s) => s.ping);
@@ -221,12 +222,13 @@ export function ConnectTab() {
   useFocusAwareInterval(() => void fetchPing(), 3000, { enabled: isConnected });
 
   function selectRegion(regionId: string) {
+    if (settings.auto_routing_enabled) return;
     update({ selected_region: regionId, auto_routing_enabled: false });
     saveDebounced();
   }
 
   function selectAutoRoute() {
-    update({ auto_routing_enabled: true });
+    update({ auto_routing_enabled: !settings.auto_routing_enabled });
     saveDebounced();
   }
 
@@ -314,7 +316,7 @@ export function ConnectTab() {
     : isTransitioning
       ? "Negotiating with relay…"
       : settings.auto_routing_enabled
-        ? "Fastest relay picked automatically each match"
+        ? "Measured gameplay routes, chosen automatically at join"
         : selectedRegion
           ? `${selectedRegion.servers.length} ${selectedRegion.servers.length === 1 ? "relay" : "relays"} available`
           : "Pick a region from the list below";
@@ -444,6 +446,23 @@ export function ConnectTab() {
         />
 
         {/* Stats strip */}
+        {isConnected && settings.auto_routing_enabled && (
+          <div className="relative px-6 pb-4 text-[12px] text-text-muted" aria-live="polite">
+            <span className="text-text-primary">
+              Game server: {gameRoute?.game_location ?? "Waiting for a game"}
+            </span>
+            {gameRoute && (
+              <span className="ml-2">
+                {gameRoute.bypassed ? "Direct connection (your bypass preference)" : `via ${connectedServerLabel}`}
+                {!gameRoute.bypassed && (gameRoute.estimated_path_ms != null
+                  ? ` · Estimated path ${gameRoute.estimated_path_ms} ms at join`
+                  : gameRoute.selection === "region_fallback"
+                    ? " · Regional fallback (unmeasured)"
+                    : " · Path measurement unavailable")}
+              </span>
+            )}
+          </div>
+        )}
         <div
           className="relative grid grid-cols-3 border-t"
           style={{ borderColor: "var(--color-border-subtle)" }}
@@ -639,7 +658,7 @@ export function ConnectTab() {
                     ? ping
                     : getLatency(r.id)
                 }
-                disabled={isConnected || isTransitioning}
+                disabled={isConnected || isTransitioning || settings.auto_routing_enabled}
                 onSelect={() => selectRegion(r.id)}
                 isLast={idx === regions.length - 1}
               />
@@ -833,7 +852,7 @@ function RouteAssistPanel({
               Route Assist
             </h3>
             <Tooltip
-              content="Join game servers in your relay's region"
+              content="Sends Roblox login and matchmaking through your selected relay. This can influence the game region, but Roblox decides placement. Turns Auto Route off."
             >
               <span className="inline-flex">
                 <InfoIcon />
@@ -841,7 +860,7 @@ function RouteAssistPanel({
             </Tooltip>
           </div>
           <p className="mt-0.5 truncate text-[11px] leading-snug text-text-muted">
-            Join game servers in your relay's region.
+            Matchmaking through your selected region. Turns Auto Route off.
           </p>
         </div>
       </div>
@@ -1004,14 +1023,14 @@ function AutoRouteRow({
           >
             Auto
           </span>
-          <Tooltip content="Picks the fastest relay to the game server each match.">
+          <Tooltip content="Compares measured paths when joining a game. Uses region-based routing when measurements are unavailable, and keeps the current route for small measured gains. Turns Route Assist off. Click again for manual selection.">
             <span className="inline-flex">
               <InfoIcon />
             </span>
           </Tooltip>
         </div>
         <span className="text-[10.5px] text-text-muted">
-          Picks the fastest relay for every match
+          {active ? "Automatic gameplay routing. Click to select manually." : "Compare measured paths when joining a game"}
         </span>
       </div>
       {active && (
