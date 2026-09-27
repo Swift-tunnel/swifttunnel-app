@@ -2488,6 +2488,19 @@ mod tests {
     }
 
     #[test]
+    fn disconnected_binding_stage_skips_missing_binding_repair_without_error_text() {
+        // The public preflight reason is prose, not the internal VpnError.
+        // Startup must recognize the stage without relying on an error prefix.
+        let info = preflight(
+            "unrecoverable",
+            "SwiftTunnel found the active network adapter, but the WinpkFilter binding is disabled while disconnected. Connect will enable it automatically.",
+            Some("winpkfilter_binding_disabled"),
+        );
+        assert!(is_winpkfilter_binding_disabled_preflight(&info));
+        assert!(!is_winpkfilter_binding_missing_preflight(&info));
+    }
+
+    #[test]
     fn driver_repair_response_ignores_unrelated_unrecoverable_preflight() {
         let response = driver_repair_response_after_binding_preflight(
             ready_health(),

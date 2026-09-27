@@ -318,6 +318,7 @@ enum BindingStage {
     ExactRouteMatch,
     ManualPreference,
     RememberedOverride,
+    WinpkFilterBindingDisabled,
     WinpkFilterBindingMissing,
     WanFallback,
     BridgeSibling,
@@ -333,6 +334,7 @@ impl BindingStage {
             Self::ExactRouteMatch => "exact_route_match",
             Self::ManualPreference => "manual_preference",
             Self::RememberedOverride => "remembered_override",
+            Self::WinpkFilterBindingDisabled => "winpkfilter_binding_disabled",
             Self::WinpkFilterBindingMissing => "winpkfilter_binding_missing",
             Self::WanFallback => "wan_fallback",
             Self::BridgeSibling => "bridge_sibling",
@@ -544,6 +546,13 @@ fn preflight_binding_inner(
     interceptor.repair_winpkfilter_binding = repair_winpkfilter_binding;
 
     let result = interceptor.find_adapters("SwiftTunnel", 0);
+    Ok(binding_preflight_result(&mut interceptor, &result))
+}
+
+fn binding_preflight_result(
+    interceptor: &mut ParallelInterceptor,
+    result: &VpnResult<()>,
+) -> BindingPreflightInfo {
     let status = match (&result, interceptor.last_validation_result.as_str()) {
         (Ok(_), _) => "ok",
         (_, "ambiguous_requires_user_choice") => "ambiguous",
@@ -560,7 +569,7 @@ fn preflight_binding_inner(
         };
     }
 
-    Ok(BindingPreflightInfo {
+    BindingPreflightInfo {
         status: status.to_string(),
         reason: interceptor.binding_reason.clone(),
         network_signature: interceptor
@@ -574,7 +583,7 @@ fn preflight_binding_inner(
         cached_override_used: interceptor.cached_override_used,
         binding_stage: Some(interceptor.binding_stage.clone()),
         candidates: interceptor.binding_candidates.clone(),
-    })
+    }
 }
 
 /// Detect whether the current active default route is point-to-point (PPP/PPPoE/WAN).
@@ -3155,33 +3164,6 @@ impl ParallelInterceptor {
         };
 
         if selected.is_none() && physical_candidates.is_empty() {
-            self.binding_stage = if default_route_binding_missing {
-                BindingStage::WinpkFilterBindingMissing.as_str().to_string()
-            } else {
-                BindingStage::Unrecoverable.as_str().to_string()
-            };
-            self.binding_reason = if default_route_binding_missing {
-                if default_route_binding_error.as_ref().is_some_and(|err| {
-                    Self::is_winpkfilter_binding_disabled_failure(&err.to_string())
-                }) {
-                    "SwiftTunnel found the active network adapter, but the WinpkFilter binding is disabled while disconnected. Connect will enable it automatically.".to_string()
-                } else {
-                    "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. SwiftTunnel will repair it automatically, then try again.".to_string()
-                }
-            } else {
-                "SwiftTunnel could not see any WinpkFilter-bound network adapters. SwiftTunnel will repair the binding automatically, then try again.".to_string()
-            };
-            self.last_validation_result = if default_route_binding_missing {
-                if default_route_binding_error.as_ref().is_some_and(|err| {
-                    Self::is_winpkfilter_binding_disabled_failure(&err.to_string())
-                }) {
-                    "winpkfilter_binding_disabled".to_string()
-                } else {
-                    "winpkfilter_binding_missing".to_string()
-                }
-            } else {
-                "no_winpkfilter_bound_adapters".to_string()
-            };
             self.binding_candidates.clear();
             self.recommended_adapter_guid = None;
 
@@ -3193,17 +3175,14 @@ impl ParallelInterceptor {
                     .as_ref()
                     .map(|(friendly_name, _, _, _)| friendly_name.as_str())
                     .unwrap_or("active network adapter");
-                if default_route_binding_error.as_ref().is_some_and(|err| {
+                let binding_disabled = default_route_binding_error.as_ref().is_some_and(|err| {
                     Self::is_winpkfilter_binding_disabled_failure(&err.to_string())
-                }) {
-                    return Err(VpnError::SplitTunnel(
-                        Self::winpkfilter_binding_disabled_message(adapter_label),
-                    ));
-                }
-                return Err(VpnError::SplitTunnel(
-                    Self::winpkfilter_binding_missing_message(adapter_label),
-                ));
+                });
+                return Err(self.record_unavailable_route_binding(adapter_label, binding_disabled));
             }
+            self.binding_stage = BindingStage::Unrecoverable.as_str().to_string();
+            self.binding_reason = "SwiftTunnel could not see any WinpkFilter-bound network adapters. SwiftTunnel will repair the binding automatically, then try again.".to_string();
+            self.last_validation_result = "no_winpkfilter_bound_adapters".to_string();
             return Err(VpnError::SplitTunnel(format!(
                 "No WinpkFilter-bound NDIS adapters were visible{suffix}."
             )));
@@ -3218,20 +3197,9 @@ impl ParallelInterceptor {
                 .as_ref()
                 .map(|(friendly_name, _, _, _)| friendly_name.as_str())
                 .unwrap_or("active network adapter");
-            self.binding_stage = BindingStage::WinpkFilterBindingMissing.as_str().to_string();
             let binding_disabled = default_route_binding_error
                 .as_ref()
                 .is_some_and(|err| Self::is_winpkfilter_binding_disabled_failure(&err.to_string()));
-            self.binding_reason = if binding_disabled {
-                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is disabled while disconnected. Connect will enable it automatically.".to_string()
-            } else {
-                "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. SwiftTunnel will repair it automatically, then try again.".to_string()
-            };
-            self.last_validation_result = if binding_disabled {
-                "winpkfilter_binding_disabled".to_string()
-            } else {
-                "winpkfilter_binding_missing".to_string()
-            };
             self.binding_candidates = physical_candidates
                 .iter()
                 .map(|candidate| {
@@ -3244,9 +3212,7 @@ impl ParallelInterceptor {
                 })
                 .collect();
             self.recommended_adapter_guid = None;
-            return Err(VpnError::SplitTunnel(
-                Self::winpkfilter_binding_missing_message(adapter_label),
-            ));
+            return Err(self.record_unavailable_route_binding(adapter_label, binding_disabled));
         }
 
         if strict_default_route
@@ -3922,6 +3888,34 @@ impl ParallelInterceptor {
         adapter_seen_by_ndisrd
             && (Self::is_winpkfilter_binding_missing_failure(details)
                 || Self::is_binding_check_timeout(details))
+    }
+
+    fn record_unavailable_route_binding(
+        &mut self,
+        adapter_label: &str,
+        binding_disabled: bool,
+    ) -> VpnError {
+        // Preflight exports the stage and reason, not last_validation_result.
+        // A disabled binding is expected while disconnected. Calling it missing
+        // makes startup enable it again and announce a repair on every launch.
+        self.binding_stage = if binding_disabled {
+            BindingStage::WinpkFilterBindingDisabled
+        } else {
+            BindingStage::WinpkFilterBindingMissing
+        }
+        .as_str()
+        .to_string();
+        self.binding_reason = if binding_disabled {
+            "SwiftTunnel found the active network adapter, but the WinpkFilter binding is disabled while disconnected. Connect will enable it automatically.".to_string()
+        } else {
+            "SwiftTunnel found the active network adapter, but the WinpkFilter binding is missing. SwiftTunnel will repair it automatically, then try again.".to_string()
+        };
+        self.last_validation_result = self.binding_stage.clone();
+        VpnError::SplitTunnel(if binding_disabled {
+            Self::winpkfilter_binding_disabled_message(adapter_label)
+        } else {
+            Self::winpkfilter_binding_missing_message(adapter_label)
+        })
     }
 
     fn winpkfilter_binding_missing_message(adapter_label: &str) -> String {
@@ -13156,6 +13150,44 @@ mod tests {
             script.contains("if (-not $repairBinding)"),
             "read-only checks must branch before enabling nt_ndisrd"
         );
+    }
+
+    #[test]
+    fn disabled_route_binding_preflight_never_requests_missing_binding_repair() {
+        // Read-only startup sees an unbound Ethernet owner while virtual
+        // adapters can remain in NDISRD's list. The public preflight response,
+        // not the private validation field, controls startup repair.
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        let error = interceptor.record_unavailable_route_binding("Ethernet", true);
+        let response = binding_preflight_result(&mut interceptor, &Err(error));
+        assert_eq!(response.status, "unrecoverable");
+        assert_eq!(
+            response.binding_stage.as_deref(),
+            Some("winpkfilter_binding_disabled")
+        );
+        assert!(response.reason.contains("Connect will enable"));
+        assert!(!response.reason.contains("winpkfilter_binding_missing"));
+        let error = interceptor
+            .record_unavailable_route_binding("Ethernet", true)
+            .to_string();
+        assert!(ParallelInterceptor::is_winpkfilter_binding_disabled_failure(&error));
+        assert!(!ParallelInterceptor::is_winpkfilter_binding_missing_failure(&error));
+    }
+
+    #[test]
+    fn missing_route_binding_preflight_still_requests_repair() {
+        let mut interceptor = ParallelInterceptor::new(Vec::new());
+        let error = interceptor.record_unavailable_route_binding("Ethernet", false);
+        assert!(ParallelInterceptor::is_winpkfilter_binding_missing_failure(
+            &error.to_string()
+        ));
+        let response = binding_preflight_result(&mut interceptor, &Err(error));
+        assert_eq!(response.status, "unrecoverable");
+        assert_eq!(
+            response.binding_stage.as_deref(),
+            Some("winpkfilter_binding_missing")
+        );
+        assert!(response.reason.contains("repair"));
     }
 
     #[test]
