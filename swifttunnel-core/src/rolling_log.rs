@@ -31,6 +31,8 @@ impl RollingLog {
         };
         if size >= max {
             writer.rotate()?;
+        } else if let Err(error) = trim_archive(previous, max) {
+            eprintln!("SwiftTunnel: could not trim previous log ({error})");
         }
         Ok(writer)
     }
@@ -73,6 +75,31 @@ impl RollingLog {
         self.size = 0;
         Ok(())
     }
+}
+
+// Compact the tail in place using bounded memory, including archives left by
+// older versions. Reading always stays ahead of writing, so bytes are not lost.
+fn trim_archive(path: &Path, max: u64) -> io::Result<()> {
+    let mut file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let size = file.metadata()?.len();
+    if size <= max {
+        return Ok(());
+    }
+    let mut offset = 0;
+    let mut buffer = [0; 32 * 1024];
+    while offset < max {
+        let count = (max - offset).min(buffer.len() as u64) as usize;
+        file.seek(SeekFrom::Start(size - max + offset))?;
+        file.read_exact(&mut buffer[..count])?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(&buffer[..count])?;
+        offset += count as u64;
+    }
+    file.set_len(max)
 }
 
 impl Write for RollingLog {
@@ -186,5 +213,24 @@ mod tests {
         log.write_all(b"abcdefgh").unwrap();
         log.write_all(b"new").unwrap();
         assert_eq!(std::fs::read(dir.previous()).unwrap(), b"12345678abcdefgh");
+    }
+
+    #[test]
+    fn startup_bounds_legacy_archive_even_with_a_small_current_log() {
+        let dir = Fixture::new();
+        std::fs::write(dir.current(), b"new").unwrap();
+        std::fs::write(dir.previous(), b"old old old old 1234567890abcdef").unwrap();
+        let _log = dir.open();
+        assert_eq!(std::fs::read(dir.current()).unwrap(), b"new");
+        assert_eq!(std::fs::read(dir.previous()).unwrap(), b"1234567890abcdef");
+    }
+
+    #[test]
+    fn archive_compaction_preserves_tail_across_buffer_boundaries() {
+        let dir = Fixture::new();
+        let bytes: Vec<u8> = (0..100_000).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.previous(), &bytes).unwrap();
+        trim_archive(&dir.previous(), 90_000).unwrap();
+        assert_eq!(std::fs::read(dir.previous()).unwrap(), bytes[10_000..]);
     }
 }

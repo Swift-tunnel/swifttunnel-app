@@ -250,17 +250,12 @@ fn init_logging() {
         return;
     }
 
-    // Roll a log that has grown too large rather than appending to it for
-    // ever. A connect that retries the driver eight times a second writes a
-    // surprising amount, and nobody can attach a 50MB file to a message. The
-    // threshold is core own, shared with the full app.
-    let _ = swifttunnel_core::rotate_log_if_needed(&path);
-
-    let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    else {
+    // Bound long-running sessions as well as files left by previous versions.
+    let Ok(file) = swifttunnel_core::rolling_log::RollingLog::open(
+        &path,
+        &path.with_extension("log.old"),
+        8 * 1024 * 1024,
+    ) else {
         return;
     };
 
