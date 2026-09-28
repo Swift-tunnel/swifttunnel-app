@@ -244,6 +244,14 @@ impl AuthManager {
         // Call Supabase auth
         match self.client.sign_in_with_password(email, password).await {
             Ok(response) => {
+                if let Err(error) = self
+                    .client
+                    .register_app_session(&response.access_token)
+                    .await
+                {
+                    *self.state.lock() = AuthState::Error(error.to_string());
+                    return Err(error);
+                }
                 let mut user_info = UserInfo {
                     id: response.user.id.clone(),
                     email: response
@@ -611,6 +619,29 @@ impl AuthManager {
     }
 
     /// Log out and clear stored credentials
+    pub async fn logout_app_session(&self) -> Result<(), AuthError> {
+        let token = match self.get_state() {
+            AuthState::LoggedIn(session) | AuthState::Banned(session) => Some(session.access_token),
+            _ => None,
+        };
+        // Always remove local credentials, including while offline. Remote
+        // revocation is best effort; the dashboard can revoke an unreachable PC.
+        self.logout()?;
+        if let Some(token) = token {
+            match tokio::time::timeout(
+                StdDuration::from_secs(5),
+                self.client.revoke_app_session(&token),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                _ => warn!("Remote app sign-out was not confirmed; local credentials were cleared"),
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear local credentials without a network call.
     pub fn logout(&self) -> Result<(), AuthError> {
         info!("Logging out");
 
@@ -873,11 +904,6 @@ impl AuthManager {
             }
         };
 
-        debug!(
-            "Got magic link token for user: {} (token: {}...)",
-            exchange_response.email,
-            &exchange_response.token[..exchange_response.token.len().min(8)]
-        );
         info!(
             "Exchanged OAuth code for magic link ({})",
             exchange_response.email
@@ -958,6 +984,15 @@ impl AuthManager {
                 Self::fallback_profile(auth_response.user.id.clone())
             }
         };
+
+        if let Err(error) = self
+            .client
+            .register_app_session(&auth_response.access_token)
+            .await
+        {
+            *self.state.lock() = AuthState::Error(error.to_string());
+            return Err(error);
+        }
 
         // Create session
         let session = Self::session_from_auth_response(

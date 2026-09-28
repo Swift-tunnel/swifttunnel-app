@@ -368,7 +368,7 @@ impl Engine {
                     let shared = shared.clone();
                     async move {
                         let auth = shared.auth.lock().await;
-                        let _ = auth.logout();
+                        let _ = auth.logout_app_session().await;
                         drop(auth);
                         if let Ok(mut discord) = shared.discord.lock() {
                             discord.clear();

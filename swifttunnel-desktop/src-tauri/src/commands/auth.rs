@@ -302,7 +302,7 @@ pub async fn auth_complete_oauth(
 #[tauri::command]
 pub async fn auth_logout(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     let auth = state.auth_manager.lock().await;
-    let result = auth.logout().map_err(|e| e.to_string());
+    let result = auth.logout_app_session().await.map_err(|e| e.to_string());
     drop(auth);
 
     if result.is_ok() {
