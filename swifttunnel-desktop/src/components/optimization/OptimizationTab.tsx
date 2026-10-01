@@ -1,3 +1,4 @@
+import { bulkEnableTargets, type BulkItem } from "./bulkSelection";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip, Icon, Watermark } from "../ui";
@@ -611,6 +612,11 @@ function AutoRamCleanRow() {
 }
 
 export function OptimizationTab() {
+  const loaded = useOptimizationStore((s) => s.loaded);
+  const loading = useOptimizationStore((s) => s.loading);
+  const loadError = useOptimizationStore((s) => s.loadError);
+  const errors = useOptimizationStore((s) => s.errors);
+  const restartRequired = useOptimizationStore((s) => s.restartRequired);
   const loadActive = useOptimizationStore((s) => s.loadActive);
   const [view, setView] = useState<"boost" | "speedup">("boost");
   const [presetMode, setPresetMode] = useState<PresetMode>(null);
@@ -633,7 +639,30 @@ export function OptimizationTab() {
 
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
-      {/* Sub-tabs + restore-to-defaults. */}
+      <div className="instrument px-4 py-3 text-[12px] text-text-muted">
+        <h2 className="text-[16px] font-semibold text-text-primary">Tune your PC, one change at a time</h2>
+        <p className="mt-1">Results vary by PC. Compare the same game before and after a change. Caution tweaks stay opt-in.</p>
+        <p className="mt-1">Revert tweaks restores saved values. Power Plan and Auto-clean RAM have their own switches.</p>
+      </div>
+      {(!loaded || loading || loadError) && (
+        <div className="instrument px-4 py-3 text-[12px]" role="status">
+          <p>{loading ? "Reading saved optimization states..." : "Could not read saved optimization states. Controls are paused to avoid changing an unknown setup."}</p>
+          {loadError && <p className="mt-1 break-words text-status-error">{loadError}</p>}
+          <button type="button" className="mt-2 underline" disabled={loading} onClick={() => void loadActive()}>Retry status check</button>
+        </div>
+      )}
+      {Object.values(errors).some(Boolean) && (
+        <div className="instrument px-4 py-3 text-[12px]" role="alert">
+          <p className="font-semibold">Some changes did not finish</p>
+          <ul className="mt-2 space-y-1">
+            {Object.entries(errors).filter(([, error]) => error).map(([id, error]) => (
+              <li key={id} className="break-words">{[...OPTIMIZATIONS, ...SPEEDUP_OPTIMIZATIONS].find((item) => item.id === id)?.name ?? id}: {error}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <fieldset disabled={!loaded || loading} className="m-0 flex min-w-0 flex-col gap-4 border-0 p-0 disabled:opacity-60">
+      {/* Sub-tabs and restoration of saved values. */}
       <div className="flex items-center justify-between gap-3">
         <div
           className="flex w-fit items-center gap-1 rounded-[10px] p-1"
@@ -670,7 +699,7 @@ export function OptimizationTab() {
       <OptimizeAllHeader view={view} />
 
       <div className="instrument px-4 py-3 text-[12px] leading-relaxed text-text-muted">
-        <p className="font-semibold text-text-primary">Some changes need a PC restart</p>
+        <p className="font-semibold text-text-primary">{restartRequired ? "Restart your PC to finish your changes" : "Some changes need a PC restart"}</p>
         <p>
           After enabling or reverting an item marked "Restart PC", save your work
           and choose Start &gt; Power &gt; Restart in Windows. Reopening SwiftTunnel
@@ -705,6 +734,7 @@ export function OptimizationTab() {
         />
       </div>
       <PresetsDialog mode={presetMode} onClose={() => setPresetMode(null)} />
+      </fieldset>
     </div>
   );
 }
@@ -721,7 +751,7 @@ function RocketIcon() {
 }
 
 /** "Enable all" for a section, flips to "Disable all" once every item is on. */
-function BulkToggle({ items }: { items: { id: string; name: string }[] }) {
+function BulkToggle({ items }: { items: BulkItem[] }) {
   const statuses = useOptimizationStore((s) => s.status);
   const activate = useOptimizationStore((s) => s.activate);
   const deactivate = useOptimizationStore((s) => s.deactivate);
@@ -729,7 +759,11 @@ function BulkToggle({ items }: { items: { id: string; name: string }[] }) {
 
   if (items.length === 0) return null;
 
-  const allActive = items.every((i) => statuses[i.id] === "active");
+  const eligible = bulkEnableTargets(items);
+  const allActive = eligible.length > 0
+    ? eligible.every((i) => statuses[i.id] === "active")
+    : items.some((i) => statuses[i.id] === "active");
+  const targets = allActive ? items.filter((i) => statuses[i.id] === "active") : eligible;
   const inFlight =
     busy ||
     items.some((i) => {
@@ -744,7 +778,7 @@ function BulkToggle({ items }: { items: { id: string; name: string }[] }) {
       let changed = 0;
       let failed = 0;
       let reboot = 0;
-      for (const item of items) {
+      for (const item of targets) {
         const active = statuses[item.id] === "active";
         let outcome = null;
         if (allActive && active) outcome = await deactivate(item, { silent: true });
@@ -770,7 +804,8 @@ function BulkToggle({ items }: { items: { id: string; name: string }[] }) {
         e.stopPropagation();
         void toggleAll();
       }}
-      disabled={inFlight}
+      disabled={inFlight || targets.length === 0}
+      title="Enable eligible tweaks only. Caution changes must be enabled individually."
       className="shrink-0 rounded-[6px] px-2 py-[3px] text-[10px] font-semibold uppercase tracking-[0.04em] transition-colors hover:bg-bg-hover disabled:opacity-50"
       style={{
         border: "1px solid var(--color-border-subtle)",
@@ -778,12 +813,12 @@ function BulkToggle({ items }: { items: { id: string; name: string }[] }) {
         color: "var(--color-text-secondary)",
       }}
     >
-      {allActive ? "Disable all" : "Enable all"}
+      {allActive ? "Revert active" : "Enable eligible"}
     </button>
   );
 }
 
-/** Reverts every applied optimization (both sub-tabs) back to Windows defaults. */
+/** Restores saved values for catalog tweaks, not unrelated power/RAM settings. */
 function RestoreDefaultsButton() {
   const statuses = useOptimizationStore((s) => s.status);
   const deactivate = useOptimizationStore((s) => s.deactivate);
@@ -822,7 +857,7 @@ function RestoreDefaultsButton() {
       type="button"
       onClick={() => void restore()}
       disabled={busy || active.length === 0}
-      title="Revert every applied optimization back to Windows defaults"
+      title="Restore saved values for catalog tweaks. Power Plan and Auto-clean RAM are separate."
       className="flex shrink-0 items-center gap-1.5 rounded-[8px] px-3 py-1.5 text-[11.5px] font-medium transition-colors hover:bg-bg-hover disabled:opacity-45"
       style={{ color: "var(--color-text-muted)" }}
     >
@@ -832,7 +867,7 @@ function RestoreDefaultsButton() {
         strokeWidth={2}
         className={busy ? "animate-spin" : ""}
       />
-      {busy ? "Restoring…" : "Restore Windows defaults"}
+      {busy ? "Restoring…" : "Revert tweaks"}
     </button>
   );
 }
@@ -843,15 +878,14 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
   const activate = useOptimizationStore((s) => s.activate);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [batchTotal, setBatchTotal] = useState(0);
 
   const pending = useMemo(() => {
     if (view === "speedup") {
-      return SPEEDUP_OPTIMIZATIONS.filter((o) => statuses[o.id] !== "active");
+      return bulkEnableTargets(SPEEDUP_OPTIMIZATIONS).filter((o) => statuses[o.id] !== "active");
     }
     // Game Boost bulk-apply skips "caution" tweaks, those stay opt-in.
-    return OPTIMIZATIONS.filter(
-      (o) => o.safety !== "caution" && statuses[o.id] !== "active",
-    );
+    return bulkEnableTargets(OPTIMIZATIONS).filter((o) => statuses[o.id] !== "active");
   }, [view, statuses]);
 
   const total = pending.length;
@@ -860,6 +894,7 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
     if (running || total === 0) return;
     setRunning(true);
     setProgress(0);
+    setBatchTotal(total);
     try {
       let done = 0;
       let failed = 0;
@@ -881,10 +916,10 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
   }
 
   const label = running
-    ? `Optimizing… ${progress}/${total}`
+    ? `Applying… ${progress}/${batchTotal}`
     : total === 0
-      ? "All optimized"
-      : "Optimize all";
+      ? "Eligible tweaks applied"
+      : "Apply eligible tweaks";
 
   return (
     <section
@@ -918,12 +953,11 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
         <div className="min-w-0">
           <h2 className="text-[16px] font-semibold leading-tight text-text-primary">
             {total === 0
-              ? "Everything's optimized"
+              ? "Eligible tweaks are applied"
               : `${total} ${total === 1 ? "tweak" : "tweaks"} ready to optimize`}
           </h2>
           <p className="mt-0.5 text-[11.5px] leading-snug text-text-muted">
-            {view === "speedup" ? "Speed Up" : "Game Boost"} · one click applies
-            them all, every change is reversible.
+            {view === "speedup" ? "Speed Up" : "Game Boost"} · applies eligible tweaks only. Caution items and the power plan stay separate.
           </p>
         </div>
       </div>
@@ -1031,6 +1065,8 @@ function SpeedUpItem({ def }: { def: SpeedUpDef }) {
     <button
       type="button"
       data-search-anchor={def.id}
+      disabled={isBusy}
+      aria-pressed={isActive}
       onClick={() => {
         if (isBusy) return;
         if (isActive) void deactivate(def);

@@ -6,7 +6,7 @@ import {
   optimizationRevert,
   optimizationGetActive,
 } from "../lib/commands";
-import { reportError } from "../lib/errors";
+import { formatErrorMessage, reportError } from "../lib/errors";
 
 export type OptStatus = "inactive" | "activating" | "active" | "deactivating";
 
@@ -25,6 +25,10 @@ type OptOptions = { silent?: boolean };
 interface OptimizationStore {
   status: Record<string, OptStatus>;
   loaded: boolean;
+  loading: boolean;
+  loadError: string | null;
+  errors: Record<string, string>;
+  restartRequired: boolean;
   loadActive: () => Promise<void>;
   activate: (def: OptTarget, opts?: OptOptions) => Promise<OptOutcome>;
   deactivate: (def: OptTarget, opts?: OptOptions) => Promise<OptOutcome>;
@@ -56,14 +60,22 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
   return {
     status: {},
     loaded: false,
+    loading: false,
+    loadError: null,
+    errors: {},
+    restartRequired: false,
 
     /** Load which optimizations are currently applied (persisted snapshots). */
     loadActive: async () => {
       const request = ++loadRequest;
       const before = new Map(revisions);
+      set({ loading: true, loadError: null });
       try {
         const active = await optimizationGetActive();
         if (request !== loadRequest) return;
+        if (!Array.isArray(active) || active.some((id) => typeof id !== "string")) {
+          throw new Error("Optimization status is unavailable. Retry before changing tweaks.");
+        }
         const status: Record<string, OptStatus> = {};
         for (const id of active) status[id] = "active";
         for (const [id, current] of Object.entries(get().status)) {
@@ -71,13 +83,13 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
             status[id] = current;
           }
         }
-        set({ status, loaded: true });
+        set({ status, loaded: true, loading: false });
       } catch (error) {
         if (request !== loadRequest) return;
         reportError("Failed to load optimization states", error, {
           dedupeKey: "optimization-load",
         });
-        set({ loaded: true });
+        set({ loaded: false, loading: false, loadError: formatErrorMessage(error) });
       }
     },
 
@@ -87,6 +99,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
         return { ok: true, requiresReboot: false };
       }
       setStatus(def.id, "activating");
+      set((s) => ({ errors: { ...s.errors, [def.id]: "" } }));
 
       try {
         const res = await optimizationApply(def.id);
@@ -100,6 +113,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
         }
 
         setStatus(def.id, "active");
+        if (res.requires_reboot) set({ restartRequired: true });
         if (!opts?.silent) {
           useToastStore.getState().addToast({
             type: "success",
@@ -130,10 +144,12 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
           // The original failure remains visible, including its recovery step.
         }
         setStatus(def.id, needsRevert ? "active" : "inactive");
+        const message = formatErrorMessage(error);
+        set((s) => ({ errors: { ...s.errors, [def.id]: message } }));
         if (!opts?.silent) {
           useToastStore.getState().addToast({
             type: "error",
-            message: `Couldn't activate ${def.name}: ${String(error)}`,
+            message: `Couldn't activate ${def.name}: ${message}`,
           });
         }
         return { ok: false, requiresReboot: false };
@@ -147,6 +163,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
         return { ok: true, requiresReboot: false };
       }
       setStatus(def.id, "deactivating");
+      set((s) => ({ errors: { ...s.errors, [def.id]: "" } }));
 
       try {
         const res = await optimizationRevert(def.id);
@@ -157,6 +174,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
         }
 
         setStatus(def.id, "inactive");
+        if (res.requires_reboot) set({ restartRequired: true });
         if (!opts?.silent) {
           useToastStore.getState().addToast({
             type: "info",
@@ -181,10 +199,12 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
         return { ok: true, requiresReboot: res.requires_reboot };
       } catch (error) {
         setStatus(def.id, "active");
+        const message = formatErrorMessage(error);
+        set((s) => ({ errors: { ...s.errors, [def.id]: message } }));
         if (!opts?.silent) {
           useToastStore.getState().addToast({
             type: "error",
-            message: `Couldn't revert ${def.name}: ${String(error)}`,
+            message: `Couldn't revert ${def.name}: ${message}`,
           });
         }
         return { ok: false, requiresReboot: false };

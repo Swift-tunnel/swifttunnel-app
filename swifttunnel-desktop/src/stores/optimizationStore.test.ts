@@ -4,13 +4,13 @@ const commands = vi.hoisted(() => ({
 }));
 vi.mock("../lib/commands", () => commands);
 vi.mock("../lib/notifications", () => ({ notify: vi.fn() }));
-vi.mock("../lib/errors", () => ({ reportError: vi.fn() }));
+vi.mock("../lib/errors", async (original) => ({ ...await original<typeof import("../lib/errors")>(), reportError: vi.fn() }));
 vi.mock("./toastStore", () => ({ useToastStore: { getState: () => ({ addToast: vi.fn() }) } }));
 import { useOptimizationStore } from "./optimizationStore";
 
 beforeEach(() => {
   vi.resetAllMocks();
-  useOptimizationStore.setState({ status: {}, loaded: false });
+  useOptimizationStore.setState({ status: {}, loaded: false, loading: false, loadError: null, errors: {}, restartRequired: false });
   commands.optimizationApply.mockRejectedValue(new Error("Rollback record kept; revert to recover"));
 });
 
@@ -106,4 +106,35 @@ it("leaves a tweak inactive when no changes or rollback record remain", async ()
   commands.optimizationGetActive.mockResolvedValue([]);
   await useOptimizationStore.getState().activate({ id: "test", name: "Test" });
   expect(useOptimizationStore.getState().status.test).toBe("inactive");
+});
+
+it("keeps failed status unavailable and allows retry", async () => {
+  commands.optimizationGetActive.mockRejectedValue({ message: "Snapshot is unreadable" });
+  await useOptimizationStore.getState().loadActive();
+  expect(useOptimizationStore.getState().loaded).toBe(false);
+  expect(useOptimizationStore.getState().loading).toBe(false);
+  expect(useOptimizationStore.getState().loadError).toBe("Snapshot is unreadable");
+  commands.optimizationGetActive.mockResolvedValue(["test"]);
+  await useOptimizationStore.getState().loadActive();
+  expect(useOptimizationStore.getState().loaded).toBe(true);
+  expect(useOptimizationStore.getState().loadError).toBeNull();
+  expect(useOptimizationStore.getState().status.test).toBe("active");
+});
+
+it("rejects malformed status instead of treating characters as tweak IDs", async () => {
+  commands.optimizationGetActive.mockResolvedValue("test");
+  await useOptimizationStore.getState().loadActive();
+  expect(useOptimizationStore.getState().loaded).toBe(false);
+  expect(useOptimizationStore.getState().status).toEqual({});
+});
+
+it("keeps bulk failures visible and normalizes object errors", async () => {
+  commands.optimizationApply.mockRejectedValue({ message: "Access denied" });
+  commands.optimizationGetActive.mockResolvedValue([]);
+  await useOptimizationStore.getState().activate(target, { silent: true });
+  expect(useOptimizationStore.getState().errors.test).toBe("Access denied");
+  commands.optimizationApply.mockResolvedValue({ requires_reboot: true });
+  await useOptimizationStore.getState().activate(target, { silent: true });
+  expect(useOptimizationStore.getState().errors.test).toBe("");
+  expect(useOptimizationStore.getState().restartRequired).toBe(true);
 });

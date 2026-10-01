@@ -1,6 +1,7 @@
 // Mock @tauri-apps/api/core for browser preview
 
 import type { AppSettings } from "../lib/types";
+import { OPTIMIZATIONS, SPEEDUP_OPTIMIZATIONS } from "../components/optimization/optimizationCatalog";
 import { DEFAULT_SETTINGS } from "../lib/settings";
 
 const MOCK_SETTINGS: AppSettings = {
@@ -100,6 +101,15 @@ let mockBytesUp = 0;
 let mockBytesDown = 0;
 let mockThroughputLastAt = 0;
 
+const mockOptimizations = new Set<string>();
+function mockOptimization(args: unknown, enabled: boolean) {
+  const id = (args as { id?: unknown })?.id;
+  const def = [...OPTIMIZATIONS, ...SPEEDUP_OPTIMIZATIONS].find((item) => item.id === id);
+  if (!def) throw new Error("Unknown optimization");
+  if (enabled) mockOptimizations.add(def.id); else mockOptimizations.delete(def.id);
+  return { requires_reboot: def.requiresReboot };
+}
+
 const handlers: Record<string, (...args: unknown[]) => unknown> = {
   auth_get_state: () => ({
     state: "logged_in",
@@ -108,6 +118,9 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     is_tester: true,
   }),
 
+  optimization_get_active: () => [...mockOptimizations],
+  optimization_apply: (args) => mockOptimization(args, true),
+  optimization_revert: (args) => mockOptimization(args, false),
   auth_start_oauth: () => "https://swifttunnel.net/login?mock=1",
   auth_poll_oauth: () => ({ completed: false, token: null, state: null }),
   auth_cancel_oauth: () => {},
