@@ -860,3 +860,13 @@ describe("repair center logic", () => {
     );
   });
 });
+
+it("does not change driver or network settings when the VPN state cannot be read", async () => {
+  const deps = makeDeps({ vpnGetState: vi.fn().mockRejectedValue(new Error("state unavailable")) });
+  const network = await runRepairIssue("no_internet", deps, { settings: DEFAULT_SETTINGS });
+  const driver = await runDriverReinstall(deps);
+  expect(network.status).toBe("failed");
+  expect(driver.status).toBe("failed");
+  expect(deps.systemRepairNetwork).not.toHaveBeenCalled();
+  expect(deps.systemReinstallDriver).not.toHaveBeenCalled();
+});

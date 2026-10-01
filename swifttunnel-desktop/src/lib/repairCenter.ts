@@ -408,7 +408,7 @@ export async function runDriverReinstall(
   deps: RepairCenterDeps,
 ): Promise<RepairReport> {
   try {
-    const state = await deps.vpnGetState().catch(() => null);
+    const state = await deps.vpnGetState();
     if (
       state !== null &&
       state.state !== "disconnected" &&
@@ -593,7 +593,7 @@ export function formatRepairForSupport(
 // error) while the kernel filter blackholes all traffic. The only
 // precondition is that no session is active.
 async function repairNoInternet(deps: RepairCenterDeps): Promise<RepairReport> {
-  const state = await deps.vpnGetState().catch(() => null);
+  const state = await deps.vpnGetState();
   if (state !== null && state.state !== "disconnected" && state.state !== "error") {
     return {
       status: "partial",
