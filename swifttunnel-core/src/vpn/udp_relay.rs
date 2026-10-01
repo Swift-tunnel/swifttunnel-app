@@ -279,8 +279,8 @@ fn record_relay_send_success(send_unreachable_streak: &AtomicU32, send_failure_s
 /// (Healthy=0, NoTrafficYet=1, Stale=2, Dead=3). Using `fetch_max` makes the
 /// transition atomic: a concurrent writer that already moved health to Dead
 /// can never be silently downgraded to Stale by a later non-Dead update.
-fn escalate_relay_health(relay_health: &AtomicU8, target: RelayHealthState) {
-    relay_health.fetch_max(target as u8, Ordering::Relaxed);
+fn escalate_relay_health(relay_health: &AtomicU8, target: RelayHealthState) -> bool {
+    relay_health.fetch_max(target as u8, Ordering::Relaxed) < target as u8
 }
 
 fn record_relay_send_error(
@@ -312,25 +312,27 @@ fn record_relay_send_error(
         // health degradation; otherwise the connection monitor sees Healthy
         // forever while every send fails with EPERM/ENOBUFS/etc.
         if total_failures >= RELAY_SEND_FAILURE_DEAD_THRESHOLD {
-            escalate_relay_health(relay_health, RelayHealthState::Dead);
-            log::error!(
-                "UDP Relay: Health -> DEAD (relay_send_failure streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
-                total_failures,
-                RELAY_SEND_FAILURE_DEAD_THRESHOLD,
-                relay_addr,
-                context,
-                err.raw_os_error()
-            );
+            if escalate_relay_health(relay_health, RelayHealthState::Dead) {
+                log::error!(
+                    "UDP Relay: Health -> DEAD (relay_send_failure streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
+                    total_failures,
+                    RELAY_SEND_FAILURE_DEAD_THRESHOLD,
+                    relay_addr,
+                    context,
+                    err.raw_os_error()
+                );
+            }
         } else if total_failures >= RELAY_SEND_FAILURE_STALE_THRESHOLD {
-            escalate_relay_health(relay_health, RelayHealthState::Stale);
-            log::warn!(
-                "UDP Relay: Health -> STALE (relay_send_failure streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
-                total_failures,
-                RELAY_SEND_FAILURE_STALE_THRESHOLD,
-                relay_addr,
-                context,
-                err.raw_os_error()
-            );
+            if escalate_relay_health(relay_health, RelayHealthState::Stale) {
+                log::warn!(
+                    "UDP Relay: Health -> STALE (relay_send_failure streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
+                    total_failures,
+                    RELAY_SEND_FAILURE_STALE_THRESHOLD,
+                    relay_addr,
+                    context,
+                    err.raw_os_error()
+                );
+            }
         }
 
         return RelaySendFailureAction::NonRepairable;
@@ -338,15 +340,16 @@ fn record_relay_send_error(
 
     let streak = send_unreachable_streak.fetch_add(1, Ordering::Relaxed) + 1;
     if streak >= RELAY_SEND_UNREACHABLE_DEAD_THRESHOLD {
-        escalate_relay_health(relay_health, RelayHealthState::Dead);
-        log::error!(
-            "UDP Relay: Health -> DEAD (relay_send_unreachable streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
-            streak,
-            RELAY_SEND_UNREACHABLE_DEAD_THRESHOLD,
-            relay_addr,
-            context,
-            err.raw_os_error()
-        );
+        if escalate_relay_health(relay_health, RelayHealthState::Dead) {
+            log::error!(
+                "UDP Relay: Health -> DEAD (relay_send_unreachable streak {} >= {}, relay {}, context {}, raw_os_error {:?})",
+                streak,
+                RELAY_SEND_UNREACHABLE_DEAD_THRESHOLD,
+                relay_addr,
+                context,
+                err.raw_os_error()
+            );
+        }
         RelaySendFailureAction::RetryBudgetExhausted(streak)
     } else {
         escalate_relay_health(relay_health, RelayHealthState::Stale);
@@ -2586,6 +2589,47 @@ impl RelayContext {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repeated_send_failures_log_health_transitions_only_once() {
+        struct Capture;
+        thread_local! { static HEALTH_LOGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+        impl log::Log for Capture {
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                true
+            }
+            fn log(&self, record: &log::Record<'_>) {
+                if record.args().to_string().contains("Health ->") {
+                    HEALTH_LOGS.with(|count| count.set(count.get() + 1));
+                }
+            }
+            fn flush(&self) {}
+        }
+        static LOGGER: Capture = Capture;
+        log::set_logger(&LOGGER).expect("test logger should be unclaimed");
+        log::set_max_level(log::LevelFilter::Warn);
+        let health = AtomicU8::new(RelayHealthState::Healthy as u8);
+        let errors = AtomicU64::new(0);
+        let unreachable = AtomicU32::new(0);
+        let failures = AtomicU32::new(0);
+        let error = std::io::Error::from_raw_os_error(10055);
+        for _ in 0..10_000 {
+            record_relay_send_error(
+                &errors,
+                &health,
+                &unreachable,
+                &failures,
+                &error,
+                "127.0.0.1:51821".parse().unwrap(),
+                "test",
+            );
+        }
+        assert_eq!(errors.load(Ordering::Relaxed), 10_000);
+        assert_eq!(health.load(Ordering::Relaxed), RelayHealthState::Dead as u8);
+        HEALTH_LOGS.with(|count| assert_eq!(count.get(), 2));
+        assert!(!escalate_relay_health(&health, RelayHealthState::Stale));
+        assert_eq!(health.load(Ordering::Relaxed), RelayHealthState::Dead as u8);
+    }
+
     use super::*;
 
     #[test]
