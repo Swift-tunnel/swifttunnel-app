@@ -18,6 +18,14 @@ pub struct AuthStateResponse {
     pub banned_at: Option<String>,
 }
 
+#[tauri::command]
+pub async fn auth_license_status(
+    state: State<'_, AppState>,
+) -> Result<swifttunnel_core::auth::license::LicenseStatus, String> {
+    let auth = state.auth_manager.lock().await;
+    auth.license_status().await.map_err(|e| e.to_string())
+}
+
 fn map_auth_state(auth_state: AuthState) -> AuthStateResponse {
     match auth_state {
         AuthState::LoggedIn(session) => AuthStateResponse {

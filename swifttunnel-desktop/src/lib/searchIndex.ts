@@ -44,6 +44,7 @@ const settingsIcon = /* @__PURE__ */ icon("settings");
 
 // ── Top-level tabs ──
 const TABS: SearchEntry[] = [
+  { id: "tab-license", tab: "license", label: "License & playtime", section: "Go to page", icon: "shield", keywords: "license key pro plus paid pass balance time redeem pricing subscription" },
   {
     id: "tab-connect",
     tab: "connect",

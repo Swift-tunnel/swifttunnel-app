@@ -107,6 +107,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     user_id: "usr_abc123",
     is_tester: true,
   }),
+  auth_license_status: () => ({ state: "not_launched", enforced: false }),
 
   auth_start_oauth: () => "https://swifttunnel.net/login?mock=1",
   auth_poll_oauth: () => ({ completed: false, token: null, state: null }),

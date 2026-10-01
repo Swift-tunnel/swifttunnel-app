@@ -225,7 +225,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::InvalidConfig(_) => "Invalid config",
         VpnError::NotAuthenticated => "Not authenticated",
         VpnError::UserBanned(_) => "Account banned",
-        VpnError::FreeTierLimitReached(_) => "Free time used up",
+        VpnError::FreeTierLimitReached(_) => "Playtime unavailable",
         VpnError::SessionExpired => "Session expired",
         VpnError::UpdateRequired(_) => "Update required",
         VpnError::SplitTunnel(_) => "Split tunnel error",

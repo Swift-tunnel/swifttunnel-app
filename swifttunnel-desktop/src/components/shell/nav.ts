@@ -63,6 +63,7 @@ const ALL_SECTIONS: NavSection[] = [
   {
     label: "System",
     items: [
+      { id: "license", label: "License", description: "Playtime, passes and account access", shortcut: "8", icon: "shield" },
       {
         id: "repair",
         label: "Repair",

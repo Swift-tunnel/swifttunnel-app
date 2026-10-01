@@ -56,6 +56,10 @@ const DEFAULT_FRAME_CAP: u32 = 60;
 
 /// What the background threads have found.
 struct Snapshot {
+    license: Option<swifttunnel_core::auth::license::LicenseStatus>,
+    license_busy: bool,
+    license_error: Option<String>,
+    license_required: bool,
     regions: Vec<RegionRow>,
     /// The fleet, in core's own container.
     ///
@@ -194,6 +198,10 @@ impl Engine {
                 tunnel: Tunnel::default(),
                 free_tier_secs: None,
                 free_tier_spent: false,
+                license: None,
+                license_busy: false,
+                license_error: None,
+                license_required: false,
                 login_busy: false,
                 login_error: None,
             }),
@@ -249,6 +257,14 @@ impl Engine {
     /// Copy everything the screens read out of the snapshot and the settings.
     pub fn fill(&self, state: &mut State) {
         if let Ok(snapshot) = self.shared.snapshot.read() {
+            if snapshot.license_required && !state.license_required {
+                state.screen = crate::view::Screen::License;
+                state.push = crate::state::Push::None;
+            }
+            state.license_required = snapshot.license_required;
+            state.license = snapshot.license.clone();
+            state.license_busy = snapshot.license_busy;
+            state.license_error = snapshot.license_error.clone();
             state.regions = snapshot.regions.clone();
             state.adapters = snapshot.adapters.clone();
             state.roblox = snapshot.roblox.clone();
@@ -290,6 +306,42 @@ impl Engine {
         self.shared.notify();
     }
 
+    pub fn refresh_license(&self) {
+        {
+            let Ok(mut snapshot) = self.shared.snapshot.write() else {
+                return;
+            };
+            if snapshot.license_busy {
+                return;
+            }
+            snapshot.license_busy = true;
+            snapshot.license = None;
+            snapshot.license_error = None;
+        }
+        let shared = self.shared.clone();
+        shared.runtime.spawn({
+            let shared = shared.clone();
+            async move {
+                let auth = shared.auth.lock().await;
+                let result = auth.license_status().await;
+                // Publish before releasing the auth lock so sign-out cannot
+                // clear the account and then receive an old account's result.
+                shared.edit(|s| {
+                    s.license_busy = false;
+                    match result {
+                        Ok(status) => s.license = Some(status),
+                        Err(_) => {
+                            s.license_error =
+                                Some("Could not check your license. Refresh to try again.".into())
+                        }
+                    }
+                });
+                drop(auth);
+                shared.notify();
+            }
+        });
+    }
+
     pub fn refresh_adapters(&self) {
         let shared = self.shared.clone();
         std::thread::spawn(move || {
@@ -309,6 +361,11 @@ impl Engine {
         }
 
         match action {
+            Action::RefreshLicense => self.refresh_license(),
+            Action::ManageLicense => {
+                open_in_browser("https://www.swifttunnel.net/dashboard?section=license")
+            }
+            Action::ComparePlans => open_in_browser("https://www.swifttunnel.net/pricing"),
             Action::Primary => self.primary(state),
 
             Action::PickAutoRegion => {
@@ -412,12 +469,9 @@ impl Engine {
 
     /// Connect, or disconnect if already up.
     fn primary(&self, state: &State) {
-        // A connect with no allowance left would be refused by the server
-        // anyway; refusing it here saves a pointless round trip and gives a
-        // reason instead of a generic failure.
-        if state.free_tier_spent && state.tunnel.status != Status::Connected {
-            return;
-        }
+        // A cached exhausted balance can become valid after redemption or a
+        // refill. Let the server decide on an explicit new connect attempt.
+        self.shared.edit(|s| s.license_required = false);
         if self.shared.busy.load(Ordering::Relaxed) || state.lockout.is_some() {
             return;
         }
@@ -1045,7 +1099,15 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
         settings.enable_country_ban,
     )
     .await
-    .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))
+    .map_err(|e| {
+        if matches!(e, swifttunnel_core::vpn::VpnError::FreeTierLimitReached(_)) {
+            shared.edit(|s| {
+                s.license_required = true;
+                s.license = None;
+            });
+        }
+        swifttunnel_core::vpn::user_friendly_error(&e)
+    })
 }
 
 // ── Background threads ──────────────────────────────────────────────────────
@@ -1681,6 +1743,9 @@ async fn refresh_auth(shared: &Arc<Shared>) {
 
     shared.edit(|s| {
         s.signed_in = signed_in;
+        s.license = None;
+        s.license_error = None;
+        s.license_required = false;
         s.email = email;
         s.lockout = lockout_of(&auth_state, reason);
     });

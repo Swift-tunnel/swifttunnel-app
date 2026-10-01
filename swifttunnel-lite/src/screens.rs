@@ -29,6 +29,7 @@ pub fn build(state: &State) -> Vec<Item> {
             Screen::Connect => connect(state),
             Screen::Roblox => roblox(state),
             Screen::Settings => settings(state),
+            Screen::License => license(state),
         },
     }
 }
@@ -231,12 +232,12 @@ fn connect(state: &State) -> Vec<Item> {
         } else {
             Variant::Solid
         },
-        disabled: t.status == Status::Working || (!connected && state.free_tier_spent),
+        disabled: t.status == Status::Working,
     });
 
     if !connected && state.free_tier_spent {
         items.push(Item::Note(
-            "Free hours reset on their own. The limit is per account, not per device, so signing in on another PC will not add more."
+            "Your last reported allowance was used up. Open License to manage access, or reconnect after adding time."
                 .to_string(),
         ));
     }
@@ -272,6 +273,85 @@ fn connect(state: &State) -> Vec<Item> {
             .action(Action::Toggle(Flag::CountryBan)),
     ]));
 
+    items
+}
+
+fn license(state: &State) -> Vec<Item> {
+    use swifttunnel_core::auth::license::LicenseStatus;
+    let mut items = vec![Item::Caption {
+        text: "LICENSE & PLAYTIME".into(),
+        trailing: None,
+    }];
+    if state.license_required {
+        items.push(Item::Note("No playtime available for a new connection. Manage your license, then try connecting again.".into()));
+    }
+    items.push(Item::Note(if state.license_busy {
+        "Checking license...".into()
+    } else if let Some(error) = &state.license_error {
+        error.clone()
+    } else {
+        state
+            .license
+            .as_ref()
+            .map(|s| s.summary())
+            .unwrap_or("Refresh to check your license.".into())
+    }));
+    if let Some(LicenseStatus::Ready {
+        expires_at,
+        resets_at,
+        checked_at,
+        enforced,
+        reserved_seconds,
+        unlimited,
+        ..
+    }) = &state.license
+    {
+        let mut rows = vec![Row::new("Checked at").sub(checked_at)];
+        if let Some(expiry) = expires_at {
+            rows.push(Row::new("Pass expires").sub(expiry));
+        }
+        if let Some(reset) = resets_at {
+            rows.push(Row::new("Window resets").sub(reset));
+        }
+        items.push(Item::Group(rows));
+        if !unlimited {
+            items.push(Item::Note(format!(
+                "{} min already reserved. Available time excludes issued leases.",
+                reserved_seconds.unwrap_or(0) / 60
+            )));
+        }
+        if !enforced {
+            items.push(Item::Note("License enforcement has not launched.".into()));
+        }
+    }
+    items.push(Item::Button {
+        label: "Refresh status".into(),
+        action: Action::RefreshLicense,
+        variant: Variant::Outline,
+        disabled: state.license_busy,
+    });
+    items.push(Item::Group(vec![
+        Row::new("Redeem or manage keys")
+            .right(Right::Chevron)
+            .action(Action::ManageLicense),
+    ]));
+    items.push(Item::Gap(14));
+    items.push(Item::Caption {
+        text: "SWIFTTUNNEL PRO".into(),
+        trailing: None,
+    });
+    items.push(Item::Note(
+        "No checkpoints. Unlimited play on PC and Android during your pass.".into(),
+    ));
+    items.push(Item::Button {
+        label: "Explore Pro / compare plans".into(),
+        action: Action::ComparePlans,
+        variant: Variant::Solid,
+        disabled: false,
+    });
+    items.push(Item::Note(
+        "Opens your browser. Checkout opens at launch.".into(),
+    ));
     items
 }
 
