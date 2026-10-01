@@ -231,12 +231,12 @@ fn connect(state: &State) -> Vec<Item> {
         } else {
             Variant::Solid
         },
-        disabled: t.status == Status::Working || (!connected && state.free_tier_spent),
+        disabled: t.status == Status::Working,
     });
 
     if !connected && state.free_tier_spent {
         items.push(Item::Note(
-            "Free hours reset on their own. The limit is per account, not per device, so signing in on another PC will not add more."
+            "Your last reported allowance was used up. Retry after your allowance resets. SwiftTunnel checks your balance again when you connect."
                 .to_string(),
         ));
     }
@@ -710,5 +710,40 @@ impl Row {
             self.tone = Tone::Danger;
         }
         self
+    }
+}
+
+#[cfg(test)]
+mod quota_retry_tests {
+    use super::*;
+
+    #[test]
+    fn stale_zero_balance_does_not_disable_a_fresh_connect_attempt() {
+        let state = State {
+            free_tier_spent: true,
+            ..State::default()
+        };
+        assert!(connect(&state).iter().any(|item| matches!(
+            item,
+            Item::Button {
+                action: Action::Primary,
+                disabled: false,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_connect_in_progress_still_disables_the_button() {
+        let mut state = State::default();
+        state.tunnel.status = Status::Working;
+        assert!(connect(&state).iter().any(|item| matches!(
+            item,
+            Item::Button {
+                action: Action::Primary,
+                disabled: true,
+                ..
+            }
+        )));
     }
 }

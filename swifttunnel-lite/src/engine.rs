@@ -412,12 +412,8 @@ impl Engine {
 
     /// Connect, or disconnect if already up.
     fn primary(&self, state: &State) {
-        // A connect with no allowance left would be refused by the server
-        // anyway; refusing it here saves a pointless round trip and gives a
-        // reason instead of a generic failure.
-        if state.free_tier_spent && state.tunnel.status != Status::Connected {
-            return;
-        }
+        // A cached zero can outlive an admin reset or a window refill. A fresh
+        // explicit attempt must reach the authoritative server quota check.
         if self.shared.busy.load(Ordering::Relaxed) || state.lockout.is_some() {
             return;
         }
