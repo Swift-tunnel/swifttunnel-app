@@ -676,7 +676,9 @@ impl SplitTunnelDriver {
 
         let output = {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new("msiexec")
+            let installer = swifttunnel_installer_cache::windows_installer_path()
+                .map_err(|e| format!("Could not locate Windows Installer: {e}"))?;
+            std::process::Command::new(installer)
                 .args(["/i", &msi_path.to_string_lossy(), "/qn", "/norestart"])
                 .creation_flags(crate::utils::CREATE_NO_WINDOW)
                 .output()
@@ -1308,10 +1310,12 @@ impl SplitTunnelDriver {
 
                 let res = {
                     use std::os::windows::process::CommandExt;
-                    std::process::Command::new("msiexec")
-                        .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
-                        .creation_flags(crate::utils::CREATE_NO_WINDOW)
-                        .output()
+                    swifttunnel_installer_cache::windows_installer_path().and_then(|installer| {
+                        std::process::Command::new(installer)
+                            .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
+                            .creation_flags(crate::utils::CREATE_NO_WINDOW)
+                            .output()
+                    })
                 };
                 match res {
                     Ok(output) => {
