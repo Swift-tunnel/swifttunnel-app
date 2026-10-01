@@ -862,6 +862,34 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn msi_validation_rejects_same_size_replacement_and_truncation() {
+        let dir = unique_temp_dir("msi_integrity");
+        let file = dir.join("driver.msi");
+        let package = WinpkFilterMsiPackage {
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            min_size_bytes: 3,
+            ..MSI_PACKAGE_X64
+        };
+        fs::write(&file, b"abc").unwrap();
+        assert!(validate_msi_file(&file, &package).is_ok());
+        fs::write(&file, b"abd").unwrap();
+        assert!(
+            validate_msi_file(&file, &package)
+                .unwrap_err()
+                .contains("sha256 mismatch")
+        );
+        fs::write(&file, b"ab").unwrap();
+        assert!(
+            validate_msi_file(&file, &package)
+                .unwrap_err()
+                .contains("too small")
+        );
+        fs::remove_file(&file).unwrap();
+        assert!(validate_msi_file(&file, &package).is_err());
+        fs::remove_dir(&dir).unwrap();
+    }
+
     fn unique_temp_dir(label: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)

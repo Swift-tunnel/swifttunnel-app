@@ -1302,6 +1302,15 @@ impl SplitTunnelDriver {
         for pkg in super::winpkfilter::removable_msi_packages() {
             if let Some(msi_path) = Self::find_driver_msi_by_name(pkg.msi_name) {
                 any_msi_found = true;
+                // Uninstall also opens the package. Apply the same pinned
+                // integrity check as install before passing a file to MSI.
+                if let Err(error) = super::winpkfilter::validate_msi_file(&msi_path, pkg) {
+                    issues.push(format!(
+                        "Driver MSI ({}) was not opened because its integrity check failed: {error}",
+                        pkg.arch
+                    ));
+                    continue;
+                }
                 log::info!(
                     "Uninstalling WinpkFilter MSI ({}) from: {}",
                     pkg.arch,
