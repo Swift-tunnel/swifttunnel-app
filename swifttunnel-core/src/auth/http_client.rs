@@ -8,7 +8,6 @@ use log::{debug, error, info, warn};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 
 /// Response from the user profile API
@@ -188,7 +187,6 @@ pub struct AuthClient {
     client: Client,
     direct_client: Client,
     device_hwid: Option<String>,
-    registered_token: tokio::sync::Mutex<Option<String>>,
 }
 
 fn build_http_client(use_system_proxy: bool) -> Client {
@@ -216,7 +214,6 @@ impl AuthClient {
             client,
             direct_client,
             device_hwid: desktop_hwid(),
-            registered_token: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -229,7 +226,6 @@ impl AuthClient {
             client,
             direct_client,
             device_hwid,
-            registered_token: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -677,63 +673,6 @@ impl AuthClient {
         Ok(())
     }
 
-    /// Register once per access token. Ticket renewal still checks revocation
-    /// in the database on every request; this cache does not grant access.
-    pub async fn register_app_session(&self, access_token: &str) -> Result<(), AuthError> {
-        let fingerprint = format!("{:x}", Sha256::digest(access_token.as_bytes()));
-        let mut registered = self.registered_token.lock().await;
-        if registered.as_ref() == Some(&fingerprint) {
-            return Ok(());
-        }
-        self.app_session_action(access_token, "login").await?;
-        *registered = Some(fingerprint);
-        Ok(())
-    }
-
-    pub async fn revoke_app_session(&self, access_token: &str) -> Result<(), AuthError> {
-        self.app_session_action(access_token, "logout").await?;
-        *self.registered_token.lock().await = None;
-        Ok(())
-    }
-
-    async fn app_session_action(&self, access_token: &str, action: &str) -> Result<(), AuthError> {
-        let response = self
-            .send_with_network_fallback("app session", |client, base| {
-                self.add_common_headers(client.post(format!("{base}/api/auth/desktop/session")))
-                    .bearer_auth(access_token)
-                    .json(&json!({"action": action}))
-            })
-            .await?;
-        let status = response.status();
-        // Compatible with a web deployment that predates registration. Its
-        // ticket route still decides access; enforcement never trusts this.
-        if status.as_u16() == 404 {
-            return Ok(());
-        }
-        let body = response.text().await.unwrap_or_default();
-        if status.is_success() {
-            let value: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|_| AuthError::ApiError("Invalid app session response".into()))?;
-            if value["enforced"] == false
-                || value["allowed"] == true
-                || (action == "logout" && value["signed_out"] == true)
-            {
-                return Ok(());
-            }
-        }
-        if status.as_u16() == 401 {
-            return Err(AuthError::RefreshTokenInvalid);
-        }
-        if let Some(error) = user_banned_error_from_body(&body) {
-            return Err(error);
-        }
-        let message = serde_json::from_str::<ApiErrorResponse>(&body)
-            .ok()
-            .and_then(|value| value.message.or(value.error))
-            .unwrap_or_else(|| "Could not verify app access. Try again shortly.".into());
-        Err(AuthError::ApiError(message))
-    }
-
     /// Fetch a short-lived relay auth ticket for a specific session/server pair.
     pub async fn get_relay_ticket(
         &self,
@@ -741,7 +680,6 @@ impl AuthClient {
         server_region: &str,
         session_id: &str,
     ) -> Result<RelayTicketResponse, AuthError> {
-        self.register_app_session(access_token).await?;
         let path = "/api/vpn/relay-ticket";
         // One renewal identity survives all transport retries and fallback hosts.
         let request_id: String = rand::random::<[u8; 16]>()
@@ -1132,17 +1070,6 @@ fn parse_retry_after(raw: Option<&str>) -> u64 {
 /// with `{"error":"free_tier_limit_reached","message":"..."}` , note the code
 /// lands in `error`, not `code`, unlike the ban and update responses.
 fn free_tier_limit_error(status: reqwest::StatusCode, body: &str) -> Option<AuthError> {
-    if status.as_u16() == 403 {
-        let parsed: ApiErrorResponse = serde_json::from_str(body).ok()?;
-        if parsed.code.as_deref() == Some("access_limit_reached") {
-            return Some(AuthError::FreeTierLimitReached(
-                parsed.message.unwrap_or_else(|| {
-                    "No playtime is available. Check License & playtime in your dashboard.".into()
-                }),
-            ));
-        }
-        return None;
-    }
     if status.as_u16() != 429 {
         return None;
     }
@@ -1409,20 +1336,6 @@ mod tests {
         assert!(update_required_error(reqwest::StatusCode::UNAUTHORIZED, body).is_none());
         assert!(user_banned_error_from_body(body).is_none());
         assert!(free_tier_limit_error(reqwest::StatusCode::UNAUTHORIZED, body).is_none());
-    }
-
-    #[test]
-    fn licensed_time_exhaustion_uses_the_terminal_quota_error() {
-        let body = r#"{"code":"access_limit_reached","message":"Check your license."}"#;
-        assert!(
-            matches!(free_tier_limit_error(reqwest::StatusCode::FORBIDDEN, body),
-            Some(AuthError::FreeTierLimitReached(message)) if message == "Check your license.")
-        );
-        assert!(free_tier_limit_error(reqwest::StatusCode::SERVICE_UNAVAILABLE, body).is_none());
-        assert!(
-            free_tier_limit_error(reqwest::StatusCode::FORBIDDEN, r#"{"code":"user_banned"}"#)
-                .is_none()
-        );
     }
 
     #[test]
