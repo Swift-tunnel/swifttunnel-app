@@ -143,9 +143,10 @@ pub async fn check_for_update(current_version: &str) -> Result<Option<AvailableU
     let public_key = base64_decode(&manifest_public_key_b64()?)?;
     let client = http_client()?;
 
-    let manifest_bytes = fetch(&client, MANIFEST_URL, "update manifest").await?;
-    let signature = String::from_utf8(fetch(&client, SIGNATURE_URL, "manifest signature").await?)
-        .map_err(|_| "the manifest signature was not text".to_string())?;
+    let manifest_bytes = fetch(&client, MANIFEST_URL, "update manifest", 1024 * 1024).await?;
+    let signature =
+        String::from_utf8(fetch(&client, SIGNATURE_URL, "manifest signature", 4096).await?)
+            .map_err(|_| "the manifest signature was not text".to_string())?;
 
     // Against the bytes as fetched. Parsing and re-encoding would change the
     // whitespace the signature was made over.
@@ -192,7 +193,13 @@ pub async fn download_verified(
     update: &AvailableUpdate,
 ) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
     let client = http_client()?;
-    let bytes = fetch(&client, &update.url, &update.file).await?;
+    let bytes = fetch(
+        &client,
+        &update.url,
+        &update.file,
+        MAX_INSTALLER_BYTES as usize,
+    )
+    .await?;
 
     // The manifest is signed, so its size is trustworthy and a mismatch means
     // this is not the file it described.
@@ -322,7 +329,12 @@ fn base64_decode(value: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("the update manifest key is not valid base64: {e}"))
 }
 
-async fn fetch(client: &reqwest::Client, url: &str, what: &str) -> Result<Vec<u8>, String> {
+async fn fetch(
+    client: &reqwest::Client,
+    url: &str,
+    what: &str,
+    limit: usize,
+) -> Result<Vec<u8>, String> {
     let response = client
         .get(url)
         .send()
@@ -336,29 +348,7 @@ async fn fetch(client: &reqwest::Client, url: &str, what: &str) -> Result<Vec<u8
         ));
     }
 
-    // Refuse before reading, so a redirect to something enormous cannot be
-    // pulled into memory first and rejected afterwards.
-    if let Some(len) = response.content_length()
-        && len > MAX_INSTALLER_BYTES
-    {
-        return Err(format!(
-            "the {what} is {len} bytes, past the {MAX_INSTALLER_BYTES} byte limit"
-        ));
-    }
-
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("could not read the {what}: {e}"))?;
-
-    if bytes.len() as u64 > MAX_INSTALLER_BYTES {
-        return Err(format!(
-            "the {what} is {} bytes, past the {MAX_INSTALLER_BYTES} byte limit",
-            bytes.len()
-        ));
-    }
-
-    Ok(bytes.to_vec())
+    crate::http_body::read_bounded(response, limit, what).await
 }
 
 #[cfg(test)]

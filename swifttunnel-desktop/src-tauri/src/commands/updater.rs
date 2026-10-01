@@ -264,6 +264,8 @@ fn verify_manifest_payload(
 
 async fn github_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Failed to create updater HTTP client: {}", e))
 }
@@ -284,9 +286,10 @@ async fn fetch_releases(client: &reqwest::Client) -> Result<Vec<GithubRelease>, 
         ));
     }
 
-    response
-        .json::<Vec<GithubRelease>>()
-        .await
+    let bytes =
+        swifttunnel_core::http_body::read_bounded(response, 4 * 1024 * 1024, "release list")
+            .await?;
+    serde_json::from_slice::<Vec<GithubRelease>>(&bytes)
         .map_err(|e| format!("Failed to parse GitHub releases: {}", e))
 }
 
@@ -313,10 +316,12 @@ async fn fetch_manifest_with_verification(
         ));
     }
 
-    let manifest_bytes = manifest_response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read updater manifest bytes: {}", e))?;
+    let manifest_bytes = swifttunnel_core::http_body::read_bounded(
+        manifest_response,
+        1024 * 1024,
+        "update manifest",
+    )
+    .await?;
 
     let signature_response = client
         .get(&signature_url)
@@ -333,10 +338,11 @@ async fn fetch_manifest_with_verification(
         ));
     }
 
-    let signature_b64 = signature_response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read updater manifest signature: {}", e))?;
+    let signature_b64 = String::from_utf8(
+        swifttunnel_core::http_body::read_bounded(signature_response, 4096, "manifest signature")
+            .await?,
+    )
+    .map_err(|_| "The update manifest signature is not valid text.".to_string())?;
 
     verify_manifest_signature(&manifest_bytes, &signature_b64)?;
 
@@ -367,10 +373,9 @@ async fn verify_latest_json_hash(
         ));
     }
 
-    let latest_json_bytes = latest_response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read latest.json bytes: {}", e))?;
+    let latest_json_bytes =
+        swifttunnel_core::http_body::read_bounded(latest_response, 1024 * 1024, "latest.json")
+            .await?;
 
     verify_bytes_sha256(&latest_json_bytes, &manifest.latest_json_sha256)
 }
