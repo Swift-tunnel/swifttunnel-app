@@ -77,6 +77,8 @@
     <Icon Id="LiteIcon" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="LiteIcon" />
     <Property Id="ARPURLINFOABOUT" Value="https://www.swifttunnel.net/lite" />
+    <!-- Distinguish this standalone product from Lite bundled with Desktop. -->
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize" />
 
     <Condition Message="SwiftTunnel Lite needs Windows 10 or later.">
       <![CDATA[Installed OR (VersionNT >= 603)]]>

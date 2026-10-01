@@ -4590,6 +4590,7 @@ dependencies = [
  "simplelog",
  "static_vcruntime",
  "swifttunnel-core",
+ "swifttunnel-installer-cache",
  "swifttunnel-msi-repair",
  "tokio",
  "windows 0.62.2",

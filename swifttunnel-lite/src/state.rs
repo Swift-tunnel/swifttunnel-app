@@ -313,6 +313,8 @@ pub struct Roblox {
 /// Everything the three screens read.
 #[derive(Debug, Clone, Default)]
 pub struct State {
+    pub uninstall_busy: bool,
+    pub installation_unknown: bool,
     pub screen: Screen,
     pub push: Push,
     pub tunnel: Tunnel,

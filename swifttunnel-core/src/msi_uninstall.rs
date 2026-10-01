@@ -1,4 +1,4 @@
-//! Resolve Desktop's registered MSI before closing the app for uninstall.
+//! Resolve the running app's registered MSI before uninstall.
 
 use std::path::Path;
 use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
@@ -20,6 +20,14 @@ fn normalized_directory(path: &str) -> String {
 }
 
 fn select_product(products: &[Product], install_dir: &str) -> Result<Option<String>, String> {
+    select_product_with_policy(products, install_dir, true)
+}
+
+fn select_product_with_policy(
+    products: &[Product],
+    install_dir: &str,
+    allow_missing_location: bool,
+) -> Result<Option<String>, String> {
     let directory = normalized_directory(install_dir);
     let matches: Vec<_> = products
         .iter()
@@ -35,7 +43,7 @@ fn select_product(products: &[Product], install_dir: &str) -> Result<Option<Stri
     }
     // Older packages may not publish InstallLocation. Only an unambiguous
     // member of Desktop's upgrade family is eligible for this fallback.
-    if products.len() == 1 && products[0].location.is_empty() {
+    if allow_missing_location && products.len() == 1 && products[0].location.is_empty() {
         return Ok(Some(products[0].code.clone()));
     }
     Err("Could not identify this SwiftTunnel installation. Open Windows Settings > Apps to select the installation to remove.".to_string())
@@ -43,14 +51,39 @@ fn select_product(products: &[Product], install_dir: &str) -> Result<Option<Stri
 
 pub fn desktop_product_code(install_dir: &Path) -> Result<Option<String>, String> {
     // Same family on x64 and ARM64, distinct from the standalone Lite product.
-    let upgrade_code = w!("{E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D}");
+    product_code(
+        install_dir,
+        w!("{E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D}"),
+        true,
+    )
+}
+
+pub fn lite_product_code(install_dir: &Path) -> Result<Option<String>, String> {
+    // Bundled Lite can coexist with standalone Lite. Missing location is not
+    // sufficient evidence that a standalone product owns this executable.
+    product_code(
+        install_dir,
+        w!("{9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520}"),
+        false,
+    )
+}
+
+fn product_code(
+    install_dir: &Path,
+    upgrade_code: PCWSTR,
+    allow_missing_location: bool,
+) -> Result<Option<String>, String> {
     let mut products = Vec::new();
     for index in 0..128 {
         let mut code = [0u16; 39];
         let status =
             unsafe { MsiEnumRelatedProductsW(upgrade_code, None, index, PWSTR(code.as_mut_ptr())) };
         if status == ERROR_NO_MORE_ITEMS.0 {
-            return select_product(&products, &install_dir.to_string_lossy());
+            return if allow_missing_location {
+                select_product(&products, &install_dir.to_string_lossy())
+            } else {
+                select_product_with_policy(&products, &install_dir.to_string_lossy(), false)
+            };
         }
         if status != ERROR_SUCCESS.0 {
             return Err(format!(
@@ -145,6 +178,45 @@ mod tests {
             config
                 .to_ascii_uppercase()
                 .contains("E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D")
+        );
+    }
+
+    #[test]
+    fn lite_family_matches_the_standalone_package() {
+        assert!(
+            include_str!("../../swifttunnel-lite/wix/product.wxs")
+                .to_uppercase()
+                .contains("9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520")
+        );
+    }
+
+    #[test]
+    fn lite_requires_a_location_even_with_one_standalone_product() {
+        assert!(
+            select_product_with_policy(
+                &[product("standalone", "")],
+                "C:\\Program Files\\SwiftTunnel",
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            select_product_with_policy(
+                &[product("standalone", "C:\\Program Files\\SwiftTunnel Lite")],
+                "C:\\Program Files\\SwiftTunnel",
+                false
+            )
+            .is_err()
+        );
+        assert_eq!(
+            select_product_with_policy(
+                &[product("standalone", "C:\\Program Files\\SwiftTunnel Lite")],
+                "C:\\Program Files\\SwiftTunnel Lite",
+                false
+            )
+            .unwrap()
+            .as_deref(),
+            Some("standalone")
         );
     }
 }

@@ -56,6 +56,8 @@ const DEFAULT_FRAME_CAP: u32 = 60;
 
 /// What the background threads have found.
 struct Snapshot {
+    uninstall_note: Option<String>,
+    uninstall_busy: bool,
     regions: Vec<RegionRow>,
     /// The fleet, in core's own container.
     ///
@@ -180,6 +182,8 @@ impl Engine {
             discord: std::sync::Mutex::new(DiscordManager::new(discord_enabled)),
             settings: RwLock::new(loaded),
             snapshot: RwLock::new(Snapshot {
+                uninstall_note: None,
+                uninstall_busy: false,
                 signed_in,
                 email,
                 roblox: read_roblox(&roblox_intent),
@@ -249,6 +253,8 @@ impl Engine {
     /// Copy everything the screens read out of the snapshot and the settings.
     pub fn fill(&self, state: &mut State) {
         if let Ok(snapshot) = self.shared.snapshot.read() {
+            state.uninstall_note = snapshot.uninstall_note.clone();
+            state.uninstall_busy = snapshot.uninstall_busy;
             state.regions = snapshot.regions.clone();
             state.adapters = snapshot.adapters.clone();
             state.roblox = snapshot.roblox.clone();
@@ -281,6 +287,14 @@ impl Engine {
                 crate::uninstall::how_installed(),
                 crate::uninstall::Installed::Standalone(_)
             );
+            state.installation_unknown = matches!(
+                crate::uninstall::how_installed(),
+                crate::uninstall::Installed::Unknown(_)
+            );
+            if let crate::uninstall::Installed::Unknown(message) = crate::uninstall::how_installed()
+            {
+                state.uninstall_note = Some(message.clone());
+            }
         }
     }
 
@@ -1865,21 +1879,53 @@ impl Engine {
         let crate::uninstall::Installed::Standalone(product_code) =
             crate::uninstall::how_installed()
         else {
-            state.uninstall_note =
-                Some("Lite came with SwiftTunnel. Uninstall SwiftTunnel to remove it.".into());
+            self.shared.edit(|s| {
+                s.uninstall_note =
+                    Some("Use Windows Settings > Apps to select the installation to remove.".into())
+            });
             return;
         };
-
-        // Drop the tunnel before the driver bindings go. Removing them under a
-        // live session leaves a machine that looks like it only has internet when
-        // SwiftTunnel is installed, which is the state people uninstall to escape.
-        if state.tunnel.status == Status::Connected {
-            self.primary(state);
+        if self.shared.busy.swap(true, Ordering::SeqCst) {
+            self.shared.edit(|s| {
+                s.uninstall_note =
+                    Some("Wait for the current operation to finish, then retry uninstall.".into())
+            });
+            return;
         }
-
-        if let Err(error) = crate::uninstall::start(product_code) {
-            state.uninstall_note = Some(error);
-        }
+        let product_code = product_code.clone();
+        self.shared
+            .intentional_disconnect
+            .store(true, Ordering::SeqCst);
+        self.shared.edit(|s| {
+            s.uninstall_busy = true;
+            s.uninstall_note = Some("Disconnecting safely before uninstall...".into());
+        });
+        let shared = self.shared.clone();
+        shared.runtime.spawn({
+            let shared = shared.clone();
+            async move {
+                let result = crate::uninstall::after_disconnect(
+                    async {
+                        shared.vpn.lock().await.disconnect().await.map_err(|_| {
+                            "Could not disconnect safely. Retry disconnecting before uninstalling."
+                                .to_string()
+                        })
+                    },
+                    move || crate::uninstall::start(&product_code),
+                )
+                .await;
+                shared.edit(|s| {
+                    s.uninstall_busy = false;
+                    s.uninstall_note = Some(match result {
+                        Ok(()) => "Windows Installer has opened. Follow its prompts to finish uninstalling.".into(),
+                        Err(error) => error,
+                    });
+                });
+                shared.busy.store(false, Ordering::SeqCst);
+                shared.notify();
+            }
+        });
+        self.fill(state);
     }
 }
 

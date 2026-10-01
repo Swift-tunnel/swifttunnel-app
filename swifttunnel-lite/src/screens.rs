@@ -585,11 +585,15 @@ fn settings(state: &State) -> Vec<Item> {
             // and a button that silently does nothing is worse than none.
             Row::new(if state.standalone {
                 "Uninstall SwiftTunnel Lite"
+            } else if state.installation_unknown {
+                "Installation status unavailable"
             } else {
                 "Installed with SwiftTunnel"
             })
             .sub(if state.standalone {
-                "Undoes every system change first"
+                "Disconnects and cleans up before opening Windows Installer"
+            } else if state.installation_unknown {
+                "Use Windows Settings > Apps to select this installation"
             } else {
                 "Remove SwiftTunnel to remove Lite"
             })
@@ -600,7 +604,7 @@ fn settings(state: &State) -> Vec<Item> {
             })
             .action(Action::Uninstall)
             .danger_if(state.standalone)
-            .disabled(!state.standalone),
+            .disabled(!state.standalone || state.uninstall_busy),
         ]),
         Item::Gap(12),
         // Whatever the last attempt had to say, if it had anything.
