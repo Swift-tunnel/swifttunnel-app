@@ -35,7 +35,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             } else if is_windows_firewall_setup_error(&lc) {
                 "Windows Firewall commands are unavailable, so SwiftTunnel could not finish its IPv6 safety setup.\n\nSwiftTunnel tried to repair this automatically. Restart Windows once, then connect again. If it still fails, contact support with your log file.".to_string()
             } else if lc.contains("no ndis adapter matched the default-route interface index") {
-                "SwiftTunnel couldn't detect your active network adapter for split tunneling.\n\nGo to Settings -> VPN -> Network Adapter, select your Wi-Fi/Ethernet adapter, then reconnect.\n\nThis can happen if another VPN, network bridge, or virtual adapter owns the default route.".to_string()
+                "SwiftTunnel couldn't detect your active network adapter for split tunneling.\n\nOpen adapter selection (Connect in Desktop, Settings in Lite), choose your active Wi-Fi or Ethernet adapter, then reconnect.\n\nAnother VPN, network bridge, or virtual adapter may own the default route.".to_string()
             } else if lc.contains("winpkfilter_binding_missing")
                 || (lc.contains("nt_ndisrd") && lc.contains("not bound to adapter"))
             {
@@ -57,7 +57,8 @@ pub fn user_friendly_error(error: &VpnError) -> String {
 
         // Route issues
         VpnError::Route(msg) => {
-            if msg.contains("No default gateway") || msg.contains("no gateway") {
+            let lower = msg.to_lowercase();
+            if lower.contains("no default gateway") || lower.contains("no gateway") {
                 "No internet connection detected.\n\nPlease check your network connection and try again.".to_string()
             } else {
                 "SwiftTunnel couldn't set up game routes.\n\nOpen the Repair tab and run a repair, then reconnect.".to_string()
@@ -77,9 +78,10 @@ pub fn user_friendly_error(error: &VpnError) -> String {
 
         // Network issues
         VpnError::Network(msg) => {
-            if msg.contains("timeout") || msg.contains("timed out") {
+            let lower = msg.to_lowercase();
+            if lower.contains("timeout") || lower.contains("timed out") {
                 "Connection timed out.\n\nPlease check your internet connection and try again.".to_string()
-            } else if msg.contains("DNS") || msg.contains("resolve") {
+            } else if lower.contains("dns") || lower.contains("resolve") {
                 "DNS lookup failed.\n\nPlease check your internet connection.".to_string()
             } else {
                 "Network error.\n\nCheck your internet connection and try again.".to_string()
@@ -205,7 +207,11 @@ fn simplify_message(msg: &str) -> String {
 
     // Truncate if too long
     if result.len() > 200 {
-        format!("{}...", &result[..197])
+        let mut end = 197;
+        while !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &result[..end])
     } else {
         result
     }
@@ -313,7 +319,7 @@ mod tests {
         );
         let msg = user_friendly_error(&error);
         assert!(msg.contains("Settings"));
-        assert!(msg.contains("Network Adapter"));
+        assert!(msg.contains("Connect in Desktop, Settings in Lite"));
     }
 
     #[test]
@@ -375,6 +381,29 @@ mod tests {
         let msg = simplify_message("Error 0x80070001 occurred");
         assert!(msg.contains("invalid function"));
         assert!(!msg.contains("0x80070001"));
+    }
+
+    #[test]
+    fn long_localized_diagnostic_does_not_panic_at_a_byte_boundary() {
+        let message = simplify_message(&"網".repeat(100));
+        assert!(message.ends_with("..."));
+        assert!(message.len() <= 200);
+    }
+
+    #[test]
+    fn network_error_classification_is_case_insensitive() {
+        assert!(
+            user_friendly_error(&VpnError::Network("DNS RESOLVE TIMEOUT".into()))
+                .contains("timed out")
+        );
+        assert!(
+            user_friendly_error(&VpnError::Network("dns lookup failed".into()))
+                .contains("DNS lookup failed")
+        );
+        assert!(
+            user_friendly_error(&VpnError::Route("no default gateway".into()))
+                .contains("No internet connection")
+        );
     }
 
     #[test]
