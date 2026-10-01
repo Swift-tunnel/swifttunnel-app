@@ -605,18 +605,6 @@ impl AuthManager {
         Ok(())
     }
 
-    /// Fetch display-only license information with a total network deadline.
-    pub async fn license_status(&self) -> Result<super::license::LicenseStatus, AuthError> {
-        tokio::time::timeout(StdDuration::from_secs(12), async {
-            let token = self.get_access_token().await?;
-            self.client.license_status(&token).await
-        })
-        .await
-        .map_err(|_| {
-            AuthError::NetworkError("License check timed out. Try again shortly.".into())
-        })?
-    }
-
     /// Get a valid access token, refreshing if needed
     pub async fn get_access_token(&self) -> Result<String, AuthError> {
         self.refresh_if_needed().await?;

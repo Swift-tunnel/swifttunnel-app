@@ -4,7 +4,6 @@ const h = vi.hoisted(() => ({ listen: vi.fn(), handle: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: h.listen }));
 vi.mock("../stores/vpnStore", () => ({ useVpnStore: { getState: () => ({ handleStateEvent: h.handle, handleThroughputEvent: h.handle }) } }));
 vi.mock("../stores/authStore", () => ({ useAuthStore: { getState: () => ({ handleStateEvent: h.handle }) } }));
-vi.mock("../stores/settingsStore", () => ({ useSettingsStore: { getState: () => ({ setTab: h.handle }) } }));
 vi.mock("../stores/boostStore", () => ({ useBoostStore: { getState: () => ({ handleMetricsEvent: h.handle, handleRamCleanProgress: h.handle }) } }));
 vi.mock("../stores/serverStore", () => ({ useServerStore: { getState: () => ({ fetchList: h.handle }) } }));
 vi.mock("../stores/updaterStore", () => ({ useUpdaterStore: { getState: () => ({ handleUpdaterProgress: h.handle, handleUpdaterDone: h.handle }) } }));
@@ -46,7 +45,7 @@ describe("native listener lifecycle", () => {
     finish(oldStop);
     await older;
     expect(oldStop).toHaveBeenCalledTimes(1);
-    expect(currentStops).toHaveLength(10);
+    expect(currentStops).toHaveLength(9);
     expect(currentStops.every((stop) => stop.mock.calls.length === 0)).toBe(true);
     await events.cleanupEventListeners();
     expect(currentStops.every((stop) => stop.mock.calls.length === 1)).toBe(true);
@@ -85,19 +84,10 @@ describe("native listener lifecycle", () => {
     await events.initEventListeners();
     fail(new Error("old failure"));
     await failure;
-    expect(stops).toHaveLength(10);
+    expect(stops).toHaveLength(9);
     expect(stops.every((stop) => stop.mock.calls.length === 0)).toBe(true);
     h.listen.mock.calls[1][1]({ payload: { state: "connected" } });
     expect(h.handle).toHaveBeenCalledOnce();
-    await events.cleanupEventListeners();
-  });
-
-  it("opens License on an authoritative access denial", async () => {
-    h.listen.mockResolvedValue(vi.fn());
-    const events = await import("./events");
-    await events.initEventListeners();
-    h.listen.mock.calls.find(([name]) => name === "license-access-required")![1]({ payload: null });
-    expect(h.handle).toHaveBeenCalledWith("license");
     await events.cleanupEventListeners();
   });
 });

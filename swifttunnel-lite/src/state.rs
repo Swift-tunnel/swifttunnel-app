@@ -313,10 +313,6 @@ pub struct Roblox {
 /// Everything the three screens read.
 #[derive(Debug, Clone, Default)]
 pub struct State {
-    pub license: Option<swifttunnel_core::auth::license::LicenseStatus>,
-    pub license_busy: bool,
-    pub license_error: Option<String>,
-    pub license_required: bool,
     pub screen: Screen,
     pub push: Push,
     pub tunnel: Tunnel,

@@ -645,7 +645,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Auth
             commands::auth::auth_get_state,
-            commands::auth::auth_license_status,
             commands::auth::auth_login,
             commands::auth::auth_start_oauth,
             commands::auth::auth_poll_oauth,

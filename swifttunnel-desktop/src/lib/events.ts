@@ -8,7 +8,6 @@ import type {
   UpdaterProgressEvent,
 } from "./types";
 import { useVpnStore } from "../stores/vpnStore";
-import { useSettingsStore } from "../stores/settingsStore";
 import { useAuthStore } from "../stores/authStore";
 import { useBoostStore } from "../stores/boostStore";
 import { useServerStore } from "../stores/serverStore";
@@ -58,9 +57,6 @@ export async function initEventListeners() {
   }
 
   try {
-    await register<void>("license-access-required", () => {
-      useSettingsStore.getState().setTab("license");
-    });
     await register<VpnStateEvent>(EVENT_VPN_STATE_CHANGED, (event) => {
       useVpnStore.getState().handleStateEvent(event.payload);
     });

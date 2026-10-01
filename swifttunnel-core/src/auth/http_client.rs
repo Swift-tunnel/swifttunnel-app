@@ -207,29 +207,6 @@ fn build_http_client(use_system_proxy: bool) -> Client {
 }
 
 impl AuthClient {
-    pub async fn license_status(
-        &self,
-        token: &str,
-    ) -> Result<super::license::LicenseStatus, AuthError> {
-        let response = self
-            .send_with_network_fallback("License status", |client, base| {
-                self.add_common_headers(client.get(format!("{base}/api/auth/desktop/license")))
-                    .bearer_auth(token)
-            })
-            .await?;
-        if !response.status().is_success() {
-            return Err(AuthError::ApiError(
-                if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-                    "Sign in again to check your license.".into()
-                } else {
-                    "License status unavailable. Try again shortly.".into()
-                },
-            ));
-        }
-        response.json().await.map_err(|_| {
-            AuthError::ApiError("License status unavailable. Try again shortly.".into())
-        })
-    }
     /// Create a new AuthClient
     pub fn new() -> Self {
         let client = build_http_client(true);

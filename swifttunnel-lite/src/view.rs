@@ -36,9 +36,6 @@ use windows::Win32::Graphics::Gdi::{
 /// Something the user can do. Interpreted by the app, never by the view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    RefreshLicense,
-    ManageLicense,
-    ComparePlans,
     Tab(Screen),
     Minimise,
     Close,
@@ -109,7 +106,6 @@ pub enum Flag {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    License,
     Connect,
     Roblox,
     Settings,

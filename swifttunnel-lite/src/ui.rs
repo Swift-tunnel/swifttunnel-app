@@ -244,10 +244,9 @@ fn content_area(m: &Metrics, client: RECT, locked: bool) -> RECT {
 
 // ── Chrome ──────────────────────────────────────────────────────────────────
 
-const TABS: [(Screen, &str); 4] = [
+const TABS: [(Screen, &str); 3] = [
     (Screen::Connect, "Connect"),
     (Screen::Roblox, "Roblox"),
-    (Screen::License, "License"),
     (Screen::Settings, "Settings"),
 ];
 
@@ -1506,9 +1505,6 @@ fn dispatch(hwnd: HWND, app: &mut App, action: Action) {
             return;
         }
         Action::Tab(screen) => {
-            if screen == Screen::License {
-                app.engine.refresh_license();
-            }
             app.state.screen = screen;
             app.state.push = Push::None;
             app.scroll = 0;

@@ -17,7 +17,6 @@ import { InGameTab } from "./components/ingame/InGameTab";
 import { NetworkTab } from "./components/network/NetworkTab";
 import { RepairTab } from "./components/repair/RepairTab";
 import { SettingsTab } from "./components/settings/SettingsTab";
-import { LicenseTab } from "./components/license/LicenseTab";
 import { WhatsNewDialog } from "./components/updater/WhatsNewDialog";
 import { UpdateRequiredScreen } from "./components/updater/UpdateRequiredScreen";
 import { useAuthStore } from "./stores/authStore";
@@ -48,7 +47,6 @@ import type { TabId } from "./lib/types";
 
 function tabComponent(tab: TabId) {
   switch (tab) {
-    case "license": return <LicenseTab />;
     case "connect":
       return <ConnectTab />;
     case "optimization":
@@ -555,7 +553,6 @@ function App() {
         "5": "repair",
         "6": "settings",
         "7": "ingame",
-        "8": "license",
       };
       const tab = map[event.key];
       if (!tab) return;

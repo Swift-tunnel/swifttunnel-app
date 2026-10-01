@@ -554,9 +554,6 @@ pub async fn vpn_connect(
     let mut connect_session_expired = false;
     let result = match connect_result {
         Ok(result) => result.map_err(|e| {
-            if matches!(e, VpnError::FreeTierLimitReached(_)) {
-                let _ = app.emit("license-access-required", ());
-            }
             if vpn_error_is_user_banned(&e)
                 && let VpnError::UserBanned(reason) = &e
             {

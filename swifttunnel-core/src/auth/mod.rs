@@ -8,7 +8,6 @@
 
 mod device_identity;
 pub(crate) mod http_client;
-pub mod license;
 mod manager;
 pub mod oauth_server;
 mod storage;
