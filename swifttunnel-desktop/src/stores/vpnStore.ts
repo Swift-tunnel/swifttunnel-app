@@ -22,7 +22,7 @@ import {
   systemResetDriver,
   boostGetMetrics,
 } from "../lib/commands";
-import { reportError } from "../lib/errors";
+import { reportError, formatErrorMessage as getErrorMessage } from "../lib/errors";
 import { notify } from "../lib/notifications";
 import { useSettingsStore } from "./settingsStore";
 import { useServerStore } from "./serverStore";
@@ -34,13 +34,6 @@ type DriverSetupState =
   | "repairing"
   | "installed"
   | "error";
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
-  return String(error);
-}
 
 const FULL_COUNTRY_BAN_ROBLOX_RUNNING_MESSAGE =
   "Close Roblox before connecting with Full Country Ban. Then connect SwiftTunnel and reopen Roblox so login and game traffic use the bypass.";
