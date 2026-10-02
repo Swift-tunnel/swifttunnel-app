@@ -72,6 +72,7 @@ export function NetworkTab() {
   const [duration, setDuration] = useState<number>(10);
 
   const anyRunning =
+    net.isRunning ||
     net.stabilityStatus === "running" ||
     net.speedStatus === "running" ||
     net.bufferbloatStatus === "running";

@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { formatErrorMessage } from "../lib/errors";
 import type {
   StabilityResultResponse,
   SpeedResultResponse,
@@ -13,6 +14,7 @@ import {
 type TestStatus = "idle" | "running" | "complete" | "error";
 
 interface NetworkStore {
+  isRunning: boolean;
   // Stability test
   stabilityStatus: TestStatus;
   stabilityResult: StabilityResultResponse | null;
@@ -36,7 +38,8 @@ interface NetworkStore {
   reset: () => void;
 }
 
-export const useNetworkStore = create<NetworkStore>((set, get) => ({
+export const useNetworkStore = create<NetworkStore>((set, get) => {
+  const emptyResults = {
   stabilityStatus: "idle",
   stabilityResult: null,
   stabilityError: null,
@@ -46,18 +49,15 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
   bufferbloatStatus: "idle",
   bufferbloatResult: null,
   bufferbloatError: null,
+  } as const;
 
-  runAllTests: async (durationSecs = 10) => {
-    const state = get();
-    if ([state.stabilityStatus, state.speedStatus, state.bufferbloatStatus].includes("running")) return;
-    // Idle latency must be sampled without our speed-test traffic. Bufferbloat
-    // then controls its own idle and loaded phases without competing tests.
-    await get().runStabilityTest(durationSecs);
-    await get().runSpeedTest();
-    await get().runBufferbloatTest();
-  },
+  async function exclusive(work: () => Promise<void>) {
+    if (get().isRunning) return;
+    set({ isRunning: true });
+    try { await work(); } finally { set({ isRunning: false }); }
+  }
 
-  runStabilityTest: async (durationSecs = 10) => {
+  async function stability(durationSecs: number) {
     try {
       set({
         stabilityStatus: "running",
@@ -67,21 +67,21 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
       const result = await networkStartStabilityTest(durationSecs);
       set({ stabilityStatus: "complete", stabilityResult: result });
     } catch (e) {
-      set({ stabilityStatus: "error", stabilityError: String(e) });
+      set({ stabilityStatus: "error", stabilityError: formatErrorMessage(e) });
     }
-  },
+  }
 
-  runSpeedTest: async () => {
+  async function speed() {
     try {
       set({ speedStatus: "running", speedResult: null, speedError: null });
       const result = await networkStartSpeedTest();
       set({ speedStatus: "complete", speedResult: result });
     } catch (e) {
-      set({ speedStatus: "error", speedError: String(e) });
+      set({ speedStatus: "error", speedError: formatErrorMessage(e) });
     }
-  },
+  }
 
-  runBufferbloatTest: async () => {
+  async function bufferbloat() {
     try {
       set({
         bufferbloatStatus: "running",
@@ -91,21 +91,28 @@ export const useNetworkStore = create<NetworkStore>((set, get) => ({
       const result = await networkStartBufferbloatTest();
       set({ bufferbloatStatus: "complete", bufferbloatResult: result });
     } catch (e) {
-      set({ bufferbloatStatus: "error", bufferbloatError: String(e) });
+      set({ bufferbloatStatus: "error", bufferbloatError: formatErrorMessage(e) });
     }
-  },
+  }
 
-  reset: () => {
-    set({
-      stabilityStatus: "idle",
-      stabilityResult: null,
-      stabilityError: null,
-      speedStatus: "idle",
-      speedResult: null,
-      speedError: null,
-      bufferbloatStatus: "idle",
-      bufferbloatResult: null,
-      bufferbloatError: null,
-    });
-  },
-}));
+  return {
+    ...emptyResults,
+    isRunning: false,
+    runAllTests: (durationSecs = 10) => exclusive(async () => {
+      set(emptyResults);
+      // One permit covers idle sampling and all loaded phases, including
+      // the gaps between tests. Prior grades do not belong to this run.
+      await stability(durationSecs);
+      await speed();
+      await bufferbloat();
+    }),
+    runStabilityTest: (durationSecs = 10) => exclusive(() => stability(durationSecs)),
+    runSpeedTest: () => exclusive(speed),
+    runBufferbloatTest: () => exclusive(bufferbloat),
+    reset: () => {
+      // This is a display reset, not native cancellation. Never unlock work
+      // which is still using the network.
+      if (!get().isRunning) set(emptyResults);
+    },
+  };
+});
