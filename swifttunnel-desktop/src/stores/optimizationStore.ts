@@ -20,7 +20,13 @@ export interface OptOutcome {
 }
 
 /** silent: no per-item toasts/notifications, bulk callers summarize instead. */
-type OptOptions = { silent?: boolean };
+type OptOptions = { silent?: boolean; batchToken?: symbol };
+
+export interface OptBatchResult {
+  changed: number;
+  failed: number;
+  reboot: number;
+}
 
 interface OptimizationStore {
   status: Record<string, OptStatus>;
@@ -29,6 +35,8 @@ interface OptimizationStore {
   loadError: string | null;
   errors: Record<string, string>;
   restartRequired: boolean;
+  batch: { action: "apply" | "revert"; completed: number; total: number } | null;
+  runBatch: (targets: OptTarget[], action: "apply" | "revert") => Promise<OptBatchResult | null>;
   loadActive: () => Promise<void>;
   activate: (def: OptTarget, opts?: OptOptions) => Promise<OptOutcome>;
   deactivate: (def: OptTarget, opts?: OptOptions) => Promise<OptOutcome>;
@@ -51,6 +59,8 @@ function busyOutcome(def: OptTarget, opts?: OptOptions): OptOutcome {
 export const useOptimizationStore = create<OptimizationStore>((set, get) => {
   const revisions = new Map<string, number>();
   let loadRequest = 0;
+  let batchOwner: symbol | null = null;
+  const blockedByBatch = (opts?: OptOptions) => batchOwner !== null && opts?.batchToken !== batchOwner;
   const setStatus = (id: string, status: OptStatus) => {
     // Count both start and completion, including an action already in flight
     // when a status read begins. Preserve unrelated items from that read.
@@ -64,6 +74,36 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
     loadError: null,
     errors: {},
     restartRequired: false,
+    batch: null,
+
+    runBatch: async (targets, action) => {
+      if (batchOwner || !get().loaded || Object.values(get().status).some(isBusy)) return null;
+      // Snapshot and deduplicate the work before the first await. A second
+      // control or a remounted tab must not start an opposing batch.
+      const unique = [...new Map(targets.map((target) => [target.id, target])).values()];
+      const pending = unique.filter((target) => action === "apply"
+        ? get().status[target.id] !== "active"
+        : get().status[target.id] === "active");
+      const token = Symbol("optimization batch");
+      batchOwner = token;
+      set({ batch: { action, completed: 0, total: pending.length } });
+      const result: OptBatchResult = { changed: 0, failed: 0, reboot: 0 };
+      try {
+        for (const target of pending) {
+          const outcome = await (action === "apply" ? get().activate : get().deactivate)(target, { silent: true, batchToken: token });
+          if (!outcome.ok) result.failed += 1;
+          else {
+            result.changed += 1;
+            if (outcome.requiresReboot) result.reboot += 1;
+          }
+          set({ batch: { action, completed: result.changed + result.failed, total: pending.length } });
+        }
+        return result;
+      } finally {
+        batchOwner = null;
+        set({ batch: null });
+      }
+    },
 
     /** Load which optimizations are currently applied (persisted snapshots). */
     loadActive: async () => {
@@ -94,6 +134,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
     },
 
     activate: async (def, opts) => {
+      if (blockedByBatch(opts)) return busyOutcome({ ...def, name: "An optimization batch" }, opts);
       if (isBusy(get().status[def.id])) return busyOutcome(def, opts);
       if (get().status[def.id] === "active") {
         return { ok: true, requiresReboot: false };
@@ -157,6 +198,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
     },
 
     deactivate: async (def, opts) => {
+      if (blockedByBatch(opts)) return busyOutcome({ ...def, name: "An optimization batch" }, opts);
       const current = get().status[def.id];
       if (isBusy(current)) return busyOutcome(def, opts);
       if (current !== "active") {

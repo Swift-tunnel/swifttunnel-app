@@ -617,6 +617,7 @@ export function OptimizationTab() {
   const loadError = useOptimizationStore((s) => s.loadError);
   const errors = useOptimizationStore((s) => s.errors);
   const restartRequired = useOptimizationStore((s) => s.restartRequired);
+  const batch = useOptimizationStore((s) => s.batch);
   const loadActive = useOptimizationStore((s) => s.loadActive);
   const [view, setView] = useState<"boost" | "speedup">("boost");
   const [presetMode, setPresetMode] = useState<PresetMode>(null);
@@ -661,7 +662,8 @@ export function OptimizationTab() {
           </ul>
         </div>
       )}
-      <fieldset disabled={!loaded || loading} className="m-0 flex min-w-0 flex-col gap-4 border-0 p-0 disabled:opacity-60">
+      {batch && <div className="instrument px-4 py-3 text-[12px]" role="status">{batch.action === "apply" ? "Applying" : "Reverting"} tweaks: {batch.completed}/{batch.total}. You can switch tabs; wait for this batch before changing more settings.</div>}
+      <fieldset disabled={!loaded || loading || batch !== null} className="m-0 flex min-w-0 flex-col gap-4 border-0 p-0 disabled:opacity-60">
       {/* Sub-tabs and restoration of saved values. */}
       <div className="flex items-center justify-between gap-3">
         <div
@@ -753,9 +755,8 @@ function RocketIcon() {
 /** "Enable all" for a section, flips to "Disable all" once every item is on. */
 function BulkToggle({ items }: { items: BulkItem[] }) {
   const statuses = useOptimizationStore((s) => s.status);
-  const activate = useOptimizationStore((s) => s.activate);
-  const deactivate = useOptimizationStore((s) => s.deactivate);
-  const [busy, setBusy] = useState(false);
+  const runBatch = useOptimizationStore((s) => s.runBatch);
+  const busy = useOptimizationStore((s) => s.batch !== null);
 
   if (items.length === 0) return null;
 
@@ -772,29 +773,8 @@ function BulkToggle({ items }: { items: BulkItem[] }) {
     });
 
   async function toggleAll() {
-    if (busy) return;
-    setBusy(true);
-    try {
-      let changed = 0;
-      let failed = 0;
-      let reboot = 0;
-      for (const item of targets) {
-        const active = statuses[item.id] === "active";
-        let outcome = null;
-        if (allActive && active) outcome = await deactivate(item, { silent: true });
-        else if (!allActive && !active)
-          outcome = await activate(item, { silent: true });
-        if (!outcome) continue;
-        if (!outcome.ok) failed += 1;
-        else {
-          changed += 1;
-          if (outcome.requiresReboot) reboot += 1;
-        }
-      }
-      summarizeBulk(allActive ? "Reverted" : "Enabled", changed, failed, reboot);
-    } finally {
-      setBusy(false);
-    }
+    const result = await runBatch(targets, allActive ? "revert" : "apply");
+    if (result) summarizeBulk(allActive ? "Reverted" : "Enabled", result.changed, result.failed, result.reboot);
   }
 
   return (
@@ -821,35 +801,16 @@ function BulkToggle({ items }: { items: BulkItem[] }) {
 /** Restores saved values for catalog tweaks, not unrelated power/RAM settings. */
 function RestoreDefaultsButton() {
   const statuses = useOptimizationStore((s) => s.status);
-  const deactivate = useOptimizationStore((s) => s.deactivate);
-  const [busy, setBusy] = useState(false);
+  const runBatch = useOptimizationStore((s) => s.runBatch);
+  const busy = useOptimizationStore((s) => s.batch !== null || Object.values(s.status).some((status) => status === "activating" || status === "deactivating"));
 
   const active = [...OPTIMIZATIONS, ...SPEEDUP_OPTIMIZATIONS].filter(
     (o) => statuses[o.id] === "active",
   );
 
   async function restore() {
-    if (busy || active.length === 0) return;
-    setBusy(true);
-    try {
-      let changed = 0;
-      let failed = 0;
-      let reboot = 0;
-      for (const item of active) {
-        const outcome = await deactivate(
-          { id: item.id, name: item.name },
-          { silent: true },
-        );
-        if (!outcome.ok) failed += 1;
-        else {
-          changed += 1;
-          if (outcome.requiresReboot) reboot += 1;
-        }
-      }
-      summarizeBulk("Restored", changed, failed, reboot);
-    } finally {
-      setBusy(false);
-    }
+    const result = await runBatch(active, "revert");
+    if (result) summarizeBulk("Restored", result.changed, result.failed, result.reboot);
   }
 
   return (
@@ -875,10 +836,10 @@ function RestoreDefaultsButton() {
 /** Razer-style hero: count of pending tweaks + a one-click "Optimize all". */
 function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
   const statuses = useOptimizationStore((s) => s.status);
-  const activate = useOptimizationStore((s) => s.activate);
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [batchTotal, setBatchTotal] = useState(0);
+  const runBatch = useOptimizationStore((s) => s.runBatch);
+  const batch = useOptimizationStore((s) => s.batch);
+  const running = batch !== null;
+  const changing = Object.values(statuses).some((status) => status === "activating" || status === "deactivating");
 
   const pending = useMemo(() => {
     if (view === "speedup") {
@@ -891,32 +852,12 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
   const total = pending.length;
 
   async function optimizeAll() {
-    if (running || total === 0) return;
-    setRunning(true);
-    setProgress(0);
-    setBatchTotal(total);
-    try {
-      let done = 0;
-      let failed = 0;
-      let reboot = 0;
-      for (const def of pending) {
-        const outcome = await activate(
-          { id: def.id, name: def.name },
-          { silent: true },
-        );
-        if (!outcome.ok) failed += 1;
-        else if (outcome.requiresReboot) reboot += 1;
-        done += 1;
-        setProgress(done);
-      }
-      summarizeBulk("Optimized", done - failed, failed, reboot);
-    } finally {
-      setRunning(false);
-    }
+    const result = await runBatch(pending, "apply");
+    if (result) summarizeBulk("Optimized", result.changed, result.failed, result.reboot);
   }
 
-  const label = running
-    ? `Applying… ${progress}/${batchTotal}`
+  const label = batch
+    ? `${batch.action === "apply" ? "Applying" : "Reverting"}… ${batch.completed}/${batch.total}`
     : total === 0
       ? "Eligible tweaks applied"
       : "Apply eligible tweaks";
@@ -964,7 +905,7 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
       <button
         type="button"
         onClick={() => void optimizeAll()}
-        disabled={running || total === 0}
+        disabled={running || changing || total === 0}
         className="repair-cta relative z-[1] flex shrink-0 items-center overflow-hidden rounded-[10px] px-5 py-2.5 text-[13px] font-semibold transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-60"
         style={{
           background: "linear-gradient(180deg, #ffffff 0%, #e9e9e9 100%)",

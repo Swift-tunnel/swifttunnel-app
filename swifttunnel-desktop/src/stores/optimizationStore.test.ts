@@ -10,7 +10,7 @@ import { useOptimizationStore } from "./optimizationStore";
 
 beforeEach(() => {
   vi.resetAllMocks();
-  useOptimizationStore.setState({ status: {}, loaded: false, loading: false, loadError: null, errors: {}, restartRequired: false });
+  useOptimizationStore.setState({ status: {}, loaded: false, loading: false, loadError: null, errors: {}, restartRequired: false, batch: null });
   commands.optimizationApply.mockRejectedValue(new Error("Rollback record kept; revert to recover"));
 });
 
@@ -21,6 +21,47 @@ function deferred<T>() {
 }
 
 const target = { id: "test", name: "Test" };
+
+it("keeps a batch exclusive across unsubscription and blocks opposite and individual changes", async () => {
+  useOptimizationStore.setState({ loaded: true });
+  const first = deferred<{ requires_reboot: boolean }>();
+  commands.optimizationApply.mockReturnValueOnce(first.promise).mockResolvedValue({ requires_reboot: false });
+  const unsubscribe = useOptimizationStore.subscribe(() => {});
+  const batch = useOptimizationStore.getState().runBatch([target, { id: "second", name: "Second" }], "apply");
+  unsubscribe();
+  expect(useOptimizationStore.getState().batch).toEqual({ action: "apply", completed: 0, total: 2 });
+  expect(await useOptimizationStore.getState().runBatch([target], "revert")).toBeNull();
+  expect((await useOptimizationStore.getState().deactivate(target)).ok).toBe(false);
+  expect((await useOptimizationStore.getState().activate({ id: "third", name: "Third" })).ok).toBe(false);
+  first.resolve({ requires_reboot: true });
+  expect(await batch).toEqual({ changed: 2, failed: 0, reboot: 1 });
+  expect(commands.optimizationApply.mock.calls.map(([id]) => id)).toEqual(["test", "second"]);
+  expect(commands.optimizationRevert).not.toHaveBeenCalled();
+  expect(useOptimizationStore.getState().batch).toBeNull();
+});
+
+it("does not start a batch with unreadable status or a single change still running", async () => {
+  expect(await useOptimizationStore.getState().runBatch([target], "apply")).toBeNull();
+  useOptimizationStore.setState({ loaded: true });
+  const applying = deferred<{ requires_reboot: boolean }>();
+  commands.optimizationApply.mockReturnValue(applying.promise);
+  const single = useOptimizationStore.getState().activate(target);
+  expect(await useOptimizationStore.getState().runBatch([{ id: "second", name: "Second" }], "apply")).toBeNull();
+  applying.resolve({ requires_reboot: false });
+  await single;
+  expect(commands.optimizationApply).toHaveBeenCalledOnce();
+});
+
+it("releases a failed batch, deduplicates targets and allows recovery by reverting", async () => {
+  useOptimizationStore.setState({ loaded: true });
+  commands.optimizationGetActive.mockResolvedValue([target.id]);
+  expect(await useOptimizationStore.getState().runBatch([target, target], "apply")).toEqual({ changed: 0, failed: 1, reboot: 0 });
+  expect(useOptimizationStore.getState().batch).toBeNull();
+  expect(commands.optimizationApply).toHaveBeenCalledOnce();
+  commands.optimizationRevert.mockResolvedValue({ requires_reboot: false });
+  expect(await useOptimizationStore.getState().runBatch([target], "revert")).toEqual({ changed: 1, failed: 0, reboot: 0 });
+  expect(useOptimizationStore.getState().status.test).toBe("inactive");
+});
 
 it("preserves a completed apply when an older status read returns", async () => {
   const read = deferred<string[]>();
