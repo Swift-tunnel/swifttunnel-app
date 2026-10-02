@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { repairIsBusy } from "./repairStore";
 import type {
   VpnState,
   VpnStateEvent,
@@ -243,6 +244,11 @@ const autoRepairedBindingSignatures = new Set<string>();
 const autoRepairedFirewallSignatures = new Set<string>();
 let relayFailoverInFlight = false;
 let lastRelayFailoverAt = 0;
+
+export function cancelPendingConnectForRepair(): void {
+  nextConnectAttempt();
+  useVpnStore.setState({ connectAttemptInFlight: false, pendingConnectIntent: null, bindingPreflight: null });
+}
 
 function nextConnectAttempt(): number {
   connectAttemptSeq += 1;
@@ -662,6 +668,10 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   connect: async (region, gamePresets) => {
+    if (repairIsBusy()) {
+      set({ error: "Repair is still running. Wait for it to finish before connecting." });
+      return;
+    }
     const attempt = nextConnectAttempt();
     const fullCountryBanEnabled =
       useSettingsStore.getState().settings.enable_country_ban;

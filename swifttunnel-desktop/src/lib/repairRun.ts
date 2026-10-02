@@ -12,6 +12,7 @@ export interface RepairRun {
   overall: RepairStatus;
   ranAt: number;
   items: RepairItemResult[];
+  interrupted?: string;
 }
 
 export function parseRepairRun(raw: string | null): RepairRun | null {
@@ -33,7 +34,8 @@ export function parseRepairRun(raw: string | null): RepairRun | null {
       if (!parsed) return null;
       items.push({ ...parsed.report, id: parsed.issue, label: item.label });
     }
-    return { items, ranAt: run.ranAt, overall: repairCompletion(items).status };
+    const interrupted = typeof run.interrupted === "string" ? run.interrupted.slice(0, 4096) : undefined;
+    return { items, ranAt: run.ranAt, overall: interrupted ? "partial" : repairCompletion(items).status, ...(interrupted ? { interrupted } : {}) };
   } catch {
     return null;
   }
@@ -49,7 +51,7 @@ export function summarizeRepairRun(run: RepairRun): string {
     const count = run.items.filter((item) => item.status === status).length;
     return count ? [`${count} ${label}`] : [];
   });
-  return `Ran ${run.items.length} checks and repairs${parts.length ? `, ${parts.join(", ")}` : ""}.`;
+  return `${run.interrupted ? `Stopped before completing: ${run.interrupted} ` : ""}Ran ${run.items.length} checks and repairs${parts.length ? `, ${parts.join(", ")}` : ""}.`;
 }
 
 export function formatRunForSupport(run: RepairRun): string {
@@ -57,6 +59,7 @@ export function formatRunForSupport(run: RepairRun): string {
     "SwiftTunnel Repair (all)",
     `Overall: ${statusLabel(run.overall)}`,
     `Last run: ${new Date(run.ranAt).toLocaleString()}`,
+    ...(run.interrupted ? [`Stopped: ${run.interrupted}`] : []),
     "",
     ...run.items.flatMap((item) => [
       `- ${item.label}: ${statusLabel(item.status)}, ${item.summary}`,

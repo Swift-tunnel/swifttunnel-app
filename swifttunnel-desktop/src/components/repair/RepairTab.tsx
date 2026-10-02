@@ -1,16 +1,19 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useToastStore } from "../../stores/toastStore";
+import { beginRepair, saveRepairRun, useRepairStore } from "../../stores/repairStore";
+import { cancelPendingConnectForRepair } from "../../stores/vpnStore";
+import { prepareRepair } from "../../lib/repairPreflight";
+import { SupportToolsSection } from "../support/SupportToolsSection";
+import { RepairGuidance } from "./RepairGuidance";
 import { formatErrorMessage } from "../../lib/errors";
 import {
   serverGetLatencies,
   serverRefresh,
   systemCheckDriver,
   systemCleanupTunnelState,
-  systemCopyLogToClipboard,
   systemGetStartupRegistration,
   systemIsAdmin,
-  systemOpenUrl,
   systemReinstallDriver,
   systemRepairDriver,
   systemRepairNetwork,
@@ -35,15 +38,13 @@ import {
   type RepairReport,
   type RepairStatus,
 } from "../../lib/repairCenter";
-import { COMMUNITY_URL } from "../../lib/maintenance";
 import { repairCompletion } from "../../lib/repairCompletion";
 import { resetTranslationCache } from "../../lib/i18n";
 import type { Config } from "../../lib/types";
 import { Button, Spinner, Readout, StatRail, Icon, Watermark } from "../ui";
 
-import { formatRunForSupport, parseRepairRun, summarizeRepairRun, type RepairItemResult, type RepairRun } from "../../lib/repairRun";
+import { formatRunForSupport, summarizeRepairRun, type RepairItemResult, type RepairRun } from "../../lib/repairRun";
 
-const LAST_REPAIR_STORAGE_KEY = "swifttunnel.lastRepairAll.v1";
 
 const repairDeps: RepairCenterDeps = {
   now: Date.now,
@@ -87,34 +88,36 @@ export function RepairTab() {
   const settings = useSettingsStore((s) => s.settings);
   const addToast = useToastStore((s) => s.addToast);
 
-  // Load the saved result synchronously (not in an effect) so its text is in
-  // the DOM on first render, the translation pass runs on tab switch and would
-  // otherwise miss late-mounted content, flashing English on every revisit.
-  const [lastRun, setLastRun] = useState<RepairRun | null>(() => loadRepairRun());
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [restarting, setRestarting] = useState(false);
+  const { lastRun, running, progress, restarting, reinstalling, reinstallReport, currentStep, error, liveItems } = useRepairStore();
   const [resultOpen, setResultOpen] = useState(true);
-  const [reinstalling, setReinstalling] = useState(false);
-  const [reinstallReport, setReinstallReport] = useState<RepairReport | null>(
-    null,
-  );
+  const [elapsed, setElapsed] = useState(0);
+  const setRunning = (value: boolean) => useRepairStore.setState({ running: value });
+  const setProgress = (value: number) => useRepairStore.setState({ progress: value });
+  const setRestarting = (value: boolean) => useRepairStore.setState({ restarting: value });
+  const setReinstalling = (value: boolean) => useRepairStore.setState({ reinstalling: value });
+  const setReinstallReport = (value: RepairReport | null) => useRepairStore.setState({ reinstallReport: value });
 
   const busy = running || restarting || reinstalling;
   const total = REPAIR_ISSUES.length;
+  useEffect(() => {
+    setElapsed(0);
+    if (!busy) return;
+    const started = Date.now();
+    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [busy, currentStep]);
 
   async function runFullRepair() {
-    if (busy) return;
-    setRunning(true);
+    if (!beginRepair("repair")) return;
+    cancelPendingConnectForRepair();
     setProgress(0);
 
     const items: RepairItemResult[] = [];
     try {
-      // Most repairs (internet recovery especially) need a disconnected
-      // tunnel; drop any session first, best-effort.
-      await vpnDisconnect().catch(() => {});
+      await prepareRepair(repairDeps);
 
       for (const issue of REPAIR_ISSUES) {
+        useRepairStore.setState({ currentStep: issue.label });
         const report = await runRepairIssue(issue.id, repairDeps, { settings });
         items.push({
           id: issue.id,
@@ -122,6 +125,7 @@ export function RepairTab() {
           ...report,
         });
         setProgress(items.length);
+        useRepairStore.setState({ liveItems: [...items] });
       }
 
       const completion = repairCompletion(items);
@@ -131,7 +135,6 @@ export function RepairTab() {
         items,
       };
       saveRepairRun(run);
-      setLastRun(run);
       setResultOpen(true);
 
       addToast({ type: completion.type, message: completion.message });
@@ -150,18 +153,24 @@ export function RepairTab() {
           });
         });
       }, 1600);
+    } catch (error) {
+      const message = "Repair stopped: " + formatErrorMessage(error);
+      useRepairStore.setState({ error: message });
+      saveRepairRun({ overall: "partial", ranAt: Date.now(), items, interrupted: message });
+      addToast({ type: "error", message });
     } finally {
+      useRepairStore.setState({ currentStep: null });
       setRunning(false);
     }
   }
 
   async function runReinstallDriver() {
-    if (busy) return;
-    setReinstalling(true);
+    if (!beginRepair("reinstall")) return;
+    cancelPendingConnectForRepair();
     setReinstallReport(null);
     try {
-      // The reinstall needs a torn-down tunnel; drop any session first.
-      await vpnDisconnect().catch(() => {});
+      await prepareRepair(repairDeps);
+      useRepairStore.setState({ currentStep: "Reinstalling and verifying the driver" });
       const report = await runDriverReinstall(repairDeps);
       setReinstallReport(report);
 
@@ -193,7 +202,12 @@ export function RepairTab() {
           message: "Driver reinstall could not complete, details below.",
         });
       }
+    } catch (error) {
+      const message = "Driver reinstall stopped: " + formatErrorMessage(error);
+      useRepairStore.setState({ error: message });
+      addToast({ type: "error", message });
     } finally {
+      useRepairStore.setState({ currentStep: null });
       setReinstalling(false);
     }
   }
@@ -228,21 +242,6 @@ export function RepairTab() {
       addToast({
         type: "error",
         message: `Could not copy: ${formatErrorMessage(error)}`,
-      });
-    }
-  }
-
-  async function copyLog() {
-    try {
-      await systemCopyLogToClipboard();
-      addToast({
-        type: "success",
-        message: "Log copied, paste it into Discord for support.",
-      });
-    } catch (error) {
-      addToast({
-        type: "error",
-        message: `Could not copy log: ${formatErrorMessage(error)}`,
       });
     }
   }
@@ -348,6 +347,17 @@ export function RepairTab() {
         />
       </section>
 
+      {error && <div role="alert" className="instrument px-4 py-3 text-[12px] text-status-error break-words">{error}</div>}
+      {busy && (
+        <section className="instrument px-4 py-3 text-[12px]" role="status" aria-live="polite">
+          <p className="font-semibold">{restarting ? "Restarting SwiftTunnel" : currentStep}</p>
+          <p className="mt-1 text-text-muted">{elapsed >= 30 ? "This step is taking longer than usual. Wait for its result before trying another repair." : "You can switch tabs. This operation will keep running."}</p>
+          {running && <ol className="mt-3 grid gap-1 sm:grid-cols-2">{REPAIR_ISSUES.map((issue, index) => (
+            <li key={issue.id} className="flex justify-between gap-2 text-text-muted"><span>{issue.label}</span><span>{liveItems[index] ? statusLabel(liveItems[index].status) : currentStep === issue.label ? "Running" : "Waiting"}</span></li>
+          ))}</ol>}
+        </section>
+      )}
+      <RepairGuidance />
       {/* ── Result ── */}
       <section
         className="instrument overflow-hidden"
@@ -373,7 +383,7 @@ export function RepairTab() {
           (!lastRun ? (
           <p className="mt-3 text-[12px] text-text-muted">
             No repair has been run yet. Click Repair to fix common SwiftTunnel
-            issues and restart the app.
+            issues. Only completed changes that need an app restart trigger one.
           </p>
         ) : (
           <>
@@ -511,36 +521,7 @@ export function RepairTab() {
         )}
       </section>
 
-      {/* ── Still stuck? → support ── */}
-      <section
-        className="instrument overflow-hidden"
-        style={{ padding: "18px 20px" }}
-      >
-        <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0">
-            <h3 className="text-[14px] font-semibold text-text-primary">
-              Still have an issue?
-            </h3>
-            <p className="mt-1 max-w-[520px] text-[12px] leading-snug text-text-muted">
-              If SwiftTunnel still isn&apos;t working after a repair, our team
-              can help directly on Discord, copy your log first so we can see
-              what happened.
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={() => void copyLog()}>
-              Copy log
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => void systemOpenUrl(COMMUNITY_URL)}
-            >
-              Contact support
-            </Button>
-          </div>
-        </div>
-      </section>
+      <SupportToolsSection />
     </div>
   );
 }
@@ -581,21 +562,5 @@ function statusColor(status: RepairStatus): string {
     case "unsupported":
     case "not_checked":
       return "var(--color-text-dimmed)";
-  }
-}
-
-function saveRepairRun(run: RepairRun) {
-  try {
-    localStorage.setItem(LAST_REPAIR_STORAGE_KEY, JSON.stringify(run));
-  } catch {
-    // Non-fatal: the result just won't persist across restarts.
-  }
-}
-
-function loadRepairRun(): RepairRun | null {
-  try {
-    return parseRepairRun(localStorage.getItem(LAST_REPAIR_STORAGE_KEY));
-  } catch {
-    return null;
   }
 }

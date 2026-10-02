@@ -1386,4 +1386,29 @@ describe("stores/vpnStore", () => {
       expect(useVpnStore.getState().connectedAt).not.toBeNull();
     });
   });
+
+it("blocks a new connection during repair without touching the driver", async () => {
+  const store = await loadStore();
+  const { beginRepair } = await import("./repairStore");
+  beginRepair("repair");
+  await store.getState().connect("singapore", ["roblox"]);
+  expect(store.getState().error).toContain("Repair is still running");
+  expect(vpnConnect).not.toHaveBeenCalled();
+  expect(systemCheckDriver).not.toHaveBeenCalled();
+});
+
+it("repair cancels an in-flight preflight before it can start a tunnel", async () => {
+  const store = await loadStore();
+  const pending = deferred<ReturnType<typeof driverStatus>>();
+  systemCheckDriver.mockReturnValue(pending.promise);
+  const connecting = store.getState().connect("singapore", ["roblox"]);
+  await vi.waitFor(() => expect(systemCheckDriver).toHaveBeenCalledOnce());
+  const { cancelPendingConnectForRepair } = await import("./vpnStore");
+  cancelPendingConnectForRepair();
+  pending.resolve(driverStatus());
+  await connecting;
+  expect(vpnConnect).not.toHaveBeenCalled();
+  expect(store.getState().connectAttemptInFlight).toBe(false);
+});
+
 });

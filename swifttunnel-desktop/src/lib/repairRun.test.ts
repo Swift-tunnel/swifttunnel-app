@@ -33,3 +33,10 @@ describe("repair-all results", () => {
     expect(parseRepairRun(raw)).toBeNull();
   });
 });
+
+it("does not turn interrupted work into a healthy completed report after reopening", () => {
+  const run = parseRepairRun(JSON.stringify({ ...legacy, interrupted: "Disconnect failed" }))!;
+  expect(run.overall).toBe("partial");
+  expect(summarizeRepairRun(run)).toContain("Stopped before completing");
+  expect(formatRunForSupport(run)).toContain("Disconnect failed");
+});
