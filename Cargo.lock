@@ -4621,6 +4621,7 @@ name = "swifttunnel-setup"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "embed-resource",
  "png",
  "static_vcruntime",
  "swifttunnel-installer-cache",

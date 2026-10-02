@@ -18,6 +18,7 @@ windows = { version = "0.62", features = [
 [build-dependencies]
 static_vcruntime = "3"
 embed-manifest = "1.4"
+embed-resource = "3"
 
 [[bin]]
 name = "SwiftTunnel-Setup"

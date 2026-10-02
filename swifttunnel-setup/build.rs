@@ -15,11 +15,16 @@ fn main() {
                 .requested_execution_level(ExecutionLevel::RequireAdministrator),
         )
         .expect("failed to embed the setup manifest");
+        embed_resource::compile("icon.rc", embed_resource::NONE)
+            .manifest_optional()
+            .expect("failed to embed the setup icon and file description");
     }
 
     stage_payload();
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=icon.rc");
+    println!("cargo:rerun-if-changed=../swifttunnel-desktop/src-tauri/icons/icon.ico");
     println!("cargo:rerun-if-env-changed=SWIFTTUNNEL_SETUP_MSI");
 
     // The filename the payload is written under before msiexec runs. Windows

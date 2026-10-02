@@ -786,6 +786,8 @@ pub fn run(state: Box<State>) -> Result<i32, String> {
         let class = WNDCLASSW {
             lpfnWndProc: Some(window_proc),
             hInstance: instance.into(),
+            hIcon: LoadIconW(Some(instance.into()), PCWSTR(1usize as *const u16))
+                .map_err(|e| format!("Could not load the setup icon: {e}"))?,
             lpszClassName: w!("SwiftTunnelOfflineSetup"),
             hCursor: LoadCursorW(None, IDC_ARROW).map_err(|e| e.to_string())?,
             ..Default::default()
@@ -823,6 +825,27 @@ pub fn run(state: Box<State>) -> Result<i32, String> {
             Some((state.as_ref() as *const RefCell<State>).cast()),
         )
         .map_err(|e| format!("Could not open Setup: {e}"))?;
+        let small_icon = LoadImageW(
+            Some(instance.into()),
+            PCWSTR(1usize as *const u16),
+            IMAGE_ICON,
+            scaled(16, dpi),
+            scaled(16, dpi),
+            LR_SHARED,
+        )
+        .map_err(|e| format!("Could not load the small setup icon: {e}"))?;
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_SMALL as usize)),
+            Some(LPARAM(small_icon.0 as isize)),
+        );
+        SendMessageW(
+            hwnd,
+            WM_SETICON,
+            Some(WPARAM(ICON_BIG as usize)),
+            Some(LPARAM(class.hIcon.0 as isize)),
+        );
         let _ = ShowWindow(hwnd, SW_SHOW);
         let mut message = MSG::default();
         loop {
