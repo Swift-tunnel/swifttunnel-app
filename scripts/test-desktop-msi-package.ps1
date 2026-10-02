@@ -40,8 +40,8 @@ try {
     cargo run -p swifttunnel-msi-actions --example render_sequence_fixture -- $WorkDir
     if ($LASTEXITCODE -ne 0) { throw 'Desktop template render failed' }
 } finally { Pop-Location }
-$previousDll = $env:SWIFTTUNNEL_MSI_ACTIONS_DLL
-$env:SWIFTTUNNEL_MSI_ACTIONS_DLL = $dll
+$previousDll = $env:TAURI_SWIFTTUNNEL_MSI_ACTIONS_DLL
+$env:TAURI_SWIFTTUNNEL_MSI_ACTIONS_DLL = $dll
 $arch = if ($Target.StartsWith('aarch64')) { 'arm64' } else { 'x64' }
 Push-Location $WorkDir
 try {
@@ -78,5 +78,5 @@ try {
     & "$PSScriptRoot/test-lite-msi-package.ps1" -WorkDir (Join-Path $WorkDir 'lite') -WixDir $wix -Architecture $arch -MsiActionsPath $dll
 } finally {
     Pop-Location
-    $env:SWIFTTUNNEL_MSI_ACTIONS_DLL = $previousDll
+    $env:TAURI_SWIFTTUNNEL_MSI_ACTIONS_DLL = $previousDll
 }

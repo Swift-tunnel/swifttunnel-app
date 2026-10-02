@@ -48,7 +48,8 @@
             <MajorUpgrade Schedule="afterInstallExecuteAgain" DowngradeErrorMessage="!(loc.DowngradeErrorMessage)" AllowSameVersionUpgrades="yes" />
         {{/if}}
 
-        <Binary Id="SwiftDesktopMsiActions" SourceFile="$(env.SWIFTTUNNEL_MSI_ACTIONS_DLL)" />
+        <!-- Tauri only forwards TAURI-prefixed custom environment variables to WiX. -->
+        <Binary Id="SwiftDesktopMsiActions" SourceFile="$(env.TAURI_SWIFTTUNNEL_MSI_ACTIONS_DLL)" />
         <CustomAction Id="PrepareDesktopRecovery" BinaryKey="SwiftDesktopMsiActions"
                       DllEntry="PrepareDesktopRecovery" Return="check" />
         <CustomAction Id="RepairDesktopOrphans" BinaryKey="SwiftDesktopMsiActions"
