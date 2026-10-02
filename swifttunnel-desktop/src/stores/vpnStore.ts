@@ -1015,6 +1015,9 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       if (!isCurrentConnectAttempt(attempt)) return;
       await get().fetchState();
       if (!isCurrentConnectAttempt(attempt)) return;
+      if (get().state !== "disconnected" || get().splitTunnelActive || get().error) {
+        throw new Error(`Disconnect was not confirmed. ${get().error ?? "The tunnel is still active or its state is unavailable."} Retry Disconnect before reconnecting or running Repair.`);
+      }
       set({
         region: null,
         serverEndpoint: null,

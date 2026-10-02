@@ -110,6 +110,29 @@ function disconnectedState() {
 }
 
 describe("stores/vpnStore", () => {
+  it("does not claim disconnect succeeded when state verification fails", async () => {
+    const store = await loadStore();
+    store.setState({ state: "connected", region: "singapore", serverEndpoint: "1.2.3.4:51821", splitTunnelActive: true });
+    vpnDisconnect.mockResolvedValue(undefined);
+    vpnGetState.mockRejectedValue(new Error("State unavailable"));
+    await store.getState().disconnect();
+    expect(store.getState().state).toBe("error");
+    expect(store.getState().error).toContain("State unavailable");
+    expect(store.getState().splitTunnelActive).toBe(true);
+    expect(notify).not.toHaveBeenCalledWith("SwiftTunnel", "VPN disconnected.");
+  });
+
+  it("retains an active tunnel reported after a claimed disconnect", async () => {
+    const store = await loadStore();
+    vpnDisconnect.mockResolvedValue(undefined);
+    vpnGetState.mockResolvedValue(connectedState("tokyo"));
+    await store.getState().disconnect();
+    expect(store.getState().state).toBe("error");
+    expect(store.getState().region).toBe("tokyo");
+    expect(store.getState().splitTunnelActive).toBe(true);
+    expect(store.getState().error).toContain("not confirmed");
+    expect(notify).not.toHaveBeenCalledWith("SwiftTunnel", "VPN disconnected.");
+  });
   it("does not let a slow connected poll undo a newer backend disconnect event", async () => {
     const poll = deferred<ReturnType<typeof connectedState>>();
     vpnGetState.mockReturnValue(poll.promise);
