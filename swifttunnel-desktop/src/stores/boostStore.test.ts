@@ -45,6 +45,59 @@ describe("stores/boostStore", () => {
 
   const metrics = { fps: 60, cpu_usage: 10, ram_usage: 100, ram_total: 1000, ping: 20, roblox_running: true, roblox_foreground: true, process_id: 123 };
 
+  it("coalesces overlapping memory reads and permits a fresh read after completion", async () => {
+    let finish!: (value: object) => void;
+    const snapshot = { total_mb: 16000, used_mb: 9000, available_mb: 7000, load_pct: 56, standby_mb: null, modified_mb: null };
+    boostGetSystemMemory.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const store = await loadStore();
+    const reads = Array.from({ length: 20 }, () => store.getState().fetchSystemMemory());
+    const requests = boostGetSystemMemory.mock.calls.length;
+    finish(snapshot);
+    await Promise.all(reads);
+    expect(requests).toBe(1);
+    expect(store.getState().systemMem).toEqual(snapshot);
+    await store.getState().fetchSystemMemory();
+    expect(boostGetSystemMemory).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not overwrite cleanup progress with a late memory poll", async () => {
+    let finish!: (value: object) => void;
+    boostGetSystemMemory.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const store = await loadStore();
+    const reading = store.getState().fetchSystemMemory();
+    const progress = { stage: "done", total_mb: 16000, used_mb: 8000, available_mb: 8000, load_pct: 50, standby_mb: null, modified_mb: null, trimmed_count: 4, current_process: null, warning: null };
+    store.getState().handleRamCleanProgress(progress);
+    finish({ ...progress, used_mb: 12000 });
+    await reading;
+    expect(store.getState().systemMem?.used_mb).toBe(8000);
+  });
+
+  it("releases failed memory sampling so a later poll can recover", async () => {
+    boostGetSystemMemory.mockRejectedValueOnce(new Error("Sampler unavailable")).mockResolvedValue({ used_mb: 4000 });
+    const store = await loadStore();
+    await store.getState().fetchSystemMemory();
+    await store.getState().fetchSystemMemory();
+    expect(boostGetSystemMemory).toHaveBeenCalledTimes(2);
+    expect(store.getState().systemMem?.used_mb).toBe(4000);
+  });
+
+  it("does not clear the running cleanup when another caller requests cleaning", async () => {
+    let finish!: (value: object) => void;
+    const snapshot = { total_mb: 16000, used_mb: 8000, available_mb: 8000, load_pct: 50, standby_mb: null, modified_mb: null };
+    boostGetSystemMemory.mockResolvedValue(snapshot);
+    boostCleanRam.mockReturnValueOnce(new Promise(resolve => { finish = resolve; })).mockRejectedValue(new Error("Cleanup already running"));
+    const store = await loadStore();
+    const cleaning = store.getState().cleanRam();
+    await vi.waitFor(() => expect(boostCleanRam).toHaveBeenCalledOnce());
+    await store.getState().cleanRam();
+    const stillBusy = store.getState().isCleaningRam;
+    finish({ before: snapshot, after: snapshot, trimmed_count: 0, freed_mb: 0, warnings: [] });
+    await cleaning;
+    expect(stillBusy).toBe(true);
+    expect(boostCleanRam).toHaveBeenCalledOnce();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
   it("distinguishes a fresh metrics result from a retained stale sample", async () => {
     boostGetMetrics.mockResolvedValueOnce(metrics).mockRejectedValueOnce(new Error("sampler failed"));
     const store = await loadStore();

@@ -22,6 +22,8 @@ import { notify } from "../lib/notifications";
 // Each option is boolean or absent, so at most nine native requests can be
 // pending in this window. Slow samplers must not queue another job every tick.
 const pendingMetrics = new Map<string, Promise<boolean>>();
+let pendingMemory: Promise<void> | null = null;
+let memoryRevision = 0;
 
 interface BoostStore {
   // Metrics
@@ -66,7 +68,7 @@ interface BoostStore {
   handleRamCleanProgress: (event: RamCleanProgressEvent) => void;
 }
 
-export const useBoostStore = create<BoostStore>((set) => ({
+export const useBoostStore = create<BoostStore>((set, get) => ({
   fps: 0,
   cpuUsage: 0,
   ramUsage: 0,
@@ -120,15 +122,21 @@ export const useBoostStore = create<BoostStore>((set) => ({
     return request;
   },
 
-  fetchSystemMemory: async () => {
-    try {
-      const mem = await boostGetSystemMemory();
-      set({ systemMem: mem });
-    } catch (error) {
-      reportError("Failed to fetch system memory", error, {
-        dedupeKey: "boost-fetch-system-memory",
-      });
-    }
+  fetchSystemMemory: () => {
+    if (pendingMemory) return pendingMemory;
+    const revision = memoryRevision;
+    pendingMemory = (async () => {
+      try {
+        const mem = await boostGetSystemMemory();
+        // Native cleanup progress is newer than a sample requested before it.
+        if (revision === memoryRevision) set({ systemMem: mem });
+      } catch (error) {
+        reportError("Failed to fetch system memory", error, {
+          dedupeKey: "boost-fetch-system-memory",
+        });
+      }
+    })().finally(() => { pendingMemory = null; });
+    return pendingMemory;
   },
 
   fetchSystemInfo: async () => {
@@ -184,6 +192,10 @@ export const useBoostStore = create<BoostStore>((set) => ({
   },
 
   cleanRam: async () => {
+    // Several views can request this action. A rejected duplicate must not
+    // reset the first caller's progress or busy flag.
+    if (get().isCleaningRam) return;
+    memoryRevision += 1;
     try {
       set({
         error: null,
@@ -205,6 +217,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
       }
 
       const result = await boostCleanRam();
+      memoryRevision += 1;
       set((state) => ({
         isCleaningRam: false,
         ramCleanStage: "done",
@@ -254,6 +267,7 @@ export const useBoostStore = create<BoostStore>((set) => ({
   },
 
   handleRamCleanProgress: (event) => {
+    memoryRevision += 1;
     set((state) => ({
       systemMem: {
         total_mb: event.total_mb,
