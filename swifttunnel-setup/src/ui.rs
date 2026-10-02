@@ -63,9 +63,7 @@ impl State {
             package: None,
             installed: vec![],
             heading: "Preparing your installer".into(),
-            detail:
-                "Verifying the bundled package and checking your installation. No download needed."
-                    .into(),
+            detail: "Verifying the bundled app and checking your installation.".into(),
             busy: true,
             installing: false,
             reboot_required: false,
@@ -288,19 +286,13 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         DT_LEFT,
         w!("Figtree ExtraBold"),
         -scaled(2, dpi),
-        true,
+        false,
     );
     let subtitle = state
         .package
         .as_ref()
-        .map(|p| {
-            format!(
-                "{}  /  V{}  /  OFFLINE SETUP",
-                p.name.to_uppercase(),
-                p.version
-            )
-        })
-        .unwrap_or_else(|| "BUNDLED PACKAGE  /  OFFLINE SETUP".into());
+        .map(|p| format!("{}  /  V{}  /  SETUP", p.name.to_uppercase(), p.version))
+        .unwrap_or_else(|| "BUNDLED APP  /  SETUP".into());
     text_face(
         dc,
         &subtitle,
