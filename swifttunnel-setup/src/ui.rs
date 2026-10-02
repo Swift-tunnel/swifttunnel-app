@@ -32,9 +32,15 @@ const INK: COLORREF = COLORREF(0x140b0a);
 const MUTED: COLORREF = COLORREF(0x765b56);
 const BORDER: COLORREF = COLORREF(0xf2e4e1);
 const CARD: COLORREF = COLORREF(0xfbf0ee);
-const HEIGHT: i32 = 560;
-const BUTTON_TOP: i32 = 444;
-const BUTTON_HEIGHT: i32 = 44;
+const WIDTH: i32 = 780;
+const HEIGHT: i32 = 450;
+const BUTTON_TOP: i32 = 352;
+const BUTTON_HEIGHT: i32 = 40;
+const BUTTON_STEP: i32 = 179;
+const BUTTON_WIDTH: i32 = 167;
+const MINIMIZE_ID: usize = 200;
+const CLOSE_ID: usize = 201;
+const WINDOW_STYLE_SETUP: WINDOW_STYLE = WINDOW_STYLE(WS_POPUP.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
 
 pub struct State {
     package: Option<Package>,
@@ -46,6 +52,7 @@ pub struct State {
     reboot_required: bool,
     exit_code: i32,
     buttons: Vec<HWND>,
+    window_buttons: Vec<HWND>,
     commands: Sender<Action>,
     events: Receiver<Event>,
 }
@@ -64,6 +71,7 @@ impl State {
             reboot_required: false,
             exit_code: 0,
             buttons: vec![],
+            window_buttons: vec![],
             commands,
             events,
         }
@@ -181,9 +189,9 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     artwork::paint(dc, bounds);
     let panel = RECT {
         left: scaled(20, dpi),
-        top: scaled(302, dpi),
+        top: scaled(246, dpi),
         right: bounds.right - scaled(20, dpi),
-        bottom: scaled(502, dpi),
+        bottom: scaled(408, dpi),
     };
     let brush = CreateSolidBrush(CARD);
     let pen = CreatePen(PS_SOLID, scaled(1, dpi), COLORREF(0xf3d7cf));
@@ -222,7 +230,10 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text_face(
         dc,
         "WINDOWS / SETUP",
-        area(35, 54),
+        RECT {
+            right: right - scaled(104, dpi),
+            ..area(35, 54)
+        },
         scaled(10, dpi),
         MUTED,
         DT_RIGHT,
@@ -230,11 +241,11 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         0,
         false,
     );
-    fill(dc, &area(72, 73), BORDER);
+    fill(dc, &area(66, 67), BORDER);
     text_face(
         dc,
         "01 / INSTALLATION",
-        area(85, 105),
+        area(78, 97),
         scaled(10, dpi),
         MUTED,
         DT_LEFT,
@@ -245,8 +256,8 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text_face(
         dc,
         "Lower ping.",
-        area(117, 200),
-        scaled(58, dpi),
+        area(102, 159),
+        scaled(48, dpi),
         INK,
         DT_LEFT,
         w!("Figtree ExtraBold"),
@@ -256,8 +267,8 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text_face(
         dc,
         "Faster",
-        area(184, 266),
-        scaled(58, dpi),
+        area(155, 214),
+        scaled(48, dpi),
         INK,
         DT_LEFT,
         w!("Figtree ExtraBold"),
@@ -265,14 +276,14 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         false,
     );
     let signal = RECT {
-        left: scaled(215, dpi),
-        ..area(184, 266)
+        left: scaled(185, dpi),
+        ..area(155, 214)
     };
     text_face(
         dc,
         "gameplay.",
         signal,
-        scaled(58, dpi),
+        scaled(48, dpi),
         INK,
         DT_LEFT,
         w!("Figtree ExtraBold"),
@@ -293,7 +304,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text_face(
         dc,
         &subtitle,
-        area(277, 299),
+        area(220, 241),
         scaled(10, dpi),
         MUTED,
         DT_LEFT,
@@ -305,8 +316,8 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text(
         dc,
         &state.heading,
-        area(320, 352),
-        scaled(24, dpi),
+        area(260, 291),
+        scaled(22, dpi),
         600,
         INK,
         DT_LEFT,
@@ -314,7 +325,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text(
         dc,
         &state.detail,
-        area(365, 424),
+        area(298, 344),
         scaled(14, dpi),
         400,
         MUTED,
@@ -329,7 +340,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         } else {
             "Your installer stays protected for future updates and repairs."
         },
-        area(512, 548),
+        area(420, 445),
         scaled(12, dpi),
         400,
         COLORREF(0xffffff),
@@ -406,6 +417,45 @@ unsafe fn paint_button(
     }
 }
 
+unsafe fn paint_window_button(
+    dc: HDC,
+    bounds: RECT,
+    dpi: u32,
+    close: bool,
+    pressed: bool,
+    focused: bool,
+) {
+    fill(dc, &bounds, if pressed { BORDER } else { CARD });
+    let cx = (bounds.left + bounds.right) / 2;
+    let cy = (bounds.top + bounds.bottom) / 2;
+    let r = scaled(5, dpi);
+    let pen = CreatePen(PS_SOLID, scaled(1, dpi).max(1), INK);
+    let old = SelectObject(dc, pen.into());
+    if close {
+        let _ = MoveToEx(dc, cx - r, cy - r, None);
+        let _ = LineTo(dc, cx + r, cy + r);
+        let _ = MoveToEx(dc, cx - r, cy + r, None);
+        let _ = LineTo(dc, cx + r, cy - r);
+    } else {
+        let _ = MoveToEx(dc, cx - r, cy, None);
+        let _ = LineTo(dc, cx + r, cy);
+    }
+    SelectObject(dc, old);
+    let _ = DeleteObject(pen.into());
+    if focused {
+        let _ = DrawFocusRect(dc, &bounds);
+    }
+}
+
+fn window_button_rect(index: usize, dpi: u32) -> RECT {
+    RECT {
+        left: scaled(WIDTH - 104 + index as i32 * 40, dpi),
+        top: scaled(24, dpi),
+        right: scaled(WIDTH - 68 + index as i32 * 40, dpi),
+        bottom: scaled(56, dpi),
+    }
+}
+
 // Uses the production paint functions without running an installer transaction.
 #[cfg(debug_assertions)]
 #[allow(dead_code)]
@@ -435,12 +485,12 @@ pub unsafe fn paint_preview(dc: HDC, bounds: RECT, dpi: u32, existing: bool) {
             &state.installed,
             ACTIONS[i],
         );
-        let left = scaled(36 + i as i32 * 161, dpi);
+        let left = scaled(36 + i as i32 * BUTTON_STEP, dpi);
         paint_button(
             dc,
             RECT {
                 left,
-                right: left + scaled(149, dpi),
+                right: left + scaled(BUTTON_WIDTH, dpi),
                 top: scaled(BUTTON_TOP, dpi),
                 bottom: scaled(BUTTON_TOP + BUTTON_HEIGHT, dpi),
             },
@@ -451,6 +501,9 @@ pub unsafe fn paint_preview(dc: HDC, bounds: RECT, dpi: u32, existing: bool) {
             false,
             false,
         );
+    }
+    for i in 0..2 {
+        paint_window_button(dc, window_button_rect(i, dpi), dpi, i == 1, false, false);
     }
 }
 
@@ -480,10 +533,21 @@ unsafe fn layout(hwnd: HWND, state: &State) {
     for (i, button) in state.buttons.iter().enumerate() {
         let _ = MoveWindow(
             *button,
-            scaled(36 + i as i32 * 161, dpi),
+            scaled(36 + i as i32 * BUTTON_STEP, dpi),
             scaled(BUTTON_TOP, dpi),
-            scaled(149, dpi),
+            scaled(BUTTON_WIDTH, dpi),
             scaled(BUTTON_HEIGHT, dpi),
+            true,
+        );
+    }
+    for (i, button) in state.window_buttons.iter().enumerate() {
+        let rect = window_button_rect(i, dpi);
+        let _ = MoveWindow(
+            *button,
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
             true,
         );
     }
@@ -497,6 +561,34 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut RefCell<State>;
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+    if msg == WM_NCHITTEST {
+        let mut point = POINT {
+            x: (lp.0 as u16 as i16) as i32,
+            y: ((lp.0 >> 16) as u16 as i16) as i32,
+        };
+        let _ = ScreenToClient(hwnd, &mut point);
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        if point.x >= 0
+            && point.x < scaled(WIDTH - 108, dpi)
+            && point.y >= 0
+            && point.y < scaled(66, dpi)
+        {
+            return LRESULT(HTCAPTION as isize);
+        }
+    }
+    if msg == WM_COMMAND {
+        match wp.0 & 0xffff {
+            MINIMIZE_ID => {
+                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                return LRESULT(0);
+            }
+            CLOSE_ID => {
+                let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                return LRESULT(0);
+            }
+            _ => {}
+        }
     }
     // Windows can synchronously reenter this procedure during child creation,
     // layout and dialogs. Never create overlapping mutable State references.
@@ -559,6 +651,25 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     return LRESULT(-1);
                 }
             }
+            for (i, label) in ["Minimize", "Close"].iter().enumerate() {
+                match CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("BUTTON"),
+                    PCWSTR(wide(label).as_ptr()),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
+                    0,
+                    0,
+                    0,
+                    0,
+                    Some(hwnd),
+                    Some(HMENU((MINIMIZE_ID + i) as *mut _)),
+                    None,
+                    None,
+                ) {
+                    Ok(button) => state.window_buttons.push(button),
+                    Err(_) => return LRESULT(-1),
+                }
+            }
             layout(hwnd, state);
             update_buttons(hwnd, state);
             SetTimer(Some(hwnd), 1, 150, None);
@@ -618,6 +729,17 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_DRAWITEM => {
             let item = &*(lp.0 as *const DRAWITEMSTRUCT);
+            if item.CtlID as usize == MINIMIZE_ID || item.CtlID as usize == CLOSE_ID {
+                paint_window_button(
+                    item.hDC,
+                    item.rcItem,
+                    GetDpiForWindow(hwnd).max(96),
+                    item.CtlID as usize == CLOSE_ID,
+                    (item.itemState.0 & ODS_SELECTED.0) != 0,
+                    (item.itemState.0 & ODS_FOCUS.0) != 0,
+                );
+                return LRESULT(1);
+            }
             let disabled = (item.itemState.0 & ODS_DISABLED.0) != 0;
             let primary = item.CtlID == 100 && !disabled;
             let pressed = (item.itemState.0 & ODS_SELECTED.0) != 0;
@@ -679,12 +801,12 @@ pub fn run(state: Box<State>) -> Result<i32, String> {
         if RegisterClassW(&class) == 0 {
             return Err("Could not create the Setup window class.".into());
         }
-        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        let style = WINDOW_STYLE_SETUP;
         let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem();
         let mut bounds = RECT {
             left: 0,
             top: 0,
-            right: scaled(704, dpi),
+            right: scaled(WIDTH, dpi),
             bottom: scaled(HEIGHT, dpi),
         };
         let _ = windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi(
@@ -752,11 +874,11 @@ mod tests {
                 WINDOW_EX_STYLE::default(),
                 class.lpszClassName,
                 w!("Hidden installer test"),
-                WS_OVERLAPPED,
+                WINDOW_STYLE_SETUP,
                 0,
                 0,
-                704,
-                488,
+                WIDTH,
+                HEIGHT,
                 None,
                 None,
                 Some(instance.into()),
@@ -765,6 +887,17 @@ mod tests {
             .unwrap();
             // No visible window, backend worker, msiexec, or installation is started.
             assert_eq!(state.borrow().buttons.len(), 4);
+            assert_eq!(state.borrow().window_buttons.len(), 2);
+            assert_eq!(GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION.0, 0);
+            let mut title_point = POINT { x: 100, y: 35 };
+            let _ = ClientToScreen(hwnd, &mut title_point);
+            let hit_point = LPARAM(
+                ((title_point.y as u16 as u32) << 16 | title_point.x as u16 as u32) as isize,
+            );
+            assert_eq!(
+                SendMessageW(hwnd, WM_NCHITTEST, Some(WPARAM(0)), Some(hit_point)).0,
+                HTCAPTION as isize
+            );
             assert!(state.borrow().busy);
             events
                 .send(Event::Ready(
@@ -801,7 +934,10 @@ mod tests {
             assert_eq!(state.borrow().exit_code, 3010);
             SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(101)), Some(LPARAM(0)));
             assert!(actions.try_recv().is_err());
-            SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+            SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(CLOSE_ID)), Some(LPARAM(0)));
+            let mut close = MSG::default();
+            assert!(PeekMessageW(&mut close, Some(hwnd), WM_CLOSE, WM_CLOSE, PM_REMOVE).as_bool());
+            DispatchMessageW(&close);
             assert!(!IsWindow(Some(hwnd)).as_bool());
             let mut message = MSG::default();
             assert!(PeekMessageW(&mut message, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool());
