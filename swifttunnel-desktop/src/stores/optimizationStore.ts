@@ -36,7 +36,7 @@ interface OptimizationStore {
   errors: Record<string, string>;
   restartRequired: boolean;
   batch: { action: "apply" | "revert"; completed: number; total: number } | null;
-  runBatch: (targets: OptTarget[], action: "apply" | "revert") => Promise<OptBatchResult | null>;
+  runBatch: (targets: OptTarget[], action: "apply" | "revert", prepare?: () => Promise<void>) => Promise<OptBatchResult | null>;
   loadActive: () => Promise<void>;
   activate: (def: OptTarget, opts?: OptOptions) => Promise<OptOutcome>;
   deactivate: (def: OptTarget, opts?: OptOptions) => Promise<OptOutcome>;
@@ -76,7 +76,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
     restartRequired: false,
     batch: null,
 
-    runBatch: async (targets, action) => {
+    runBatch: async (targets, action, prepare) => {
       if (batchOwner || !get().loaded || Object.values(get().status).some(isBusy)) return null;
       // Snapshot and deduplicate the work before the first await. A second
       // control or a remounted tab must not start an opposing batch.
@@ -89,6 +89,9 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
       set({ batch: { action, completed: 0, total: pending.length } });
       const result: OptBatchResult = { changed: 0, failed: 0, reboot: 0 };
       try {
+        // Preset settings must share the same lock as their catalog changes.
+        // Do not mutate config first and only discover a conflicting batch later.
+        await prepare?.();
         for (const target of pending) {
           const outcome = await (action === "apply" ? get().activate : get().deactivate)(target, { silent: true, batchToken: token });
           if (!outcome.ok) result.failed += 1;

@@ -148,36 +148,28 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
     set({ applyingId: id });
     const addToast = useToastStore.getState().addToast;
     try {
-      // Applying can change some settings before failing. Neither the old
-      // nor the requested preset describes that partial state reliably.
-      persistActive(null);
-      set({ activeId: null });
-      // 1) Settings (Roblox, overlay, network, portable system tweaks).
-      const cur = useSettingsStore.getState().settings;
-      const nextConfig = mergePresetIntoConfig(cur.config, preset);
-      const applied = await useBoostStore
-        .getState()
-        .updateConfig(JSON.stringify(nextConfig));
-      useSettingsStore.getState().update({
-        config: applied,
-        selected_game_presets: preset.game_presets,
-      });
-      await useSettingsStore.getState().save(true);
-
-      // 2) Optimization catalog items, apply each known id, aggregate.
-      const activate = useOptimizationStore.getState().activate;
+      if (!useOptimizationStore.getState().loaded) await useOptimizationStore.getState().loadActive();
       const targets = preset.optimizations
         .map((oid) => CATALOG_BY_ID.get(oid))
         .filter((t): t is { id: string; name: string } => Boolean(t));
-      let ok = 0;
-      let failed = preset.optimizations.filter((oid) => !CATALOG_BY_ID.has(oid)).length;
-      let reboot = false;
-      for (const t of targets) {
-        const r = await activate(t, { silent: true });
-        if (r.ok) ok++;
-        else failed++;
-        if (r.requiresReboot) reboot = true;
+      const result = await useOptimizationStore.getState().runBatch(targets, "apply", async () => {
+        // Applying can change some settings before failing. Neither preset
+        // describes that partial state. Clear the marker only after admission.
+        persistActive(null);
+        set({ activeId: null });
+        const cur = useSettingsStore.getState().settings;
+        const nextConfig = mergePresetIntoConfig(cur.config, preset);
+        const applied = await useBoostStore.getState().updateConfig(JSON.stringify(nextConfig));
+        useSettingsStore.getState().update({ config: applied, selected_game_presets: preset.game_presets });
+        await useSettingsStore.getState().save(true);
+      });
+      if (!result) {
+        addToast({ type: "warning", message: "Preset was not applied. Wait for other optimization changes to finish and retry. If status is unavailable, retry the status check in Optimize first." });
+        return;
       }
+      const ok = result.changed;
+      const failed = result.failed + preset.optimizations.filter((oid) => !CATALOG_BY_ID.has(oid)).length;
+      const reboot = result.reboot > 0;
 
       const warning = useBoostStore.getState().warning;
       if (failed || warning) {

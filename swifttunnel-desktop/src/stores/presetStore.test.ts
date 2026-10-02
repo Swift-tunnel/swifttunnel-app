@@ -4,12 +4,12 @@ import { buildPreset } from "../lib/presets";
 
 const h = vi.hoisted(() => ({
   settings: {} as typeof DEFAULT_SETTINGS,
-  save: vi.fn(), update: vi.fn(), updateConfig: vi.fn(), activate: vi.fn(), toast: vi.fn(),
+  save: vi.fn(), update: vi.fn(), updateConfig: vi.fn(), activate: vi.fn(), runBatch: vi.fn(), toast: vi.fn(),
   warning: null as string | null,
 }));
 vi.mock("./settingsStore", () => ({ useSettingsStore: { getState: () => ({ settings: h.settings, save: h.save, update: h.update }) } }));
 vi.mock("./boostStore", () => ({ useBoostStore: { getState: () => ({ updateConfig: h.updateConfig, robloxRunning: false, warning: h.warning }) } }));
-vi.mock("./optimizationStore", () => ({ useOptimizationStore: { getState: () => ({ status: {}, activate: h.activate }) } }));
+vi.mock("./optimizationStore", () => ({ useOptimizationStore: { getState: () => ({ status: {}, loaded: true, runBatch: h.runBatch }) } }));
 vi.mock("./toastStore", () => ({ useToastStore: { getState: () => ({ addToast: h.toast }) } }));
 import { usePresetStore } from "./presetStore";
 
@@ -20,6 +20,17 @@ beforeEach(() => {
   h.updateConfig.mockImplementation(async (json: string) => JSON.parse(json));
   h.save.mockResolvedValue(undefined);
   h.activate.mockResolvedValue({ ok: true, requiresReboot: false });
+  h.runBatch.mockImplementation(async (targets: { id: string }[], _action: string, prepare: () => Promise<void>) => {
+    await prepare();
+    const result = { changed: 0, failed: 0, reboot: 0 };
+    for (const target of targets) {
+      const outcome = await h.activate(target);
+      if (outcome.ok) result.changed += 1;
+      else result.failed += 1;
+      if (outcome.requiresReboot) result.reboot += 1;
+    }
+    return result;
+  });
   usePresetStore.setState({ presets: [], applyingId: null, activeId: "previous" });
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -67,6 +78,17 @@ it("marks a fully applied and saved preset active", async () => {
   await usePresetStore.getState().apply("test");
   expect(usePresetStore.getState().activeId).toBe("test");
   expect(h.toast).toHaveBeenCalledWith(expect.objectContaining({ type: "success" }));
+});
+
+it("does not mutate settings or the active preset when another batch prevents admission", async () => {
+  addPreset();
+  h.runBatch.mockResolvedValue(null);
+  await usePresetStore.getState().apply("test");
+  expect(h.updateConfig).not.toHaveBeenCalled();
+  expect(h.update).not.toHaveBeenCalled();
+  expect(h.save).not.toHaveBeenCalled();
+  expect(usePresetStore.getState().activeId).toBe("previous");
+  expect(h.toast).toHaveBeenCalledWith(expect.objectContaining({ type: "warning", message: expect.stringContaining("not applied") }));
 });
 
 it("does not claim a full switch for unavailable catalog items or native warnings", async () => {

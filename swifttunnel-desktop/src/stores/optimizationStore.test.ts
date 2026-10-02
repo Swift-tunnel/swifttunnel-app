@@ -22,6 +22,23 @@ function deferred<T>() {
 
 const target = { id: "test", name: "Test" };
 
+it("holds the batch lock throughout preset preparation and releases it after preparation failure", async () => {
+  useOptimizationStore.setState({ loaded: true });
+  const prepared = deferred<void>();
+  const prepare = vi.fn().mockImplementation(async () => { await prepared.promise; throw new Error("Save failed"); });
+  const applying = useOptimizationStore.getState().runBatch([target], "apply", prepare);
+  const deniedPrepare = vi.fn();
+  expect(await useOptimizationStore.getState().runBatch([], "revert", deniedPrepare)).toBeNull();
+  expect(deniedPrepare).not.toHaveBeenCalled();
+  expect((await useOptimizationStore.getState().activate(target)).ok).toBe(false);
+  prepared.resolve();
+  await expect(applying).rejects.toThrow("Save failed");
+  expect(commands.optimizationApply).not.toHaveBeenCalled();
+  expect(useOptimizationStore.getState().batch).toBeNull();
+  commands.optimizationApply.mockResolvedValue({ requires_reboot: false });
+  expect(await useOptimizationStore.getState().runBatch([target], "apply")).toEqual({ changed: 1, failed: 0, reboot: 0 });
+});
+
 it("keeps a batch exclusive across unsubscription and blocks opposite and individual changes", async () => {
   useOptimizationStore.setState({ loaded: true });
   const first = deferred<{ requires_reboot: boolean }>();
