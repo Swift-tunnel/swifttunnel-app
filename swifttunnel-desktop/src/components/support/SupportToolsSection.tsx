@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { formatErrorMessage } from "../../lib/errors";
+import { COMMUNITY_URL } from "../../lib/maintenance";
 import { useToastStore } from "../../stores/toastStore";
 import {
   settingsGenerateNetworkDiagnosticsBundle,
@@ -18,8 +20,10 @@ export function SupportToolsSection() {
   const [copyLogError, setCopyLogError] = useState<string | null>(null);
 
   async function generateDiagnosticsBundle() {
+    if (isGeneratingDiagnostics) return;
     setIsGeneratingDiagnostics(true);
     setDiagnosticsError(null);
+    setDiagnosticsPath(null);
 
     try {
       const response = await settingsGenerateNetworkDiagnosticsBundle();
@@ -30,19 +34,21 @@ export function SupportToolsSection() {
         await systemOpenUrl(response.folder_path);
       } catch (openError) {
         setDiagnosticsError(
-          `Bundle generated, but failed to open folder: ${String(openError)}`,
+          `Bundle saved at the path shown below, but its folder could not open: ${formatErrorMessage(openError)}`,
         );
       }
     } catch (error) {
-      setDiagnosticsError(String(error));
+      setDiagnosticsError(formatErrorMessage(error));
     } finally {
       setIsGeneratingDiagnostics(false);
     }
   }
 
   async function copyLogToClipboard() {
+    if (isCopyingLog) return;
     setIsCopyingLog(true);
     setCopyLogError(null);
+    setCopyLogPath(null);
 
     try {
       const response = await systemCopyLogToClipboard();
@@ -52,7 +58,7 @@ export function SupportToolsSection() {
         message: "Log file copied, paste it into Discord or email.",
       });
     } catch (error) {
-      setCopyLogError(String(error));
+      setCopyLogError(formatErrorMessage(error));
     } finally {
       setIsCopyingLog(false);
     }
@@ -65,7 +71,9 @@ export function SupportToolsSection() {
         <button
           type="button"
           onClick={() =>
-            void systemOpenUrl("https://discord.com/invite/8FjPxk92Tf")
+            void systemOpenUrl(COMMUNITY_URL).catch((error) => {
+              addToast({ type: "error", message: `Could not open support: ${formatErrorMessage(error)}. Visit ${COMMUNITY_URL} in your browser.` });
+            })
           }
           aria-label="Open SwiftTunnel Discord support server"
           className="inline-flex cursor-pointer items-center gap-1 rounded-[4px] px-1.5 py-[2px] font-mono text-[9.5px] font-medium transition-colors hover:bg-bg-hover active:scale-[0.98]"
