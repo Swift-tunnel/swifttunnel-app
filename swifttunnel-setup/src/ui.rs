@@ -32,14 +32,15 @@ const INK: COLORREF = COLORREF(0x140b0a);
 const MUTED: COLORREF = COLORREF(0x765b56);
 const BORDER: COLORREF = COLORREF(0xf2e4e1);
 const CARD: COLORREF = COLORREF(0xfbf0ee);
-const WIDTH: i32 = 780;
-const HEIGHT: i32 = 450;
-const BUTTON_TOP: i32 = 352;
-const BUTTON_HEIGHT: i32 = 40;
-const BUTTON_STEP: i32 = 179;
-const BUTTON_WIDTH: i32 = 167;
+const WIDTH: i32 = 560;
+const HEIGHT: i32 = 340;
+const BUTTON_TOP: i32 = 264;
+const BUTTON_HEIGHT: i32 = 32;
+const BUTTON_STEP: i32 = 130;
+const BUTTON_WIDTH: i32 = 122;
 const MINIMIZE_ID: usize = 200;
 const CLOSE_ID: usize = 201;
+const DETAILS_ID: usize = 202;
 const WINDOW_STYLE_SETUP: WINDOW_STYLE = WINDOW_STYLE(WS_POPUP.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
 
 pub struct State {
@@ -53,6 +54,8 @@ pub struct State {
     exit_code: i32,
     buttons: Vec<HWND>,
     window_buttons: Vec<HWND>,
+    details_button: Option<HWND>,
+    worker_closed: bool,
     commands: Sender<Action>,
     events: Receiver<Event>,
 }
@@ -70,6 +73,8 @@ impl State {
             exit_code: 0,
             buttons: vec![],
             window_buttons: vec![],
+            details_button: None,
+            worker_closed: false,
             commands,
             events,
         }
@@ -88,7 +93,7 @@ impl State {
             [current] if current.version == package.version && action_allowed(&package, &installed, Action::Install) =>
                 format!("Version {} is installed from another package. Replace it with this build using Update. Your preferences are kept.", current.version),
             [current] if action_allowed(&package, &installed, Action::Install) =>
-                format!("Version {} is installed. Update to {} with this offline package.", current.version, package.version),
+                format!("Version {} is installed. Update to {} with this package.", current.version, package.version),
             [_] => "This Setup is for a different version. To repair, download Setup for the installed version or a newer release.".into(),
             _ => "Open Windows Settings > Apps to choose a copy. Setup will not guess which one to change.".into(),
         };
@@ -96,6 +101,22 @@ impl State {
         self.installed = installed;
         self.busy = false;
         self.installing = false;
+    }
+
+    fn worker_stopped(&mut self) -> bool {
+        if self.worker_closed {
+            return false;
+        }
+        self.worker_closed = true;
+        self.package = None;
+        if self.busy {
+            self.busy = false;
+            self.installing = false;
+            self.exit_code = 1;
+            self.heading = "Setup lost contact with its worker".into();
+            self.detail = "Windows Installer may still be running. Wait for it to finish, then reopen Setup to check the installation. No success was confirmed.".into();
+        }
+        true
     }
 }
 
@@ -186,10 +207,10 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     fill(dc, &bounds, BG);
     artwork::paint(dc, bounds);
     let panel = RECT {
-        left: scaled(20, dpi),
-        top: scaled(246, dpi),
-        right: bounds.right - scaled(20, dpi),
-        bottom: scaled(408, dpi),
+        left: scaled(12, dpi),
+        top: scaled(164, dpi),
+        right: bounds.right - scaled(12, dpi),
+        bottom: scaled(308, dpi),
     };
     let brush = CreateSolidBrush(CARD);
     let pen = CreatePen(PS_SOLID, scaled(1, dpi), COLORREF(0xf3d7cf));
@@ -208,7 +229,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     SelectObject(dc, previous_brush);
     let _ = DeleteObject(pen.into());
     let _ = DeleteObject(brush.into());
-    let x = scaled(36, dpi);
+    let x = scaled(24, dpi);
     let right = bounds.right - x;
     let area = |top, bottom| RECT {
         left: x,
@@ -219,8 +240,8 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text(
         dc,
         "SwiftTunnel",
-        area(28, 55),
-        scaled(21, dpi),
+        area(17, 40),
+        scaled(18, dpi),
         600,
         INK,
         DT_LEFT,
@@ -230,7 +251,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         "WINDOWS / SETUP",
         RECT {
             right: right - scaled(104, dpi),
-            ..area(35, 54)
+            ..area(23, 40)
         },
         scaled(10, dpi),
         MUTED,
@@ -239,23 +260,12 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         0,
         false,
     );
-    fill(dc, &area(66, 67), BORDER);
-    text_face(
-        dc,
-        "01 / INSTALLATION",
-        area(78, 97),
-        scaled(10, dpi),
-        MUTED,
-        DT_LEFT,
-        w!("Azeret Mono"),
-        scaled(1, dpi),
-        false,
-    );
+    fill(dc, &area(48, 49), BORDER);
     text_face(
         dc,
         "Lower ping.",
-        area(102, 159),
-        scaled(48, dpi),
+        area(61, 99),
+        scaled(32, dpi),
         INK,
         DT_LEFT,
         w!("Figtree ExtraBold"),
@@ -264,24 +274,9 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     );
     text_face(
         dc,
-        "Faster",
-        area(155, 214),
-        scaled(48, dpi),
-        INK,
-        DT_LEFT,
-        w!("Figtree ExtraBold"),
-        -scaled(2, dpi),
-        false,
-    );
-    let signal = RECT {
-        left: scaled(185, dpi),
-        ..area(155, 214)
-    };
-    text_face(
-        dc,
-        "gameplay.",
-        signal,
-        scaled(48, dpi),
+        "Faster gameplay.",
+        area(97, 135),
+        scaled(32, dpi),
         INK,
         DT_LEFT,
         w!("Figtree ExtraBold"),
@@ -296,8 +291,8 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text_face(
         dc,
         &subtitle,
-        area(220, 241),
-        scaled(10, dpi),
+        area(142, 159),
+        scaled(9, dpi),
         MUTED,
         DT_LEFT,
         w!("Azeret Mono"),
@@ -308,8 +303,8 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text(
         dc,
         &state.heading,
-        area(260, 291),
-        scaled(22, dpi),
+        area(176, 201),
+        scaled(19, dpi),
         600,
         INK,
         DT_LEFT,
@@ -317,11 +312,11 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     text(
         dc,
         &state.detail,
-        area(298, 344),
-        scaled(14, dpi),
+        area(208, 258),
+        scaled(12, dpi),
         400,
         MUTED,
-        DT_LEFT | DT_WORDBREAK,
+        DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS,
     );
     text(
         dc,
@@ -332,8 +327,16 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         } else {
             "Your installer stays protected for future updates and repairs."
         },
-        area(420, 445),
-        scaled(12, dpi),
+        RECT {
+            right: right
+                - if state.exit_code != 0 {
+                    scaled(78, dpi)
+                } else {
+                    0
+                },
+            ..area(317, 338)
+        },
+        scaled(10, dpi),
         400,
         COLORREF(0xffffff),
         DT_LEFT | DT_WORDBREAK,
@@ -442,9 +445,9 @@ unsafe fn paint_window_button(
 fn window_button_rect(index: usize, dpi: u32) -> RECT {
     RECT {
         left: scaled(WIDTH - 104 + index as i32 * 40, dpi),
-        top: scaled(24, dpi),
+        top: scaled(12, dpi),
         right: scaled(WIDTH - 68 + index as i32 * 40, dpi),
-        bottom: scaled(56, dpi),
+        bottom: scaled(40, dpi),
     }
 }
 
@@ -477,7 +480,7 @@ pub unsafe fn paint_preview(dc: HDC, bounds: RECT, dpi: u32, existing: bool) {
             &state.installed,
             ACTIONS[i],
         );
-        let left = scaled(36 + i as i32 * BUTTON_STEP, dpi);
+        let left = scaled(24 + i as i32 * BUTTON_STEP, dpi);
         paint_button(
             dc,
             RECT {
@@ -517,6 +520,16 @@ unsafe fn update_buttons(hwnd: HWND, state: &State) {
             let _ = SetWindowTextW(*button, PCWSTR(wide(label).as_ptr()));
         }
     }
+    if let Some(button) = state.details_button {
+        let _ = ShowWindow(
+            button,
+            if state.exit_code != 0 {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
+    }
     let _ = InvalidateRect(Some(hwnd), None, false);
 }
 
@@ -525,7 +538,7 @@ unsafe fn layout(hwnd: HWND, state: &State) {
     for (i, button) in state.buttons.iter().enumerate() {
         let _ = MoveWindow(
             *button,
-            scaled(36 + i as i32 * BUTTON_STEP, dpi),
+            scaled(24 + i as i32 * BUTTON_STEP, dpi),
             scaled(BUTTON_TOP, dpi),
             scaled(BUTTON_WIDTH, dpi),
             scaled(BUTTON_HEIGHT, dpi),
@@ -540,6 +553,16 @@ unsafe fn layout(hwnd: HWND, state: &State) {
             rect.top,
             rect.right - rect.left,
             rect.bottom - rect.top,
+            true,
+        );
+    }
+    if let Some(button) = state.details_button {
+        let _ = MoveWindow(
+            button,
+            scaled(WIDTH - 88, dpi),
+            scaled(313, dpi),
+            scaled(64, dpi),
+            scaled(24, dpi),
             true,
         );
     }
@@ -564,13 +587,28 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         if point.x >= 0
             && point.x < scaled(WIDTH - 108, dpi)
             && point.y >= 0
-            && point.y < scaled(66, dpi)
+            && point.y < scaled(48, dpi)
         {
             return LRESULT(HTCAPTION as isize);
         }
     }
     if msg == WM_COMMAND {
         match wp.0 & 0xffff {
+            DETAILS_ID => {
+                let details = (*ptr)
+                    .try_borrow()
+                    .ok()
+                    .map(|s| (wide(&s.detail), wide(&s.heading)));
+                if let Some((message, title)) = details {
+                    MessageBoxW(
+                        Some(hwnd),
+                        PCWSTR(message.as_ptr()),
+                        PCWSTR(title.as_ptr()),
+                        MB_OK | MB_ICONINFORMATION,
+                    );
+                }
+                return LRESULT(0);
+            }
             MINIMIZE_ID => {
                 let _ = ShowWindow(hwnd, SW_MINIMIZE);
                 return LRESULT(0);
@@ -662,13 +700,41 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     Err(_) => return LRESULT(-1),
                 }
             }
+            state.details_button = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("BUTTON"),
+                w!("Details"),
+                WS_CHILD | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
+                0,
+                0,
+                0,
+                0,
+                Some(hwnd),
+                Some(HMENU(DETAILS_ID as *mut _)),
+                None,
+                None,
+            )
+            .ok();
+            if state.details_button.is_none() {
+                return LRESULT(-1);
+            }
             layout(hwnd, state);
             update_buttons(hwnd, state);
             SetTimer(Some(hwnd), 1, 150, None);
             LRESULT(0)
         }
         WM_TIMER => {
-            while let Ok(event) = state.events.try_recv() {
+            loop {
+                let event = match state.events.try_recv() {
+                    Ok(event) => event,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        if state.worker_stopped() {
+                            update_buttons(hwnd, state);
+                        }
+                        break;
+                    }
+                };
                 match event {
                     Event::Ready(package, installed) => state.ready(package, installed),
                     Event::Finished(action, code, installed) => {
@@ -872,6 +938,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn missing_worker_cannot_leave_setup_busy_or_claim_success() {
+        let (commands, _) = std::sync::mpsc::channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut state = State::new(commands, events);
+        state.installing = true;
+        assert!(state.worker_stopped());
+        assert!(!state.busy && !state.installing);
+        assert_eq!(state.exit_code, 1);
+        assert!(state.package.is_none());
+        assert!(!state.worker_stopped());
+        assert!(state.detail.contains("may still be running"));
+    }
+
+    #[test]
+    fn compact_controls_fit_at_common_display_scales() {
+        for dpi in [96, 120, 144, 192] {
+            assert!(scaled(24 + 3 * BUTTON_STEP + BUTTON_WIDTH, dpi) <= scaled(WIDTH - 24, dpi));
+            assert!(scaled(BUTTON_TOP + BUTTON_HEIGHT, dpi) < scaled(308, dpi));
+            for index in 0..2 {
+                let rect = window_button_rect(index, dpi);
+                assert!(rect.left >= 0 && rect.right < scaled(WIDTH, dpi));
+                assert!(rect.bottom < scaled(48, dpi));
+            }
+        }
+    }
+
+    #[test]
     fn hidden_native_window_dispatches_actions_and_waits_for_worker_completion() {
         unsafe {
             let instance = GetModuleHandleW(None).unwrap();
@@ -903,6 +996,7 @@ mod tests {
             // No visible window, backend worker, msiexec, or installation is started.
             assert_eq!(state.borrow().buttons.len(), 4);
             assert_eq!(state.borrow().window_buttons.len(), 2);
+            assert!(state.borrow().details_button.is_some());
             assert_eq!(GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION.0, 0);
             let mut title_point = POINT { x: 100, y: 35 };
             let _ = ClientToScreen(hwnd, &mut title_point);
@@ -949,6 +1043,23 @@ mod tests {
             assert_eq!(state.borrow().exit_code, 3010);
             SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(101)), Some(LPARAM(0)));
             assert!(actions.try_recv().is_err());
+            events
+                .send(Event::Failed(
+                    "A detailed error that must remain available in Details.".repeat(20),
+                ))
+                .unwrap();
+            SendMessageW(hwnd, WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
+            assert_eq!(state.borrow().exit_code, 1);
+            let detail_control = state.borrow().details_button.unwrap();
+            assert_ne!(
+                GetWindowLongW(detail_control, GWL_STYLE) as u32 & WS_VISIBLE.0,
+                0
+            );
+            let error_text = state.borrow().detail.clone();
+            drop(events);
+            SendMessageW(hwnd, WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
+            assert!(state.borrow().package.is_none());
+            assert_eq!(state.borrow().detail, error_text);
             SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(CLOSE_ID)), Some(LPARAM(0)));
             let mut close = MSG::default();
             assert!(PeekMessageW(&mut close, Some(hwnd), WM_CLOSE, WM_CLOSE, PM_REMOVE).as_bool());
