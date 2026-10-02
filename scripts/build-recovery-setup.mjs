@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
-export function setupPlan({ target, flavor, version, msi }) {
+export function setupPlan({ target, flavor, version, msi, offline = false }) {
   if (!["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"].includes(target)) {
     throw new Error("Unsupported recovery setup target");
   }
@@ -16,7 +16,7 @@ export function setupPlan({ target, flavor, version, msi }) {
   const prefix = flavor === "lite" ? "SwiftTunnelLite" : "SwiftTunnel";
   const suffix = target.startsWith("aarch64") ? "-arm64" : "";
   return {
-    output: `${prefix}-Setup-${version}${suffix}.exe`,
+    output: `${prefix}-${offline ? "Offline-" : ""}Setup-${version}${suffix}.exe`,
     payloadName: `${prefix}-Installer.msi`,
     payload: path.resolve(msi),
     args: ["build", "-p", "swifttunnel-setup", "--bin", "SwiftTunnel-Setup",
@@ -68,7 +68,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   try {
     const { values } = parseArgs({ options: {
       target: { type: "string" }, flavor: { type: "string" },
-      version: { type: "string" }, msi: { type: "string" },
+      version: { type: "string" }, msi: { type: "string" }, offline: { type: "boolean", default: false },
     } });
     console.log(buildRecoverySetup(values));
   } catch (error) {

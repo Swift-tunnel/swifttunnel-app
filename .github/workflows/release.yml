@@ -782,6 +782,36 @@ jobs:
           # manifest. Without it Lite refuses to update rather than trusting
           # an unverified download.
           SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
+      - name: Build optional offline Desktop launchers
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          foreach ($target in @("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")) {
+            $bundleDir = Join-Path $PWD "target/$target/release/bundle/msi"
+            $msi = Get-ChildItem $bundleDir -Filter "*.msi" | Select-Object -First 1
+            if (-not $msi) { throw "No Desktop MSI for $target" }
+            $saved = Join-Path $env:RUNNER_TEMP "desktop-standard-$target.msi"
+            Copy-Item -LiteralPath $msi.FullName -Destination $saved
+            $env:TAURI_SWIFTTUNNEL_MSI_ACTIONS_DLL = Join-Path $PWD "target/$target/release/swifttunnel_msi_actions.dll"
+            try {
+              Push-Location swifttunnel-desktop
+              try {
+                npx tauri bundle --target $target --bundles msi --config src-tauri/tauri.offline.conf.json
+                if ($LASTEXITCODE -ne 0) { throw "Offline MSI bundling failed for $target" }
+              } finally { Pop-Location }
+              $offline = node scripts/build-recovery-setup.mjs --target $target --flavor desktop --version "$env:RELEASE_VERSION" --msi "$($msi.FullName)" --offline
+              if ($LASTEXITCODE -ne 0) { throw "Offline launcher build failed for $target" }
+              gh release upload "$env:RELEASE_TAG" $offline --clobber
+              if ($LASTEXITCODE -ne 0) { throw "Offline launcher upload failed for $target" }
+            } finally {
+              # Later updater steps must retain the standard, small MSI.
+              Copy-Item -LiteralPath $saved -Destination $msi.FullName -Force
+            }
+          }
+
       - name: Merge ARM64 updater metadata
         shell: powershell
         env:

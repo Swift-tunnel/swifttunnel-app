@@ -6,6 +6,18 @@ import { buildRecoverySetup, emittedSetup, setupPlan } from "./build-recovery-se
 const artifact = { reason: "compiler-artifact", target: { name: "SwiftTunnel-Setup", kind: ["bin"] }, executable: "emitted-setup.exe" };
 const result = { status: 0, stdout: JSON.stringify(artifact) };
 
+test("offline launchers never overwrite standard downloads", () => {
+  for (const target of ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]) {
+    const options = { target, flavor: "desktop", version: "3.1.6", msi: "desktop.msi" };
+    assert.notEqual(setupPlan(options).output, setupPlan({ ...options, offline: true }).output);
+    assert.match(setupPlan({ ...options, offline: true }).output, /^SwiftTunnel-Offline-Setup-/);
+  }
+  const standard = JSON.parse(readFileSync(new URL("../swifttunnel-desktop/src-tauri/tauri.conf.json", import.meta.url)));
+  const offline = JSON.parse(readFileSync(new URL("../swifttunnel-desktop/src-tauri/tauri.offline.conf.json", import.meta.url)));
+  assert.equal(standard.bundle.windows.webviewInstallMode.type, "embedBootstrapper");
+  assert.equal(offline.bundle.windows.webviewInstallMode.type, "offlineInstaller");
+});
+
 test("each product and architecture keeps its own payload and recovery asset", () => {
   const outputs = new Set();
   for (const flavor of ["desktop", "lite"]) {
