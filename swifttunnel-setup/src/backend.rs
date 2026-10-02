@@ -1,5 +1,6 @@
 use crate::model::{
-    action_allowed, registration_matches, result_message, Action, Installed, Package,
+    action_allowed, product_version_available, registration_matches, result_message, Action,
+    Installed, Package,
 };
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender};
@@ -140,17 +141,21 @@ fn installed_products(package: &Package) -> Result<Vec<Installed>, String> {
         check(status, "identify installed copies")?;
         let mut version = [0u16; 256];
         let mut length = version.len() as u32;
-        check(
-            unsafe {
-                MsiGetProductInfoW(
-                    code.as_ptr(),
-                    wide("VersionString").as_ptr(),
-                    version.as_mut_ptr(),
-                    &mut length,
-                )
-            },
-            "read the installed version",
-        )?;
+        let version_status = unsafe {
+            MsiGetProductInfoW(
+                code.as_ptr(),
+                wide("VersionString").as_ptr(),
+                version.as_mut_ptr(),
+                &mut length,
+            )
+        };
+        match product_version_available(version_status) {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(status) => {
+                return Err(format!("Could not check an existing SwiftTunnel installation (Windows Installer {status}). Close other installers and reopen Setup. If it persists, contact support with this code."));
+            }
+        }
         let product_code = String::from_utf16_lossy(&code[..38]);
         if !guid(&product_code) {
             return Err("Invalid Windows Installer registration. Contact support.".into());

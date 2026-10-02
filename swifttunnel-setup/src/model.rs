@@ -22,6 +22,17 @@ pub struct Installed {
     pub version: String,
 }
 
+/// Upgrade-family enumeration can retain entries after the product disappears.
+/// Only ERROR_UNKNOWN_PRODUCT means it is safe to omit this entry. Other
+/// failures must keep setup from acting on an incomplete installation list.
+pub fn product_version_available(status: u32) -> Result<bool, u32> {
+    match status {
+        0 => Ok(true),
+        1605 => Ok(false),
+        error => Err(error),
+    }
+}
+
 fn version(value: &str) -> Option<(u32, u32, u32)> {
     let fields: Vec<_> = value.split('.').collect();
     if fields.len() != 3 {
@@ -86,6 +97,24 @@ pub fn result_message(action: Action, code: i32) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_products_do_not_hide_later_valid_installations() {
+        let statuses = [1605, 1605, 0];
+        let visible: Vec<_> = statuses
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, status)| match product_version_available(status) {
+                Ok(true) => Some(Ok(index)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(visible, vec![2]);
+        for error in [5, 234, 1610, 1608] {
+            assert_eq!(product_version_available(error), Err(error));
+        }
+    }
     fn package() -> Package {
         Package {
             name: "SwiftTunnel".into(),
