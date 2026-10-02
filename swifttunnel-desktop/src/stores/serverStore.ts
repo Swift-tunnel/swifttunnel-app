@@ -6,7 +6,7 @@ import {
   serverRefresh,
   serverSmartSelect,
 } from "../lib/commands";
-import { reportError } from "../lib/errors";
+import { formatErrorMessage, reportError } from "../lib/errors";
 
 // A scan probes every relay and can wait behind connection setup. Timer ticks,
 // focus changes and refresh clicks must share it instead of queuing more scans.
@@ -32,7 +32,32 @@ interface ServerStore {
   getLatency: (region: string) => number | null;
 }
 
-export const useServerStore = create<ServerStore>((set, get) => ({
+export const useServerStore = create<ServerStore>((set, get) => {
+  let pendingList: Promise<void> | null = null;
+  let pendingRefresh: Promise<void> | null = null;
+  let listRevision = 0;
+
+  function loadList(): Promise<void> {
+    if (pendingList) return pendingList;
+    const revision = ++listRevision;
+    set({ isLoading: true });
+    const work = (async () => {
+      try {
+        const resp = await serverGetList();
+        if (revision !== listRevision) return;
+        set({ regions: resp.regions, servers: resp.servers, source: resp.source,
+          isLoading: false, hasLoaded: true, error: null });
+      } catch (error) {
+        if (revision !== listRevision) return;
+        // Failure still completes startup, but retains the last usable list.
+        set({ isLoading: false, hasLoaded: true, error: formatErrorMessage(error) });
+      }
+    })().finally(() => { if (pendingList === work) pendingList = null; });
+    pendingList = work;
+    return work;
+  }
+
+  return {
   regions: [],
   servers: [],
   latencies: new Map(),
@@ -41,24 +66,7 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   hasLoaded: false,
   error: null,
 
-  fetchList: async () => {
-    try {
-      set({ isLoading: true });
-      const resp = await serverGetList();
-      set({
-        regions: resp.regions,
-        servers: resp.servers,
-        source: resp.source,
-        isLoading: false,
-        hasLoaded: true,
-        error: null,
-      });
-    } catch (e) {
-      // Even a failed fetch counts as "loaded" so the launch screen can't hang
-      // waiting on an unreachable backend.
-      set({ isLoading: false, hasLoaded: true, error: String(e) });
-    }
-  },
+  fetchList: () => pendingRefresh ?? loadList(),
 
   fetchLatencies: () => {
     if (pendingLatencies) return pendingLatencies;
@@ -79,14 +87,21 @@ export const useServerStore = create<ServerStore>((set, get) => ({
     return pendingLatencies;
   },
 
-  refresh: async () => {
-    try {
-      set({ isLoading: true });
-      await serverRefresh();
-      await get().fetchList();
-    } catch (e) {
-      set({ isLoading: false, error: String(e) });
-    }
+  refresh: () => {
+    if (pendingRefresh) return pendingRefresh;
+    // Old cached reads must not overwrite the fresh result or clear its spinner.
+    ++listRevision;
+    pendingList = null;
+    set({ isLoading: true, error: null });
+    pendingRefresh = (async () => {
+      try {
+        await serverRefresh();
+        await loadList();
+      } catch (error) {
+        set({ isLoading: false, hasLoaded: true, error: formatErrorMessage(error) });
+      }
+    })().finally(() => { pendingRefresh = null; });
+    return pendingRefresh;
   },
 
   smartSelect: async (regionId) => {
@@ -100,4 +115,5 @@ export const useServerStore = create<ServerStore>((set, get) => ({
   getLatency: (region) => {
     return get().latencies.get(region) ?? null;
   },
-}));
+  };
+});
