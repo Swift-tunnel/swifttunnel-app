@@ -10,6 +10,7 @@ import { useToastStore } from "./toastStore";
 import { useSettingsStore } from "./settingsStore";
 import { useBoostStore } from "./boostStore";
 import { useOptimizationStore } from "./optimizationStore";
+import { formatErrorMessage } from "../lib/errors";
 import {
   buildPreset,
   mergePresetIntoConfig,
@@ -128,6 +129,10 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
     set({ applyingId: id });
     const addToast = useToastStore.getState().addToast;
     try {
+      // Applying can change some settings before failing. Neither the old
+      // nor the requested preset describes that partial state reliably.
+      persistActive(null);
+      set({ activeId: null });
       // 1) Settings (Roblox, overlay, network, portable system tweaks).
       const cur = useSettingsStore.getState().settings;
       const nextConfig = mergePresetIntoConfig(cur.config, preset);
@@ -138,7 +143,7 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
         config: applied,
         selected_game_presets: preset.game_presets,
       });
-      await useSettingsStore.getState().save();
+      await useSettingsStore.getState().save(true);
 
       // 2) Optimization catalog items, apply each known id, aggregate.
       const activate = useOptimizationStore.getState().activate;
@@ -146,7 +151,7 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
         .map((oid) => CATALOG_BY_ID.get(oid))
         .filter((t): t is { id: string; name: string } => Boolean(t));
       let ok = 0;
-      let failed = 0;
+      let failed = preset.optimizations.filter((oid) => !CATALOG_BY_ID.has(oid)).length;
       let reboot = false;
       for (const t of targets) {
         const r = await activate(t, { silent: true });
@@ -155,6 +160,14 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
         if (r.requiresReboot) reboot = true;
       }
 
+      const warning = useBoostStore.getState().warning;
+      if (failed || warning) {
+        addToast({
+          type: "warning",
+          message: `"${preset.name}" only partially applied. ${failed ? `${failed} optimization${failed === 1 ? "" : "s"} failed or are unavailable. ` : ""}${warning ? `${warning} ` : ""}Review the settings before retrying.${reboot ? " Restart your PC to finish completed changes." : ""}`,
+        });
+        return;
+      }
       persistActive(id);
       set({ activeId: id });
       // Roblox reads its settings files at launch, changes applied while the
@@ -168,14 +181,8 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
           robloxOpen ? " Restart Roblox to apply its settings." : ""
         }`,
       });
-      if (failed) {
-        addToast({
-          type: "warning",
-          message: `${failed} optimization${failed === 1 ? "" : "s"} couldn't apply.`,
-        });
-      }
     } catch (e) {
-      addToast({ type: "error", message: `Couldn't switch preset: ${String(e)}` });
+      addToast({ type: "error", message: `Couldn't finish switching preset: ${formatErrorMessage(e)}. Some settings may have changed. Review them before retrying.` });
     } finally {
       set({ applyingId: null });
     }
