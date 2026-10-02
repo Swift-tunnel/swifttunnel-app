@@ -79,6 +79,8 @@ impl State {
             [] => "Install SwiftTunnel on this PC. Close SwiftTunnel before continuing.".into(),
             [current] if current.product_code.eq_ignore_ascii_case(&package.product_code) =>
                 format!("Version {}. Repair fixes missing files. Reinstall replaces app files and keeps your preferences.", current.version),
+            [current] if current.version == package.version && action_allowed(&package, &installed, Action::Install) =>
+                format!("Version {} is installed from another package. Replace it with this build using Update. Your preferences are kept.", current.version),
             [current] if action_allowed(&package, &installed, Action::Install) =>
                 format!("Version {} is installed. Update to {} with this offline package.", current.version, package.version),
             [_] => "This Setup is for a different version. To repair, download Setup for the installed version or a newer release.".into(),

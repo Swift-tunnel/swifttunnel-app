@@ -58,7 +58,12 @@ pub fn action_allowed(package: &Package, installed: &[Installed], action: Action
             .product_code
             .eq_ignore_ascii_case(&package.product_code),
         Action::Install => match (version(&package.version), version(&current.version)) {
-            (Some(bundle), Some(existing)) => bundle > existing,
+            (Some(bundle), Some(existing)) => {
+                bundle >= existing
+                    && !current
+                        .product_code
+                        .eq_ignore_ascii_case(&package.product_code)
+            }
             _ => false,
         },
     }
@@ -135,6 +140,24 @@ mod tests {
         for action in [Action::Repair, Action::Reinstall, Action::Uninstall] {
             assert!(!action_allowed(&package(), &[], action));
         }
+    }
+    #[test]
+    fn rebuilt_same_version_package_can_replace_a_different_product() {
+        assert!(action_allowed(
+            &package(),
+            &installed("{B}", "3.1.6"),
+            Action::Install
+        ));
+        assert!(!action_allowed(
+            &package(),
+            &installed("{A}", "3.1.6"),
+            Action::Install
+        ));
+        assert!(!action_allowed(
+            &package(),
+            &installed("{B}", "3.1.7"),
+            Action::Install
+        ));
     }
     #[test]
     fn maintenance_requires_the_exact_embedded_product() {
