@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { AppSettings, TabId } from "../lib/types";
 import { boostResetRobloxSettings, settingsLoad, settingsSave } from "../lib/commands";
 import { DEFAULT_SETTINGS, mergeAppSettings } from "../lib/settings";
-import { reportError } from "../lib/errors";
+import { formatErrorMessage, reportError } from "../lib/errors";
 import { NAV_ITEMS } from "../components/shell/nav";
 
 // Native saves perform filesystem and system work on blocking workers. Keep
@@ -25,6 +25,7 @@ interface SettingsStore {
   settings: AppSettings;
   activeTab: TabId;
   isLoaded: boolean;
+  saveError: string | null;
 
   // Actions
   load: () => Promise<void>;
@@ -38,6 +39,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   activeTab: "connect",
   isLoaded: false,
+  saveError: null,
 
   load: async () => {
     try {
@@ -64,9 +66,15 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   save: async (propagateError = false) => {
     // Read after earlier writes and native resets finish. A queued save must
     // not restore the pre-reset config captured while Repair was still busy.
-    const write = saveTail.then(() => {
-      const { settings, activeTab } = get();
-      return settingsSave(structuredClone({ ...settings, current_tab: activeTab }));
+    const write = saveTail.then(async () => {
+      try {
+        const { settings, activeTab } = get();
+        await settingsSave(structuredClone({ ...settings, current_tab: activeTab }));
+        set({ saveError: null });
+      } catch (error) {
+        set({ saveError: formatErrorMessage(error) });
+        throw error;
+      }
     });
     // A failed write must not poison the queue or drop subsequent changes.
     saveTail = write.catch(() => {});

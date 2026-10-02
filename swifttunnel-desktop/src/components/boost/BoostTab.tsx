@@ -4,6 +4,8 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useToastStore } from "../../stores/toastStore";
+import { formatErrorMessage } from "../../lib/errors";
+import { SettingsSaveNotice } from "../ui/SettingsSaveNotice";
 import {
   boostCloseRoblox,
   boostGetMetrics,
@@ -348,13 +350,15 @@ export function BoostTab() {
         enable_country_ban: draftCountryBan,
       });
       setDraft(appliedConfig);
-      await saveSettings();
+      await saveSettings(true);
       const currentWarning = useBoostStore.getState().warning;
       if (currentWarning) {
         addToast({ type: "warning", message: "Boost applied with warnings" });
       } else {
         addToast({ type: "success", message: "Boost settings applied" });
       }
+    } catch (error) {
+      addToast({ type: "error", message: `Could not finish applying Boost settings: ${formatErrorMessage(error)}. Some changes may already be applied. Review your settings and retry.` });
     } finally {
       setIsApplying(false);
     }
@@ -386,8 +390,10 @@ export function BoostTab() {
         enable_country_ban: draftCountryBan,
       });
       setDraft(appliedConfig);
-      await saveSettings();
+      await saveSettings(true);
       await boost.restartRoblox();
+    } catch (error) {
+      addToast({ type: "error", message: `Could not finish applying and restarting Roblox: ${formatErrorMessage(error)}. Review your settings before retrying.` });
     } finally {
       setIsRestarting(false);
     }
@@ -399,6 +405,7 @@ export function BoostTab() {
     saveSettings,
     updateSettings,
     boost,
+    addToast,
     validationError,
     isRestarting,
     isApplying,
@@ -521,7 +528,7 @@ export function BoostTab() {
           game_process_performance: draftGPP,
         });
         setDraft(appliedConfig);
-        saveSettings();
+        await saveSettings(true);
 
         const currentWarning = useBoostStore.getState().warning;
         if (currentWarning) {
@@ -532,6 +539,8 @@ export function BoostTab() {
         } else {
           addToast({ type: "success", message: "Network boost updated" });
         }
+      } catch (error) {
+        addToast({ type: "error", message: `Could not finish updating Network Boost: ${formatErrorMessage(error)}. Review your settings and retry.` });
       } finally {
         setNetworkApplying(false);
       }
@@ -578,6 +587,7 @@ export function BoostTab() {
 
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
+      <SettingsSaveNotice />
       {boost.error && <ErrorBanner tone="error">{boost.error}</ErrorBanner>}
 
       {boost.warning && (

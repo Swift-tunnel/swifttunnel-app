@@ -20,6 +20,28 @@ async function loadStore() {
 }
 
 describe("stores/settingsStore", () => {
+  it("keeps a save failure visible until a later save actually succeeds", async () => {
+    settingsSave.mockRejectedValueOnce({ message: "Disk full" });
+    const store = await loadStore();
+    await store.getState().save();
+    expect(store.getState().saveError).toBe("Disk full");
+    let finish!: () => void;
+    settingsSave.mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }));
+    const retry = store.getState().save(true);
+    await Promise.resolve();
+    expect(store.getState().saveError).toBe("Disk full");
+    finish();
+    await retry;
+    expect(store.getState().saveError).toBeNull();
+  });
+
+  it("retains the newest failure after a successful earlier queued save", async () => {
+    settingsSave.mockResolvedValueOnce(undefined).mockRejectedValueOnce({ message: "Access denied" });
+    const store = await loadStore();
+    await Promise.all([store.getState().save(), store.getState().save()]);
+    expect(store.getState().saveError).toBe("Access denied");
+  });
+
   it("makes Auto and Route Assist exclusive in either toggle order", async () => {
     const store = await loadStore();
     store.getState().update({ enable_api_tunneling: true });

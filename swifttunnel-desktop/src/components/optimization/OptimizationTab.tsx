@@ -11,6 +11,8 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useToastStore } from "../../stores/toastStore";
 import { notify } from "../../lib/notifications";
+import { formatErrorMessage } from "../../lib/errors";
+import { SettingsSaveNotice } from "../ui/SettingsSaveNotice";
 import {
   nextPowerPlanForSwiftTunnelToggle,
   previousNonSwiftTunnelPowerPlan,
@@ -312,15 +314,15 @@ function PowerPlanCard() {
     try {
       const applied = await updateConfig(JSON.stringify(nextConfig));
       updateSettings({ config: applied });
-      void saveSettings();
+      await saveSettings(true);
       addToast({
         type: next ? "success" : "info",
         message: next
           ? "SwiftTunnel power plan activated"
           : "Previous power plan restored",
       });
-    } catch {
-      // updateConfig already surfaces the error through the boost store.
+    } catch (error) {
+      addToast({ type: "error", message: `Could not finish saving the power plan: ${formatErrorMessage(error)}. Windows may already be using the changed plan. Review it and retry.` });
     } finally {
       setBusy(false);
     }
@@ -562,9 +564,9 @@ function AutoRamCleanRow() {
     try {
       const applied = await updateConfig(JSON.stringify(nextConfig));
       updateSettings({ config: applied });
-      void saveSettings();
-    } catch {
-      // updateConfig surfaces errors through the boost store.
+      await saveSettings(true);
+    } catch (error) {
+      addToast({ type: "error", message: `Could not finish saving Auto-clean RAM: ${formatErrorMessage(error)}. Review the setting and retry.` });
     } finally {
       setBusy(false);
     }
@@ -640,6 +642,7 @@ export function OptimizationTab() {
 
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
+      <SettingsSaveNotice />
       <div className="instrument px-4 py-3 text-[12px] text-text-muted">
         <h2 className="text-[16px] font-semibold text-text-primary">Tune your PC, one change at a time</h2>
         <p className="mt-1">Results vary by PC. Compare the same game before and after a change. Caution tweaks stay opt-in.</p>
