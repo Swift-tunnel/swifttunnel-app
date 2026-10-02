@@ -240,6 +240,14 @@ async function cleanupFailedConnectAttempt(): Promise<string | null> {
 }
 
 let connectAttemptSeq = 0;
+let stateReadSeq = 0;
+let stateEventRevision = 0;
+let sessionRevision = 0;
+
+const clearedSessionTelemetry = {
+  bytesUp: 0, bytesDown: 0, packetsTunneled: 0, packetsBypassed: 0,
+  ping: null, pingReadings: 0, diagnostics: null,
+};
 const autoRepairedBindingSignatures = new Set<string>();
 const autoRepairedFirewallSignatures = new Set<string>();
 let relayFailoverInFlight = false;
@@ -487,9 +495,12 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
 
   fetchState: async () => {
     const attempt = connectAttemptSeq;
+    const read = ++stateReadSeq;
+    const eventRevision = stateEventRevision;
+    const currentRead = () => isCurrentConnectAttempt(attempt) && read === stateReadSeq && eventRevision === stateEventRevision;
     try {
       const resp = await vpnGetState();
-      if (!isCurrentConnectAttempt(attempt)) return;
+      if (!currentRead()) return;
       set((current) => {
         const staleReadyPoll =
           resp.state === "disconnected" &&
@@ -501,6 +512,9 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         if (staleReadyPoll) {
           return {};
         }
+
+        const sessionChanged = current.state !== resp.state || current.region !== resp.region || current.serverEndpoint !== resp.server_endpoint;
+        if (sessionChanged) sessionRevision += 1;
 
         // Keep the session clock honest about what the backend reports.
         //
@@ -517,6 +531,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           : null;
 
         return {
+          ...(sessionChanged ? clearedSessionTelemetry : {}),
           state: resp.state,
           gameRoute: nowConnected
             ? (resp.game_route
@@ -533,7 +548,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         };
       });
     } catch (e) {
-      if (!isCurrentConnectAttempt(attempt)) return;
+      if (!currentRead()) return;
       set({ error: String(e) });
     }
   },
@@ -1031,8 +1046,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   fetchThroughput: async () => {
+    const attempt = connectAttemptSeq;
+    const revision = sessionRevision;
     try {
       const stats = await vpnGetThroughput();
+      if (!isCurrentConnectAttempt(attempt) || revision !== sessionRevision) return;
       if (stats) {
         set({
           bytesUp: stats.bytes_up,
@@ -1111,8 +1129,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   fetchPing: async () => {
+    const attempt = connectAttemptSeq;
+    const revision = sessionRevision;
     try {
       const ms = await vpnGetPing();
+      if (!isCurrentConnectAttempt(attempt) || revision !== sessionRevision) return;
       // null means "no sample this tick", not "no ping". The backend returns
       // it whenever the split-tunnel driver lock happens to be busy, which is
       // routine while packets are flowing, and writing it through made the
@@ -1129,8 +1150,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   fetchDiagnostics: async () => {
+    const attempt = connectAttemptSeq;
+    const revision = sessionRevision;
     try {
       const diag = await vpnGetDiagnostics();
+      if (!isCurrentConnectAttempt(attempt) || revision !== sessionRevision) return;
       set({ diagnostics: diag });
     } catch (error) {
       reportError("Failed to fetch VPN diagnostics", error, {
@@ -1140,6 +1164,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   },
 
   handleStateEvent: (event) => {
+    // An event observed after a poll started takes precedence over its reply.
+    stateEventRevision += 1;
     const shouldFailoverRelay =
       event.state === "error" &&
       isRelayStoppedReturningTrafficMessage(event.error);
@@ -1169,7 +1195,13 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         return {};
       }
 
+      const sessionChanged = current.state !== event.state || current.region !== event.region || current.serverEndpoint !== event.server_endpoint;
+      if (sessionChanged) sessionRevision += 1;
+
       return {
+        ...(sessionChanged ? clearedSessionTelemetry : {}),
+        ...(event.state === "disconnected" ? { splitTunnelActive: false, tunneledProcesses: [] } : {}),
+        connectedAt: event.state === "connected" ? (current.connectedAt ?? Date.now()) : null,
         state: event.state,
         gameRoute: event.state === "connected" && current.region === event.region ? current.gameRoute : null,
         region: event.region,

@@ -105,11 +105,53 @@ function deferred<T>() {
 }
 
 function disconnectedState() {
-  return { ...connectedState("singapore"), state: "disconnected", region: null,
+  return { ...connectedState("singapore"), state: "disconnected" as const, region: null,
     server_endpoint: null, assigned_ip: null, split_tunnel_active: false, tunneled_processes: [] };
 }
 
 describe("stores/vpnStore", () => {
+  it("does not let a slow connected poll undo a newer backend disconnect event", async () => {
+    const poll = deferred<ReturnType<typeof connectedState>>();
+    vpnGetState.mockReturnValue(poll.promise);
+    const store = await loadStore();
+    store.setState({ state: "connected", region: "singapore", serverEndpoint: "1.2.3.4:51821", connectedAt: 123, splitTunnelActive: true, ping: 30, bytesDown: 100 });
+    const reading = store.getState().fetchState();
+    store.getState().handleStateEvent(disconnectedState());
+    poll.resolve(connectedState("singapore"));
+    await reading;
+    expect(store.getState().state).toBe("disconnected");
+    expect(store.getState().connectedAt).toBeNull();
+    expect(store.getState().splitTunnelActive).toBe(false);
+    expect(store.getState().ping).toBeNull();
+    expect(store.getState().bytesDown).toBe(0);
+  });
+
+  it("keeps the newest state poll when two reads finish out of order", async () => {
+    const first = deferred<ReturnType<typeof connectedState>>();
+    vpnGetState.mockReturnValueOnce(first.promise).mockResolvedValueOnce(connectedState("tokyo"));
+    const store = await loadStore();
+    const stale = store.getState().fetchState();
+    await store.getState().fetchState();
+    first.resolve(connectedState("singapore"));
+    await stale;
+    expect(store.getState().region).toBe("tokyo");
+  });
+
+  it("discards pending telemetry when a backend event ends the session", async () => {
+    const ping = deferred<number>();
+    const throughput = deferred<{ bytes_up: number; bytes_down: number; packets_tunneled: number; packets_bypassed: number }>();
+    vpnGetPing.mockReturnValue(ping.promise);
+    vpnGetThroughput.mockReturnValue(throughput.promise);
+    const store = await loadStore();
+    store.setState({ state: "connected", region: "singapore", serverEndpoint: "1.2.3.4:51821" });
+    const reads = [store.getState().fetchPing(), store.getState().fetchThroughput()];
+    store.getState().handleStateEvent(disconnectedState());
+    ping.resolve(99);
+    throughput.resolve({ bytes_up: 400, bytes_down: 700, packets_tunneled: 4, packets_bypassed: 2 });
+    await Promise.all(reads);
+    expect(store.getState().ping).toBeNull();
+    expect(store.getState().bytesDown).toBe(0);
+  });
   it("discards game route details when disconnected or moved to another relay", async () => {
     const store = await loadStore();
     vpnGetState.mockResolvedValue({ ...connectedState("mumbai"), game_route: {
