@@ -13,6 +13,7 @@ import { useOptimizationStore } from "./optimizationStore";
 import { formatErrorMessage } from "../lib/errors";
 import {
   buildPreset,
+  decodePreset,
   mergePresetIntoConfig,
   type SwiftTunnelPreset,
 } from "../lib/presets";
@@ -36,7 +37,22 @@ for (const o of [...OPTIMIZATIONS, ...SPEEDUP_OPTIMIZATIONS]) {
 function loadList(): SavedPreset[] {
   try {
     const v = JSON.parse(localStorage.getItem(LIST_KEY) || "[]");
-    return Array.isArray(v) ? v : [];
+    if (!Array.isArray(v)) return [];
+    const ids = new Set<string>();
+    const valid: SavedPreset[] = [];
+    for (const item of v) {
+      if (!item || typeof item.id !== "string" || !item.id.trim() || ids.has(item.id)) continue;
+      try {
+        // Stored data can be incomplete or from an older version. Apply the
+        // same shape/range checks as imports before rendering or merging it.
+        const preset = decodePreset(JSON.stringify(item));
+        valid.push({ ...preset, id: item.id });
+        ids.add(item.id);
+      } catch {
+        // Keep other valid entries usable. Do not rewrite storage on load.
+      }
+    }
+    return valid;
   } catch {
     return [];
   }
@@ -91,9 +107,12 @@ interface PresetStore {
   apply: (id: string) => Promise<void>;
 }
 
+const initialPresets = loadList();
+const initialActiveId = loadActive();
+
 export const usePresetStore = create<PresetStore>((set, get) => ({
-  presets: loadList(),
-  activeId: loadActive(),
+  presets: initialPresets,
+  activeId: initialPresets.some((preset) => preset.id === initialActiveId) ? initialActiveId : null,
   applyingId: null,
 
   createFromCurrent: (name) => {

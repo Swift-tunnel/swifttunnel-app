@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../lib/settings";
 import { buildPreset } from "../lib/presets";
 
@@ -22,6 +22,7 @@ beforeEach(() => {
   h.activate.mockResolvedValue({ ok: true, requiresReboot: false });
   usePresetStore.setState({ presets: [], applyingId: null, activeId: "previous" });
 });
+afterEach(() => vi.unstubAllGlobals());
 
 function addPreset(ids: string[] = []) {
   const preset = { ...buildPreset("Test preset", h.settings, ids), id: "test" };
@@ -78,4 +79,30 @@ it("does not claim a full switch for unavailable catalog items or native warning
   await usePresetStore.getState().apply("test");
   expect(usePresetStore.getState().activeId).toBeNull();
   expect(h.toast).toHaveBeenLastCalledWith(expect.objectContaining({ type: "warning", message: expect.stringContaining(h.warning) }));
+});
+
+it("loads valid saved presets without admitting broken records that crash the panel", async () => {
+  const valid = { ...buildPreset("Saved", h.settings, []), id: "valid" };
+  vi.stubGlobal("localStorage", { getItem: (key: string) => key === "st.presetLibrary"
+    ? JSON.stringify([null, { id: "broken", name: "Missing config" }, valid, { ...valid, name: "Duplicate" }])
+    : "broken" });
+  vi.resetModules();
+  const loaded = (await import("./presetStore")).usePresetStore.getState();
+  expect(loaded.presets).toHaveLength(1);
+  expect(loaded.presets[0].config.roblox_settings).toBeDefined();
+  expect(loaded.presets[0].id).toBe("valid");
+  expect(loaded.activeId).toBeNull();
+});
+
+it("revalidates persisted preset values using the same rules as new imports", async () => {
+  const saved = { ...buildPreset("Saved", h.settings, []), id: "valid" };
+  saved.config.roblox_settings.target_fps = -99;
+  Object.assign(saved.config.system_optimization, { previous_power_plan: "Someone else's plan", cpu_cores: [999] });
+  vi.stubGlobal("localStorage", { getItem: (key: string) => key === "st.presetLibrary" ? JSON.stringify([saved]) : "valid" });
+  vi.resetModules();
+  const loaded = (await import("./presetStore")).usePresetStore.getState();
+  expect(loaded.presets[0].config.roblox_settings.target_fps).toBeGreaterThan(0);
+  expect(loaded.presets[0].config.system_optimization).not.toHaveProperty("previous_power_plan");
+  expect(loaded.presets[0].config.system_optimization).not.toHaveProperty("cpu_cores");
+  expect(loaded.activeId).toBe("valid");
 });
