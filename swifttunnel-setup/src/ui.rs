@@ -26,18 +26,16 @@ const ACTIONS: [Action; 4] = [
     Action::Uninstall,
 ];
 const LABELS: [&str; 4] = ["Install", "Repair", "Reinstall", "Uninstall"];
-// Website design/new-theme, 2bccb79: light petal palette. COLORREF uses BGR.
-const BG: COLORREF = COLORREF(0xfcf7f7);
+// Native petal artwork and pale controls. COLORREF uses BGR.
+const BG: COLORREF = COLORREF(0x1d0f0c);
 const INK: COLORREF = COLORREF(0x140b0a);
-const MUTED: COLORREF = COLORREF(0x765b56);
 const BORDER: COLORREF = COLORREF(0xf2e4e1);
 const CARD: COLORREF = COLORREF(0xfbf0ee);
-const WIDTH: i32 = 560;
-const HEIGHT: i32 = 340;
-const BUTTON_TOP: i32 = 264;
-const BUTTON_HEIGHT: i32 = 32;
-const BUTTON_STEP: i32 = 130;
-const BUTTON_WIDTH: i32 = 122;
+const WIDTH: i32 = 720;
+const HEIGHT: i32 = 432;
+const BUTTON_TOP: i32 = 364;
+const BUTTON_HEIGHT: i32 = 40;
+const BUTTON_WIDTH: i32 = 96;
 const MINIMIZE_ID: usize = 200;
 const CLOSE_ID: usize = 201;
 const DETAILS_ID: usize = 202;
@@ -206,141 +204,170 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     fonts::install();
     fill(dc, &bounds, BG);
     artwork::paint(dc, bounds);
-    let panel = RECT {
-        left: scaled(12, dpi),
-        top: scaled(164, dpi),
-        right: bounds.right - scaled(12, dpi),
-        bottom: scaled(308, dpi),
-    };
-    let brush = CreateSolidBrush(CARD);
-    let pen = CreatePen(PS_SOLID, scaled(1, dpi), COLORREF(0xf3d7cf));
-    let previous_brush = SelectObject(dc, brush.into());
-    let previous_pen = SelectObject(dc, pen.into());
-    let _ = RoundRect(
+    // SwiftTunnel branding, using the reference's quiet centered composition.
+    text_face(
         dc,
-        panel.left,
-        panel.top,
-        panel.right,
-        panel.bottom,
-        scaled(24, dpi),
-        scaled(24, dpi),
+        "SWIFTTUNNEL",
+        RECT {
+            left: scaled(32, dpi),
+            top: scaled(145, dpi),
+            right: scaled(WIDTH - 32, dpi),
+            bottom: scaled(239, dpi),
+        },
+        scaled(56, dpi),
+        COLORREF(0xffffff),
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        w!("Figtree ExtraBold"),
+        scaled(2, dpi),
+        false,
     );
-    SelectObject(dc, previous_pen);
-    SelectObject(dc, previous_brush);
-    let _ = DeleteObject(pen.into());
-    let _ = DeleteObject(brush.into());
-    let x = scaled(24, dpi);
-    let right = bounds.right - x;
-    let area = |top, bottom| RECT {
-        left: x,
-        right,
-        top: scaled(top, dpi),
-        bottom: scaled(bottom, dpi),
-    };
     text(
         dc,
-        "SwiftTunnel",
-        area(17, 40),
-        scaled(18, dpi),
-        600,
-        INK,
-        DT_LEFT,
-    );
-    text_face(
-        dc,
-        "WINDOWS / SETUP",
+        "ST",
         RECT {
-            right: right - scaled(104, dpi),
-            ..area(23, 40)
+            left: scaled(27, dpi),
+            top: scaled(20, dpi),
+            right: scaled(59, dpi),
+            bottom: scaled(45, dpi),
         },
-        scaled(10, dpi),
-        MUTED,
-        DT_RIGHT,
-        w!("Azeret Mono"),
+        scaled(17, dpi),
+        800,
+        COLORREF(0xffffff),
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
+    let status_color = if state.exit_code != 0 {
+        COLORREF(0x5996ef)
+    } else if state.busy {
+        COLORREF(0xb59183)
+    } else {
+        COLORREF(0x62c45a)
+    };
+    let brush = CreateSolidBrush(status_color);
+    let old_brush = SelectObject(dc, brush.into());
+    let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+    let _ = Ellipse(
+        dc,
+        scaled(27, dpi),
+        scaled(364, dpi),
+        scaled(67, dpi),
+        scaled(404, dpi),
+    );
+    SelectObject(dc, old_pen);
+    SelectObject(dc, old_brush);
+    let _ = DeleteObject(brush.into());
+    let mark = if state.exit_code != 0 {
+        "!"
+    } else if state.busy {
+        "…"
+    } else {
+        "✓"
+    };
+    text_face(
+        dc,
+        mark,
+        RECT {
+            left: scaled(27, dpi),
+            top: scaled(364, dpi),
+            right: scaled(67, dpi),
+            bottom: scaled(404, dpi),
+        },
+        scaled(23, dpi),
+        COLORREF(0xffffff),
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        w!("Segoe UI"),
         0,
         false,
     );
-    fill(dc, &area(48, 49), BORDER);
-    text_face(
-        dc,
-        "Lower ping.",
-        area(61, 99),
-        scaled(32, dpi),
-        INK,
-        DT_LEFT,
-        w!("Figtree ExtraBold"),
-        -scaled(2, dpi),
-        false,
-    );
-    text_face(
-        dc,
-        "Faster gameplay.",
-        area(97, 135),
-        scaled(32, dpi),
-        INK,
-        DT_LEFT,
-        w!("Figtree ExtraBold"),
-        -scaled(2, dpi),
-        false,
-    );
-    let subtitle = state
-        .package
-        .as_ref()
-        .map(|p| format!("{}  /  V{}  /  SETUP", p.name.to_uppercase(), p.version))
-        .unwrap_or_else(|| "BUNDLED APP  /  SETUP".into());
-    text_face(
-        dc,
-        &subtitle,
-        area(142, 159),
-        scaled(9, dpi),
-        MUTED,
-        DT_LEFT,
-        w!("Azeret Mono"),
-        0,
-        false,
-    );
-
     text(
         dc,
         &state.heading,
-        area(176, 201),
-        scaled(19, dpi),
-        600,
-        INK,
-        DT_LEFT,
-    );
-    text(
-        dc,
-        &state.detail,
-        area(208, 258),
-        scaled(12, dpi),
-        400,
-        MUTED,
-        DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS,
-    );
-    text(
-        dc,
-        if state.installing {
-            "Windows Installer is working. Please keep this window open."
-        } else if state.reboot_required {
-            "Restart Windows to finish. Setup will never restart it automatically."
-        } else {
-            "Your installer stays protected for future updates and repairs."
-        },
         RECT {
-            right: right
-                - if state.exit_code != 0 {
-                    scaled(78, dpi)
-                } else {
-                    0
-                },
-            ..area(317, 338)
+            left: scaled(82, dpi),
+            top: scaled(363, dpi),
+            right: scaled(416, dpi),
+            bottom: scaled(386, dpi),
         },
-        scaled(10, dpi),
-        400,
+        scaled(17, dpi),
+        600,
         COLORREF(0xffffff),
-        DT_LEFT | DT_WORDBREAK,
+        DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
     );
+    let subtitle = if state.exit_code != 0 {
+        "View details to continue".to_string()
+    } else if state.installing {
+        "Please wait. Your PC will not restart.".into()
+    } else if state.busy {
+        "Checking your installation".into()
+    } else if state.installed.is_empty() {
+        "Ready when you are".into()
+    } else {
+        match state.installed.as_slice() {
+            [installed] => format!("Version {}", installed.version),
+            _ => "Choose an action".into(),
+        }
+    };
+    text(
+        dc,
+        &subtitle,
+        RECT {
+            left: scaled(82, dpi),
+            top: scaled(386, dpi),
+            right: scaled(410, dpi),
+            bottom: scaled(408, dpi),
+        },
+        scaled(11, dpi),
+        400,
+        COLORREF(0xc9b8b4),
+        DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+    );
+}
+
+// Paint the corresponding background under owner-drawn buttons, so rounded
+// corners have no rectangular card or contrasting box behind them.
+unsafe fn paint_control_background(dc: HDC, dpi: u32, left: i32, top: i32) {
+    let saved = SaveDC(dc);
+    let _ = SetViewportOrgEx(dc, -left, -top, None);
+    artwork::paint(
+        dc,
+        RECT {
+            left: 0,
+            top: 0,
+            right: scaled(WIDTH, dpi),
+            bottom: scaled(HEIGHT, dpi),
+        },
+    );
+    let _ = RestoreDC(dc, saved);
+}
+
+fn visible_actions(state: &State) -> Vec<usize> {
+    if state.reboot_required || state.package.is_none() {
+        return vec![];
+    }
+    let package = state.package.as_ref().unwrap();
+    (0..ACTIONS.len())
+        .filter(|&i| action_allowed(package, &state.installed, ACTIONS[i]))
+        .collect()
+}
+fn action_rect(index: usize, visible: &[usize], dpi: u32) -> RECT {
+    let total: i32 = visible
+        .iter()
+        .map(|&i| if i == 3 { 40 } else { BUTTON_WIDTH })
+        .sum::<i32>()
+        + (visible.len().saturating_sub(1) as i32) * 10;
+    let mut left = WIDTH - 27 - total;
+    for &i in visible {
+        let width = if i == 3 { 40 } else { BUTTON_WIDTH };
+        if i == index {
+            return RECT {
+                left: scaled(left, dpi),
+                right: scaled(left + width, dpi),
+                top: scaled(BUTTON_TOP, dpi),
+                bottom: scaled(BUTTON_TOP + BUTTON_HEIGHT, dpi),
+            };
+        }
+        left += width + 10;
+    }
+    RECT::default()
 }
 
 unsafe fn paint_button(
@@ -353,7 +380,6 @@ unsafe fn paint_button(
     pressed: bool,
     focused: bool,
 ) {
-    fill(dc, &bounds, CARD);
     let background = if primary {
         if pressed {
             COLORREF(0x352b2a)
@@ -385,28 +411,54 @@ unsafe fn paint_button(
         bounds.top,
         bounds.right,
         bounds.bottom,
-        scaled(8, dpi),
-        scaled(8, dpi),
+        scaled(40, dpi),
+        scaled(40, dpi),
     );
     SelectObject(dc, old_pen);
     SelectObject(dc, old_brush);
     let _ = DeleteObject(pen.into());
     let _ = DeleteObject(brush.into());
-    text(
-        dc,
-        label,
-        bounds,
-        scaled(14, dpi),
-        600,
-        if disabled {
-            COLORREF(0xb0a6a1)
-        } else if primary {
-            COLORREF(0xffffff)
-        } else {
-            INK
-        },
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
+    if label == "Uninstall" {
+        let cx = (bounds.left + bounds.right) / 2;
+        let cy = (bounds.top + bounds.bottom) / 2;
+        let pen = CreatePen(
+            PS_SOLID,
+            scaled(2, dpi),
+            if disabled { COLORREF(0xb0a6a1) } else { INK },
+        );
+        let old = SelectObject(dc, pen.into());
+        let old_brush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+        let _ = Rectangle(
+            dc,
+            cx - scaled(4, dpi),
+            cy - scaled(3, dpi),
+            cx + scaled(5, dpi),
+            cy + scaled(6, dpi),
+        );
+        let _ = MoveToEx(dc, cx - scaled(6, dpi), cy - scaled(5, dpi), None);
+        let _ = LineTo(dc, cx + scaled(6, dpi), cy - scaled(5, dpi));
+        let _ = MoveToEx(dc, cx - scaled(2, dpi), cy - scaled(7, dpi), None);
+        let _ = LineTo(dc, cx + scaled(2, dpi), cy - scaled(7, dpi));
+        SelectObject(dc, old_brush);
+        SelectObject(dc, old);
+        let _ = DeleteObject(pen.into());
+    } else {
+        text(
+            dc,
+            label,
+            bounds,
+            scaled(14, dpi),
+            600,
+            if disabled {
+                COLORREF(0xb0a6a1)
+            } else if primary {
+                COLORREF(0xffffff)
+            } else {
+                INK
+            },
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
+    }
     if focused {
         let _ = DrawFocusRect(dc, &bounds);
     }
@@ -420,11 +472,13 @@ unsafe fn paint_window_button(
     pressed: bool,
     focused: bool,
 ) {
-    fill(dc, &bounds, if pressed { BORDER } else { CARD });
+    if pressed {
+        fill(dc, &bounds, COLORREF(0x8b6551));
+    }
     let cx = (bounds.left + bounds.right) / 2;
     let cy = (bounds.top + bounds.bottom) / 2;
     let r = scaled(5, dpi);
-    let pen = CreatePen(PS_SOLID, scaled(1, dpi).max(1), INK);
+    let pen = CreatePen(PS_SOLID, scaled(1, dpi).max(1), COLORREF(0xd8c9c4));
     let old = SelectObject(dc, pen.into());
     if close {
         let _ = MoveToEx(dc, cx - r, cy - r, None);
@@ -474,25 +528,20 @@ pub unsafe fn paint_preview(dc: HDC, bounds: RECT, dpi: u32, existing: bool) {
     };
     state.ready(package, installed);
     paint(dc, bounds, dpi, &state);
-    for (i, label) in LABELS.iter().enumerate() {
-        let enabled = action_allowed(
-            state.package.as_ref().unwrap(),
-            &state.installed,
-            ACTIONS[i],
-        );
-        let left = scaled(24 + i as i32 * BUTTON_STEP, dpi);
+    let visible = visible_actions(&state);
+    for &i in &visible {
+        let rect = action_rect(i, &visible, dpi);
         paint_button(
             dc,
-            RECT {
-                left,
-                right: left + scaled(BUTTON_WIDTH, dpi),
-                top: scaled(BUTTON_TOP, dpi),
-                bottom: scaled(BUTTON_TOP + BUTTON_HEIGHT, dpi),
-            },
+            rect,
             dpi,
-            if i == 0 && existing { "Update" } else { label },
-            !enabled,
-            enabled && i == 0,
+            if i == 0 && existing {
+                "Update"
+            } else {
+                LABELS[i]
+            },
+            false,
+            false,
             false,
             false,
         );
@@ -511,6 +560,14 @@ unsafe fn update_buttons(hwnd: HWND, state: &State) {
                 .as_ref()
                 .is_some_and(|p| action_allowed(p, &state.installed, ACTIONS[index]));
         let _ = EnableWindow(*button, allowed);
+        let _ = ShowWindow(
+            *button,
+            if visible_actions(state).contains(&index) {
+                SW_SHOW
+            } else {
+                SW_HIDE
+            },
+        );
         if index == 0 {
             let label = if state.installed.is_empty() {
                 "Install"
@@ -530,20 +587,34 @@ unsafe fn update_buttons(hwnd: HWND, state: &State) {
             },
         );
     }
+    layout(hwnd, state);
     let _ = InvalidateRect(Some(hwnd), None, false);
 }
 
 unsafe fn layout(hwnd: HWND, state: &State) {
     let dpi = GetDpiForWindow(hwnd).max(96);
+    let visible = visible_actions(state);
     for (i, button) in state.buttons.iter().enumerate() {
+        let r = action_rect(i, &visible, dpi);
         let _ = MoveWindow(
             *button,
-            scaled(24 + i as i32 * BUTTON_STEP, dpi),
-            scaled(BUTTON_TOP, dpi),
-            scaled(BUTTON_WIDTH, dpi),
-            scaled(BUTTON_HEIGHT, dpi),
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
             true,
         );
+    }
+    let region = CreateRoundRectRgn(
+        0,
+        0,
+        scaled(WIDTH, dpi) + 1,
+        scaled(HEIGHT, dpi) + 1,
+        scaled(14, dpi),
+        scaled(14, dpi),
+    );
+    if SetWindowRgn(hwnd, Some(region), true) == 0 {
+        let _ = DeleteObject(region.into());
     }
     for (i, button) in state.window_buttons.iter().enumerate() {
         let rect = window_button_rect(i, dpi);
@@ -559,10 +630,10 @@ unsafe fn layout(hwnd: HWND, state: &State) {
     if let Some(button) = state.details_button {
         let _ = MoveWindow(
             button,
-            scaled(WIDTH - 88, dpi),
-            scaled(313, dpi),
-            scaled(64, dpi),
-            scaled(24, dpi),
+            scaled(WIDTH - 123, dpi),
+            scaled(320, dpi),
+            scaled(96, dpi),
+            scaled(28, dpi),
             true,
         );
     }
@@ -654,7 +725,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     let state = &mut *guard;
     match msg {
         WM_CREATE => {
-            let dark = 0i32;
+            let dark = 1i32;
             let _ = DwmSetWindowAttribute(
                 hwnd,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -769,6 +840,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     .is_some_and(|p| action_allowed(p, &state.installed, action))
                 {
                     if state.commands.send(action).is_ok() {
+                        state.exit_code = 0;
                         state.busy = true;
                         state.installing = true;
                         state.heading = format!("{} in progress", LABELS[id - 100]);
@@ -788,6 +860,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         WM_DRAWITEM => {
             let item = &*(lp.0 as *const DRAWITEMSTRUCT);
             if item.CtlID as usize == MINIMIZE_ID || item.CtlID as usize == CLOSE_ID {
+                let dpi = GetDpiForWindow(hwnd).max(96);
+                let rect = window_button_rect(item.CtlID as usize - MINIMIZE_ID, dpi);
+                paint_control_background(item.hDC, dpi, rect.left, rect.top);
                 paint_window_button(
                     item.hDC,
                     item.rcItem,
@@ -798,8 +873,23 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 );
                 return LRESULT(1);
             }
+            let dpi = GetDpiForWindow(hwnd).max(96);
+            let pos = if item.CtlID as usize == DETAILS_ID {
+                RECT {
+                    left: scaled(WIDTH - 123, dpi),
+                    top: scaled(320, dpi),
+                    ..Default::default()
+                }
+            } else {
+                action_rect(
+                    item.CtlID.saturating_sub(100) as usize,
+                    &visible_actions(state),
+                    dpi,
+                )
+            };
+            paint_control_background(item.hDC, dpi, pos.left, pos.top);
             let disabled = (item.itemState.0 & ODS_DISABLED.0) != 0;
-            let primary = item.CtlID == 100 && !disabled;
+            let primary = false;
             let pressed = (item.itemState.0 & ODS_SELECTED.0) != 0;
             let mut label = [0u16; 64];
             let count = GetWindowTextW(item.hwndItem, &mut label);
@@ -954,8 +1044,15 @@ mod tests {
     #[test]
     fn compact_controls_fit_at_common_display_scales() {
         for dpi in [96, 120, 144, 192] {
-            assert!(scaled(24 + 3 * BUTTON_STEP + BUTTON_WIDTH, dpi) <= scaled(WIDTH - 24, dpi));
-            assert!(scaled(BUTTON_TOP + BUTTON_HEIGHT, dpi) < scaled(308, dpi));
+            for visible in [vec![0], vec![0, 3], vec![1, 2, 3]] {
+                let mut previous = scaled(416, dpi);
+                for &i in &visible {
+                    let rect = action_rect(i, &visible, dpi);
+                    assert!(rect.left >= previous && rect.right <= scaled(WIDTH - 27, dpi));
+                    previous = rect.right;
+                }
+            }
+            assert!(scaled(BUTTON_TOP + BUTTON_HEIGHT, dpi) < scaled(HEIGHT, dpi));
             for index in 0..2 {
                 let rect = window_button_rect(index, dpi);
                 assert!(rect.left >= 0 && rect.right < scaled(WIDTH, dpi));
@@ -998,6 +1095,11 @@ mod tests {
             assert_eq!(state.borrow().window_buttons.len(), 2);
             assert!(state.borrow().details_button.is_some());
             assert_eq!(GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION.0, 0);
+            let region = CreateRectRgn(0, 0, 0, 0);
+            assert_ne!(GetWindowRgn(hwnd, region), GDI_REGION_TYPE(0));
+            assert!(!PtInRegion(region, 0, 0).as_bool());
+            assert!(PtInRegion(region, 30, 30).as_bool());
+            let _ = DeleteObject(region.into());
             let mut title_point = POINT { x: 100, y: 35 };
             let _ = ClientToScreen(hwnd, &mut title_point);
             let hit_point = LPARAM(

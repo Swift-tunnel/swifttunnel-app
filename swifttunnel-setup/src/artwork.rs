@@ -17,7 +17,14 @@ fn decode() -> Option<Pixels> {
         return None;
     }
     bytes.truncate(info.buffer_size());
-    for pixel in bytes.chunks_exact_mut(4) {
+    for (index, pixel) in bytes.chunks_exact_mut(4).enumerate() {
+        let y = (index / info.width as usize) as f32 / info.height as f32;
+        // Blue-violet tint with a quiet dark lower edge behind the controls.
+        let fade = ((y - 0.42) / 0.58).clamp(0.0, 1.0).powi(2) * 0.88;
+        for (channel, tint) in [0.30, 0.38, 0.82].iter().enumerate() {
+            let shaded = pixel[channel] as f32 * tint;
+            pixel[channel] = (shaded * (1.0 - fade) + [12.0, 15.0, 29.0][channel] * fade) as u8;
+        }
         pixel.swap(0, 2);
     }
     Some(Pixels {
