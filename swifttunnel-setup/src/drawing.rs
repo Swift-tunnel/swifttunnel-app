@@ -36,19 +36,16 @@ impl Drop for Graphics {
     }
 }
 
-pub unsafe fn rounded(dc: HDC, rect: RECT, radius: f32, color: u32) {
-    let Some(graphics) = Graphics::new(dc) else {
-        return;
-    };
+/// A rounded rectangle inside `rect`, inset by `inset` pixels on every side.
+unsafe fn rounded_path(rect: RECT, radius: f32, inset: f32) -> Option<*mut GpPath> {
     let mut path = null_mut();
     if GdipCreatePath(FillModeAlternate, &mut path) != Ok {
-        return;
+        return None;
     }
-    // Inset by half a pixel so the antialiased edge stays within the control.
-    let x = rect.left as f32 + 0.5;
-    let y = rect.top as f32 + 0.5;
-    let w = (rect.right - rect.left - 1) as f32;
-    let h = (rect.bottom - rect.top - 1) as f32;
+    let x = rect.left as f32 + inset;
+    let y = rect.top as f32 + inset;
+    let w = (rect.right - rect.left) as f32 - inset * 2.0;
+    let h = (rect.bottom - rect.top) as f32 - inset * 2.0;
     let d = (radius * 2.0).min(w).min(h).max(1.0);
     for (ax, ay, start) in [
         (x, y, 180.0),
@@ -59,12 +56,123 @@ pub unsafe fn rounded(dc: HDC, rect: RECT, radius: f32, color: u32) {
         GdipAddPathArc(path, ax, ay, d, d, start, 90.0);
     }
     GdipClosePathFigure(path);
+    Some(path)
+}
+
+pub unsafe fn rounded(dc: HDC, rect: RECT, radius: f32, color: u32) {
+    let Some(graphics) = Graphics::new(dc) else {
+        return;
+    };
+    // Inset by half a pixel so the antialiased edge stays within the control.
+    let Some(path) = rounded_path(rect, radius, 0.5) else {
+        return;
+    };
     let mut brush = null_mut();
     if GdipCreateSolidFill(color, &mut brush) == Ok {
         GdipFillPath(graphics.0, brush.cast(), path);
         GdipDeleteBrush(brush.cast());
     }
     GdipDeletePath(path);
+}
+
+/// The outline of a rounded rectangle, `width` pixels wide, kept inside `rect`.
+pub unsafe fn rounded_outline(dc: HDC, rect: RECT, radius: f32, color: u32, width: f32) {
+    let Some(graphics) = Graphics::new(dc) else {
+        return;
+    };
+    let Some(path) = rounded_path(rect, radius, width / 2.0) else {
+        return;
+    };
+    let mut pen = null_mut();
+    if GdipCreatePen1(color, width, UnitPixel, &mut pen) == Ok {
+        GdipDrawPath(graphics.0, pen, path);
+        GdipDeletePen(pen);
+    }
+    GdipDeletePath(path);
+}
+
+/// A square-cornered fill on whole pixels, for glass and hairlines.
+pub unsafe fn rect(dc: HDC, rect: RECT, color: u32) {
+    let Some(graphics) = Graphics::new(dc) else {
+        return;
+    };
+    let mut brush = null_mut();
+    if GdipCreateSolidFill(color, &mut brush) == Ok {
+        GdipSetSmoothingMode(graphics.0, SmoothingModeNone);
+        GdipFillRectangleI(
+            graphics.0,
+            brush.cast(),
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        );
+        GdipDeleteBrush(brush.cast());
+    }
+}
+
+/// A square frame `width` pixels wide, kept inside `bounds`.
+pub unsafe fn frame(dc: HDC, bounds: RECT, color: u32, width: i32) {
+    let RECT {
+        left,
+        top,
+        right,
+        bottom,
+    } = bounds;
+    rect(
+        dc,
+        RECT {
+            left,
+            top,
+            right,
+            bottom: top + width,
+        },
+        color,
+    );
+    rect(
+        dc,
+        RECT {
+            left,
+            top: bottom - width,
+            right,
+            bottom,
+        },
+        color,
+    );
+    rect(
+        dc,
+        RECT {
+            left,
+            top: top + width,
+            right: left + width,
+            bottom: bottom - width,
+        },
+        color,
+    );
+    rect(
+        dc,
+        RECT {
+            left: right - width,
+            top: top + width,
+            right,
+            bottom: bottom - width,
+        },
+        color,
+    );
+}
+
+/// A hairline or rule. Coordinates are pixel edges; the stroke is centred on
+/// the pixel row or column so a 1px line stays crisp.
+pub unsafe fn line(dc: HDC, x1: i32, y1: i32, x2: i32, y2: i32, color: u32, width: f32) {
+    let Some(graphics) = Graphics::new(dc) else {
+        return;
+    };
+    let mut pen = null_mut();
+    if GdipCreatePen1(color, width, UnitPixel, &mut pen) == Ok {
+        GdipSetSmoothingMode(graphics.0, SmoothingModeNone);
+        GdipDrawLine(graphics.0, pen, x1 as f32, y1 as f32, x2 as f32, y2 as f32);
+        GdipDeletePen(pen);
+    }
 }
 
 struct Logo {
