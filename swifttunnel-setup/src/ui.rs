@@ -6,7 +6,9 @@ mod drawing;
 mod fonts;
 
 use crate::backend::Event;
-use crate::model::{action_allowed, result_message, Action, Installed, Package};
+use crate::model::{
+    action_allowed, result_message, Action, Command, Installed, Package, LITE_FAMILY,
+};
 use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender};
 use windows::core::{w, PCWSTR};
@@ -39,6 +41,7 @@ const BUTTON_WIDTH: i32 = 96;
 const MINIMIZE_ID: usize = 200;
 const CLOSE_ID: usize = 201;
 const DETAILS_ID: usize = 202;
+const PRODUCT_ID: usize = 203;
 const WINDOW_STYLE_SETUP: WINDOW_STYLE = WINDOW_STYLE(WS_POPUP.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
 
 pub struct State {
@@ -53,13 +56,14 @@ pub struct State {
     buttons: Vec<HWND>,
     window_buttons: Vec<HWND>,
     details_button: Option<HWND>,
+    product_button: Option<HWND>,
     worker_closed: bool,
-    commands: Sender<Action>,
+    commands: Sender<Command>,
     events: Receiver<Event>,
 }
 
 impl State {
-    pub fn new(commands: Sender<Action>, events: Receiver<Event>) -> Self {
+    pub fn new(commands: Sender<Command>, events: Receiver<Event>) -> Self {
         Self {
             package: None,
             installed: vec![],
@@ -72,6 +76,7 @@ impl State {
             buttons: vec![],
             window_buttons: vec![],
             details_button: None,
+            product_button: None,
             worker_closed: false,
             commands,
             events,
@@ -79,8 +84,9 @@ impl State {
     }
 
     fn ready(&mut self, package: Package, installed: Vec<Installed>) {
+        self.exit_code = 0;
         self.heading = match installed.as_slice() {
-            [] => "Ready to install".into(),
+            [] => format!("{} is ready to install", package.name),
             [_] => format!("{} is installed", package.name),
             _ => "Multiple installations found".into(),
         };
@@ -99,6 +105,20 @@ impl State {
         self.installed = installed;
         self.busy = false;
         self.installing = false;
+    }
+
+    fn lite_selected(&self) -> bool {
+        self.package
+            .as_ref()
+            .is_some_and(|p| p.upgrade_code.eq_ignore_ascii_case(LITE_FAMILY))
+    }
+
+    fn product_label(&self) -> &'static str {
+        if self.lite_selected() {
+            "Back to Desktop"
+        } else {
+            "Get SwiftTunnel Lite"
+        }
     }
 
     fn worker_stopped(&mut self) -> bool {
@@ -229,7 +249,11 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     );
     text(
         dc,
-        "SWIFTTUNNEL / WINDOWS",
+        if state.lite_selected() {
+            "SWIFTTUNNEL LITE / WINDOWS"
+        } else {
+            "SWIFTTUNNEL / WINDOWS"
+        },
         RECT {
             left: scaled(32, dpi),
             top: scaled(143, dpi),
@@ -264,6 +288,26 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             bottom: scaled(300, dpi),
         },
     );
+    if crate::MSI_NAME == "SwiftTunnel-Installer.msi" {
+        text(
+            dc,
+            if state.lite_selected() {
+                "Standalone Lite. No WebView2."
+            } else {
+                "Smaller native app. Internet required."
+            },
+            RECT {
+                left: scaled(209, dpi),
+                top: scaled(316, dpi),
+                right: scaled(575, dpi),
+                bottom: scaled(335, dpi),
+            },
+            scaled(11, dpi),
+            400,
+            COLORREF(0xd8c4bd),
+            DT_LEFT | DT_SINGLELINE,
+        );
+    }
     let status_color = if state.exit_code != 0 {
         0xffefa45c
     } else if state.busy {
@@ -300,6 +344,8 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         "View details to continue".to_string()
     } else if state.installing {
         "Please wait. Your PC will not restart.".into()
+    } else if state.busy && state.package.is_some() {
+        "Secure download. Close Setup to cancel.".into()
     } else if state.busy {
         "Checking your installation".into()
     } else if state.installed.is_empty() {
@@ -457,6 +503,15 @@ fn window_button_rect(index: usize, dpi: u32) -> RECT {
     }
 }
 
+fn product_button_rect(dpi: u32) -> RECT {
+    RECT {
+        left: scaled(32, dpi),
+        top: scaled(307, dpi),
+        right: scaled(196, dpi),
+        bottom: scaled(341, dpi),
+    }
+}
+
 // Uses the production paint functions without running an installer transaction.
 #[cfg(debug_assertions)]
 #[allow(dead_code)]
@@ -501,6 +556,18 @@ pub unsafe fn paint_preview(dc: HDC, bounds: RECT, dpi: u32, existing: bool) {
     for i in 0..2 {
         paint_window_button(dc, window_button_rect(i, dpi), dpi, i == 1, false, false);
     }
+    if crate::MSI_NAME == "SwiftTunnel-Installer.msi" {
+        paint_button(
+            dc,
+            product_button_rect(dpi),
+            dpi,
+            state.product_label(),
+            false,
+            false,
+            false,
+            false,
+        );
+    }
 }
 
 unsafe fn update_buttons(hwnd: HWND, state: &State) {
@@ -539,6 +606,13 @@ unsafe fn update_buttons(hwnd: HWND, state: &State) {
             },
         );
     }
+    if let Some(button) = state.product_button {
+        let _ = EnableWindow(
+            button,
+            !state.busy && !state.reboot_required && !state.worker_closed,
+        );
+        let _ = SetWindowTextW(button, PCWSTR(wide(state.product_label()).as_ptr()));
+    }
     layout(hwnd, state);
     let _ = InvalidateRect(Some(hwnd), None, false);
 }
@@ -546,6 +620,17 @@ unsafe fn update_buttons(hwnd: HWND, state: &State) {
 unsafe fn layout(hwnd: HWND, state: &State) {
     let dpi = GetDpiForWindow(hwnd).max(96);
     let visible = visible_actions(state);
+    if let Some(button) = state.product_button {
+        let r = product_button_rect(dpi);
+        let _ = MoveWindow(
+            button,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+            true,
+        );
+    }
     for (i, button) in state.buttons.iter().enumerate() {
         let r = action_rect(i, &visible, dpi);
         let _ = MoveWindow(
@@ -741,6 +826,26 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             if state.details_button.is_none() {
                 return LRESULT(-1);
             }
+            if crate::MSI_NAME == "SwiftTunnel-Installer.msi" {
+                state.product_button = CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("BUTTON"),
+                    w!("Get SwiftTunnel Lite"),
+                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
+                    0,
+                    0,
+                    0,
+                    0,
+                    Some(hwnd),
+                    Some(HMENU(PRODUCT_ID as *mut _)),
+                    None,
+                    None,
+                )
+                .ok();
+                if state.product_button.is_none() {
+                    return LRESULT(-1);
+                }
+            }
             layout(hwnd, state);
             update_buttons(hwnd, state);
             SetTimer(Some(hwnd), 1, 150, None);
@@ -759,6 +864,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     }
                 };
                 match event {
+                    Event::Progress(status) => {
+                        state.heading = status;
+                    }
                     Event::Ready(package, installed) => state.ready(package, installed),
                     Event::Finished(action, code, installed) => {
                         state.installed = installed;
@@ -784,6 +892,33 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
         }
         WM_COMMAND => {
             let id = (wp.0 & 0xffff) as usize;
+            if id == PRODUCT_ID
+                && state.product_button.is_some()
+                && !state.busy
+                && !state.reboot_required
+                && !state.worker_closed
+            {
+                let command = if state.lite_selected() {
+                    Command::UseBundled
+                } else {
+                    Command::DownloadLite
+                };
+                if state.commands.send(command).is_ok() {
+                    state.busy = true;
+                    state.exit_code = 0;
+                    state.heading = if command == Command::UseBundled {
+                        "Checking Desktop".into()
+                    } else {
+                        "Preparing Lite download".into()
+                    };
+                } else {
+                    state.exit_code = 1;
+                    state.heading = "Please reopen Setup".into();
+                    state.detail = "The installer worker is unavailable.".into();
+                }
+                update_buttons(hwnd, state);
+                return LRESULT(0);
+            }
             if (100..104).contains(&id) && !state.busy && !state.reboot_required {
                 let action = ACTIONS[id - 100];
                 if state
@@ -791,7 +926,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     .as_ref()
                     .is_some_and(|p| action_allowed(p, &state.installed, action))
                 {
-                    if state.commands.send(action).is_ok() {
+                    if state.commands.send(Command::Execute(action)).is_ok() {
                         state.exit_code = 0;
                         state.busy = true;
                         state.installing = true;
@@ -826,7 +961,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 return LRESULT(1);
             }
             let dpi = GetDpiForWindow(hwnd).max(96);
-            let pos = if item.CtlID as usize == DETAILS_ID {
+            let pos = if item.CtlID as usize == PRODUCT_ID {
+                product_button_rect(dpi)
+            } else if item.CtlID as usize == DETAILS_ID {
                 RECT {
                     left: scaled(WIDTH - 123, dpi),
                     top: scaled(320, dpi),
@@ -1075,8 +1212,61 @@ mod tests {
                 .unwrap();
             SendMessageW(hwnd, WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
             assert!(!state.borrow().busy);
+            if crate::MSI_NAME == "SwiftTunnel-Installer.msi" {
+                // Switching products is asynchronous and cannot queue transactions
+                // or another download until the worker returns a verified package.
+                SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(PRODUCT_ID)), Some(LPARAM(0)));
+                assert_eq!(actions.try_recv().unwrap(), Command::DownloadLite);
+                assert!(state.borrow().busy && !state.borrow().installing);
+                SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(100)), Some(LPARAM(0)));
+                SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(PRODUCT_ID)), Some(LPARAM(0)));
+                assert!(actions.try_recv().is_err());
+                events
+                    .send(Event::Failed("Download interrupted".into()))
+                    .unwrap();
+                SendMessageW(hwnd, WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
+                assert!(!state.borrow().busy);
+                assert_eq!(
+                    state.borrow().package.as_ref().unwrap().product_code,
+                    "test"
+                );
+                SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(PRODUCT_ID)), Some(LPARAM(0)));
+                assert_eq!(actions.try_recv().unwrap(), Command::DownloadLite);
+                events
+                    .send(Event::Ready(
+                        Package {
+                            name: "SwiftTunnel Lite".into(),
+                            version: "3.1.6".into(),
+                            product_code: "lite".into(),
+                            upgrade_code: LITE_FAMILY.into(),
+                        },
+                        vec![],
+                    ))
+                    .unwrap();
+                SendMessageW(hwnd, WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
+                assert!(state.borrow().lite_selected());
+                assert_eq!(state.borrow().exit_code, 0);
+                SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(PRODUCT_ID)), Some(LPARAM(0)));
+                assert_eq!(actions.try_recv().unwrap(), Command::UseBundled);
+                events
+                    .send(Event::Ready(
+                        Package {
+                            name: "SwiftTunnel".into(),
+                            version: "3.1.6".into(),
+                            product_code: "test".into(),
+                            upgrade_code: crate::model::DESKTOP_FAMILY.into(),
+                        },
+                        vec![],
+                    ))
+                    .unwrap();
+                SendMessageW(hwnd, WM_TIMER, Some(WPARAM(1)), Some(LPARAM(0)));
+                assert!(!state.borrow().lite_selected());
+            }
             SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(100)), Some(LPARAM(0)));
-            assert_eq!(actions.try_recv().unwrap(), Action::Install);
+            assert_eq!(
+                actions.try_recv().unwrap(),
+                Command::Execute(Action::Install)
+            );
             assert!(state.borrow().installing);
             // A repeated click cannot queue a second transaction.
             SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(100)), Some(LPARAM(0)));

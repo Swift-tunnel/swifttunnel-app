@@ -1,6 +1,6 @@
 use crate::model::{
     action_allowed, product_version_available, registration_matches, result_message, Action,
-    Installed, Package,
+    Command, Installed, Package, DESKTOP_FAMILY, LITE_FAMILY,
 };
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender};
@@ -8,6 +8,7 @@ use swifttunnel_installer_cache::{InstallerCache, ProtectedInstaller};
 
 pub enum Event {
     Ready(Package, Vec<Installed>),
+    Progress(String),
     Finished(Action, i32, Vec<Installed>),
     Failed(String),
 }
@@ -64,7 +65,7 @@ fn guid(value: &str) -> bool {
         })
 }
 
-fn read_package(path: &Path) -> Result<Package, String> {
+fn read_package(path: &Path, expected_name: &str) -> Result<Package, String> {
     use std::os::windows::ffi::OsStrExt;
     let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut database = 0;
@@ -107,10 +108,10 @@ fn read_package(path: &Path) -> Result<Package, String> {
         product_code: property("ProductCode")?,
         upgrade_code: property("UpgradeCode")?,
     };
-    let family = if crate::MSI_NAME == "SwiftTunnelLite-Installer.msi" {
-        "{9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520}"
-    } else if crate::MSI_NAME == "SwiftTunnel-Installer.msi" {
-        "{E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D}"
+    let family = if expected_name == "SwiftTunnelLite-Installer.msi" {
+        LITE_FAMILY
+    } else if expected_name == "SwiftTunnel-Installer.msi" {
+        DESKTOP_FAMILY
     } else {
         return Err("Unknown setup product. Download Setup again.".into());
     };
@@ -221,7 +222,7 @@ fn execute(
     Ok((code, after))
 }
 
-pub fn worker(commands: Receiver<Action>, events: Sender<Event>) {
+pub fn worker(commands: Receiver<Command>, events: Sender<Event>) {
     let prepare = || -> Result<_, String> {
         if crate::MSI_BYTES.is_empty() {
             return Err(
@@ -231,7 +232,7 @@ pub fn worker(commands: Receiver<Action>, events: Sender<Event>) {
         let source = InstallerCache::open()
             .and_then(|cache| cache.stage(crate::MSI_NAME, crate::MSI_BYTES))
             .map_err(|e| e.to_string())?;
-        let package = read_package(source.path())?;
+        let package = read_package(source.path(), crate::MSI_NAME)?;
         let installed = installed_products(&package)?;
         Ok((source, package, installed))
     };
@@ -249,20 +250,51 @@ pub fn worker(commands: Receiver<Action>, events: Sender<Event>) {
     {
         return;
     }
-    while let Ok(action) = commands.recv() {
-        let event = match execute(&package, &source, action) {
-            Ok((code, installed)) => {
-                let (ok, message) = result_message(action, code);
-                if !ok {
-                    crate::log_failure(&message);
+    let mut lite: Option<(ProtectedInstaller, Package)> = None;
+    let mut selected_lite = false;
+    while let Ok(command) = commands.recv() {
+        let result = match command {
+            Command::DownloadLite => (|| -> Result<Event, String> {
+                if lite.is_none() {
+                    let (download, version) = crate::lite_download::download(|status| {
+                        let _ = events.send(Event::Progress(status));
+                    })?;
+                    let package = read_package(download.path(), "SwiftTunnelLite-Installer.msi")?;
+                    if package.version != version {
+                        return Err("Lite's package version does not match its verified release. Nothing was installed.".into());
+                    }
+                    lite = Some((download, package));
                 }
-                Event::Finished(action, code, installed)
-            }
-            Err(error) => {
-                crate::log_failure(&error);
-                Event::Failed(error)
+                let (_, package) = lite.as_ref().unwrap();
+                let installed = installed_products(package)?;
+                selected_lite = true;
+                Ok(Event::Ready(package.clone(), installed))
+            })(),
+            Command::UseBundled => installed_products(&package).map(|installed| {
+                selected_lite = false;
+                Event::Ready(package.clone(), installed)
+            }),
+            Command::Execute(action) => {
+                let (selected_source, selected_package) = if selected_lite {
+                    let (source, package) =
+                        lite.as_ref().expect("selected only after verification");
+                    (source, package)
+                } else {
+                    (&source, &package)
+                };
+                execute(selected_package, selected_source, action).map(|(code, installed)| {
+                    let (ok, message) = result_message(action, code);
+                    if !ok {
+                        crate::log_failure(&message);
+                    }
+                    Event::Finished(action, code, installed)
+                })
             }
         };
+        let event = result.unwrap_or_else(|error| {
+            crate::log_failure(&error);
+            Event::Failed(error)
+        });
         if events.send(event).is_err() {
             break;
         }

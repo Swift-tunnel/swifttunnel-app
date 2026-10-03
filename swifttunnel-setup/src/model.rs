@@ -8,6 +8,16 @@ pub enum Action {
     Uninstall,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    Execute(Action),
+    DownloadLite,
+    UseBundled,
+}
+
+pub const LITE_FAMILY: &str = "{9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520}";
+pub const DESKTOP_FAMILY: &str = "{E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D}";
+
 #[derive(Clone, Debug)]
 pub struct Package {
     pub name: String,

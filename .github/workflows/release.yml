@@ -662,6 +662,7 @@ jobs:
           Write-Host "::notice::uploaded $named"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
 
@@ -747,6 +748,7 @@ jobs:
           gh release upload "$env:RELEASE_TAG" $out --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
 
@@ -786,6 +788,7 @@ jobs:
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           RELEASE_TAG: ${{ steps.meta.outputs.tag }}
         run: |

@@ -6,16 +6,24 @@ description = "Desktop and Lite setup with a protected persistent MSI source"
 
 [dependencies]
 png = "0.17"
+base64 = "0.22"
+ring = "0.17"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "native-tls"] }
 swifttunnel-installer-cache = { path = "../swifttunnel-installer-cache" }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_GdiPlus", "Win32_Graphics_Dwm",
     "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_HiDpi",
-    "Win32_System_LibraryLoader", "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 [build-dependencies]
+base64 = "0.22"
 static_vcruntime = "3"
 embed-manifest = "1.4"
 embed-resource = "3"

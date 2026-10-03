@@ -34,6 +34,17 @@ fn main() {
     // this crate was written for.
     let name = std::env::var("SWIFTTUNNEL_SETUP_NAME")
         .unwrap_or_else(|_| "SwiftTunnel-Installer.msi".to_string());
+    if std::env::var("PROFILE").as_deref() == Ok("release") && name == "SwiftTunnel-Installer.msi" {
+        use base64::Engine;
+        let key = std::env::var("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64").unwrap_or_default();
+        assert!(
+            base64::engine::general_purpose::STANDARD
+                .decode(key.trim())
+                .is_ok_and(|value| value.len() == 32),
+            "Desktop Setup requires the release public verification key for Lite downloads"
+        );
+    }
+    println!("cargo:rerun-if-env-changed=SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64");
     println!("cargo:rustc-env=SWIFTTUNNEL_SETUP_NAME={name}");
     println!("cargo:rerun-if-env-changed=SWIFTTUNNEL_SETUP_NAME");
 }

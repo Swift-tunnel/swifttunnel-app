@@ -5,8 +5,12 @@
 #![windows_subsystem = "windows"]
 
 mod backend;
+mod lite_download;
 mod model;
 mod ui;
+#[path = "../../swifttunnel-core/src/update_verify.rs"]
+#[rustfmt::skip]
+mod update_verify;
 
 /// The installer payload, staged into OUT_DIR by build.rs.
 ///

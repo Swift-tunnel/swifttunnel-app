@@ -4620,9 +4620,16 @@ dependencies = [
 name = "swifttunnel-setup"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "embed-manifest",
  "embed-resource",
  "png",
+ "reqwest 0.12.28",
+ "ring",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
  "static_vcruntime",
  "swifttunnel-installer-cache",
  "windows 0.62.2",

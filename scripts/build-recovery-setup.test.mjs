@@ -84,4 +84,8 @@ test("release workflow packages recovery for both products on both architectures
       assert.match(workflow, new RegExp(`build-recovery-setup\\.mjs --target ${target} --flavor ${flavor} `));
     }
   }
+  for (const name of ["Build website setup launcher (x64)", "Build website setup launcher (arm64)", "Build optional offline Desktop launchers"]) {
+    const step = workflow.split(`- name: ${name}`)[1]?.split(/\n      - name:/)[0];
+    assert.ok(step?.includes("SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64: ${{ secrets.SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64 }}"), `${name} needs the Lite verification key`);
+  }
 });
