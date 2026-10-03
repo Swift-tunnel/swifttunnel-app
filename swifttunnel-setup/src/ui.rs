@@ -1,5 +1,7 @@
 #[path = "artwork.rs"]
 mod artwork;
+#[path = "drawing.rs"]
+mod drawing;
 #[path = "fonts.rs"]
 mod fonts;
 
@@ -29,8 +31,6 @@ const LABELS: [&str; 4] = ["Install", "Repair", "Reinstall", "Uninstall"];
 // Native petal artwork and pale controls. COLORREF uses BGR.
 const BG: COLORREF = COLORREF(0x1d0f0c);
 const INK: COLORREF = COLORREF(0x140b0a);
-const BORDER: COLORREF = COLORREF(0xf2e4e1);
-const CARD: COLORREF = COLORREF(0xfbf0ee);
 const WIDTH: i32 = 720;
 const HEIGHT: i32 = 432;
 const BUTTON_TOP: i32 = 364;
@@ -204,90 +204,94 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
     fonts::install();
     fill(dc, &bounds, BG);
     artwork::paint(dc, bounds);
-    // SwiftTunnel branding, using the reference's quiet centered composition.
-    text_face(
+    drawing::logo(
         dc,
-        "SWIFTTUNNEL",
         RECT {
-            left: scaled(32, dpi),
-            top: scaled(145, dpi),
-            right: scaled(WIDTH - 32, dpi),
-            bottom: scaled(239, dpi),
+            left: scaled(28, dpi),
+            top: scaled(19, dpi),
+            right: scaled(62, dpi),
+            bottom: scaled(53, dpi),
         },
-        scaled(56, dpi),
-        COLORREF(0xffffff),
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        w!("Figtree ExtraBold"),
-        scaled(2, dpi),
-        false,
     );
     text(
         dc,
-        "ST",
+        "SwiftTunnel Setup",
         RECT {
-            left: scaled(27, dpi),
-            top: scaled(20, dpi),
-            right: scaled(59, dpi),
-            bottom: scaled(45, dpi),
+            left: scaled(73, dpi),
+            top: scaled(25, dpi),
+            right: scaled(310, dpi),
+            bottom: scaled(49, dpi),
         },
-        scaled(17, dpi),
+        scaled(15, dpi),
+        600,
+        COLORREF(0xffffff),
+        DT_LEFT | DT_SINGLELINE,
+    );
+    text(
+        dc,
+        "SWIFTTUNNEL / WINDOWS",
+        RECT {
+            left: scaled(32, dpi),
+            top: scaled(143, dpi),
+            right: scaled(440, dpi),
+            bottom: scaled(165, dpi),
+        },
+        scaled(11, dpi),
+        600,
+        COLORREF(0xd8c4bd),
+        DT_LEFT | DT_SINGLELINE,
+    );
+    text(
+        dc,
+        "Less setup.\nMore play.",
+        RECT {
+            left: scaled(30, dpi),
+            top: scaled(172, dpi),
+            right: scaled(475, dpi),
+            bottom: scaled(289, dpi),
+        },
+        scaled(48, dpi),
         800,
         COLORREF(0xffffff),
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        DT_LEFT,
+    );
+    drawing::logo(
+        dc,
+        RECT {
+            left: scaled(505, dpi),
+            top: scaled(166, dpi),
+            right: scaled(659, dpi),
+            bottom: scaled(300, dpi),
+        },
     );
     let status_color = if state.exit_code != 0 {
-        COLORREF(0x5996ef)
+        0xffefa45c
     } else if state.busy {
-        COLORREF(0xb59183)
+        0xffb8b3dc
     } else {
-        COLORREF(0x62c45a)
+        0xff83d8bc
     };
-    let brush = CreateSolidBrush(status_color);
-    let old_brush = SelectObject(dc, brush.into());
-    let old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
-    let _ = Ellipse(
+    drawing::rounded(
         dc,
-        scaled(27, dpi),
-        scaled(364, dpi),
-        scaled(67, dpi),
-        scaled(404, dpi),
-    );
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    let _ = DeleteObject(brush.into());
-    let mark = if state.exit_code != 0 {
-        "!"
-    } else if state.busy {
-        "…"
-    } else {
-        "✓"
-    };
-    text_face(
-        dc,
-        mark,
         RECT {
-            left: scaled(27, dpi),
-            top: scaled(364, dpi),
-            right: scaled(67, dpi),
-            bottom: scaled(404, dpi),
+            left: scaled(28, dpi),
+            top: scaled(371, dpi),
+            right: scaled(36, dpi),
+            bottom: scaled(379, dpi),
         },
-        scaled(23, dpi),
-        COLORREF(0xffffff),
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        w!("Segoe UI"),
-        0,
-        false,
+        scaled(4, dpi) as f32,
+        status_color,
     );
     text(
         dc,
         &state.heading,
         RECT {
-            left: scaled(82, dpi),
+            left: scaled(48, dpi),
             top: scaled(363, dpi),
-            right: scaled(416, dpi),
+            right: scaled(365, dpi),
             bottom: scaled(386, dpi),
         },
-        scaled(17, dpi),
+        scaled(16, dpi),
         600,
         COLORREF(0xffffff),
         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
@@ -310,9 +314,9 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         dc,
         &subtitle,
         RECT {
-            left: scaled(82, dpi),
+            left: scaled(48, dpi),
             top: scaled(386, dpi),
-            right: scaled(410, dpi),
+            right: scaled(365, dpi),
             bottom: scaled(408, dpi),
         },
         scaled(11, dpi),
@@ -349,14 +353,11 @@ fn visible_actions(state: &State) -> Vec<usize> {
         .collect()
 }
 fn action_rect(index: usize, visible: &[usize], dpi: u32) -> RECT {
-    let total: i32 = visible
-        .iter()
-        .map(|&i| if i == 3 { 40 } else { BUTTON_WIDTH })
-        .sum::<i32>()
+    let total: i32 = visible.iter().map(|_| BUTTON_WIDTH).sum::<i32>()
         + (visible.len().saturating_sub(1) as i32) * 10;
     let mut left = WIDTH - 27 - total;
     for &i in visible {
-        let width = if i == 3 { 40 } else { BUTTON_WIDTH };
+        let width = BUTTON_WIDTH;
         if i == index {
             return RECT {
                 left: scaled(left, dpi),
@@ -380,85 +381,36 @@ unsafe fn paint_button(
     pressed: bool,
     focused: bool,
 ) {
-    let background = if primary {
-        if pressed {
-            COLORREF(0x352b2a)
-        } else {
-            INK
-        }
+    let primary = primary || matches!(label, "Install" | "Update" | "Repair");
+    let background = if disabled {
+        0xff292637
     } else if pressed {
-        COLORREF(0xf8e9e7)
-    } else {
-        CARD
-    };
-    let brush = CreateSolidBrush(background);
-    let pen = CreatePen(
-        PS_SOLID,
-        scaled(1, dpi),
         if primary {
-            background
-        } else if disabled {
-            BORDER
+            0xffc3b9ee
         } else {
-            COLORREF(0xcfc6c3)
-        },
-    );
-    let old_brush = SelectObject(dc, brush.into());
-    let old_pen = SelectObject(dc, pen.into());
-    let _ = RoundRect(
-        dc,
-        bounds.left,
-        bounds.top,
-        bounds.right,
-        bounds.bottom,
-        scaled(40, dpi),
-        scaled(40, dpi),
-    );
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    let _ = DeleteObject(pen.into());
-    let _ = DeleteObject(brush.into());
-    if label == "Uninstall" {
-        let cx = (bounds.left + bounds.right) / 2;
-        let cy = (bounds.top + bounds.bottom) / 2;
-        let pen = CreatePen(
-            PS_SOLID,
-            scaled(2, dpi),
-            if disabled { COLORREF(0xb0a6a1) } else { INK },
-        );
-        let old = SelectObject(dc, pen.into());
-        let old_brush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-        let _ = Rectangle(
-            dc,
-            cx - scaled(4, dpi),
-            cy - scaled(3, dpi),
-            cx + scaled(5, dpi),
-            cy + scaled(6, dpi),
-        );
-        let _ = MoveToEx(dc, cx - scaled(6, dpi), cy - scaled(5, dpi), None);
-        let _ = LineTo(dc, cx + scaled(6, dpi), cy - scaled(5, dpi));
-        let _ = MoveToEx(dc, cx - scaled(2, dpi), cy - scaled(7, dpi), None);
-        let _ = LineTo(dc, cx + scaled(2, dpi), cy - scaled(7, dpi));
-        SelectObject(dc, old_brush);
-        SelectObject(dc, old);
-        let _ = DeleteObject(pen.into());
+            0xff3c354f
+        }
+    } else if primary {
+        0xffe5ddff
     } else {
-        text(
-            dc,
-            label,
-            bounds,
-            scaled(14, dpi),
-            600,
-            if disabled {
-                COLORREF(0xb0a6a1)
-            } else if primary {
-                COLORREF(0xffffff)
-            } else {
-                INK
-            },
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-        );
-    }
+        0xff302b40
+    };
+    drawing::rounded(dc, bounds, scaled(9, dpi) as f32, background);
+    text(
+        dc,
+        label,
+        bounds,
+        scaled(13, dpi),
+        600,
+        if disabled {
+            COLORREF(0x938b99)
+        } else if primary {
+            INK
+        } else {
+            COLORREF(0xf5eff3)
+        },
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
     if focused {
         let _ = DrawFocusRect(dc, &bounds);
     }
@@ -1045,7 +997,7 @@ mod tests {
     fn compact_controls_fit_at_common_display_scales() {
         for dpi in [96, 120, 144, 192] {
             for visible in [vec![0], vec![0, 3], vec![1, 2, 3]] {
-                let mut previous = scaled(416, dpi);
+                let mut previous = scaled(365, dpi);
                 for &i in &visible {
                     let rect = action_rect(i, &visible, dpi);
                     assert!(rect.left >= previous && rect.right <= scaled(WIDTH - 27, dpi));
