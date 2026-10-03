@@ -18,9 +18,20 @@ fn main() {
     let config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(tauri.join("tauri.conf.json")).unwrap())
             .unwrap();
+    // The standard download carries only the small WebView bootstrapper. Offline
+    // Setup is the same bundle with tauri.offline.conf.json laid over it, so
+    // that overlay is what must name the full runtime installer.
+    let offline: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(tauri.join("tauri.offline.conf.json")).unwrap(),
+    )
+    .unwrap();
     let mut engine = handlebars::Handlebars::new();
     assert_eq!(
-        config["bundle"]["windows"]["webviewInstallMode"]["type"], "offlineInstaller",
+        config["bundle"]["windows"]["webviewInstallMode"]["type"], "embedBootstrapper",
+        "The standard download must not embed the full WebView runtime"
+    );
+    assert_eq!(
+        offline["bundle"]["windows"]["webviewInstallMode"]["type"], "offlineInstaller",
         "Offline Setup must include the WebView runtime prerequisite"
     );
     // Match the Tauri bundler's XML rendering behavior.
