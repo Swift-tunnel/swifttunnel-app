@@ -958,10 +958,10 @@ fn build_latency_probe_targets(
 
 fn apply_latency_measurements(
     sl: &mut swifttunnel_core::vpn::servers::DynamicServerList,
-    measurements: &[(String, Option<u32>)],
+    measurements: &[(String, String, u16, Option<u32>)],
 ) -> Vec<LatencyEntry> {
-    for (server_id, latency) in measurements {
-        sl.set_latency(server_id, *latency);
+    for (server_id, ip, port, latency) in measurements {
+        sl.set_endpoint_latency(server_id, ip, *port, *latency);
     }
 
     sl.regions()
@@ -1012,30 +1012,31 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
     };
 
     let mut tasks = tokio::task::JoinSet::new();
-    let mut measured: Vec<(String, Option<u32>)> = Vec::with_capacity(probes.len());
+    let mut measured: Vec<(String, String, u16, Option<u32>)> = Vec::with_capacity(probes.len());
     for (server_id, ip, port) in probes {
         if tasks.len() >= LATENCY_PROBE_CONCURRENCY
             && let Some(result) = tasks.join_next().await
-            && let Ok((server_id, latency)) = result
+            && let Ok(sample) = result
         {
-            measured.push((server_id, latency));
+            measured.push(sample);
         }
         tasks.spawn(async move {
-            let _ = port; // V3 relays don't echo unauthenticated probes — ICMP is the only signal we have.
+            let probe_ip = ip.clone();
+            // V3 relays do not echo unauthenticated probes. Use ICMP.
             // measure_latency_icmp blocks for up to 2s — keep it off the
             // async runtime's worker threads.
             let latency = tokio::task::spawn_blocking(move || {
-                swifttunnel_core::vpn::servers::measure_latency_icmp(&ip)
+                swifttunnel_core::vpn::servers::measure_latency_icmp(&probe_ip)
             })
             .await
             .unwrap_or(None);
-            (server_id, latency)
+            (server_id, ip, port, latency)
         });
     }
 
     while let Some(result) = tasks.join_next().await {
-        if let Ok((server_id, latency)) = result {
-            measured.push((server_id, latency));
+        if let Ok(sample) = result {
+            measured.push(sample);
         }
     }
 
@@ -1244,9 +1245,24 @@ mod tests {
     fn apply_latency_measurements_updates_all_servers_and_region_best_latency() {
         let mut list = make_dynamic_server_list();
         let measurements = vec![
-            ("singapore".to_string(), Some(18)),
-            ("singapore-02".to_string(), Some(7)),
-            ("tokyo-01".to_string(), Some(40)),
+            (
+                "singapore".to_string(),
+                "1.1.1.1".to_string(),
+                51821,
+                Some(18),
+            ),
+            (
+                "singapore-02".to_string(),
+                "1.1.1.2".to_string(),
+                51821,
+                Some(7),
+            ),
+            (
+                "tokyo-01".to_string(),
+                "2.2.2.1".to_string(),
+                51821,
+                Some(40),
+            ),
         ];
 
         let latencies = apply_latency_measurements(&mut list, &measurements);

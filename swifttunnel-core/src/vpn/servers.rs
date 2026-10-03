@@ -749,6 +749,23 @@ impl DynamicServerList {
         source: ServerListSource,
     ) {
         record_region_members(&regions);
+        // A relay id can be reused during a fleet rebuild. Measurements belong
+        // to its endpoint, not to whichever box later receives that id.
+        let unchanged: std::collections::HashSet<_> = servers
+            .iter()
+            .filter(|new| {
+                self.get_server(&new.region).is_some_and(|old| {
+                    old.ip == new.ip && old.effective_relay_port() == new.effective_relay_port()
+                })
+            })
+            .map(|server| server.region.clone())
+            .collect();
+        self.latencies.retain(|id, _| unchanged.contains(id));
+        if let Ok(mut guard) = AVOIDED_RELAYS.lock() {
+            if let Some(avoided) = guard.as_mut() {
+                avoided.retain(|id, _| self.get_server(id).is_none() || unchanged.contains(id));
+            }
+        }
         self.servers = servers;
         self.regions = regions;
         self.source = source;
@@ -798,6 +815,21 @@ impl DynamicServerList {
         );
     }
 
+    /// Ignore probes that finished after their endpoint was replaced or removed.
+    pub fn set_endpoint_latency(
+        &mut self,
+        region: &str,
+        ip: &str,
+        port: u16,
+        latency_ms: Option<u32>,
+    ) {
+        if self.get_server(region).is_some_and(|server| {
+            server.relay_available && server.ip == ip && server.effective_relay_port() == port
+        }) {
+            self.set_latency(region, latency_ms);
+        }
+    }
+
     /// Get servers in a gaming region
     pub fn servers_in_region(&self, region_id: &str) -> Vec<&DynamicServerInfo> {
         if let Some(region) = self.get_region(region_id) {
@@ -833,6 +865,45 @@ impl DynamicServerList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fleet_replacement_invalidates_old_endpoints_and_late_probes() {
+        let _guard = RELAY_LOAD_TEST_LOCK.lock().unwrap();
+        let mut list = DynamicServerList::new_empty();
+        let old = make_server("reused-01", "192.0.2.1");
+        let kept = make_server("kept-01", "192.0.2.2");
+        list.update(
+            vec![
+                old.clone(),
+                kept.clone(),
+                make_server("removed-01", "192.0.2.3"),
+            ],
+            vec![],
+            ServerListSource::Api,
+        );
+        for id in ["reused-01", "kept-01", "removed-01"] {
+            list.set_latency(id, Some(10));
+        }
+        avoid_relay_for_a_while("reused-01");
+        let new = make_server("reused-01", "192.0.2.4");
+        list.update(vec![new.clone(), kept], vec![], ServerListSource::Api);
+        assert_eq!(list.get_latency("kept-01"), Some(10));
+        assert_eq!(list.get_latency("reused-01"), None);
+        assert_eq!(list.get_latency("removed-01"), None);
+        assert!(!relay_is_avoided("reused-01"));
+        list.set_endpoint_latency("reused-01", &old.ip, old.effective_relay_port(), Some(1));
+        list.set_endpoint_latency("removed-01", "192.0.2.3", 51820, Some(1));
+        list.set_endpoint_latency("reused-01", &new.ip, 1234, Some(1));
+        assert_eq!(list.get_latency("reused-01"), None);
+        assert_eq!(list.get_latency("removed-01"), None);
+        list.set_endpoint_latency("reused-01", &new.ip, new.effective_relay_port(), Some(30));
+        assert_eq!(list.get_latency("reused-01"), Some(30));
+        let mut moved_port = new;
+        moved_port.relay_port = Some(1234);
+        list.update(vec![moved_port], vec![], ServerListSource::Api);
+        assert_eq!(list.get_latency("reused-01"), None);
+        clear_avoided_relays_for_test();
+    }
 
     fn make_server(region: &str, ip: &str) -> DynamicServerInfo {
         DynamicServerInfo {

@@ -99,3 +99,26 @@ describe("server latency polling", () => {
     expect(serverGetLatencies).toHaveBeenCalledTimes(3);
   });
 });
+
+
+it("drops displayed and in-flight pings when a relay id moves to a new box", async () => {
+  const list = (ip: string) => ({
+    regions: [{ id: "jakarta", name: "Jakarta", country_code: "ID", servers: ["jakarta-01"] }],
+    servers: [{ region: "jakarta-01", ip, port: 51820, relay_port: 51821, relay_available: true }],
+    source: "API",
+  });
+  serverGetList.mockResolvedValueOnce(list("192.0.2.1")).mockResolvedValueOnce(list("192.0.2.2"));
+  serverGetLatencies.mockResolvedValueOnce([{ region: "jakarta", latency_ms: 5 }]);
+  const store = (await import("./serverStore")).useServerStore;
+  await store.getState().fetchList();
+  await store.getState().fetchLatencies();
+  expect(store.getState().getLatency("jakarta")).toBe(5);
+  let finish!: (value: object) => void;
+  serverGetLatencies.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  const oldScan = store.getState().fetchLatencies();
+  await store.getState().fetchList();
+  expect(store.getState().getLatency("jakarta")).toBeNull();
+  finish([{ region: "jakarta", latency_ms: 6 }]);
+  await oldScan;
+  expect(store.getState().getLatency("jakarta")).toBeNull();
+});

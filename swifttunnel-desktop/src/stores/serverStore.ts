@@ -36,6 +36,8 @@ export const useServerStore = create<ServerStore>((set, get) => {
   let pendingList: Promise<void> | null = null;
   let pendingRefresh: Promise<void> | null = null;
   let listRevision = 0;
+  let fleetRevision = 0;
+  let fleetSignature = "";
 
   function loadList(): Promise<void> {
     if (pendingList) return pendingList;
@@ -45,6 +47,15 @@ export const useServerStore = create<ServerStore>((set, get) => {
       try {
         const resp = await serverGetList();
         if (revision !== listRevision) return;
+        const signature = JSON.stringify([
+          resp.servers.map(s => [s.region, s.ip, s.port, s.relay_port, s.relay_available]),
+          resp.regions.map(r => [r.id, r.servers]),
+        ]);
+        if (signature !== fleetSignature) {
+          fleetSignature = signature;
+          ++fleetRevision;
+          set({ latencies: new Map() });
+        }
         set({ regions: resp.regions, servers: resp.servers, source: resp.source,
           isLoading: false, hasLoaded: true, error: null });
       } catch (error) {
@@ -70,9 +81,11 @@ export const useServerStore = create<ServerStore>((set, get) => {
 
   fetchLatencies: () => {
     if (pendingLatencies) return pendingLatencies;
+    const revision = fleetRevision;
     pendingLatencies = (async () => {
       try {
         const entries = await serverGetLatencies();
+        if (revision !== fleetRevision) return;
         const latencies = new Map<string, number | null>();
         for (const entry of entries) {
           latencies.set(entry.region, entry.latency_ms);
