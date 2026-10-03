@@ -21,6 +21,12 @@ export default defineConfig(({ command }) => {
       host: "localhost",
     },
     envPrefix: ["VITE_", "TAURI_"],
+    build: {
+      // Keep every asset a file. Vite would fold small ones (the flags) into
+      // the script as data: URLs, and the app's CSP in tauri.conf.json blocks
+      // those, so they show in `vite dev` and vanish from the packaged app.
+      assetsInlineLimit: 0,
+    },
     define: {
       __APP_VERSION__: JSON.stringify(process.env.npm_package_version || "0.1.0"),
     },
