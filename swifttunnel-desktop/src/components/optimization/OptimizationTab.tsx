@@ -618,7 +618,6 @@ export function OptimizationTab() {
   const loading = useOptimizationStore((s) => s.loading);
   const loadError = useOptimizationStore((s) => s.loadError);
   const errors = useOptimizationStore((s) => s.errors);
-  const restartRequired = useOptimizationStore((s) => s.restartRequired);
   const batch = useOptimizationStore((s) => s.batch);
   const loadActive = useOptimizationStore((s) => s.loadActive);
   const [view, setView] = useState<"boost" | "speedup">("boost");
@@ -643,11 +642,6 @@ export function OptimizationTab() {
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
       <SettingsSaveNotice />
-      <div className="instrument px-4 py-3 text-[12px] text-text-muted">
-        <h2 className="text-[16px] font-semibold text-text-primary">Tune your PC, one change at a time</h2>
-        <p className="mt-1">Results vary by PC. Compare the same game before and after a change. Caution tweaks stay opt-in.</p>
-        <p className="mt-1">Revert tweaks restores saved values. Power Plan and Auto-clean RAM have their own switches.</p>
-      </div>
       {(!loaded || loading || loadError) && (
         <div className="instrument px-4 py-3 text-[12px]" role="status">
           <p>{loading ? "Reading saved optimization states..." : "Could not read saved optimization states. Controls are paused to avoid changing an unknown setup."}</p>
@@ -702,16 +696,6 @@ export function OptimizationTab() {
           belongs UNDER the switcher, above it, it read as a page header that
           silently changed meaning when you switched sub-tabs. */}
       <OptimizeAllHeader view={view} />
-
-      <div className="instrument px-4 py-3 text-[12px] leading-relaxed text-text-muted">
-        <p className="font-semibold text-text-primary">{restartRequired ? "Restart your PC to finish your changes" : "Some changes need a PC restart"}</p>
-        <p>
-          After enabling or reverting an item marked "Restart PC", save your work
-          and choose Start &gt; Power &gt; Restart in Windows. Reopening SwiftTunnel
-          or signing out is not enough for those changes. You do not need to
-          restart for every optimization.
-        </p>
-      </div>
 
       {/* RAM cleaner stays mounted across both sub-tabs. */}
       <MemoryCleaner />
