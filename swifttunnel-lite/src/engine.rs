@@ -296,10 +296,26 @@ impl Engine {
                 state.uninstall_note = Some(message.clone());
             }
         }
+        // A removed saved city must not remain the picker label while core
+        // chooses a surviving location for the next connection.
+        if !state.regions.is_empty()
+            && !state
+                .regions
+                .iter()
+                .any(|row| row.id == state.selected_region)
+        {
+            if let Ok(snapshot) = self.shared.snapshot.read() {
+                state.selected_region = resolve_initial_connect_region(
+                    &snapshot.server_list,
+                    &state.selected_region,
+                    false,
+                );
+            }
+        }
     }
 
     pub fn refresh_regions(&self) {
-        // The list is already kept fresh by its own thread; this only matters
+        // The list is refreshed periodically by its own thread; this only matters
         // on the first open, when it may not have landed yet.
         self.shared.notify();
     }
@@ -1009,6 +1025,12 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
             .map_err(|e| format!("Sign in again: {e}"))?
     };
 
+    if settings.custom_relay_server.is_empty() {
+        if let Err(error) = refresh_fleet(shared).await {
+            log::warn!("Fleet refresh before connect failed; retaining last list: {error}");
+        }
+    }
+
     // The fleet with its measured round trips, and the region auto-routing
     // would actually pick, both from core's own policy rather than from a
     // second opinion held here.
@@ -1060,7 +1082,6 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
 
 // ── Background threads ──────────────────────────────────────────────────────
 
-/// Fetch the fleet once, then keep its round trips fresh.
 /// Keep Lite current on its own, and never in the middle of a game.
 ///
 /// Lite is used while playing, and an installer cannot replace files this
@@ -1206,6 +1227,39 @@ fn spawn_auto_update(shared: Arc<Shared>) {
     });
 }
 
+fn region_rows(list: &DynamicServerList) -> Vec<RegionRow> {
+    list.regions()
+        .iter()
+        .filter(|region| !list.servers_in_region(&region.id).is_empty())
+        .map(|region| RegionRow {
+            id: region.id.clone(),
+            name: region.name.clone(),
+            country: region.country_code.to_uppercase(),
+            ping_ms: list.get_region_best_latency(&region.id),
+        })
+        .collect()
+}
+
+/// The worker and connect path share the same list replacement logic.
+async fn refresh_fleet(shared: &Arc<Shared>) -> Result<(), String> {
+    let list = servers::fetch_server_list_for_connect().await?;
+    shared.edit(|s| {
+        s.server_list
+            .update(list.servers, list.regions, ServerListSource::Api);
+        s.regions = region_rows(&s.server_list);
+    });
+    // Updating candidates does not move the existing connection.
+    if let Ok(vpn) = shared.vpn.try_lock() {
+        if let Some(router) = vpn.auto_router() {
+            if let Ok(s) = shared.snapshot.read() {
+                router.set_available_servers(build_available_servers(&s.server_list));
+            }
+        }
+    }
+    shared.notify();
+    Ok(())
+}
+
 fn spawn_regions(shared: Arc<Shared>) {
     std::thread::Builder::new()
         .name("lite-regions".into())
@@ -1218,62 +1272,49 @@ fn spawn_regions(shared: Arc<Shared>) {
                 return;
             };
 
-            // (relay id, address to ping).
-            let mut targets: Vec<(String, String)> = Vec::new();
-
-            match runtime.block_on(servers::fetch_server_list()) {
-                Ok(list) => {
-                    let mut rows = Vec::new();
-                    for region in &list.regions {
-                        // Only relays the API is currently offering. A region
-                        // whose relays are all withdrawn should not be listed
-                        // as somewhere you can go.
-                        let Some(first) = list
-                            .servers
-                            .iter()
-                            .find(|s| region.servers.contains(&s.region) && s.relay_available)
-                        else {
-                            continue;
-                        };
-                        // The relay id, not the region id: latency is keyed by
-                        // server in core's list, and `get_region_best_latency`
-                        // reads it back out per region.
-                        targets.push((first.region.clone(), first.ip.clone()));
-                        rows.push(RegionRow {
-                            id: region.id.clone(),
-                            name: region.name.clone(),
-                            country: region.country_code.to_uppercase(),
-                            ping_ms: None,
-                        });
-                    }
-                    log::info!("region list: {} regions", rows.len());
-                    shared.edit(|s| {
-                        s.regions = rows;
-                        s.server_list.update(
-                            list.servers.clone(),
-                            list.regions.clone(),
-                            ServerListSource::Api,
-                        );
-                    });
-                    shared.notify();
-                }
-                Err(error) => {
-                    log::warn!("could not fetch the region list: {error}");
-                    return;
-                }
-            }
-
+            let mut next_refresh = Instant::now();
             while !shared.stop.load(Ordering::Relaxed) {
-                for (server_id, ip) in &targets {
+                if Instant::now() >= next_refresh {
+                    match runtime.block_on(refresh_fleet(&shared)) {
+                        Ok(()) => next_refresh = Instant::now() + Duration::from_secs(5 * 60),
+                        Err(error) => {
+                            log::warn!("could not refresh the region list: {error}");
+                            next_refresh = Instant::now() + PING_INTERVAL;
+                        }
+                    }
+                }
+                // Rebuild targets from the current snapshot. Connect can also
+                // refresh the fleet while one of these probes is in flight.
+                let targets = shared
+                    .snapshot
+                    .read()
+                    .map(|s| {
+                        s.server_list
+                            .regions()
+                            .iter()
+                            .filter_map(|region| {
+                                s.server_list
+                                    .servers_in_region(&region.id)
+                                    .first()
+                                    .map(|server| {
+                                        (
+                                            server.region.clone(),
+                                            server.ip.clone(),
+                                            server.effective_relay_port(),
+                                        )
+                                    })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for (server_id, ip, port) in targets {
                     if shared.stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    let measured = servers::measure_latency_icmp(ip);
+                    let measured = servers::measure_latency_icmp(&ip);
                     shared.edit(|s| {
-                        // Into core's list, so a later connect hands the same
-                        // numbers to auto-routing, and back out per region for
-                        // the rows the picker draws.
-                        s.server_list.set_latency(server_id, measured);
+                        s.server_list
+                            .set_endpoint_latency(&server_id, &ip, port, measured);
                         for row in s.regions.iter_mut() {
                             row.ping_ms = s.server_list.get_region_best_latency(&row.id);
                         }
@@ -1965,6 +2006,46 @@ fn open_in_browser(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::split_message;
+
+    #[test]
+    fn region_picker_accepts_new_locations_and_removes_withdrawn_ones() {
+        use super::{DynamicServerList, ServerListSource, region_rows, servers};
+        let mut list = DynamicServerList::new_empty();
+        let mut relays = Vec::new();
+        let mut regions = Vec::new();
+        for (id, name, country) in [("jakarta", "Jakarta", "id"), ("israel", "Israel", "il")] {
+            let relay = format!("{id}-99");
+            relays.push(
+                serde_json::from_value(serde_json::json!({
+                    "region": relay, "name": name, "country_code": country,
+                    "ip": "192.0.2.1", "port": 51820, "phantun_available": false,
+                    "relay_available": true
+                }))
+                .unwrap(),
+            );
+            regions.push(servers::DynamicGamingRegion {
+                id: id.into(),
+                name: name.into(),
+                description: String::new(),
+                country_code: country.into(),
+                servers: vec![relay],
+            });
+        }
+        list.update(relays, regions.clone(), ServerListSource::Api);
+        let rows = region_rows(&list);
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.name.as_str(), r.country.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("Jakarta", "ID"), ("Israel", "IL")]
+        );
+        let mut remaining = list.servers.clone();
+        remaining[0].relay_available = false;
+        list.update(remaining, regions, ServerListSource::Api);
+        assert_eq!(region_rows(&list).len(), 1);
+        list.update(vec![], vec![], ServerListSource::Api);
+        assert!(region_rows(&list).is_empty());
+    }
 
     // The status line is one line and it clips. Every case below is really the
     // same assertion: whatever lands there has to fit, and nothing the reader

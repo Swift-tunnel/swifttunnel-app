@@ -381,6 +381,14 @@ pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
     Ok(data)
 }
 
+/// Bound the entire refresh, including alternate hosts, before a connection.
+/// Callers keep their last usable list if the website cannot be reached.
+pub async fn fetch_server_list_for_connect() -> Result<ServerListResponse, String> {
+    tokio::time::timeout(Duration::from_secs(5), fetch_server_list())
+        .await
+        .map_err(|_| "Server list refresh timed out".to_string())?
+}
+
 /// Live occupancy per relay, refreshed whenever the server list is fetched.
 ///
 /// Kept beside the list rather than threaded through the candidate tuples,

@@ -493,6 +493,24 @@ pub async fn vpn_connect(
     let preset_set = parse_game_presets(&game_presets);
     let tunnel_apps = swifttunnel_core::vpn::get_apps_for_preset_set(&preset_set);
 
+    // Refresh before choosing endpoints: a saved id may now name a new box.
+    // The total wait is bounded and an API outage retains the last usable list.
+    if custom_relay.is_none() {
+        match swifttunnel_core::vpn::servers::fetch_server_list_for_connect().await {
+            Ok(data) => {
+                state.server_list.lock().update(
+                    data.servers,
+                    data.regions,
+                    swifttunnel_core::vpn::servers::ServerListSource::Api,
+                );
+                let _ = app.emit(SERVER_LIST_UPDATED, "API");
+            }
+            Err(error) => {
+                log::warn!("Fleet refresh before connect failed; retaining last list: {error}")
+            }
+        }
+    }
+
     // Build available_servers list from the dynamic server list
     let (connect_region, available_servers): (String, Vec<(String, SocketAddr, Option<u32>)>) = {
         let sl = state.server_list.lock();
@@ -1362,7 +1380,12 @@ mod tests {
 
 #[tauri::command]
 pub async fn server_refresh(state: State<'_, AppState>, app: AppHandle) -> Result<String, String> {
-    let (servers, regions, source) = swifttunnel_core::vpn::servers::load_server_list().await?;
+    let data = swifttunnel_core::vpn::servers::fetch_server_list().await?;
+    let (servers, regions, source) = (
+        data.servers,
+        data.regions,
+        swifttunnel_core::vpn::servers::ServerListSource::Api,
+    );
 
     let available_servers = {
         let mut sl = state.server_list.lock();

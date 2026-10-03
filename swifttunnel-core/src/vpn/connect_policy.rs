@@ -174,11 +174,21 @@ pub fn resolve_initial_connect_region(
     requested_region: &str,
     auto_routing: bool,
 ) -> String {
-    if !auto_routing {
+    let requested_available = !sl.servers_in_region(requested_region).is_empty();
+    if !auto_routing && requested_available {
         return requested_region.to_string();
     }
 
-    select_best_region_by_latency(sl).unwrap_or_else(|| requested_region.to_string())
+    select_best_region_by_latency(sl).unwrap_or_else(|| {
+        if requested_available {
+            return requested_region.to_string();
+        }
+        sl.regions()
+            .iter()
+            .find(|region| !sl.servers_in_region(&region.id).is_empty())
+            .map(|region| region.id.clone())
+            .unwrap_or_else(|| requested_region.to_string())
+    })
 }
 
 /// The relays a connection may use, with their measured round trips.
@@ -373,6 +383,28 @@ mod tests {
         assert_eq!(
             resolve_initial_connect_region(&list, "tokyo", true),
             "tokyo"
+        );
+    }
+
+    #[test]
+    fn removed_location_uses_a_current_location_without_hardcoded_fleet_ids() {
+        let mut list = make_dynamic_server_list();
+        list.set_latency("tokyo-01", Some(20));
+        for auto in [false, true] {
+            assert_eq!(
+                resolve_initial_connect_region(&list, "retired-location", auto),
+                "tokyo"
+            );
+        }
+        let mut unavailable = list.servers.clone();
+        unavailable
+            .iter_mut()
+            .for_each(|server| server.relay_available = false);
+        list.update(unavailable, list.regions.clone(), ServerListSource::Api);
+        // No invented endpoint when the whole fleet is unavailable.
+        assert_eq!(
+            resolve_initial_connect_region(&list, "retired-location", false),
+            "retired-location"
         );
     }
 
