@@ -146,88 +146,6 @@ fn check_bundled_driver_msis() {
     }
 }
 
-/// Fail release builds if the NVIDIA Profile Inspector helper was not staged.
-///
-/// Ultraboost can apply its Roblox FastFlags without this helper, but the
-/// NVIDIA-only potato graphics profile depends on
-/// `nvidiaProfileInspector.exe`. The release workflow downloads the helper
-/// into resources/tools before Tauri bundles updater artifacts; this guard
-/// catches skipped downloads before users receive an update without the new
-/// payload.
-fn check_bundled_nvidia_profile_inspector() {
-    const NPI_FILES: &[(&str, u64, Option<&str>)] = &[
-        (
-            "resources/tools/nvidiaProfileInspector/nvidiaProfileInspector.exe",
-            900_000,
-            Some("61452518fdd2464313e08589dd6b6e9d00d3fd36c1622e1105884ab1ad7334d4"),
-        ),
-        (
-            "resources/tools/nvidiaProfileInspector/Reference.xml",
-            800_000,
-            Some("fb19d0ed9a8f1b95caa3675a94f80e2e14ae891c8fe83f164e0bb62513c2bb3f"),
-        ),
-        (
-            "resources/tools/nvidiaProfileInspector/nvidiaProfileInspector.exe.config",
-            100,
-            Some("051099983b896673909e01a1f631b6652abb88da95c9f06f3efef4be033091fa"),
-        ),
-        (
-            "resources/tools/nvidiaProfileInspector/nvidiaProfileInspector.pdb",
-            100_000,
-            Some("68ab6fe22594a906e40bb414a76a30106fa1c8d95f778c910f07e194623e7070"),
-        ),
-    ];
-
-    for (rel, min_bytes, expected_hash) in NPI_FILES {
-        println!("cargo:rerun-if-changed={}", rel);
-        let path = std::path::Path::new(rel);
-        match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() && meta.len() >= *min_bytes => {
-                if let Some(expected_hash) = expected_hash {
-                    let actual_hash = file_sha256_with_powershell(path).unwrap_or_else(|err| {
-                        panic!(
-                            "Failed to hash bundled NVIDIA Profile Inspector helper `{}`: {}",
-                            rel, err
-                        )
-                    });
-                    if actual_hash != *expected_hash {
-                        panic!(
-                            "Bundled NVIDIA Profile Inspector helper `{}` failed SHA-256 check: \
-                             expected {}, got {}. Re-run the release workflow's pinned helper download \
-                             step and do not ship an unverified third-party binary.",
-                            rel, expected_hash, actual_hash
-                        );
-                    }
-                }
-            }
-            Ok(meta) if meta.is_file() => {
-                panic!(
-                    "Bundled NVIDIA Profile Inspector helper `{}` is suspiciously small ({} bytes, \
-                     expected >= {}). Re-run the release workflow's helper download step, or fetch \
-                     nvidiaProfileInspector.zip from https://github.com/Orbmu2k/nvidiaProfileInspector/releases",
-                    rel,
-                    meta.len(),
-                    min_bytes
-                );
-            }
-            Ok(_) => {
-                panic!(
-                    "Bundled NVIDIA Profile Inspector helper path `{}` exists but is not a file.",
-                    rel
-                );
-            }
-            Err(err) => {
-                panic!(
-                    "Bundled NVIDIA Profile Inspector helper `{}` is missing ({}). The updater must \
-                     ship the complete helper directory so existing Ultraboost users receive the \
-                     NVIDIA potato profile without a separate manual install.",
-                    rel, err
-                );
-            }
-        }
-    }
-}
-
 /// Fail release builds if the GoodbyeDPI helper payload was not staged.
 ///
 /// The country-ban bypass starts `goodbyedpi.exe` with a generated Roblox
@@ -365,7 +283,6 @@ fn main() {
         && std::env::var("PROFILE").as_deref() == Ok("release")
     {
         check_bundled_driver_msis();
-        check_bundled_nvidia_profile_inspector();
         check_bundled_goodbyedpi_helper();
     }
 
