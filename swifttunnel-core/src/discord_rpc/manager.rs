@@ -4,8 +4,8 @@
 //! and updates presence based on VPN state.
 
 use super::state::{
-    DiscordActivity, DiscordState, game_display_name, game_icon_key, region_display_label,
-    region_flag_key,
+    DISCORD_BRAND_IMAGE_KEY, DiscordActivity, DiscordState, game_display_name, game_icon_key,
+    region_display_label, region_flag_key,
 };
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use log::{debug, info, warn};
@@ -16,9 +16,6 @@ use std::time::{Duration, Instant};
 /// Discord Application ID (create at https://discord.com/developers)
 /// This should be replaced with the actual SwiftTunnel application ID
 const DISCORD_APP_ID: &str = "1467394500476538920";
-
-/// Discord developer asset key for the black-and-white `swift.png` logo.
-const DISCORD_BRAND_IMAGE_KEY: &str = "swift";
 
 /// Interval to retry Discord connection if not connected
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(30);

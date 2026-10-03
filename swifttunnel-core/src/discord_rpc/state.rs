@@ -3,6 +3,9 @@
 use std::borrow::Cow;
 use std::time::Instant;
 
+// The public Discord application asset list currently contains only this logo.
+pub(super) const DISCORD_BRAND_IMAGE_KEY: &str = "swifttunnel";
+
 /// Current state for Discord Rich Presence display
 #[derive(Debug, Clone, Default)]
 pub enum DiscordState {
@@ -45,6 +48,8 @@ pub fn region_display_name(region_id: &str) -> &'static str {
         "singapore" => "Singapore",
         "mumbai" => "Mumbai",
         "tokyo" => "Tokyo",
+        "jakarta" => "Jakarta",
+        "israel" => "Israel",
         "sydney" => "Sydney",
         "germany" | "frankfurt" => "Germany",
         "paris" => "Paris",
@@ -55,6 +60,8 @@ pub fn region_display_name(region_id: &str) -> &'static str {
         _ if region_id.starts_with("singapore-") => "Singapore",
         _ if region_id.starts_with("mumbai-") => "Mumbai",
         _ if region_id.starts_with("tokyo-") => "Tokyo",
+        _ if region_id.starts_with("jakarta-") => "Jakarta",
+        _ if region_id.starts_with("israel-") => "Israel",
         _ if region_id.starts_with("sydney-") => "Sydney",
         _ if region_id.starts_with("germany-") => "Germany",
         _ if region_id.starts_with("paris-") => "Paris",
@@ -139,40 +146,14 @@ pub fn region_display_label(region_id: &str) -> Cow<'static, str> {
     }
 }
 
-/// Get region flag emoji for Discord (uses country codes for flag rendering)
-pub fn region_flag_key(region_id: &str) -> &'static str {
-    match region_id {
-        "singapore" => "flag_sg",
-        "mumbai" => "flag_in",
-        "tokyo" => "flag_jp",
-        "sydney" => "flag_au",
-        "germany" | "frankfurt" => "flag_de",
-        "paris" => "flag_fr",
-        "london" => "flag_gb",
-        "amsterdam" => "flag_nl",
-        "korea" => "flag_kr",
-        "brazil" | "sao-paulo" => "flag_br",
-        _ if region_id.starts_with("singapore-") => "flag_sg",
-        _ if region_id.starts_with("mumbai-") => "flag_in",
-        _ if region_id.starts_with("tokyo-") => "flag_jp",
-        _ if region_id.starts_with("sydney-") => "flag_au",
-        _ if region_id.starts_with("germany-") => "flag_de",
-        _ if region_id.starts_with("paris-") => "flag_fr",
-        _ if region_id.starts_with("london-") => "flag_gb",
-        _ if region_id.starts_with("amsterdam-") => "flag_nl",
-        _ if region_id.starts_with("korea-") => "flag_kr",
-        _ if region_id.starts_with("brazil-") => "flag_br",
-        _ if region_id.starts_with("us-") => "flag_us",
-        _ => "flag_us",
-    }
+/// Use neutral artwork until country and game assets exist in Discord.
+/// Do not invent asset keys: Discord does not render them as emoji flags.
+pub fn region_flag_key(_region_id: &str) -> &'static str {
+    DISCORD_BRAND_IMAGE_KEY
 }
 
-/// Get game icon key for Discord Rich Presence assets
-pub fn game_icon_key(game_name: &str) -> &'static str {
-    match game_name.to_lowercase().as_str() {
-        "roblox" | "robloxplayerbeta" | "robloxplayerbeta.exe" => "game_roblox",
-        _ => "game_generic",
-    }
+pub fn game_icon_key(_game_name: &str) -> &'static str {
+    DISCORD_BRAND_IMAGE_KEY
 }
 
 /// Get game display name for Discord
@@ -186,6 +167,18 @@ pub fn game_display_name(game_name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_locations_and_unknown_regions_use_verified_artwork() {
+        for (id, name) in [("jakarta", "Jakarta"), ("israel", "Israel")] {
+            assert_eq!(region_display_label(id), name);
+            assert_eq!(region_display_label(&format!("{id}-02")), name);
+            assert_eq!(region_flag_key(id), "swifttunnel");
+            assert_eq!(region_display_name(&format!("{id}2")), "Unknown Region");
+        }
+        assert_eq!(region_flag_key("future-location"), "swifttunnel");
+        assert_eq!(game_icon_key("roblox"), "swifttunnel");
+    }
 
     #[test]
     fn test_region_display_name() {
