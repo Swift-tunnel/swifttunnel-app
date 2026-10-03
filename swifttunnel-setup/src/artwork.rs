@@ -1,5 +1,5 @@
 //! A cached, embedded copy of the website's petal artwork, in its own colours.
-use std::{io::Cursor, sync::OnceLock};
+use std::{cell::RefCell, io::Cursor, sync::OnceLock};
 use windows::Win32::{Foundation::RECT, Graphics::Gdi::*};
 
 struct Pixels {
@@ -41,40 +41,102 @@ fn decode() -> Option<Pixels> {
     })
 }
 
-pub unsafe fn paint(dc: HDC, bounds: RECT) {
-    static IMAGE: OnceLock<Option<Pixels>> = OnceLock::new();
-    if let Some(image) = IMAGE.get_or_init(decode) {
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: image.width,
-                biHeight: -image.height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
+/// The artwork scaled to one window size, kept so a repaint is a plain copy.
+struct Scaled {
+    width: i32,
+    height: i32,
+    bitmap: HBITMAP,
+}
+
+thread_local! {
+    static SCALED: RefCell<Option<Scaled>> = const { RefCell::new(None) };
+}
+
+unsafe fn scale(image: &Pixels, width: i32, height: i32) -> Option<HBITMAP> {
+    let source = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: image.width,
+            biHeight: -image.height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
             ..Default::default()
-        };
-        let old_mode = SetStretchBltMode(dc, HALFTONE);
-        let mut origin = windows::Win32::Foundation::POINT::default();
-        let _ = SetBrushOrgEx(dc, 0, 0, Some(&mut origin));
+        },
+        ..Default::default()
+    };
+    let target = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biWidth: width,
+            biHeight: -height,
+            ..source.bmiHeader
+        },
+        ..Default::default()
+    };
+    let dc = CreateCompatibleDC(None);
+    let mut bits = std::ptr::null_mut();
+    let bitmap = CreateDIBSection(Some(dc), &target, DIB_RGB_COLORS, &mut bits, None, 0).ok();
+    if let Some(bitmap) = bitmap {
+        let previous = SelectObject(dc, bitmap.into());
+        SetStretchBltMode(dc, HALFTONE);
+        let _ = SetBrushOrgEx(dc, 0, 0, None);
         StretchDIBits(
             dc,
-            bounds.left,
-            bounds.top,
-            bounds.right - bounds.left,
-            bounds.bottom - bounds.top,
+            0,
+            0,
+            width,
+            height,
             0,
             0,
             image.width,
             image.height,
             Some(image.bytes.as_ptr().cast()),
-            &info,
+            &source,
             DIB_RGB_COLORS,
             SRCCOPY,
         );
-        SetStretchBltMode(dc, STRETCH_BLT_MODE(old_mode));
-        let _ = SetBrushOrgEx(dc, origin.x, origin.y, None);
+        SelectObject(dc, previous);
     }
+    let _ = DeleteDC(dc);
+    bitmap
+}
+
+pub unsafe fn paint(dc: HDC, bounds: RECT) {
+    static IMAGE: OnceLock<Option<Pixels>> = OnceLock::new();
+    let Some(image) = IMAGE.get_or_init(decode) else {
+        return;
+    };
+    let (width, height) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
+    SCALED.with_borrow_mut(|scaled| {
+        if !scaled
+            .as_ref()
+            .is_some_and(|s| s.width == width && s.height == height)
+        {
+            if let Some(old) = scaled.take() {
+                let _ = DeleteObject(old.bitmap.into());
+            }
+            *scaled = scale(image, width, height).map(|bitmap| Scaled {
+                width,
+                height,
+                bitmap,
+            });
+        }
+        if let Some(scaled) = scaled {
+            let source = CreateCompatibleDC(Some(dc));
+            let previous = SelectObject(source, scaled.bitmap.into());
+            let _ = BitBlt(
+                dc,
+                bounds.left,
+                bounds.top,
+                width,
+                height,
+                Some(source),
+                0,
+                0,
+                SRCCOPY,
+            );
+            SelectObject(source, previous);
+            let _ = DeleteDC(source);
+        }
+    });
 }

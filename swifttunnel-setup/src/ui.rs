@@ -11,6 +11,7 @@ use crate::model::{
 };
 use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
@@ -33,7 +34,8 @@ const LABELS: [&str; 4] = ["Install", "Repair", "Reinstall", "Uninstall"];
 // The website's petal theme: the hero's petals in their own colours, ink copy
 // on the pale band, white controls on the cobalt below. COLORREF is BGR; the
 // u32 values are GDI+ ARGB.
-const BG: COLORREF = COLORREF(0xe64727);
+const COBALT: COLORREF = COLORREF(0xe64727);
+const BG: COLORREF = COBALT;
 const INK: COLORREF = COLORREF(0x140b0a);
 /// The site's muted copy: ink at 86% over the pale petals.
 const INK_SOFT: COLORREF = COLORREF(0x352928);
@@ -54,7 +56,14 @@ const DETAILS_ID: usize = 202;
 /// The app chooser's two halves: the full app, bundled, and Lite, downloaded.
 const PRODUCT_ID: usize = 203;
 const LITE_ID: usize = 204;
-const WINDOW_STYLE_SETUP: WINDOW_STYLE = WINDOW_STYLE(WS_POPUP.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0);
+/// The worker's events are read on this timer; the chooser animates on the other.
+const EVENT_TIMER: usize = 1;
+const SLIDE_TIMER: usize = 2;
+/// How long the chooser's pill takes to slide to the other half.
+const SLIDE: Duration = Duration::from_millis(220);
+// The window never paints over its controls, so each control can repaint alone.
+const WINDOW_STYLE_SETUP: WINDOW_STYLE =
+    WINDOW_STYLE(WS_POPUP.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_CLIPCHILDREN.0);
 
 pub struct State {
     package: Option<Package>,
@@ -72,6 +81,11 @@ pub struct State {
     product_buttons: Vec<HWND>,
     /// The half just picked (true for Lite) while that switch is running.
     switching_to_lite: Option<bool>,
+    /// Where the chooser's pill last started sliding from, and when.
+    slide: Option<(f32, Instant)>,
+    /// The animation clock. Both halves of the chooser paint as of this
+    /// moment, so the pill they share always lines up.
+    frame: Instant,
     worker_closed: bool,
     commands: Sender<Command>,
     events: Receiver<Event>,
@@ -93,6 +107,8 @@ impl State {
             details_button: None,
             product_buttons: vec![],
             switching_to_lite: None,
+            slide: None,
+            frame: Instant::now(),
             worker_closed: false,
             commands,
             events,
@@ -134,6 +150,36 @@ impl State {
     fn shows_lite(&self) -> bool {
         self.switching_to_lite
             .unwrap_or_else(|| self.lite_selected())
+    }
+
+    /// The chooser's pill as of the current frame: 0 under the full app, 1
+    /// under Lite, between the two while it slides, easing out as it arrives.
+    fn pill_position(&self) -> f32 {
+        let target = if self.shows_lite() { 1.0 } else { 0.0 };
+        match self.slide {
+            Some((from, start)) => {
+                let elapsed = self.frame.saturating_duration_since(start);
+                let t = (elapsed.as_secs_f32() / SLIDE.as_secs_f32()).min(1.0);
+                from + (target - from) * (1.0 - (1.0 - t).powi(3))
+            }
+            None => target,
+        }
+    }
+
+    /// Whether the pill has further to go as of the current frame.
+    fn sliding(&self) -> bool {
+        self.slide
+            .is_some_and(|(_, start)| self.frame.saturating_duration_since(start) < SLIDE)
+    }
+
+    /// Applies a change, sliding the pill from where it is now if the change
+    /// moves it to the other half.
+    fn shift(&mut self, change: impl FnOnce(&mut Self)) {
+        let (position, shown) = (self.pill_position(), self.shows_lite());
+        change(self);
+        if self.shows_lite() != shown {
+            self.slide = Some((position, Instant::now()));
+        }
     }
 
     /// The chooser can switch only between transactions and downloads.
@@ -415,55 +461,48 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         },
     );
 
-    // The headline, set like the homepage's: the second line in outline.
-    text(
-        dc,
-        "Less setup.",
-        RECT {
-            left: s(26),
-            top: s(96),
-            right: s(470),
-            bottom: s(152),
-        },
-        s(50),
-        800,
-        INK,
-        DT_LEFT | DT_SINGLELINE,
-    );
-    text_face(
-        dc,
-        "More play.",
-        RECT {
-            left: s(26),
-            top: s(148),
-            right: s(470),
-            bottom: s(204),
-        },
-        s(50),
-        INK,
-        DT_LEFT | DT_SINGLELINE,
-        w!("Figtree ExtraBold"),
-        0,
-        true,
-    );
+    // The headline, solid ink with the last line in cobalt.
+    for (index, (line, color)) in [
+        ("One tap away", INK),
+        ("from dominating", INK),
+        ("every match.", COBALT),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let top = 84 + index as i32 * 44;
+        text(
+            dc,
+            line,
+            RECT {
+                left: s(26),
+                top: s(top),
+                right: s(470),
+                bottom: s(top + 52),
+            },
+            s(40),
+            800,
+            color,
+            DT_LEFT | DT_SINGLELINE,
+        );
+    }
 
-    // The app chooser's track and the line that says what the choice means.
-    // Its two halves are owner-drawn buttons painted over the track.
+    // What the chooser is for, and what the chosen app includes. The chooser
+    // itself is its two halves' buttons.
     if crate::MSI_NAME == "SwiftTunnel-Installer.msi" {
         mono(
             dc,
             "CHOOSE YOUR APP",
             RECT {
                 left: s(28),
-                top: s(222),
+                top: s(234),
                 right: s(330),
-                bottom: s(236),
+                bottom: s(248),
             },
             s(10),
             INK_SOFT,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER,
         );
-        paint_chooser_frame(dc, dpi);
         text(
             dc,
             if state.shows_lite() {
@@ -473,9 +512,9 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             },
             RECT {
                 left: s(28),
-                top: s(290),
+                top: s(300),
                 right: s(460),
-                bottom: s(310),
+                bottom: s(318),
             },
             s(12),
             400,
@@ -657,13 +696,30 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
 fn chooser_rect(dpi: u32) -> RECT {
     RECT {
         left: scaled(28, dpi),
-        top: scaled(242, dpi),
+        top: scaled(254, dpi),
         right: scaled(348, dpi),
-        bottom: scaled(282, dpi),
+        bottom: scaled(292, dpi),
     }
 }
 
-/// One half of the chooser: the full app (0) or Lite (1).
+/// The part of the track each half's button covers: the full app (0) or Lite (1).
+fn half_rect(index: usize, dpi: u32) -> RECT {
+    let track = chooser_rect(dpi);
+    let middle = segment_rect(1, dpi).left;
+    if index == 0 {
+        RECT {
+            right: middle,
+            ..track
+        }
+    } else {
+        RECT {
+            left: middle,
+            ..track
+        }
+    }
+}
+
+/// Where the pill sits under one half's label.
 fn segment_rect(index: usize, dpi: u32) -> RECT {
     let track = chooser_rect(dpi);
     let inset = scaled(4, dpi);
@@ -677,23 +733,127 @@ fn segment_rect(index: usize, dpi: u32) -> RECT {
     }
 }
 
-unsafe fn paint_chooser_frame(dc: HDC, dpi: u32) {
-    let track = chooser_rect(dpi);
-    drawing::rounded(dc, track, scaled(9, dpi) as f32, 0xa6ffffff);
-    drawing::rounded_outline(
-        dc,
-        track,
-        scaled(9, dpi) as f32,
-        INK_HAIRLINE,
-        scaled(1, dpi) as f32,
-    );
+/// The pill at `position`: 0 under the full app, 1 under Lite.
+fn pill_rect(position: f32, dpi: u32) -> RECT {
+    let (first, second) = (segment_rect(0, dpi), segment_rect(1, dpi));
+    let offset = ((second.left - first.left) as f32 * position).round() as i32;
+    RECT {
+        left: first.left + offset,
+        right: first.right + offset,
+        ..first
+    }
 }
 
-// Paint the corresponding background under owner-drawn buttons, so rounded
-// corners have no rectangular card or contrasting box behind them.
-unsafe fn paint_control_background(dc: HDC, dpi: u32, left: i32, top: i32) {
+/// The whole chooser, in window coordinates: the glass track, both labels and
+/// the ink pill. Each half's button paints its own slice of it, so the pill
+/// slides across both, and a label turns white wherever the pill is under it.
+unsafe fn paint_chooser(dc: HDC, dpi: u32, state: &State, focus: Option<usize>) {
+    let track = chooser_rect(dpi);
+    let radius = scaled(9, dpi) as f32;
+    drawing::rounded(dc, track, radius, 0xa6ffffff);
+    drawing::rounded_outline(dc, track, radius, INK_HAIRLINE, scaled(1, dpi) as f32);
+    let pill = pill_rect(state.pill_position(), dpi);
+    let locked = !state.can_choose();
+    let labels = |color: COLORREF| {
+        for (index, label) in ["SwiftTunnel", "SwiftTunnel Lite"].iter().enumerate() {
+            text(
+                dc,
+                label,
+                segment_rect(index, dpi),
+                scaled(13, dpi),
+                600,
+                color,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+        }
+    };
     let saved = SaveDC(dc);
-    let _ = SetViewportOrgEx(dc, -left, -top, None);
+    let _ = ExcludeClipRect(dc, pill.left, pill.top, pill.right, pill.bottom);
+    labels(if locked { COLORREF(0x9a8f8a) } else { INK });
+    let _ = RestoreDC(dc, saved);
+    // A switch that is running keeps its pill dark; anything else that locks
+    // the chooser greys it.
+    let pill_color = if locked && state.switching_to_lite.is_none() {
+        0x990a0b14
+    } else {
+        INK_ARGB
+    };
+    drawing::rounded(dc, pill, scaled(6, dpi) as f32, pill_color);
+    let saved = SaveDC(dc);
+    let _ = IntersectClipRect(dc, pill.left, pill.top, pill.right, pill.bottom);
+    labels(WHITE);
+    let _ = RestoreDC(dc, saved);
+    if let Some(index) = focus {
+        drawing::rounded_outline(
+            dc,
+            segment_rect(index, dpi),
+            scaled(6, dpi) as f32,
+            0xff2747e6,
+            scaled(2, dpi) as f32,
+        );
+    }
+}
+
+/// Where a control sits in the window.
+fn control_rect(id: usize, dpi: u32, state: &State) -> RECT {
+    match id {
+        MINIMIZE_ID | CLOSE_ID => window_button_rect(id - MINIMIZE_ID, dpi),
+        PRODUCT_ID | LITE_ID => half_rect(id - PRODUCT_ID, dpi),
+        DETAILS_ID => details_rect(dpi),
+        _ => action_rect(id.wrapping_sub(100), &visible_actions(state), dpi),
+    }
+}
+
+/// The text on an action or the Details button.
+fn item_label(id: usize, state: &State) -> &'static str {
+    match id {
+        DETAILS_ID => "Details",
+        100 if !state.installed.is_empty() => "Update",
+        _ => LABELS.get(id.wrapping_sub(100)).copied().unwrap_or(""),
+    }
+}
+
+/// Paints into an off-screen copy of `rect`, then copies it to `dc` in one
+/// step, so nothing half-drawn reaches the screen.
+unsafe fn buffered(dc: HDC, rect: RECT, draw: impl FnOnce(HDC, RECT)) {
+    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let surface = CreateCompatibleDC(Some(dc));
+    let bitmap = CreateCompatibleBitmap(dc, w, h);
+    let previous = SelectObject(surface, bitmap.into());
+    draw(
+        surface,
+        RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        },
+    );
+    let _ = BitBlt(dc, rect.left, rect.top, w, h, Some(surface), 0, 0, SRCCOPY);
+    SelectObject(surface, previous);
+    let _ = DeleteObject(bitmap.into());
+    let _ = DeleteDC(surface);
+}
+
+/// One owner-drawn control, in its own coordinates. Its background is the
+/// window's artwork under it, and the chooser's halves add their slice of the
+/// chooser, so rounded corners have no box behind them.
+unsafe fn paint_item(
+    dc: HDC,
+    bounds: RECT,
+    dpi: u32,
+    state: &State,
+    id: usize,
+    disabled: bool,
+    pressed: bool,
+    focused: bool,
+) {
+    let place = control_rect(id, dpi, state);
+    let saved = SaveDC(dc);
+    let _ = SetViewportOrgEx(dc, -place.left, -place.top, None);
     artwork::paint(
         dc,
         RECT {
@@ -703,59 +863,25 @@ unsafe fn paint_control_background(dc: HDC, dpi: u32, left: i32, top: i32) {
             bottom: scaled(HEIGHT, dpi),
         },
     );
-    let _ = RestoreDC(dc, saved);
-}
-
-/// A chooser half sits on the glass track, so its background is the artwork
-/// with that slice of the track painted over it.
-unsafe fn paint_segment_background(dc: HDC, dpi: u32, left: i32, top: i32) {
-    paint_control_background(dc, dpi, left, top);
-    let saved = SaveDC(dc);
-    let _ = SetViewportOrgEx(dc, -left, -top, None);
-    paint_chooser_frame(dc, dpi);
-    let _ = RestoreDC(dc, saved);
-}
-
-unsafe fn paint_segment(
-    dc: HDC,
-    bounds: RECT,
-    dpi: u32,
-    label: &str,
-    active: bool,
-    disabled: bool,
-    focused: bool,
-) {
-    if active {
-        drawing::rounded(
-            dc,
-            bounds,
-            scaled(6, dpi) as f32,
-            if disabled { 0x990a0b14 } else { INK_ARGB },
-        );
+    if id == PRODUCT_ID || id == LITE_ID {
+        paint_chooser(dc, dpi, state, focused.then_some(id - PRODUCT_ID));
     }
-    text(
-        dc,
-        label,
-        bounds,
-        scaled(13, dpi),
-        600,
-        if active {
-            WHITE
-        } else if disabled {
-            COLORREF(0x9a8f8a)
-        } else {
-            INK
-        },
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-    if focused {
-        drawing::rounded_outline(
+    let _ = RestoreDC(dc, saved);
+    match id {
+        PRODUCT_ID | LITE_ID => {}
+        MINIMIZE_ID | CLOSE_ID => {
+            paint_window_button(dc, bounds, dpi, id == CLOSE_ID, pressed, focused)
+        }
+        _ => paint_button(
             dc,
             bounds,
-            scaled(6, dpi) as f32,
-            0xff2747e6,
-            scaled(2, dpi) as f32,
-        );
+            dpi,
+            item_label(id, state),
+            disabled,
+            false,
+            pressed,
+            focused,
+        ),
     }
 }
 
@@ -934,32 +1060,47 @@ pub unsafe fn paint_preview(dc: HDC, bounds: RECT, dpi: u32, existing: bool) {
         vec![]
     };
     state.ready(package, installed);
-    paint(dc, bounds, dpi, &state);
-    let visible = visible_actions(&state);
-    for &i in &visible {
-        let rect = action_rect(i, &visible, dpi);
-        paint_button(
-            dc,
-            rect,
-            dpi,
-            if i == 0 && existing {
-                "Update"
-            } else {
-                LABELS[i]
-            },
-            false,
-            false,
-            false,
-            false,
-        );
-    }
-    for i in 0..2 {
-        paint_window_button(dc, window_button_rect(i, dpi), dpi, i == 1, false, false);
+    paint_composed(dc, bounds, dpi, &state, None);
+}
+
+/// Everything the window shows for a state, composed as the window composes
+/// it: its own paint, then each visible control painted the way WM_DRAWITEM
+/// paints it. `focus` is the control with keyboard focus, if any.
+#[cfg(any(test, debug_assertions))]
+#[allow(dead_code)]
+unsafe fn paint_composed(dc: HDC, bounds: RECT, dpi: u32, state: &State, focus: Option<usize>) {
+    paint(dc, bounds, dpi, state);
+    let mut controls: Vec<(usize, bool)> = visible_actions(state)
+        .into_iter()
+        .map(|i| (100 + i, state.busy))
+        .collect();
+    controls.extend([(MINIMIZE_ID, false), (CLOSE_ID, false)]);
+    if state.exit_code != 0 {
+        controls.push((DETAILS_ID, false));
     }
     if crate::MSI_NAME == "SwiftTunnel-Installer.msi" {
-        for (i, label) in ["SwiftTunnel", "SwiftTunnel Lite"].iter().enumerate() {
-            paint_segment(dc, segment_rect(i, dpi), dpi, label, i == 0, false, false);
-        }
+        controls.extend([(PRODUCT_ID, false), (LITE_ID, false)]);
+    }
+    for (id, disabled) in controls {
+        let rect = control_rect(id, dpi, state);
+        let rect = RECT {
+            left: rect.left + bounds.left,
+            top: rect.top + bounds.top,
+            right: rect.right + bounds.left,
+            bottom: rect.bottom + bounds.top,
+        };
+        buffered(dc, rect, |surface, local| {
+            paint_item(
+                surface,
+                local,
+                dpi,
+                state,
+                id,
+                disabled,
+                false,
+                focus == Some(id),
+            )
+        });
     }
 }
 
@@ -981,12 +1122,13 @@ unsafe fn update_buttons(hwnd: HWND, state: &State) {
             },
         );
         if index == 0 {
-            let label = if state.installed.is_empty() {
-                "Install"
-            } else {
-                "Update"
-            };
-            let _ = SetWindowTextW(*button, PCWSTR(wide(label).as_ptr()));
+            // Setting the same text still repaints the button, so only change it.
+            let label = item_label(100, state);
+            let mut current = [0u16; 16];
+            let length = GetWindowTextW(*button, &mut current).max(0) as usize;
+            if String::from_utf16_lossy(&current[..length]) != label {
+                let _ = SetWindowTextW(*button, PCWSTR(wide(label).as_ptr()));
+            }
         }
     }
     if let Some(button) = state.details_button {
@@ -1001,38 +1143,53 @@ unsafe fn update_buttons(hwnd: HWND, state: &State) {
     }
     for button in &state.product_buttons {
         let _ = EnableWindow(*button, state.can_choose());
-        // Owner-drawn: the active half follows the choice, so repaint both.
+        // Owner-drawn: the pill follows the choice, so repaint both halves.
         let _ = InvalidateRect(Some(*button), None, false);
     }
     layout(hwnd, state);
     let _ = InvalidateRect(Some(hwnd), None, false);
 }
 
+/// Moves a control only when it is not already in place: moving repaints it.
+unsafe fn place(parent: HWND, control: HWND, rect: RECT) {
+    let mut current = RECT::default();
+    let _ = GetWindowRect(control, &mut current);
+    let mut origin = POINT {
+        x: current.left,
+        y: current.top,
+    };
+    let _ = ScreenToClient(parent, &mut origin);
+    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+    if origin.x != rect.left
+        || origin.y != rect.top
+        || current.right - current.left != width
+        || current.bottom - current.top != height
+    {
+        let _ = MoveWindow(control, rect.left, rect.top, width, height, true);
+    }
+}
+
 unsafe fn layout(hwnd: HWND, state: &State) {
     let dpi = GetDpiForWindow(hwnd).max(96);
     let visible = visible_actions(state);
     for (i, button) in state.product_buttons.iter().enumerate() {
-        let r = segment_rect(i, dpi);
-        let _ = MoveWindow(
-            *button,
-            r.left,
-            r.top,
-            r.right - r.left,
-            r.bottom - r.top,
-            true,
-        );
+        place(hwnd, *button, half_rect(i, dpi));
     }
     for (i, button) in state.buttons.iter().enumerate() {
-        let r = action_rect(i, &visible, dpi);
-        let _ = MoveWindow(
-            *button,
-            r.left,
-            r.top,
-            r.right - r.left,
-            r.bottom - r.top,
-            true,
-        );
+        place(hwnd, *button, action_rect(i, &visible, dpi));
     }
+    for (i, button) in state.window_buttons.iter().enumerate() {
+        place(hwnd, *button, window_button_rect(i, dpi));
+    }
+    if let Some(button) = state.details_button {
+        place(hwnd, button, details_rect(dpi));
+    }
+}
+
+/// The window's rounded outline. Set when the window's size is, not on every
+/// refresh, since setting it redraws the whole window.
+unsafe fn shape(hwnd: HWND) {
+    let dpi = GetDpiForWindow(hwnd).max(96);
     let region = CreateRoundRectRgn(
         0,
         0,
@@ -1044,27 +1201,17 @@ unsafe fn layout(hwnd: HWND, state: &State) {
     if SetWindowRgn(hwnd, Some(region), true) == 0 {
         let _ = DeleteObject(region.into());
     }
-    for (i, button) in state.window_buttons.iter().enumerate() {
-        let rect = window_button_rect(i, dpi);
-        let _ = MoveWindow(
-            *button,
-            rect.left,
-            rect.top,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
-            true,
-        );
-    }
-    if let Some(button) = state.details_button {
-        let r = details_rect(dpi);
-        let _ = MoveWindow(
-            button,
-            r.left,
-            r.top,
-            r.right - r.left,
-            r.bottom - r.top,
-            true,
-        );
+}
+
+/// Brings the controls in line with State after a change. Callers release
+/// their mutable borrow first: this takes a shared one, so a control that
+/// repaints at once can still read State.
+unsafe fn refresh(hwnd: HWND, cell: &RefCell<State>) {
+    if let Ok(state) = cell.try_borrow() {
+        update_buttons(hwnd, &state);
+        if state.sliding() {
+            SetTimer(Some(hwnd), SLIDE_TIMER, 10, None);
+        }
     }
 }
 
@@ -1123,7 +1270,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
     // Windows can synchronously reenter this procedure during child creation,
     // layout and dialogs. Never create overlapping mutable State references.
     if msg == WM_DESTROY {
-        let _ = KillTimer(Some(hwnd), 1);
+        let _ = KillTimer(Some(hwnd), EVENT_TIMER);
+        let _ = KillTimer(Some(hwnd), SLIDE_TIMER);
         PostQuitMessage(0);
         return LRESULT(0);
     }
@@ -1148,11 +1296,86 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             return LRESULT(0);
         }
     }
+    // Painting only reads State, through a shared borrow, so a control that
+    // repaints in the middle of a refresh can still read it.
+    match msg {
+        WM_PAINT | WM_DRAWITEM => {
+            let Ok(state) = (*ptr).try_borrow() else {
+                return DefWindowProcW(hwnd, msg, wp, lp);
+            };
+            let dpi = GetDpiForWindow(hwnd).max(96);
+            if msg == WM_PAINT {
+                let mut ps = PAINTSTRUCT::default();
+                let dc = BeginPaint(hwnd, &mut ps);
+                let mut bounds = RECT::default();
+                let _ = GetClientRect(hwnd, &mut bounds);
+                buffered(dc, bounds, |dc, bounds| paint(dc, bounds, dpi, &state));
+                let _ = EndPaint(hwnd, &ps);
+                return LRESULT(0);
+            }
+            let item = &*(lp.0 as *const DRAWITEMSTRUCT);
+            let flag = |value: u32| item.itemState.0 & value != 0;
+            buffered(item.hDC, item.rcItem, |dc, bounds| {
+                paint_item(
+                    dc,
+                    bounds,
+                    dpi,
+                    &state,
+                    item.CtlID as usize,
+                    flag(ODS_DISABLED.0),
+                    flag(ODS_SELECTED.0),
+                    flag(ODS_FOCUS.0),
+                )
+            });
+            return LRESULT(1);
+        }
+        // Owner-drawn buttons paint their own background; nothing erases it first.
+        WM_CTLCOLORBTN => return LRESULT(GetStockObject(NULL_BRUSH).0 as isize),
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_DPICHANGED => {
+            let rect = &*(lp.0 as *const RECT);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            shape(hwnd);
+            refresh(hwnd, &*ptr);
+            return LRESULT(0);
+        }
+        WM_TIMER if wp.0 == SLIDE_TIMER => {
+            // Move the clock on, then repaint both halves as of it.
+            let sliding = match (*ptr).try_borrow_mut() {
+                Ok(mut state) => {
+                    state.frame = Instant::now();
+                    state.sliding()
+                }
+                Err(_) => true,
+            };
+            if let Ok(state) = (*ptr).try_borrow() {
+                for button in &state.product_buttons {
+                    let _ = InvalidateRect(Some(*button), None, false);
+                }
+            }
+            if !sliding {
+                let _ = KillTimer(Some(hwnd), SLIDE_TIMER);
+            }
+            return LRESULT(0);
+        }
+        WM_CREATE | WM_TIMER | WM_COMMAND => {}
+        _ => return DefWindowProcW(hwnd, msg, wp, lp),
+    }
+    // These change State. The mutable borrow ends before the controls are
+    // refreshed, since refreshing can repaint them on the spot.
     let Ok(mut guard) = (*ptr).try_borrow_mut() else {
         return DefWindowProcW(hwnd, msg, wp, lp);
     };
     let state = &mut *guard;
-    match msg {
+    let result = match msg {
         WM_CREATE => {
             let dark = 1i32;
             let _ = DwmSetWindowAttribute(
@@ -1244,9 +1467,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     }
                 }
             }
-            layout(hwnd, state);
-            update_buttons(hwnd, state);
-            SetTimer(Some(hwnd), 1, 150, None);
+            SetTimer(Some(hwnd), EVENT_TIMER, 150, None);
             LRESULT(0)
         }
         WM_TIMER => {
@@ -1255,9 +1476,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     Ok(event) => event,
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        if state.worker_stopped() {
-                            update_buttons(hwnd, state);
-                        }
+                        state.shift(|s| {
+                            s.worker_stopped();
+                        });
                         break;
                     }
                 };
@@ -1265,7 +1486,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                     Event::Progress(status) => {
                         state.heading = status;
                     }
-                    Event::Ready(package, installed) => state.ready(package, installed),
+                    Event::Ready(package, installed) => {
+                        state.shift(|s| s.ready(package, installed));
+                    }
                     Event::Finished(action, code, installed) => {
                         state.installed = installed;
                         state.busy = false;
@@ -1277,15 +1500,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                         state.detail = message;
                     }
                     Event::Failed(error) => {
-                        state.exit_code = 1;
-                        state.busy = false;
-                        state.installing = false;
-                        state.switching_to_lite = None;
+                        state.shift(|s| {
+                            s.exit_code = 1;
+                            s.busy = false;
+                            s.installing = false;
+                            s.switching_to_lite = None;
+                        });
                         state.heading = "Setup needs attention".into();
                         state.detail = error;
                     }
                 }
-                update_buttons(hwnd, state);
             }
             LRESULT(0)
         }
@@ -1299,35 +1523,34 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 _ => None,
             };
             if let Some(wants_lite) = wants_lite {
-                if state.product_buttons.is_empty()
-                    || !state.can_choose()
-                    || wants_lite == state.lite_selected()
+                if !state.product_buttons.is_empty()
+                    && state.can_choose()
+                    && wants_lite != state.lite_selected()
                 {
-                    return LRESULT(0);
-                }
-                let command = if wants_lite {
-                    Command::DownloadLite
-                } else {
-                    Command::UseBundled
-                };
-                if state.commands.send(command).is_ok() {
-                    state.busy = true;
-                    state.exit_code = 0;
-                    state.switching_to_lite = Some(wants_lite);
-                    state.heading = if command == Command::UseBundled {
-                        "Switching to SwiftTunnel".into()
+                    let command = if wants_lite {
+                        Command::DownloadLite
                     } else {
-                        "Getting SwiftTunnel Lite".into()
+                        Command::UseBundled
                     };
-                } else {
-                    state.exit_code = 1;
-                    state.heading = "Please reopen Setup".into();
-                    state.detail = "The installer worker is unavailable.".into();
+                    if state.commands.send(command).is_ok() {
+                        state.shift(|s| {
+                            s.busy = true;
+                            s.exit_code = 0;
+                            s.switching_to_lite = Some(wants_lite);
+                        });
+                        state.heading = if wants_lite {
+                            "Getting SwiftTunnel Lite"
+                        } else {
+                            "Switching to SwiftTunnel"
+                        }
+                        .into();
+                    } else {
+                        state.exit_code = 1;
+                        state.heading = "Please reopen Setup".into();
+                        state.detail = "The installer worker is unavailable.".into();
+                    }
                 }
-                update_buttons(hwnd, state);
-                return LRESULT(0);
-            }
-            if (100..104).contains(&id) && !state.busy && !state.reboot_required {
+            } else if (100..104).contains(&id) && !state.busy && !state.reboot_required {
                 let action = ACTIONS[id - 100];
                 if state
                     .package
@@ -1347,101 +1570,21 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                             "The installer worker is unavailable. Close this window and try again."
                                 .into();
                     }
-                    update_buttons(hwnd, state);
                 }
             }
             LRESULT(0)
         }
-        WM_DRAWITEM => {
-            let item = &*(lp.0 as *const DRAWITEMSTRUCT);
-            if item.CtlID as usize == MINIMIZE_ID || item.CtlID as usize == CLOSE_ID {
-                let dpi = GetDpiForWindow(hwnd).max(96);
-                let rect = window_button_rect(item.CtlID as usize - MINIMIZE_ID, dpi);
-                paint_control_background(item.hDC, dpi, rect.left, rect.top);
-                paint_window_button(
-                    item.hDC,
-                    item.rcItem,
-                    GetDpiForWindow(hwnd).max(96),
-                    item.CtlID as usize == CLOSE_ID,
-                    (item.itemState.0 & ODS_SELECTED.0) != 0,
-                    (item.itemState.0 & ODS_FOCUS.0) != 0,
-                );
-                return LRESULT(1);
-            }
-            let dpi = GetDpiForWindow(hwnd).max(96);
-            let id = item.CtlID as usize;
-            if id == PRODUCT_ID || id == LITE_ID {
-                let index = id - PRODUCT_ID;
-                let rect = segment_rect(index, dpi);
-                paint_segment_background(item.hDC, dpi, rect.left, rect.top);
-                paint_segment(
-                    item.hDC,
-                    item.rcItem,
-                    dpi,
-                    if index == 0 {
-                        "SwiftTunnel"
-                    } else {
-                        "SwiftTunnel Lite"
-                    },
-                    (index == 1) == state.shows_lite(),
-                    (item.itemState.0 & ODS_DISABLED.0) != 0,
-                    (item.itemState.0 & ODS_FOCUS.0) != 0,
-                );
-                return LRESULT(1);
-            }
-            let pos = if id == DETAILS_ID {
-                details_rect(dpi)
-            } else {
-                action_rect(
-                    item.CtlID.saturating_sub(100) as usize,
-                    &visible_actions(state),
-                    dpi,
-                )
-            };
-            paint_control_background(item.hDC, dpi, pos.left, pos.top);
-            let disabled = (item.itemState.0 & ODS_DISABLED.0) != 0;
-            let primary = false;
-            let pressed = (item.itemState.0 & ODS_SELECTED.0) != 0;
-            let mut label = [0u16; 64];
-            let count = GetWindowTextW(item.hwndItem, &mut label);
-            paint_button(
-                item.hDC,
-                item.rcItem,
-                GetDpiForWindow(hwnd).max(96),
-                &String::from_utf16_lossy(&label[..count.max(0) as usize]),
-                disabled,
-                primary,
-                pressed,
-                (item.itemState.0 & ODS_FOCUS.0) != 0,
-            );
-            LRESULT(1)
-        }
-        WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let dc = BeginPaint(hwnd, &mut ps);
-            let mut bounds = RECT::default();
-            let _ = GetClientRect(hwnd, &mut bounds);
-            paint(dc, bounds, GetDpiForWindow(hwnd).max(96), state);
-            let _ = EndPaint(hwnd, &ps);
-            LRESULT(0)
-        }
-        WM_ERASEBKGND => LRESULT(1),
-        WM_DPICHANGED => {
-            let rect = &*(lp.0 as *const RECT);
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                rect.left,
-                rect.top,
-                rect.right - rect.left,
-                rect.bottom - rect.top,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
-            layout(hwnd, state);
-            LRESULT(0)
-        }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
+    };
+    drop(guard);
+    if msg == WM_CREATE {
+        if result.0 == -1 {
+            return result;
+        }
+        shape(hwnd);
     }
+    refresh(hwnd, &*ptr);
+    result
 }
 
 pub fn run(state: Box<State>) -> Result<i32, String> {
@@ -1538,97 +1681,6 @@ pub fn run(state: Box<State>) -> Result<i32, String> {
 mod tests {
     use super::*;
 
-    /// Paints one owner-drawn control as WM_DRAWITEM does: on a surface of its
-    /// own, in its own coordinates, then copied into place.
-    unsafe fn paint_control(dc: HDC, rect: RECT, draw: &dyn Fn(HDC, RECT)) {
-        let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
-        let surface = CreateCompatibleDC(Some(dc));
-        let bitmap = CreateCompatibleBitmap(dc, w, h);
-        let previous = SelectObject(surface, bitmap.into());
-        draw(
-            surface,
-            RECT {
-                left: 0,
-                top: 0,
-                right: w,
-                bottom: h,
-            },
-        );
-        let _ = BitBlt(dc, rect.left, rect.top, w, h, Some(surface), 0, 0, SRCCOPY);
-        SelectObject(surface, previous);
-        let _ = DeleteObject(bitmap.into());
-        let _ = DeleteDC(surface);
-    }
-
-    /// Everything the window shows for a state, composed the way the window
-    /// composes it: the painted background, then each visible control.
-    unsafe fn paint_screen(dc: HDC, bounds: RECT, dpi: u32, state: &State, focus: Option<usize>) {
-        paint(dc, bounds, dpi, state);
-        let visible = visible_actions(state);
-        let mut buttons: Vec<(usize, RECT, &str)> = visible
-            .iter()
-            .map(|&i| {
-                let label = if i == 0 && !state.installed.is_empty() {
-                    "Update"
-                } else {
-                    LABELS[i]
-                };
-                (100 + i, action_rect(i, &visible, dpi), label)
-            })
-            .collect();
-        if state.exit_code != 0 {
-            buttons.push((DETAILS_ID, details_rect(dpi), "Details"));
-        }
-        for (id, rect, label) in buttons {
-            paint_control(dc, rect, &|surface, local| {
-                paint_control_background(surface, dpi, rect.left, rect.top);
-                let disabled = state.busy && id != DETAILS_ID;
-                paint_button(
-                    surface,
-                    local,
-                    dpi,
-                    label,
-                    disabled,
-                    false,
-                    false,
-                    focus == Some(id),
-                );
-            });
-        }
-        for i in 0..2 {
-            let rect = window_button_rect(i, dpi);
-            paint_control(dc, rect, &|surface, local| {
-                paint_control_background(surface, dpi, rect.left, rect.top);
-                paint_window_button(
-                    surface,
-                    local,
-                    dpi,
-                    i == 1,
-                    false,
-                    focus == Some(MINIMIZE_ID + i),
-                );
-            });
-        }
-        if crate::MSI_NAME == "SwiftTunnel-Installer.msi" {
-            for (i, label) in ["SwiftTunnel", "SwiftTunnel Lite"].iter().enumerate() {
-                let rect = segment_rect(i, dpi);
-                paint_control(dc, rect, &|surface, local| {
-                    paint_segment_background(surface, dpi, rect.left, rect.top);
-                    let active = (i == 1) == state.shows_lite();
-                    paint_segment(
-                        surface,
-                        local,
-                        dpi,
-                        label,
-                        active,
-                        !state.can_choose(),
-                        focus == Some(PRODUCT_ID + i),
-                    );
-                });
-            }
-        }
-    }
-
     unsafe fn render_png(state: &State, dpi: u32, focus: Option<usize>, path: &std::path::Path) {
         let (w, h) = (scaled(WIDTH, dpi), scaled(HEIGHT, dpi));
         let screen = GetDC(None);
@@ -1648,7 +1700,7 @@ mod tests {
         let mut bits = std::ptr::null_mut();
         let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
         let previous = SelectObject(dc, bitmap.into());
-        paint_screen(
+        paint_composed(
             dc,
             RECT {
                 left: 0,
@@ -1661,6 +1713,15 @@ mod tests {
             focus,
         );
         let _ = GdiFlush();
+        write_png(path, w, h, bits);
+        SelectObject(dc, previous);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(dc);
+        ReleaseDC(None, screen);
+    }
+
+    /// Saves top-down 32-bit BGRA pixels as a PNG.
+    unsafe fn write_png(path: &std::path::Path, w: i32, h: i32, bits: *const std::ffi::c_void) {
         let pixels = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize);
         let rgba: Vec<u8> = pixels
             .chunks_exact(4)
@@ -1675,10 +1736,167 @@ mod tests {
             .unwrap()
             .write_image_data(&rgba)
             .unwrap();
+    }
+
+    /// Copies what a live window currently shows, children included.
+    unsafe fn capture_window(hwnd: HWND, path: &std::path::Path) {
+        let mut client = RECT::default();
+        let _ = GetClientRect(hwnd, &mut client);
+        let (w, h) = (client.right, client.bottom);
+        let window = GetDC(Some(hwnd));
+        let dc = CreateCompatibleDC(Some(window));
+        let info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits = std::ptr::null_mut();
+        let bitmap = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
+        let previous = SelectObject(dc, bitmap.into());
+        let _ = BitBlt(dc, 0, 0, w, h, Some(window), 0, 0, SRCCOPY);
+        let _ = GdiFlush();
+        write_png(path, w, h, bits);
         SelectObject(dc, previous);
         let _ = DeleteObject(bitmap.into());
         let _ = DeleteDC(dc);
-        ReleaseDC(None, screen);
+        ReleaseDC(Some(hwnd), window);
+    }
+
+    /// Design review: drives the real window through a switch to Lite and back
+    /// and saves what it shows along the way.
+    /// SETUP_PREVIEW_DIR=<dir> cargo test -p swifttunnel-setup live_switch -- --ignored
+    #[test]
+    #[ignore]
+    fn live_switch() {
+        let Ok(dir) = std::env::var("SETUP_PREVIEW_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let package = |lite: bool| Package {
+            name: if lite {
+                "SwiftTunnel Lite"
+            } else {
+                "SwiftTunnel"
+            }
+            .into(),
+            version: "3.1.6".into(),
+            product_code: if lite { "lite" } else { "full" }.into(),
+            upgrade_code: if lite {
+                LITE_FAMILY.into()
+            } else {
+                crate::model::DESKTOP_FAMILY.into()
+            },
+        };
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            fonts::install();
+            let instance = GetModuleHandleW(None).unwrap();
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: instance.into(),
+                lpszClassName: w!("SwiftTunnelSetupLiveTest"),
+                hCursor: LoadCursorW(None, IDC_ARROW).unwrap(),
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassW(&class), 0);
+            let (commands, actions) = std::sync::mpsc::channel();
+            let (events, updates) = std::sync::mpsc::channel();
+            let state = Box::new(RefCell::new(State::new(commands, updates)));
+            let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem();
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class.lpszClassName,
+                w!("Setup live test"),
+                WINDOW_STYLE_SETUP,
+                40,
+                40,
+                scaled(WIDTH, dpi),
+                scaled(HEIGHT, dpi),
+                None,
+                None,
+                Some(instance.into()),
+                Some((state.as_ref() as *const RefCell<State>).cast()),
+            )
+            .unwrap();
+            // On screen so it paints, but behind every other window.
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_BOTTOM),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            let pump = |ms: u64| {
+                let end = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+                let mut message = MSG::default();
+                while std::time::Instant::now() < end {
+                    while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            };
+            let frames = |name: &str, count: usize, every: u64| {
+                for i in 0..count {
+                    pump(every);
+                    capture_window(hwnd, &dir.join(format!("live-{name}-{i}.png")));
+                }
+            };
+            events.send(Event::Ready(package(false), vec![])).unwrap();
+            pump(600);
+            capture_window(hwnd, &dir.join("live-a-full.png"));
+            SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(LITE_ID)), Some(LPARAM(0)));
+            assert_eq!(actions.try_recv().unwrap(), Command::DownloadLite);
+            frames("b-click", 8, 30);
+            events.send(Event::Ready(package(true), vec![])).unwrap();
+            frames("c-ready", 8, 30);
+            SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(PRODUCT_ID)), Some(LPARAM(0)));
+            assert_eq!(actions.try_recv().unwrap(), Command::UseBundled);
+            events.send(Event::Ready(package(false), vec![])).unwrap();
+            frames("d-back", 8, 30);
+            // What one repaint of everything, and of one chooser half, costs.
+            let timed = |window: HWND, flags: REDRAW_WINDOW_FLAGS| {
+                let start = std::time::Instant::now();
+                for _ in 0..20 {
+                    let _ = RedrawWindow(Some(window), None, None, flags);
+                }
+                start.elapsed() / 20
+            };
+            let everything = RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN;
+            let half = state.borrow().product_buttons[1];
+            let objects = || {
+                windows::Win32::System::Threading::GetGuiResources(
+                    windows::Win32::System::Threading::GetCurrentProcess(),
+                    windows::Win32::System::Threading::GR_GDIOBJECTS,
+                )
+            };
+            let before = objects();
+            println!(
+                "full repaint {:?}, window alone {:?}, chooser half {:?}",
+                timed(hwnd, everything),
+                timed(hwnd, RDW_INVALIDATE | RDW_UPDATENOW),
+                timed(half, RDW_INVALIDATE | RDW_UPDATENOW)
+            );
+            // Forty repaints later, no GDI objects have been left behind.
+            assert!(
+                objects() <= before,
+                "{} GDI objects, was {before}",
+                objects()
+            );
+            let _ = DestroyWindow(hwnd);
+            pump(50);
+        }
     }
 
     /// Design review: renders every screen to PNG.
@@ -1774,6 +1992,21 @@ mod tests {
                     s.ready(package(false), installed("3.1.6", "preview"));
                 }),
             ),
+            (
+                "10-sliding",
+                None,
+                Box::new(move |s: &mut State| {
+                    s.ready(package(false), vec![]);
+                    s.shift(|s| {
+                        s.busy = true;
+                        s.switching_to_lite = Some(true);
+                    });
+                    s.heading = "Getting SwiftTunnel Lite".into();
+                    // A third of the way through the slide.
+                    s.slide = Some((0.0, Instant::now() - SLIDE / 3));
+                    s.frame = Instant::now();
+                }),
+            ),
         ];
         fonts::install();
         for dpi in [96u32, 144] {
@@ -1786,6 +2019,42 @@ mod tests {
                 unsafe { render_png(&state, dpi, *focus, &path) };
             }
         }
+    }
+
+    #[test]
+    fn chooser_pill_slides_from_where_it_is_to_the_chosen_half() {
+        let (commands, _) = std::sync::mpsc::channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut state = State::new(commands, events);
+        state.ready(
+            Package {
+                name: "SwiftTunnel".into(),
+                version: "3.1.6".into(),
+                product_code: "full".into(),
+                upgrade_code: crate::model::DESKTOP_FAMILY.into(),
+            },
+            vec![],
+        );
+        assert_eq!(state.pill_position(), 0.0);
+        state.shift(|s| s.switching_to_lite = Some(true));
+        // Until the animation clock moves on, the pill stays where it was.
+        assert_eq!(state.pill_position(), 0.0);
+        assert!(state.sliding());
+        // Halfway through, it has covered most of the way and is slowing down.
+        state.slide = Some((0.0, Instant::now() - SLIDE / 2));
+        state.frame = Instant::now();
+        let halfway = state.pill_position();
+        assert!(halfway > 0.8 && halfway < 0.95, "{halfway}");
+        // Turning back mid-slide starts from where the pill is, not a half.
+        state.shift(|s| s.switching_to_lite = None);
+        assert_eq!(state.pill_position(), halfway);
+        state.frame = Instant::now() + SLIDE;
+        assert_eq!(state.pill_position(), 0.0);
+        assert!(!state.sliding());
+        // A change that keeps the same half does not start a slide.
+        state.slide = None;
+        state.shift(|s| s.heading = "Checking".into());
+        assert!(state.slide.is_none());
     }
 
     #[test]
