@@ -641,7 +641,7 @@ jobs:
           tagName: ${{ steps.meta.outputs.tag }}
           releaseName: SwiftTunnel v${{ steps.meta.outputs.version }}
           releaseBody: ${{ steps.release_notes.outputs.body }}
-          releaseDraft: false
+          releaseDraft: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
           generateReleaseNotes: false
           includeUpdaterJson: true
@@ -730,7 +730,7 @@ jobs:
           tagName: ${{ steps.meta.outputs.tag }}
           releaseName: SwiftTunnel v${{ steps.meta.outputs.version }}
           releaseBody: ${{ steps.release_notes.outputs.body }}
-          releaseDraft: false
+          releaseDraft: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
           generateReleaseNotes: false
           includeUpdaterJson: false
@@ -992,8 +992,13 @@ jobs:
             exit 0
           }
 
-          $releaseJson = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json name,body,url,tagName,isPrerelease
+          $releaseJson = gh release view $env:TAG --repo $env:GITHUB_REPOSITORY --json name,body,url,tagName,isPrerelease,isDraft
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect release state" }
           $release = $releaseJson | ConvertFrom-Json
+          if ($release.isDraft) {
+            Write-Host "Release remains a draft pending installer and update verification. No announcement sent."
+            exit 0
+          }
 
           $description = ""
           if ($release.body) {
