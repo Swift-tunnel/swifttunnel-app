@@ -33,6 +33,8 @@ struct HarnessCli {
     email: Option<String>,
     password: Option<String>,
     custom_relay_server: Option<String>,
+    /// The one relay a connect test may use, by id (for example "singapore-05").
+    only_server: Option<String>,
     enable_api_tunneling: bool,
     enable_country_ban: bool,
     connect: bool,
@@ -461,6 +463,7 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
     let requested_region = cli
         .region
         .clone()
+        .or_else(|| cli.only_server.as_deref().map(region_of_server))
         .or_else(|| state.settings.lock().last_connected_region.clone())
         .unwrap_or_else(|| DEFAULT_REGION.to_string());
 
@@ -495,7 +498,8 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
                     Some(snapshot.custom_relay_server.clone())
                 }
             }),
-            snapshot.auto_routing_enabled,
+            // A pinned relay must stay the relay for the whole test.
+            snapshot.auto_routing_enabled && cli.only_server.is_none(),
             snapshot.whitelisted_regions.clone(),
             binding_preference,
             snapshot.game_process_performance,
@@ -504,13 +508,22 @@ async fn run_connect_flow(state: &AppState, cli: &HarnessCli) -> Result<ConnectS
         )
     };
 
-    let available_servers = {
+    let mut available_servers = {
         let server_list = state.server_list.lock();
         crate::commands::vpn::build_available_servers(&server_list)
     };
 
     if available_servers.is_empty() {
         return Err("Server list is empty, cannot run connect harness".to_string());
+    }
+
+    if let Some(only) = cli.only_server.as_deref() {
+        available_servers.retain(|(server, _, _)| server == only);
+        if available_servers.is_empty() {
+            return Err(format!(
+                "Relay '{only}' is not in the server list, or is out of rotation"
+            ));
+        }
     }
 
     let access_token = resolve_access_token(state, cli).await?;
@@ -696,6 +709,18 @@ enum ParseOutcome {
     Error(String),
 }
 
+/// The region a relay id belongs to: the id without its trailing number.
+fn region_of_server(server: &str) -> String {
+    match server.rsplit_once('-') {
+        Some((region, number))
+            if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            region.to_string()
+        }
+        _ => server.to_string(),
+    }
+}
+
 fn parse_cli(raw_args: &[String]) -> Result<HarnessCli, ParseOutcome> {
     let mut cli = HarnessCli {
         connect_wait_ms: DEFAULT_CONNECT_WAIT_MS,
@@ -724,6 +749,7 @@ fn parse_cli(raw_args: &[String]) -> Result<HarnessCli, ParseOutcome> {
             "--email" => cli.email = Some(next(flag, &mut idx)?),
             "--password" => cli.password = Some(next(flag, &mut idx)?),
             "--custom-relay" => cli.custom_relay_server = Some(next(flag, &mut idx)?),
+            "--only-server" => cli.only_server = Some(next(flag, &mut idx)?),
             "--enable-api-tunneling" => cli.enable_api_tunneling = true,
             "--enable-country-ban" => cli.enable_country_ban = true,
             "--connect" => cli.connect = true,
@@ -759,6 +785,7 @@ fn print_help() {
     println!("  --email <email>           Sign in with email when connect testing");
     println!("  --password <password>     Sign in with password when connect testing");
     println!("  --custom-relay <host:port>  Override the relay endpoint for connect tests");
+    println!("  --only-server <id>        Connect through this one relay and no other");
     println!("  --enable-api-tunneling      Force TCP/API tunneling on for connect tests");
     println!("  --enable-country-ban        Force local GoodbyeDPI bypass on for connect tests");
     println!("  --connect                 Run a connect/disconnect smoke flow");
