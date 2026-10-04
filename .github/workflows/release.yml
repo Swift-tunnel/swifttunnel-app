@@ -845,26 +845,26 @@ jobs:
           }
 
           $assets = ($releaseJson | ConvertFrom-Json).assets
+          # Desktop only. The Lite installer is an ARM64 .msi too and sorts
+          # first, so through 3.1.5 it was the one listed here, beside the
+          # Desktop signature, and no ARM64 client could verify its update.
           $armUpdaterBundle = $assets |
-            Where-Object { $_.name -match '(?i)(aarch64|arm64).*\.msi$' -and $_.name -notmatch '(?i)\.sig$' } |
+            Where-Object { $_.name -match '(?i)^SwiftTunnel_.*(aarch64|arm64).*\.msi$' } |
             Select-Object -First 1
           if (-not $armUpdaterBundle) {
             $armUpdaterBundle = $assets |
-              Where-Object { $_.name -match '(?i)(aarch64|arm64).*\.zip$' -and $_.name -notmatch '(?i)\.sig$' } |
+              Where-Object { $_.name -match '(?i)^SwiftTunnel_.*(aarch64|arm64).*\.zip$' } |
               Select-Object -First 1
           }
           if (-not $armUpdaterBundle) {
-            throw "Could not find an ARM64 updater asset in release $env:TAG"
+            throw "Could not find an ARM64 Desktop updater asset in release $env:TAG"
           }
 
+          # The signature has to be this file's own. Falling back to any ARM64
+          # signature is how the mismatched pair was published.
           $armSignatureAsset = $assets |
             Where-Object { $_.name -eq "$($armUpdaterBundle.name).sig" } |
             Select-Object -First 1
-          if (-not $armSignatureAsset) {
-            $armSignatureAsset = $assets |
-              Where-Object { $_.name -match '(?i)(aarch64|arm64).*\.(msi|zip)\.sig$' } |
-              Select-Object -First 1
-          }
           if (-not $armSignatureAsset) {
             throw "Could not find an ARM64 updater signature asset for $($armUpdaterBundle.name)"
           }
