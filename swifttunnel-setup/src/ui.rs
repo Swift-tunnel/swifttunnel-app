@@ -14,7 +14,10 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE};
+use windows::Win32::Graphics::Dwm::{
+    DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_DISABLED, ODS_FOCUS, ODS_SELECTED};
@@ -31,20 +34,25 @@ const ACTIONS: [Action; 4] = [
     Action::Uninstall,
 ];
 const LABELS: [&str; 4] = ["Install", "Repair", "Reinstall", "Uninstall"];
-// The website's petal theme: the hero's petals in their own colours, ink copy
-// on the pale band, white controls on the cobalt below. COLORREF is BGR; the
-// u32 values are GDI+ ARGB.
-const COBALT: COLORREF = COLORREF(0xe64727);
-const BG: COLORREF = COBALT;
+// The website's petals at night: the artwork deep and out of focus, white
+// copy on it, controls in glass and the main action solid white. COLORREF is
+// BGR; the u32 values are GDI+ ARGB.
+/// Behind the artwork, and all there is if it cannot be decoded.
+const BG: COLORREF = COLORREF(0x2e0b07);
+/// Text on a white control.
 const INK: COLORREF = COLORREF(0x140b0a);
-/// The site's muted copy: ink at 86% over the pale petals.
-const INK_SOFT: COLORREF = COLORREF(0x352928);
 const WHITE: COLORREF = COLORREF(0xffffff);
-const WHITE_SOFT: COLORREF = COLORREF(0xfbd6d2);
-const INK_ARGB: u32 = 0xff0a0b14;
-const INK_HAIRLINE: u32 = 0x240a0b14;
+/// Secondary copy: white with the night showing through.
+const WHITE_SOFT: COLORREF = COLORREF(0xf7d6cd);
+/// The headline's last line, the petal's own light.
+const GLOW: COLORREF = COLORREF(0xffc0ab);
+/// Rules and outlines, and the glass they sit on.
+const HAIRLINE: u32 = 0x2effffff;
+const GLASS: u32 = 0x1cffffff;
 const WIDTH: i32 = 720;
 const HEIGHT: i32 = 432;
+/// The window's corner radius, the one Windows 11 gives its own windows.
+const CORNER: i32 = 8;
 /// Height over width: the artwork is cropped to this.
 pub(crate) const ASPECT: f32 = HEIGHT as f32 / WIDTH as f32;
 const BUTTON_TOP: i32 = 366;
@@ -377,11 +385,11 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         },
         s(17),
         800,
-        INK,
+        WHITE,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER,
     );
     let rule = s(64) + measure(dc, "SwiftTunnel", s(17), w!("Figtree ExtraBold")) + s(14);
-    drawing::line(dc, rule, s(24), rule, s(38), INK_HAIRLINE, s(1) as f32);
+    drawing::line(dc, rule, s(24), rule, s(38), HAIRLINE, s(1) as f32);
     mono(
         dc,
         "SETUP",
@@ -392,7 +400,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             bottom: s(44),
         },
         s(10),
-        INK_SOFT,
+        WHITE_SOFT,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER,
     );
 
@@ -403,7 +411,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         s(60),
         s(WIDTH - 28),
         s(60),
-        INK_HAIRLINE,
+        HAIRLINE,
         s(1) as f32,
     );
     mono(
@@ -420,7 +428,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             bottom: s(82),
         },
         s(10),
-        INK_SOFT,
+        WHITE_SOFT,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER,
     );
     // While a switch runs, the package on hand is not the one shown.
@@ -442,7 +450,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             bottom: s(82),
         },
         s(10),
-        INK,
+        WHITE,
         DT_RIGHT | DT_SINGLELINE | DT_VCENTER,
     );
     drawing::rounded(
@@ -461,11 +469,11 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         },
     );
 
-    // The headline, solid ink with the last line in cobalt.
+    // The headline, white with the last line in the petal's light.
     for (index, (line, color)) in [
-        ("One tap away", INK),
-        ("from dominating", INK),
-        ("every match.", COBALT),
+        ("One tap away", WHITE),
+        ("from dominating", WHITE),
+        ("every match.", GLOW),
     ]
     .into_iter()
     .enumerate()
@@ -500,7 +508,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
                 bottom: s(248),
             },
             s(10),
-            INK_SOFT,
+            WHITE_SOFT,
             DT_LEFT | DT_SINGLELINE | DT_VCENTER,
         );
         text(
@@ -518,13 +526,13 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             },
             s(12),
             400,
-            INK_SOFT,
+            WHITE_SOFT,
             DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
         );
     }
 
-    // The homepage hero's card: the mark on frosted glass in a hairline
-    // square, a crosshair through it and mono labels in the corners.
+    // The homepage hero's card: the mark on glass in a hairline square, a
+    // crosshair through it and mono labels in the corners.
     let card = RECT {
         left: s(484),
         top: s(92),
@@ -532,9 +540,9 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         bottom: s(300),
     };
     let hairline = s(1);
-    drawing::rect(dc, card, 0x66ffffff);
+    drawing::rect(dc, card, GLASS);
     let (cx, cy) = ((card.left + card.right) / 2, (card.top + card.bottom) / 2);
-    drawing::frame(dc, card, INK_HAIRLINE, hairline);
+    drawing::frame(dc, card, HAIRLINE, hairline);
     let (left, top) = (card.left + hairline, card.top + hairline);
     let (right, bottom) = (card.right - hairline, card.bottom - hairline);
     drawing::rect(
@@ -545,7 +553,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             right,
             bottom: cy + hairline,
         },
-        INK_HAIRLINE,
+        HAIRLINE,
     );
     drawing::rect(
         dc,
@@ -555,7 +563,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             right: cx + hairline,
             bottom: cy,
         },
-        INK_HAIRLINE,
+        HAIRLINE,
     );
     drawing::rect(
         dc,
@@ -565,7 +573,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             right: cx + hairline,
             bottom,
         },
-        INK_HAIRLINE,
+        HAIRLINE,
     );
     let rune = |value: &str, left: bool, top: bool| {
         let row = RECT {
@@ -588,7 +596,7 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
             value,
             row,
             s(9),
-            INK_SOFT,
+            WHITE_SOFT,
             align | DT_SINGLELINE | DT_VCENTER,
         );
     };
@@ -690,6 +698,9 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         WHITE_SOFT,
         DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
     );
+
+    // The window's edge catches the light, all the way round.
+    drawing::rounded_outline(dc, bounds, s(CORNER) as f32, 0x3dffffff, s(1) as f32);
 }
 
 /// The chooser's glass track, in window coordinates.
@@ -745,13 +756,13 @@ fn pill_rect(position: f32, dpi: u32) -> RECT {
 }
 
 /// The whole chooser, in window coordinates: the glass track, both labels and
-/// the ink pill. Each half's button paints its own slice of it, so the pill
-/// slides across both, and a label turns white wherever the pill is under it.
+/// the white pill. Each half's button paints its own slice of it, so the pill
+/// slides across both, and a label turns to ink wherever the pill is under it.
 unsafe fn paint_chooser(dc: HDC, dpi: u32, state: &State, focus: Option<usize>) {
     let track = chooser_rect(dpi);
-    let radius = scaled(9, dpi) as f32;
-    drawing::rounded(dc, track, radius, 0xa6ffffff);
-    drawing::rounded_outline(dc, track, radius, INK_HAIRLINE, scaled(1, dpi) as f32);
+    let radius = (track.bottom - track.top) as f32 / 2.0;
+    drawing::rounded(dc, track, radius, GLASS);
+    drawing::rounded_outline(dc, track, radius, HAIRLINE, scaled(1, dpi) as f32);
     let pill = pill_rect(state.pill_position(), dpi);
     let locked = !state.can_choose();
     let labels = |color: COLORREF| {
@@ -769,26 +780,28 @@ unsafe fn paint_chooser(dc: HDC, dpi: u32, state: &State, focus: Option<usize>) 
     };
     let saved = SaveDC(dc);
     let _ = ExcludeClipRect(dc, pill.left, pill.top, pill.right, pill.bottom);
-    labels(if locked { COLORREF(0x9a8f8a) } else { INK });
+    labels(if locked { COLORREF(0xc9a59b) } else { WHITE });
     let _ = RestoreDC(dc, saved);
-    // A switch that is running keeps its pill dark; anything else that locks
-    // the chooser greys it.
+    // A switch that is running keeps its pill solid; anything else that locks
+    // the chooser dims it.
     let pill_color = if locked && state.switching_to_lite.is_none() {
-        0x990a0b14
+        0x8cffffff
     } else {
-        INK_ARGB
+        0xffffffff
     };
-    drawing::rounded(dc, pill, scaled(6, dpi) as f32, pill_color);
+    let pill_radius = (pill.bottom - pill.top) as f32 / 2.0;
+    drawing::rounded(dc, pill, pill_radius, pill_color);
     let saved = SaveDC(dc);
     let _ = IntersectClipRect(dc, pill.left, pill.top, pill.right, pill.bottom);
-    labels(WHITE);
+    labels(INK);
     let _ = RestoreDC(dc, saved);
     if let Some(index) = focus {
+        let segment = segment_rect(index, dpi);
         drawing::rounded_outline(
             dc,
-            segment_rect(index, dpi),
-            scaled(6, dpi) as f32,
-            0xff2747e6,
+            segment,
+            (segment.bottom - segment.top) as f32 / 2.0,
+            0xffabc0ff,
             scaled(2, dpi) as f32,
         );
     }
@@ -913,8 +926,8 @@ fn action_rect(index: usize, visible: &[usize], dpi: u32) -> RECT {
     RECT::default()
 }
 
-/// Buttons on the cobalt, like the homepage hero's: the main action solid
-/// white with ink text, the others white outlines.
+/// Pills on the night: the main action solid white with ink text, the others
+/// glass with a hairline.
 unsafe fn paint_button(
     dc: HDC,
     bounds: RECT,
@@ -926,7 +939,7 @@ unsafe fn paint_button(
     focused: bool,
 ) {
     let primary = primary || matches!(label, "Install" | "Update" | "Repair");
-    let radius = scaled(6, dpi) as f32;
+    let radius = (bounds.bottom - bounds.top) as f32 / 2.0;
     if primary {
         let background = if disabled {
             0x73ffffff
@@ -937,14 +950,12 @@ unsafe fn paint_button(
         };
         drawing::rounded(dc, bounds, radius, background);
     } else {
-        if pressed {
-            drawing::rounded(dc, bounds, radius, 0x29ffffff);
-        }
+        drawing::rounded(dc, bounds, radius, if pressed { 0x3dffffff } else { GLASS });
         drawing::rounded_outline(
             dc,
             bounds,
             radius,
-            if disabled { 0x59ffffff } else { 0xccffffff },
+            if disabled { 0x29ffffff } else { 0x52ffffff },
             scaled(1, dpi) as f32,
         );
     }
@@ -961,7 +972,7 @@ unsafe fn paint_button(
                 INK
             }
         } else if disabled {
-            COLORREF(0xd9b3ad)
+            COLORREF(0xc9a59b)
         } else {
             WHITE
         },
@@ -986,7 +997,7 @@ unsafe fn paint_button(
     }
 }
 
-/// Minimise and close, drawn in ink over the pale petals.
+/// Minimise and close, drawn in white over the night.
 unsafe fn paint_window_button(
     dc: HDC,
     bounds: RECT,
@@ -996,24 +1007,24 @@ unsafe fn paint_window_button(
     focused: bool,
 ) {
     if pressed {
-        drawing::rounded(dc, bounds, scaled(6, dpi) as f32, 0x240a0b14);
+        drawing::rounded(dc, bounds, scaled(6, dpi) as f32, 0x29ffffff);
     }
     let cx = (bounds.left + bounds.right) / 2;
     let cy = (bounds.top + bounds.bottom) / 2;
     let r = scaled(5, dpi);
     let width = scaled(1, dpi).max(1) as f32 * 1.25;
     if close {
-        drawing::line(dc, cx - r, cy - r, cx + r, cy + r, INK_ARGB, width);
-        drawing::line(dc, cx - r, cy + r, cx + r, cy - r, INK_ARGB, width);
+        drawing::line(dc, cx - r, cy - r, cx + r, cy + r, 0xe6ffffff, width);
+        drawing::line(dc, cx - r, cy + r, cx + r, cy - r, 0xe6ffffff, width);
     } else {
-        drawing::line(dc, cx - r, cy, cx + r, cy, INK_ARGB, width);
+        drawing::line(dc, cx - r, cy, cx + r, cy, 0xe6ffffff, width);
     }
     if focused {
         drawing::rounded_outline(
             dc,
             bounds,
             scaled(6, dpi) as f32,
-            0xff2747e6,
+            0xffabc0ff,
             scaled(2, dpi) as f32,
         );
     }
@@ -1186,17 +1197,36 @@ unsafe fn layout(hwnd: HWND, state: &State) {
     }
 }
 
+/// Asks Windows to round the window itself, which Windows 11 does with smooth
+/// corners and a shadow. False on Windows 10, which has no such thing.
+unsafe fn rounded_by_windows(hwnd: HWND) -> bool {
+    let round = DWMWCP_ROUND;
+    DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_WINDOW_CORNER_PREFERENCE,
+        (&round as *const _ as *const core::ffi::c_void).cast(),
+        std::mem::size_of_val(&round) as u32,
+    )
+    .is_ok()
+}
+
 /// The window's rounded outline. Set when the window's size is, not on every
 /// refresh, since setting it redraws the whole window.
 unsafe fn shape(hwnd: HWND) {
+    // A region cuts jagged corners and loses the shadow, so it is only for
+    // Windows 10.
+    if rounded_by_windows(hwnd) {
+        let _ = SetWindowRgn(hwnd, None, true);
+        return;
+    }
     let dpi = GetDpiForWindow(hwnd).max(96);
     let region = CreateRoundRectRgn(
         0,
         0,
         scaled(WIDTH, dpi) + 1,
         scaled(HEIGHT, dpi) + 1,
-        scaled(14, dpi),
-        scaled(14, dpi),
+        scaled(CORNER * 2, dpi),
+        scaled(CORNER * 2, dpi),
     );
     if SetWindowRgn(hwnd, Some(region), true) == 0 {
         let _ = DeleteObject(region.into());
@@ -1899,6 +1929,108 @@ mod tests {
         }
     }
 
+    /// Design review: shows the real window on screen for a moment and saves
+    /// the screen around it, with the corners and shadow Windows gives it.
+    /// SETUP_PREVIEW_DIR=<dir> cargo test -p swifttunnel-setup on_screen -- --ignored
+    #[test]
+    #[ignore]
+    fn on_screen() {
+        let Ok(dir) = std::env::var("SETUP_PREVIEW_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            fonts::install();
+            let instance = GetModuleHandleW(None).unwrap();
+            let class = WNDCLASSW {
+                lpfnWndProc: Some(window_proc),
+                hInstance: instance.into(),
+                lpszClassName: w!("SwiftTunnelSetupOnScreenTest"),
+                hCursor: LoadCursorW(None, IDC_ARROW).unwrap(),
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassW(&class), 0);
+            let (commands, _actions) = std::sync::mpsc::channel();
+            let (events, updates) = std::sync::mpsc::channel();
+            let state = Box::new(RefCell::new(State::new(commands, updates)));
+            let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem();
+            let (margin, w, h) = (scaled(48, dpi), scaled(WIDTH, dpi), scaled(HEIGHT, dpi));
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                class.lpszClassName,
+                w!("Setup on screen test"),
+                WINDOW_STYLE_SETUP,
+                margin * 2,
+                margin * 2,
+                w,
+                h,
+                None,
+                None,
+                Some(instance.into()),
+                Some((state.as_ref() as *const RefCell<State>).cast()),
+            )
+            .unwrap();
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            events
+                .send(Event::Ready(
+                    Package {
+                        name: "SwiftTunnel".into(),
+                        version: "3.9.0".into(),
+                        product_code: "full".into(),
+                        upgrade_code: crate::model::DESKTOP_FAMILY.into(),
+                    },
+                    vec![],
+                ))
+                .unwrap();
+            let end = std::time::Instant::now() + std::time::Duration::from_millis(900);
+            let mut message = MSG::default();
+            while std::time::Instant::now() < end {
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let (cw, ch) = (w + margin * 2, h + margin * 2);
+            let screen = GetDC(None);
+            let dc = CreateCompatibleDC(Some(screen));
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: cw,
+                    biHeight: -ch,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut bits = std::ptr::null_mut();
+            let bitmap =
+                CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0).unwrap();
+            let previous = SelectObject(dc, bitmap.into());
+            let _ = BitBlt(dc, 0, 0, cw, ch, Some(screen), margin, margin, SRCCOPY);
+            let _ = GdiFlush();
+            write_png(&dir.join("on-screen.png"), cw, ch, bits);
+            SelectObject(dc, previous);
+            let _ = DeleteObject(bitmap.into());
+            let _ = DeleteDC(dc);
+            ReleaseDC(None, screen);
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
     /// Design review: renders every screen to PNG.
     /// SETUP_PREVIEW_DIR=<dir> cargo test -p swifttunnel-setup preview_screens -- --ignored
     #[test]
@@ -2126,9 +2258,14 @@ mod tests {
             assert!(state.borrow().details_button.is_some());
             assert_eq!(GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_CAPTION.0, 0);
             let region = CreateRectRgn(0, 0, 0, 0);
-            assert_ne!(GetWindowRgn(hwnd, region), GDI_REGION_TYPE(0));
-            assert!(!PtInRegion(region, 0, 0).as_bool());
-            assert!(PtInRegion(region, 30, 30).as_bool());
+            if rounded_by_windows(hwnd) {
+                // Windows 11 rounds the window itself, so it carries no region.
+                assert_eq!(GetWindowRgn(hwnd, region), GDI_REGION_TYPE(0));
+            } else {
+                assert_ne!(GetWindowRgn(hwnd, region), GDI_REGION_TYPE(0));
+                assert!(!PtInRegion(region, 0, 0).as_bool());
+                assert!(PtInRegion(region, 30, 30).as_bool());
+            }
             let _ = DeleteObject(region.into());
             let mut title_point = POINT { x: 100, y: 35 };
             let _ = ClientToScreen(hwnd, &mut title_point);
