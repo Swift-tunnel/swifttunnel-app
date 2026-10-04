@@ -10,6 +10,19 @@ vi.mock("../lib/commands", () => ({
 
 beforeEach(() => { vi.resetModules(); vi.resetAllMocks(); });
 
+it("keeps city-best ping distinct from each relay's own ping", async () => {
+  serverGetLatencies.mockResolvedValue([
+    { region: "singapore", latency_ms: 10, server_id: null },
+    { region: "singapore", latency_ms: 70, server_id: "singapore" },
+    { region: "singapore-02", latency_ms: 10, server_id: "singapore-02" },
+  ]);
+  const store = (await import("./serverStore")).useServerStore;
+  await store.getState().fetchLatencies();
+  expect(store.getState().getLatency("singapore")).toBe(10);
+  expect(store.getState().getLatency("relay:singapore")).toBe(70);
+  expect(store.getState().getLatency("relay:singapore-02")).toBe(10);
+});
+
 it("does not let an old cached list undo a completed refresh", async () => {
   let finishOld!: (value: object) => void;
   serverGetList.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve; }))

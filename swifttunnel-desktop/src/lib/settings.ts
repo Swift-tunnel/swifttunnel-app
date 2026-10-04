@@ -54,6 +54,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   window_state: { x: null, y: null, width: 1020, height: 660, maximized: false },
   selected_region: "singapore",
   selected_server: "singapore",
+  manual_relay: null,
   current_tab: "connect",
   total_tunneled_ms: 0,
   update_settings: { auto_check: true, last_check: null },

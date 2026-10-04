@@ -24,6 +24,7 @@ pub fn build(state: &State) -> Vec<Item> {
 
     match state.push {
         Push::Regions => regions(state),
+        Push::Relays => relays(state),
         Push::Adapters => adapters(state),
         Push::None => match state.screen {
             Screen::Connect => connect(state),
@@ -259,6 +260,19 @@ fn connect(state: &State) -> Vec<Item> {
         Row::new("Region")
             .right(Right::TextChevron(region_label(state)))
             .action(Action::OpenRegions),
+        Row::new("Relay")
+            .right(Right::TextChevron(
+                state
+                    .manual_relay
+                    .as_ref()
+                    .map_or("Automatic".into(), |r| r.server_id.clone()),
+            ))
+            .action(Action::OpenRelays)
+            .disabled(
+                state.auto_routing
+                    || state.custom_relay
+                    || matches!(state.tunnel.status, Status::Connected | Status::Working),
+            ),
         Row::new("Adapter")
             .right(Right::TextChevron(adapter_label(state)))
             .action(Action::OpenAdapters),
@@ -304,11 +318,13 @@ fn region_label(state: &State) -> String {
 // ── Region picker ───────────────────────────────────────────────────────────
 
 fn regions(state: &State) -> Vec<Item> {
+    let busy = matches!(state.tunnel.status, Status::Connected | Status::Working);
     let mut rows = vec![
         Row::new("Automatic")
             .sub("Measured gameplay paths. Turn off to choose a region.")
             .right(Right::Tick(state.auto_routing))
-            .action(Action::PickAutoRegion),
+            .action(Action::PickAutoRegion)
+            .disabled(busy),
     ];
 
     for region in &state.regions {
@@ -321,7 +337,7 @@ fn regions(state: &State) -> Vec<Item> {
                     Right::Latency(region.ping_ms)
                 })
                 .action(Action::PickRegion(region.id.clone()))
-                .disabled(state.auto_routing),
+                .disabled(state.auto_routing || busy),
         );
     }
 
@@ -332,8 +348,58 @@ fn regions(state: &State) -> Vec<Item> {
     vec![Item::Back("Region".into()), Item::Group(rows)]
 }
 
-// ── Roblox ──────────────────────────────────────────────────────────────────
+fn relays(state: &State) -> Vec<Item> {
+    let disabled = state.auto_routing
+        || state.custom_relay
+        || matches!(state.tunnel.status, Status::Connected | Status::Working);
+    let mut rows = vec![
+        Row::new("Automatic (recommended)")
+            .right(Right::Tick(state.manual_relay.is_none()))
+            .action(Action::PickRelay(None))
+            .disabled(disabled),
+    ];
+    if let Some(pin) = &state.manual_relay {
+        let valid = state.selected().is_some_and(|r| {
+            r.id == pin.region
+                && r.relays.iter().any(|s| {
+                    s.id == pin.server_id && s.ip == pin.ip && s.port == pin.port && s.available
+                })
+        });
+        if !valid {
+            rows.push(
+                Row::new(format!("{} unavailable or changed", pin.server_id))
+                    .sub("Choose another relay or Automatic")
+                    .disabled(true),
+            );
+        }
+    }
+    if let Some(region) = state.selected() {
+        for relay in &region.relays {
+            let selected = state.manual_relay.as_ref().is_some_and(|p| {
+                p.region == region.id
+                    && p.server_id == relay.id
+                    && p.ip == relay.ip
+                    && p.port == relay.port
+            });
+            rows.push(
+                Row::new(&relay.id)
+                    .sub(if !relay.available {
+                        "Unavailable"
+                    } else if selected {
+                        "Selected"
+                    } else {
+                        "Ping to relay"
+                    })
+                    .right(Right::Latency(relay.ping_ms))
+                    .action(Action::PickRelay(Some(relay.id.clone())))
+                    .disabled(disabled || !relay.available),
+            );
+        }
+    }
+    vec![Item::Back("Relay".into()), Item::Group(rows)]
+}
 
+// Roblox
 /// The Roblox screen.
 ///
 /// Nothing here writes anything. Every control edits a draft, and Apply is
@@ -720,6 +786,54 @@ impl Row {
 #[cfg(test)]
 mod quota_retry_tests {
     use super::*;
+
+    #[test]
+    fn manual_relay_picker_handles_unavailable_and_connected_states() {
+        let mut state = State {
+            selected_region: "singapore".into(),
+            ..State::default()
+        };
+        state.regions.push(crate::state::RegionRow {
+            id: "singapore".into(),
+            name: "Singapore".into(),
+            country: "SG".into(),
+            ping_ms: Some(5),
+            relays: vec![crate::state::RelayRow {
+                id: "singapore-01".into(),
+                ip: "192.0.2.1".into(),
+                port: 51821,
+                available: false,
+                ping_ms: None,
+            }],
+        });
+        let items = relays(&state);
+        let Item::Group(rows) = &items[1] else {
+            panic!("missing relay choices")
+        };
+        assert!(!rows[0].disabled);
+        assert_eq!(rows[0].action, Some(Action::PickRelay(None)));
+        assert!(rows[1].disabled);
+        state.manual_relay = Some(swifttunnel_core::settings::ManualRelay {
+            region: "singapore".into(),
+            server_id: "removed".into(),
+            ip: "192.0.2.2".into(),
+            port: 51821,
+        });
+        let items = relays(&state);
+        let Item::Group(rows) = &items[1] else {
+            panic!("missing relay choices")
+        };
+        assert!(
+            rows.iter()
+                .any(|r| r.label.contains("removed unavailable or changed"))
+        );
+        state.tunnel.status = Status::Connected;
+        let items = relays(&state);
+        let Item::Group(rows) = &items[1] else {
+            panic!("missing relay choices")
+        };
+        assert!(rows.iter().all(|r| r.disabled));
+    }
 
     #[test]
     fn stale_zero_balance_does_not_disable_a_fresh_connect_attempt() {

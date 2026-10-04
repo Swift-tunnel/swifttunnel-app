@@ -27,6 +27,7 @@ pub enum Push {
     #[default]
     None,
     Regions,
+    Relays,
     Adapters,
 }
 
@@ -215,6 +216,16 @@ pub struct RegionRow {
     /// come out as anyway, minus the substitution.
     pub country: String,
     pub ping_ms: Option<u32>,
+    pub relays: Vec<RelayRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelayRow {
+    pub id: String,
+    pub ip: String,
+    pub port: u16,
+    pub available: bool,
+    pub ping_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -344,6 +355,8 @@ pub struct State {
 
     // ── From the shared settings file ──
     pub selected_region: String,
+    pub manual_relay: Option<swifttunnel_core::settings::ManualRelay>,
+    pub custom_relay: bool,
     pub auto_routing: bool,
     pub route_assist: bool,
     pub country_ban: bool,

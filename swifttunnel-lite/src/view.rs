@@ -42,8 +42,10 @@ pub enum Action {
     /// Connect, disconnect, or whatever the driver state says instead.
     Primary,
     OpenRegions,
+    OpenRelays,
     Back,
     PickRegion(String),
+    PickRelay(Option<String>),
     PickAutoRegion,
     OpenAdapters,
     PickAdapter(Option<String>),

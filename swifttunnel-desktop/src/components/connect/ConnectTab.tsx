@@ -13,6 +13,7 @@ import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useLiveUpdates } from "../../lib/useLiveUpdates";
 import { vpnGetThroughput } from "../../lib/commands";
 import { RouteDiagram } from "./RouteDiagram";
+import { RelayPicker } from "./RelayPicker";
 import {
   isConnectActionBusy,
   resolveConnectStatus,
@@ -72,6 +73,7 @@ export function ConnectTab() {
 
   const regions = useServerStore((s) => s.regions);
   const servers = useServerStore((s) => s.servers);
+  const relayLatencies = useServerStore((s) => s.latencies);
   const serversLoading = useServerStore((s) => s.isLoading);
   const serversError = useServerStore((s) => s.error);
   const getLatency = useServerStore((s) => s.getLatency);
@@ -100,7 +102,13 @@ export function ConnectTab() {
   });
 
   const selectedRegion = regions.find((r) => r.id === settings.selected_region);
-  const cachedLatency = getLatency(settings.selected_region);
+  const relayPickerRegion = selectedRegion ?? (settings.manual_relay ? {
+    id: settings.manual_relay.region, name: settings.manual_relay.region,
+    description: "", country_code: "", servers: [],
+  } : undefined);
+  const cachedLatency = settings.manual_relay
+    ? relayLatencies.get(`relay:${settings.manual_relay.server_id}`) ?? null
+    : getLatency(settings.selected_region);
 
   const [dataHistory, setDataHistory] = useState<DataSample[]>([]);
   // Every sample lands here first; state (and so a redraw) only follows while
@@ -256,7 +264,7 @@ export function ConnectTab() {
       clearTimeout(saveTimeoutRef.current);
       saveTimeoutRef.current = null;
     }
-    await save();
+    await save(true);
   }
 
   async function handlePrimary() {
@@ -283,7 +291,7 @@ export function ConnectTab() {
       return;
     }
     if (!isIdle || !canConnect || isConnectBusy) return;
-    await flushSettingsSave();
+    try { await flushSettingsSave(); } catch { return; }
     void connect(settings.selected_region, ["roblox"]);
   }
 
@@ -608,6 +616,13 @@ export function ConnectTab() {
             </button>
           )}
         </div>
+
+        {relayPickerRegion && !settings.auto_routing_enabled && (
+          <RelayPicker region={relayPickerRegion} servers={servers} latencies={relayLatencies}
+            value={settings.manual_relay}
+            disabled={!isIdle || Boolean(settings.custom_relay_server)}
+            onChange={manual_relay => { update({ manual_relay }); saveDebounced(); }} />
+        )}
 
         {!hasRegions ? (
           <EmptyState

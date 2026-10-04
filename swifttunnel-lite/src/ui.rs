@@ -1523,11 +1523,16 @@ fn dispatch(hwnd: HWND, app: &mut App, action: Action) {
             app.scroll = 0;
             app.engine.refresh_adapters();
         }
+        Action::OpenRelays => {
+            app.state.push = Push::Relays;
+            app.scroll = 0;
+            app.engine.refresh_regions();
+        }
         other => {
             app.engine.dispatch(other, &mut app.state);
             app.state.push = match app.state.push {
                 // A pick closes the list it was made in.
-                Push::Regions | Push::Adapters => Push::None,
+                Push::Regions | Push::Relays | Push::Adapters => Push::None,
                 Push::None => Push::None,
             };
         }

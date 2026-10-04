@@ -191,6 +191,40 @@ pub fn resolve_initial_connect_region(
     })
 }
 
+/// Resolve Automatic or validate an explicit choice against the refreshed fleet.
+pub fn connect_candidates(
+    sl: &DynamicServerList,
+    requested_region: &str,
+    auto_routing: bool,
+    manual: Option<&crate::settings::ManualRelay>,
+) -> Result<(String, Vec<(String, SocketAddr, Option<u32>)>), String> {
+    let mut available = build_available_servers(sl);
+    if let Some(manual) = manual.filter(|_| !auto_routing) {
+        let valid = manual.region == requested_region
+            && sl.servers_in_region(requested_region).iter().any(|server| {
+                server.region == manual.server_id
+                    && server.ip == manual.ip
+                    && server.effective_relay_port() == manual.port
+                    && server.relay_available
+            });
+        if !valid {
+            return Err("Your selected relay is unavailable or has changed. Choose another relay or Automatic, then connect again.".into());
+        }
+        available.retain(|(id, _, _)| id == &manual.server_id);
+        if available.is_empty() {
+            return Err(
+                "Your selected relay has an invalid address. Choose another relay or Automatic."
+                    .into(),
+            );
+        }
+        return Ok((requested_region.to_string(), available));
+    }
+    Ok((
+        resolve_initial_connect_region(sl, requested_region, auto_routing),
+        available,
+    ))
+}
+
 /// The relays a connection may use, with their measured round trips.
 ///
 /// The latency matters: auto-routing sorts by it mid-session, so handing this
@@ -212,6 +246,99 @@ pub fn build_available_servers(sl: &DynamicServerList) -> Vec<(String, SocketAdd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manual_choice() -> crate::settings::ManualRelay {
+        crate::settings::ManualRelay {
+            region: "singapore".into(),
+            server_id: "singapore-02".into(),
+            ip: "1.1.1.2".into(),
+            port: 8443,
+        }
+    }
+
+    #[test]
+    fn manual_relay_excludes_faster_alternatives_and_preserves_auth_id() {
+        let mut list = make_dynamic_server_list();
+        list.set_latency("singapore", Some(1));
+        list.set_latency("singapore-02", Some(90));
+        let (region, candidates) =
+            connect_candidates(&list, "singapore", false, Some(&manual_choice())).unwrap();
+        assert_eq!(region, "singapore");
+        assert_eq!(
+            candidates,
+            vec![(
+                "singapore-02".into(),
+                "1.1.1.2:8443".parse().unwrap(),
+                Some(90)
+            )]
+        );
+        assert_eq!(
+            super::super::connection::relay_candidates_for_region(&region, &candidates),
+            candidates
+        );
+    }
+
+    #[test]
+    fn manual_relay_rejects_removed_reused_moved_and_unavailable_choices() {
+        let list = make_dynamic_server_list();
+        for choice in [
+            crate::settings::ManualRelay {
+                server_id: "removed".into(),
+                ..manual_choice()
+            },
+            crate::settings::ManualRelay {
+                ip: "1.1.1.3".into(),
+                ..manual_choice()
+            },
+            crate::settings::ManualRelay {
+                port: 51821,
+                ..manual_choice()
+            },
+            crate::settings::ManualRelay {
+                region: "tokyo".into(),
+                ..manual_choice()
+            },
+        ] {
+            assert!(connect_candidates(&list, "singapore", false, Some(&choice)).is_err());
+        }
+        let mut list = make_dynamic_server_list();
+        let mut servers = list.servers().to_vec();
+        servers[1].relay_available = false;
+        list.update(servers, list.regions().to_vec(), ServerListSource::Api);
+        assert!(connect_candidates(&list, "singapore", false, Some(&manual_choice())).is_err());
+    }
+
+    #[test]
+    fn automatic_keeps_all_candidates_and_ignores_inactive_manual_choice() {
+        let list = make_dynamic_server_list();
+        assert_eq!(
+            connect_candidates(&list, "singapore", false, None)
+                .unwrap()
+                .1
+                .len(),
+            3
+        );
+        assert_eq!(
+            connect_candidates(&list, "singapore", true, Some(&manual_choice()))
+                .unwrap()
+                .1
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn legacy_settings_do_not_restore_old_pins_and_new_choices_round_trip() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("manual_relay");
+        value["forced_servers"] = serde_json::json!({"singapore": "singapore-02"});
+        let mut settings: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(settings.manual_relay, None);
+        settings.manual_relay = Some(manual_choice());
+        let restored: AppSettings =
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(restored.manual_relay, settings.manual_relay);
+    }
 
     #[tokio::test]
     async fn startup_recovery_timeout_must_not_allow_connect() {

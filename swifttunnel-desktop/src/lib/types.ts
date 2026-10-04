@@ -141,6 +141,7 @@ export interface ServerListResponse {
 export interface LatencyEntry {
   region: string;
   latency_ms: number | null;
+  server_id?: string | null;
 }
 
 // ── Boost / Optimizer ──
@@ -426,6 +427,7 @@ export interface AppSettings {
   window_state: WindowState;
   selected_region: string;
   selected_server: string;
+  manual_relay: { region: string; server_id: string; ip: string; port: number } | null;
   current_tab: string;
   update_settings: UpdateSettings;
   update_channel: UpdateChannel;

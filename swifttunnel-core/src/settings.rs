@@ -69,6 +69,15 @@ impl Default for WindowState {
     }
 }
 
+/// A deliberate relay choice, bound to the endpoint shown when it was selected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManualRelay {
+    pub region: String,
+    pub server_id: String,
+    pub ip: String,
+    pub port: u16,
+}
+
 /// App settings including theme preference
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -91,6 +100,9 @@ pub struct AppSettings {
     /// Selected VPN server within region (auto-selected by best ping)
     #[serde(default = "default_server")]
     pub selected_server: String,
+    /// None keeps automatic relay selection. Legacy pins are not reactivated.
+    #[serde(default)]
+    pub manual_relay: Option<ManualRelay>,
     /// Current tab
     #[serde(default)]
     pub current_tab: String,
@@ -316,6 +328,7 @@ impl Default for AppSettings {
             window_state: WindowState::default(),
             selected_region: "singapore".to_string(),
             selected_server: "singapore".to_string(),
+            manual_relay: None,
             current_tab: "connect".to_string(),
             update_settings: UpdateSettings::default(),
             update_channel: UpdateChannel::Stable,

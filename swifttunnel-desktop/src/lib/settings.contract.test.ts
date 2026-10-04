@@ -9,6 +9,7 @@ const RUST_SETTINGS_FIELDS = [
   "window_state",
   "selected_region",
   "selected_server",
+  "manual_relay",
   "current_tab",
   "update_settings",
   "update_channel",

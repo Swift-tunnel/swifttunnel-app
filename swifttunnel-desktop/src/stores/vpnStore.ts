@@ -325,6 +325,7 @@ async function failoverRelayAfterDeadSession(
 
   const settingsStore = useSettingsStore.getState();
   const settings = settingsStore.settings;
+  if (settings.manual_relay && !settings.auto_routing_enabled) return;
   if (useServerStore.getState().regions.length === 0) {
     await useServerStore.getState().fetchList();
   }

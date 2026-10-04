@@ -275,6 +275,8 @@ impl Engine {
         }
         if let Ok(s) = self.shared.settings.read() {
             state.selected_region = s.selected_region.clone();
+            state.manual_relay = s.manual_relay.clone();
+            state.custom_relay = !s.custom_relay_server.is_empty();
             state.auto_routing = s.auto_routing_enabled;
             state.route_assist = s.enable_api_tunneling;
             state.country_ban = s.enable_country_ban;
@@ -298,7 +300,8 @@ impl Engine {
         }
         // A removed saved city must not remain the picker label while core
         // chooses a surviving location for the next connection.
-        if !state.regions.is_empty()
+        if state.manual_relay.is_none()
+            && !state.regions.is_empty()
             && !state
                 .regions
                 .iter()
@@ -342,8 +345,12 @@ impl Engine {
             Action::Primary => self.primary(state),
 
             Action::PickAutoRegion => {
+                if matches!(state.tunnel.status, Status::Connected | Status::Working) {
+                    return;
+                }
                 self.settings(|s| {
                     s.auto_routing_enabled = !s.auto_routing_enabled;
+                    s.manual_relay = None;
                     if s.auto_routing_enabled {
                         s.enable_api_tunneling = false;
                         s.enable_country_ban = false;
@@ -351,11 +358,14 @@ impl Engine {
                 });
             }
             Action::PickRegion(id) => {
-                if state.auto_routing {
+                if state.auto_routing
+                    || matches!(state.tunnel.status, Status::Connected | Status::Working)
+                {
                     return;
                 }
                 self.settings(|s| {
                     s.selected_region = id.clone();
+                    s.manual_relay = None;
                     s.auto_routing_enabled = false;
                 });
             }
@@ -367,6 +377,37 @@ impl Engine {
                     } else {
                         AdapterBindingMode::SmartAuto
                     };
+                });
+            }
+
+            Action::PickRelay(id) => {
+                if state.auto_routing
+                    || state.custom_relay
+                    || matches!(state.tunnel.status, Status::Connected | Status::Working)
+                {
+                    return;
+                }
+                let manual = match id {
+                    None => None,
+                    Some(id) => {
+                        let Some(relay) = state
+                            .selected()
+                            .and_then(|r| r.relays.iter().find(|r| r.id == id && r.available))
+                        else {
+                            return;
+                        };
+                        Some(swifttunnel_core::settings::ManualRelay {
+                            region: state.selected_region.clone(),
+                            server_id: id,
+                            ip: relay.ip.clone(),
+                            port: relay.port,
+                        })
+                    }
+                };
+                self.settings(|s| {
+                    s.selected_region = state.selected_region.clone();
+                    s.manual_relay = manual;
+                    s.auto_routing_enabled = false;
                 });
             }
 
@@ -432,6 +473,7 @@ impl Engine {
             Action::Tab(_)
             | Action::Back
             | Action::OpenRegions
+            | Action::OpenRelays
             | Action::OpenAdapters
             | Action::Minimise
             | Action::Close => {}
@@ -1039,14 +1081,16 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
             .snapshot
             .read()
             .map_err(|_| "server list unavailable".to_string())?;
-        (
-            build_available_servers(&snapshot.server_list),
-            resolve_initial_connect_region(
-                &snapshot.server_list,
-                &settings.selected_region,
-                settings.auto_routing_enabled,
-            ),
-        )
+        let (region, available) = swifttunnel_core::vpn::connect_policy::connect_candidates(
+            &snapshot.server_list,
+            &settings.selected_region,
+            settings.auto_routing_enabled,
+            settings
+                .manual_relay
+                .as_ref()
+                .filter(|_| settings.custom_relay_server.is_empty()),
+        )?;
+        (available, region)
     };
 
     // Always the Roblox preset, because that is the only thing this client
@@ -1236,6 +1280,18 @@ fn region_rows(list: &DynamicServerList) -> Vec<RegionRow> {
             name: region.name.clone(),
             country: region.country_code.to_uppercase(),
             ping_ms: list.get_region_best_latency(&region.id),
+            relays: list
+                .servers()
+                .iter()
+                .filter(|s| region.servers.contains(&s.region))
+                .map(|s| crate::state::RelayRow {
+                    id: s.region.clone(),
+                    ip: s.ip.clone(),
+                    port: s.effective_relay_port(),
+                    available: s.relay_available,
+                    ping_ms: list.get_recent_latency(&s.region),
+                })
+                .collect(),
         })
         .collect()
 }

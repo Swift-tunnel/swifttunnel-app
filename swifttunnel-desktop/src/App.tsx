@@ -113,7 +113,10 @@ function App() {
   const reconcileSelectedRegion = useCallback(() => {
     const regions = useServerStore.getState().regions;
     if (regions.length === 0) return;
-    const current = useSettingsStore.getState().settings.selected_region;
+    const saved = useSettingsStore.getState().settings;
+    // A withdrawn manual choice must be acknowledged, not silently replaced.
+    if (saved.manual_relay && !saved.auto_routing_enabled) return;
+    const current = saved.selected_region;
     const next = resolveValidRegion(
       regions,
       current,

@@ -88,7 +88,7 @@ export const useServerStore = create<ServerStore>((set, get) => {
         if (revision !== fleetRevision) return;
         const latencies = new Map<string, number | null>();
         for (const entry of entries) {
-          latencies.set(entry.region, entry.latency_ms);
+          latencies.set(entry.server_id ? `relay:${entry.server_id}` : entry.region, entry.latency_ms);
         }
         set({ latencies });
       } catch (error) {

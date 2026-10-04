@@ -59,13 +59,14 @@ const MOCK_SETTINGS: AppSettings = {
   window_state: { x: null, y: null, width: 1020, height: 660, maximized: false },
   selected_region: "singapore",
   selected_server: "singapore",
+  manual_relay: null,
   current_tab: "connect",
   update_settings: { auto_check: true, last_check: 1739350000, dismissed_version: null },
   update_channel: "Stable",
   minimize_to_tray: true,
   run_on_startup: true,
   auto_reconnect: true,
-  resume_vpn_on_startup: true,
+  resume_vpn_on_startup: false,
   last_connected_region: "singapore",
   expanded_boost_info: [],
   selected_game_presets: ["roblox"],
@@ -111,6 +112,10 @@ function mockOptimization(args: unknown, enabled: boolean) {
 }
 
 const handlers: Record<string, (...args: unknown[]) => unknown> = {
+  system_startup_recovery_done: () => true,
+  auth_update_required: () => null,
+  vpn_get_free_tier: () => ({ remaining_seconds: null, limit_seconds: null, grace_seconds: null }),
+  vpn_list_network_adapters: () => [],
   auth_get_state: () => ({
     state: "logged_in",
     email: "evelyn@swifttunnel.net",
@@ -259,16 +264,20 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       { id: "brazil", name: "Brazil", description: "South America", country_code: "BR", servers: ["br-1"] },
     ],
     servers: [
-      { region: "singapore", name: "sg-3", country_code: "SG", ip: "54.255.205.216", port: 51821 },
-      { region: "singapore", name: "sg-1", country_code: "SG", ip: "54.255.205.210", port: 51821 },
-      { region: "singapore", name: "sg-2", country_code: "SG", ip: "54.255.205.212", port: 51821 },
-      { region: "mumbai", name: "in-1", country_code: "IN", ip: "13.232.1.1", port: 51821 },
-      { region: "tokyo", name: "jp-1", country_code: "JP", ip: "13.230.1.1", port: 51821 },
+      { region: "sg-3", name: "Singapore", country_code: "SG", ip: "192.0.2.3", port: 51821, relay_port: 51821, relay_available: true },
+      { region: "sg-1", name: "Singapore", country_code: "SG", ip: "192.0.2.1", port: 51821, relay_port: 51821, relay_available: true },
+      { region: "sg-2", name: "Singapore", country_code: "SG", ip: "192.0.2.2", port: 51821, relay_port: 51821, relay_available: false },
+      { region: "in-1", name: "Mumbai", country_code: "IN", ip: "192.0.2.4", port: 51821, relay_port: 51821, relay_available: true },
+      { region: "jp-1", name: "Tokyo", country_code: "JP", ip: "192.0.2.5", port: 51821, relay_port: 51821, relay_available: true },
     ],
     source: "mock",
   }),
 
   server_get_latencies: () => [
+    { region: "sg-1", server_id: "sg-1", latency_ms: 24 },
+    { region: "sg-3", server_id: "sg-3", latency_ms: 18 },
+    { region: "in-1", server_id: "in-1", latency_ms: 52 },
+    { region: "jp-1", server_id: "jp-1", latency_ms: null },
     { region: "singapore", latency_ms: 18 },
     { region: "mumbai", latency_ms: 52 },
     { region: "tokyo", latency_ms: 35 },

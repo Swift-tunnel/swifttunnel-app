@@ -101,6 +101,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   update: (partial) => {
+    if (partial.auto_routing_enabled === true ||
+        (partial.selected_region !== undefined && partial.selected_region !== get().settings.selected_region)) {
+      partial = { ...partial, manual_relay: null };
+    }
+    if (partial.manual_relay) partial = { ...partial, auto_routing_enabled: false };
     if (partial.auto_routing_enabled === true) {
       partial = { ...partial, enable_api_tunneling: false, enable_country_ban: false };
     } else if (partial.enable_api_tunneling === true || partial.enable_country_ban === true) {

@@ -17,7 +17,7 @@ use swifttunnel_core::vpn::{
 // which relays to offer. It lives in core so SwiftTunnel Lite runs the same
 // decisions rather than its own approximation of them.
 pub(crate) use swifttunnel_core::vpn::connect_policy::{
-    build_available_servers, current_binding_preference, resolve_initial_connect_region,
+    build_available_servers, connect_candidates, current_binding_preference,
 };
 
 const VPN_CONNECT_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
@@ -514,10 +514,15 @@ pub async fn vpn_connect(
     // Build available_servers list from the dynamic server list
     let (connect_region, available_servers): (String, Vec<(String, SocketAddr, Option<u32>)>) = {
         let sl = state.server_list.lock();
-        (
-            resolve_initial_connect_region(&sl, &region, auto_routing),
-            build_available_servers(&sl),
-        )
+        connect_candidates(
+            &sl,
+            &region,
+            auto_routing,
+            settings_snapshot
+                .manual_relay
+                .as_ref()
+                .filter(|_| custom_relay.is_none()),
+        )?
     };
     if connect_region != region {
         log::info!(
@@ -954,6 +959,7 @@ pub async fn server_get_list(state: State<'_, AppState>) -> Result<ServerListRes
 pub struct LatencyEntry {
     pub region: String,
     pub latency_ms: Option<u32>,
+    pub server_id: Option<String>,
 }
 
 const LATENCY_PROBE_CONCURRENCY: usize = 8;
@@ -987,7 +993,17 @@ fn apply_latency_measurements(
         .map(|region| LatencyEntry {
             region: region.id.clone(),
             latency_ms: sl.get_region_best_latency(&region.id),
+            server_id: None,
         })
+        .chain(sl.servers().iter().map(|server| LatencyEntry {
+            region: server.region.clone(),
+            latency_ms: if server.relay_available {
+                sl.get_recent_latency(&server.region)
+            } else {
+                None
+            },
+            server_id: Some(server.region.clone()),
+        }))
         .collect()
 }
 

@@ -20,6 +20,19 @@ async function loadStore() {
 }
 
 describe("stores/settingsStore", () => {
+  it("keeps an explicit relay until changing city or enabling Auto Route", async () => {
+    const store = await loadStore();
+    const manual = { region: "singapore", server_id: "singapore-02", ip: "192.0.2.2", port: 51821 };
+    store.getState().update({ manual_relay: manual });
+    expect(store.getState().settings.auto_routing_enabled).toBe(false);
+    store.getState().update({ enable_api_tunneling: true });
+    expect(store.getState().settings.manual_relay).toEqual(manual);
+    store.getState().update({ selected_region: "tokyo" });
+    expect(store.getState().settings.manual_relay).toBeNull();
+    store.getState().update({ manual_relay: manual });
+    store.getState().update({ auto_routing_enabled: true });
+    expect(store.getState().settings.manual_relay).toBeNull();
+  });
   it("keeps a save failure visible until a later save actually succeeds", async () => {
     settingsSave.mockRejectedValueOnce({ message: "Disk full" });
     const store = await loadStore();
