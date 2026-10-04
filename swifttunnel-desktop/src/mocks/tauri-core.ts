@@ -111,6 +111,21 @@ function mockOptimization(args: unknown, enabled: boolean) {
   return { requires_reboot: def.requiresReboot };
 }
 
+const MOCK_REGIONS = [
+      { id: "singapore", name: "Singapore", description: "Southeast Asia", country_code: "SG", servers: ["sg-1", "sg-2", "sg-3", "sg-4", "sg-5", "sg-6"] },
+      { id: "mumbai", name: "Mumbai", description: "South Asia", country_code: "IN", servers: ["in-1", "in-2", "in-3", "in-4", "in-5"] },
+      { id: "tokyo", name: "Tokyo", description: "East Asia", country_code: "JP", servers: ["jp-1", "jp-2", "jp-3", "jp-4"] },
+      { id: "sydney", name: "Sydney", description: "Oceania", country_code: "AU", servers: ["au-1", "au-2", "au-3"] },
+      { id: "germany", name: "Germany", description: "Central Europe", country_code: "DE", servers: ["de-1", "de-2", "de-3", "de-4"] },
+      { id: "us-east", name: "US East", description: "New Jersey", country_code: "US", servers: ["us-east-nj"] },
+      { id: "us-west", name: "US West", description: "Los Angeles", country_code: "US", servers: ["us-west-la"] },
+      { id: "us-central", name: "US Central", description: "Dallas", country_code: "US", servers: ["us-central-dallas"] },
+      { id: "london", name: "London", description: "Western Europe", country_code: "GB", servers: ["gb-1"] },
+      { id: "paris", name: "Paris", description: "Western Europe", country_code: "FR", servers: ["fr-1"] },
+      { id: "amsterdam", name: "Amsterdam", description: "Western Europe", country_code: "NL", servers: ["nl-1"] },
+      { id: "brazil", name: "Brazil", description: "South America", country_code: "BR", servers: ["br-1"] },
+    ];
+
 const handlers: Record<string, (...args: unknown[]) => unknown> = {
   system_startup_recovery_done: () => true,
   auth_update_required: () => null,
@@ -249,35 +264,19 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       : null,
 
   server_get_list: () => ({
-    regions: [
-      { id: "singapore", name: "Singapore", description: "Southeast Asia", country_code: "SG", servers: ["sg-1", "sg-2", "sg-3", "sg-4", "sg-5", "sg-6"] },
-      { id: "mumbai", name: "Mumbai", description: "South Asia", country_code: "IN", servers: ["in-1", "in-2", "in-3", "in-4", "in-5"] },
-      { id: "tokyo", name: "Tokyo", description: "East Asia", country_code: "JP", servers: ["jp-1", "jp-2", "jp-3", "jp-4"] },
-      { id: "sydney", name: "Sydney", description: "Oceania", country_code: "AU", servers: ["au-1", "au-2", "au-3"] },
-      { id: "germany", name: "Germany", description: "Central Europe", country_code: "DE", servers: ["de-1", "de-2", "de-3", "de-4"] },
-      { id: "us-east", name: "US East", description: "New Jersey", country_code: "US", servers: ["us-east-nj"] },
-      { id: "us-west", name: "US West", description: "Los Angeles", country_code: "US", servers: ["us-west-la"] },
-      { id: "us-central", name: "US Central", description: "Dallas", country_code: "US", servers: ["us-central-dallas"] },
-      { id: "london", name: "London", description: "Western Europe", country_code: "GB", servers: ["gb-1"] },
-      { id: "paris", name: "Paris", description: "Western Europe", country_code: "FR", servers: ["fr-1"] },
-      { id: "amsterdam", name: "Amsterdam", description: "Western Europe", country_code: "NL", servers: ["nl-1"] },
-      { id: "brazil", name: "Brazil", description: "South America", country_code: "BR", servers: ["br-1"] },
-    ],
-    servers: [
-      { region: "sg-3", name: "Singapore", country_code: "SG", ip: "192.0.2.3", port: 51821, relay_port: 51821, relay_available: true },
-      { region: "sg-1", name: "Singapore", country_code: "SG", ip: "192.0.2.1", port: 51821, relay_port: 51821, relay_available: true },
-      { region: "sg-2", name: "Singapore", country_code: "SG", ip: "192.0.2.2", port: 51821, relay_port: 51821, relay_available: false },
-      { region: "in-1", name: "Mumbai", country_code: "IN", ip: "192.0.2.4", port: 51821, relay_port: 51821, relay_available: true },
-      { region: "jp-1", name: "Tokyo", country_code: "JP", ip: "192.0.2.5", port: 51821, relay_port: 51821, relay_available: true },
-    ],
+    regions: MOCK_REGIONS,
+    servers: MOCK_REGIONS.flatMap((r, regionIndex) => r.servers.map((id, index) => ({
+      region: id, name: r.name, country_code: r.country_code,
+      ip: `192.0.2.${regionIndex * 10 + index + 1}`, port: 51821, relay_port: 51821,
+      relay_available: id !== "sg-2",
+    }))),
     source: "mock",
   }),
 
   server_get_latencies: () => [
-    { region: "sg-1", server_id: "sg-1", latency_ms: 24 },
-    { region: "sg-3", server_id: "sg-3", latency_ms: 18 },
-    { region: "in-1", server_id: "in-1", latency_ms: 52 },
-    { region: "jp-1", server_id: "jp-1", latency_ms: null },
+    ...MOCK_REGIONS.flatMap((r, regionIndex) => r.servers.map((id, index) => ({
+      region: id, server_id: id, latency_ms: id === "sg-2" ? null : 18 + regionIndex * 12 + index * 3,
+    }))),
     { region: "singapore", latency_ms: 18 },
     { region: "mumbai", latency_ms: 52 },
     { region: "tokyo", latency_ms: 35 },

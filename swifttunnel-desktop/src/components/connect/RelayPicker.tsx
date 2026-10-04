@@ -8,36 +8,39 @@ export function RelayPicker({ region, servers, latencies, value, disabled, onCha
   disabled: boolean;
   onChange: (relay: AppSettings["manual_relay"]) => void;
 }) {
-  const choices = servers.filter(s => region.servers.includes(s.region));
-  const current = choices.find(s => s.region === value?.server_id && s.ip === value.ip &&
-    (s.relay_port ?? 51821) === value.port && s.relay_available);
-  const unavailable = value !== null && (value.region !== region.id || !current);
+  const matches = (server: ServerInfo) => value?.region === region.id &&
+    server.region === value.server_id && server.ip === value.ip &&
+    (server.relay_port ?? 51821) === value.port;
+  const choices = region.servers.map(id => ({ id, server: servers.find(s => s.region === id) }));
+  const unavailable = value !== null && !choices.some(({ server }) => server?.relay_available && matches(server));
   return (
-    <div className="mb-3 rounded-[var(--radius-card)] surface-card p-4">
-      <label htmlFor="manual-relay" className="mb-2 block text-[13px] font-semibold text-text-primary">
-        {region.name} relay
-      </label>
-      <select id="manual-relay" disabled={disabled}
-        className="w-full rounded-lg border border-border-subtle bg-bg-card px-3 py-2 text-[13px] text-text-primary disabled:opacity-50"
-        value={unavailable ? "unavailable" : value?.server_id ?? ""}
-        onChange={event => {
-          const server = choices.find(s => s.region === event.target.value && s.relay_available);
-          onChange(server ? { region: region.id, server_id: server.region, ip: server.ip,
-            port: server.relay_port ?? 51821 } : null);
-        }}>
-        <option value="">Automatic (recommended)</option>
-        {unavailable && <option value="unavailable" disabled>{value?.server_id} (unavailable or changed)</option>}
-        {choices.map(server => {
-          const ms = latencies.get(`relay:${server.region}`);
-          return <option key={server.region} value={server.region} disabled={!server.relay_available}>
-            {server.region} · {!server.relay_available ? "Unavailable" : ms == null ? "Ping unavailable" : `${ms} ms`}
-          </option>;
+    <div className="pb-3 pl-[58px] pr-3.5" role="group" aria-label={`${region.name} relays`}>
+      <div className="w-full max-w-[460px] overflow-hidden rounded-[8px] border border-border-subtle bg-bg-elevated">
+        <RelayOption label="Auto" detail={`Best ${region.name} relay`} active={value === null}
+          disabled={disabled} onClick={() => onChange(null)} />
+        {choices.map(({ id, server }) => {
+          const ms = latencies.get(`relay:${id}`);
+          return <RelayOption key={id} label={id}
+            detail={!server?.relay_available ? "Unavailable" : ms == null ? "Ping unavailable" : `${ms} ms`}
+            active={!!server && matches(server)} disabled={disabled || !server?.relay_available}
+            onClick={() => { if (server?.relay_available) onChange({ region: region.id,
+              server_id: id, ip: server.ip, port: server.relay_port ?? 51821 }); }} />;
         })}
-      </select>
-      <p className="mt-2 text-[11px] text-text-muted">
-        {unavailable ? "Choose another relay or Automatic before connecting." :
-          "Ping is measured to the relay. A manual choice stays fixed until you disconnect."}
-      </p>
+      </div>
+      {unavailable && <p className="mt-2 text-[11px] text-text-muted">
+        Your saved relay is unavailable or changed. Choose another relay or Auto.
+      </p>}
     </div>
   );
+}
+
+function RelayOption({ label, detail, active, disabled, onClick }: {
+  label: string; detail: string; active: boolean; disabled: boolean; onClick: () => void;
+}) {
+  return <button type="button" disabled={disabled} aria-pressed={active} onClick={onClick}
+    className={`flex min-h-8 w-full items-center gap-2 px-2.5 py-1 text-left text-[11.5px] transition-colors hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50 ${active ? "bg-bg-hover text-text-primary" : "text-text-secondary"}`}>
+    <span aria-hidden="true" className="w-4 shrink-0 text-center">{active ? "✓" : ""}</span>
+    <span className="min-w-0 truncate font-mono font-medium">{label}</span>
+    <span className="ml-auto shrink-0 text-[10px] text-text-muted">{detail}</span>
+  </button>;
 }

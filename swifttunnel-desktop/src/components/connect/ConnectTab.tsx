@@ -230,7 +230,6 @@ export function ConnectTab() {
   useFocusAwareInterval(() => void fetchPing(), 3000, { enabled: isConnected });
 
   function selectRegion(regionId: string) {
-    if (settings.auto_routing_enabled) return;
     update({ selected_region: regionId, auto_routing_enabled: false });
     saveDebounced();
   }
@@ -617,7 +616,7 @@ export function ConnectTab() {
           )}
         </div>
 
-        {relayPickerRegion && !settings.auto_routing_enabled && (
+        {!selectedRegion && relayPickerRegion && !settings.auto_routing_enabled && (
           <RelayPicker region={relayPickerRegion} servers={servers} latencies={relayLatencies}
             value={settings.manual_relay}
             disabled={!isIdle || Boolean(settings.custom_relay_server)}
@@ -673,9 +672,15 @@ export function ConnectTab() {
                     ? ping
                     : getLatency(r.id)
                 }
-                disabled={isConnected || isTransitioning || settings.auto_routing_enabled}
+                disabled={isConnected || isTransitioning}
                 onSelect={() => selectRegion(r.id)}
                 isLast={idx === regions.length - 1}
+                relayPicker={!settings.auto_routing_enabled && settings.selected_region === r.id ? (
+                  <RelayPicker region={r} servers={servers} latencies={relayLatencies}
+                    value={settings.manual_relay}
+                    disabled={!isIdle || Boolean(settings.custom_relay_server)}
+                    onChange={manual_relay => { update({ manual_relay }); saveDebounced(); }} />
+                ) : null}
               />
             ))}
           </div>
@@ -1071,6 +1076,7 @@ function RegionRow({
   disabled,
   onSelect,
   isLast,
+  relayPicker,
 }: {
   region: ServerRegion;
   selected: boolean;
@@ -1079,6 +1085,7 @@ function RegionRow({
   disabled: boolean;
   onSelect: () => void;
   isLast: boolean;
+  relayPicker: React.ReactNode;
 }) {
   const [hover, setHover] = useState(false);
   const relayCountLabel = `${region.servers.length} ${
@@ -1113,6 +1120,7 @@ function RegionRow({
       <button
         type="button"
         onClick={onSelect}
+        aria-expanded={selected}
         disabled={disabled}
         className="flex min-w-0 flex-1 items-center gap-3 self-stretch text-left disabled:cursor-not-allowed"
       >
@@ -1158,6 +1166,7 @@ function RegionRow({
 
       </div>
 
+      {selected && relayPicker}
     </div>
   );
 }
