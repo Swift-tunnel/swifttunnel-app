@@ -2106,7 +2106,7 @@ impl UdpRelay {
             }
         }
         self.record_outbound_activity();
-        log::info!(
+        log::debug!(
             "UDP Relay: Sent keepalive burst (3 packets) to {} (session {:016x})",
             current_addr,
             self.session_id_u64()
@@ -2286,6 +2286,36 @@ impl UdpRelay {
             self.packets_sent.load(Ordering::Relaxed),
             self.packets_received.load(Ordering::Relaxed),
         )
+    }
+
+    /// Low-frequency support summary. Control-probe replies do not prove that
+    /// Roblox data returns, and enqueued data does not prove remote delivery.
+    /// Reuse existing counters without adding work to each game packet.
+    pub(crate) fn log_support_snapshot(&self, reason: &str) {
+        let ping = self.ping.snapshot();
+        let last_reply_age_s = self.last_receive_time.lock().map(|t| t.elapsed().as_secs());
+        log::info!(
+            "Relay support: reason={} endpoint={} health={} data_enqueued_total={} data_received_total={} control_probes_sent={} control_pongs_received={} control_rtt_ms={:?} last_current_relay_reply_age_s={:?} unanswered_keepalives={} send_queue_len={} outbound_backpressure_drops={} queue_expired_drops={} socket_send_errors={} oversize_drops={} fragmented_sends={} path_mtu={} mtu_fallback={} inject_error_streak={}",
+            reason,
+            self.relay_addr(),
+            self.relay_health().as_str(),
+            self.packets_sent.load(Ordering::Relaxed),
+            self.packets_received.load(Ordering::Relaxed),
+            ping.sent,
+            ping.received,
+            ping.last_rtt_ms,
+            last_reply_age_s,
+            self.unanswered_keepalives.load(Ordering::Relaxed),
+            self.outbound_tx.len(),
+            self.outbound_drops.load(Ordering::Relaxed),
+            self.stale_queue_drops.load(Ordering::Relaxed),
+            self.send_errors.load(Ordering::Relaxed),
+            self.oversize_drops.load(Ordering::Relaxed),
+            self.fragmented_sends.load(Ordering::Relaxed),
+            self.relay_path_mtu.load(Ordering::Relaxed),
+            self.relay_path_mtu_is_fallback.load(Ordering::Relaxed),
+            self.inject_error_streak.load(Ordering::Relaxed),
+        );
     }
 
     /// Stop the relay

@@ -9396,6 +9396,10 @@ fn run_v3_inbound_receiver(
     let mut last_health_check = std::time::Instant::now();
     let mut no_traffic_warning_logged = false;
     let mut first_outbound_time: Option<std::time::Instant> = None;
+    let mut last_support_log: Option<(
+        std::time::Instant,
+        crate::vpn::udp_relay::RelayHealthState,
+    )> = None;
 
     // Health check constants
     const HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
@@ -9439,22 +9443,13 @@ fn run_v3_inbound_receiver(
                 no_traffic_warning_logged,
             ) {
                 no_traffic_warning_logged = true;
-                log::error!("========================================");
-                log::error!("V3 WARNING: NO INBOUND TRAFFIC DETECTED!");
-                log::error!("========================================");
-                log::error!("  Uptime: {}s", uptime_secs);
-                log::error!(
-                    "  Outbound wait: {}s",
-                    outbound_wait_secs.unwrap_or_default()
+                log::warn!(
+                    "V3 data path: no return data after {}s of outbound activity (uptime={}s, tx_bytes={}). Authentication/control replies alone do not verify game traffic; compare relay-side receive, forwarding and return counters.",
+                    outbound_wait_secs.unwrap_or_default(),
+                    uptime_secs,
+                    tx_bytes
                 );
-                log::error!("  Outbound bytes: {}", tx_bytes);
-                log::error!("  Packets received: 0");
-                log::error!("");
-                log::error!("This may indicate:");
-                log::error!("  1. Relay server not running on port 51821");
-                log::error!("  2. Firewall blocking UDP traffic");
-                log::error!("  3. Session ID mismatch");
-                log::error!("========================================");
+                relay.log_support_snapshot("no_return_data");
             }
 
             // Periodic health log
@@ -9464,15 +9459,28 @@ fn run_v3_inbound_receiver(
             relay.check_health();
             let health = relay.relay_health();
 
-            log::info!(
-                "V3 inbound health: {}s uptime, {} recv, {} injected, {} B/s avg, {} errors, health={}",
-                uptime_secs,
-                packets_received,
-                packets_injected,
-                rx_rate,
-                inject_errors,
-                health.as_str()
-            );
+            if should_log_relay_support(
+                last_support_log.map(|(at, old)| (now.duration_since(at).as_secs(), old)),
+                health,
+            ) {
+                let reason = match last_support_log {
+                    None => "initial",
+                    Some((_, old)) if old != health => "health_changed",
+                    _ => "periodic",
+                };
+                last_support_log = Some((now, health));
+                relay.log_support_snapshot(reason);
+                log::info!(
+                    "V3 receive support: uptime_s={} data_received={} data_injected={} inject_errors={} rx_bytes={} rx_average_Bps={} last_data_age_s={:?}",
+                    uptime_secs,
+                    packets_received,
+                    packets_injected,
+                    inject_errors,
+                    rx_bytes,
+                    rx_rate,
+                    last_packet_time.map(|last| now.duration_since(last).as_secs())
+                );
+            }
 
             // === STALE TRAFFIC DETECTION ===
             // If relay was previously working but stopped sending traffic,
@@ -9485,7 +9493,7 @@ fn run_v3_inbound_receiver(
                     if let Err(e) = relay.send_keepalive_burst() {
                         log::warn!("V3 inbound receiver: stale keepalive burst failed: {}", e);
                     } else {
-                        log::warn!(
+                        log::debug!(
                             "V3 inbound receiver: {}s silence, sent recovery keepalive burst (health={})",
                             silence_secs,
                             health.as_str()
@@ -9585,6 +9593,7 @@ fn run_v3_inbound_receiver(
     // === FINAL STATS ===
     let total_uptime = start_time.elapsed().as_secs();
     let (sent, recv) = relay.stats();
+    relay.log_support_snapshot("receiver_stopped");
     log::info!("========================================");
     log::info!("V3 INBOUND RECEIVER STOPPED");
     log::info!("========================================");
@@ -9610,11 +9619,20 @@ fn run_v3_inbound_receiver(
             final_outbound_wait_secs.unwrap_or_default()
         );
         log::error!("Outbound bytes sent: {}", total_tx_bytes);
-        log::error!("Relay server may not be running.");
+        log::error!(
+            "No return data reached this receiver. This alone does not identify whether the network, relay forwarding, or destination dropped it."
+        );
         log::error!("========================================");
     }
     log::info!("========================================");
     Ok(())
+}
+
+fn should_log_relay_support(
+    previous: Option<(u64, crate::vpn::udp_relay::RelayHealthState)>,
+    current: crate::vpn::udp_relay::RelayHealthState,
+) -> bool {
+    previous.is_none_or(|(elapsed_s, old)| old != current || elapsed_s >= 60)
 }
 
 fn should_log_no_inbound_warning(
@@ -9636,6 +9654,25 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn relay_support_logs_transitions_without_repeating_unchanged_health() {
+        use crate::vpn::udp_relay::RelayHealthState::{Dead, Healthy, Stale};
+        assert!(super::should_log_relay_support(None, Healthy));
+        for seconds in [0, 5, 30, 59] {
+            assert!(!super::should_log_relay_support(
+                Some((seconds, Healthy)),
+                Healthy
+            ));
+        }
+        assert!(super::should_log_relay_support(
+            Some((60, Healthy)),
+            Healthy
+        ));
+        assert!(super::should_log_relay_support(Some((5, Healthy)), Stale));
+        assert!(super::should_log_relay_support(Some((5, Stale)), Dead));
+        assert!(super::should_log_relay_support(Some((5, Dead)), Healthy));
+    }
+
     #[test]
     fn connection_name_refresh_deduplicates_even_failed_lookups() {
         let connections = ahash::AHashMap::from_iter([
