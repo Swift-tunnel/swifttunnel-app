@@ -4538,7 +4538,7 @@ dependencies = [
 
 [[package]]
 name = "swifttunnel-desktop"
-version = "3.9.1"
+version = "3.9.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4579,7 +4579,7 @@ dependencies = [
 
 [[package]]
 name = "swifttunnel-lite"
-version = "3.9.1"
+version = "3.9.2"
 dependencies = [
  "dirs 5.0.1",
  "embed-manifest",
@@ -4618,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "swifttunnel-setup"
-version = "3.9.1"
+version = "3.9.2"
 dependencies = [
  "base64 0.22.1",
  "embed-manifest",
