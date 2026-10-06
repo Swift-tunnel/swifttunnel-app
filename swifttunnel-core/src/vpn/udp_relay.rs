@@ -9,6 +9,7 @@
 //! - Server sends back: [8-byte session_id][game server response]
 //! - Client strips session_id and injects response to game
 
+use super::relay_support::{AuthAttempt, Sample as SupportSample, log_counter_example};
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use crossbeam_channel as channel;
@@ -18,6 +19,17 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct ReceiveDiagnostics {
+    unexpected_source: AtomicU64,
+    pending_candidate_data: AtomicU64,
+    short_frame: AtomicU64,
+    session_mismatch: AtomicU64,
+    malformed_control: AtomicU64,
+    reauth_hints: AtomicU64,
+    socket_errors: AtomicU64,
+}
 
 /// Session ID length in bytes
 const SESSION_ID_LEN: usize = 8;
@@ -690,6 +702,10 @@ impl PingMetrics {
 
 /// UDP Relay client for Game Booster mode
 pub struct UdpRelay {
+    /// Random diagnostic label, independent of the protocol session/credentials.
+    support_id: u64,
+    support_previous: parking_lot::Mutex<Option<SupportSample>>,
+    receive_diagnostics: ReceiveDiagnostics,
     /// Socket for communicating with relay server
     socket: UdpSocket,
     /// Relay server address (swappable for auto-routing)
@@ -1131,6 +1147,9 @@ impl UdpRelay {
         }
 
         Ok(Self {
+            support_id: rand::random(),
+            support_previous: parking_lot::Mutex::new(None),
+            receive_diagnostics: ReceiveDiagnostics::default(),
             socket,
             relay_addr: ArcSwap::from_pointee(relay_addr),
             previous_relay_addr: ArcSwap::from_pointee(None),
@@ -1535,6 +1554,21 @@ impl UdpRelay {
     /// already-authed `jti` with `Ok` instead of `Replay`) — the documented
     /// follow-up — not a client-side guess.
     pub fn authenticate_with_ticket(&self, token: &str) -> Result<Option<RelayAuthAckStatus>> {
+        let mut diagnostic = AuthAttempt::new(self.support_id, self.relay_addr(), "initial");
+        let result = self.authenticate_initial_inner(token, &mut diagnostic);
+        diagnostic.outcome = match &result {
+            Ok(Some(status)) => status.as_str(),
+            Ok(None) => "ack_timeout",
+            Err(_) => "local_io_error",
+        };
+        result
+    }
+
+    fn authenticate_initial_inner(
+        &self,
+        token: &str,
+        diagnostic: &mut AuthAttempt,
+    ) -> Result<Option<RelayAuthAckStatus>> {
         let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
 
         for attempt in 0..AUTH_HANDSHAKE_ATTEMPTS {
@@ -1543,6 +1577,7 @@ impl UdpRelay {
                 break;
             }
 
+            diagnostic.attempts += 1;
             self.send_auth_hello(token)?;
 
             // The bug this fixes: attempt 0 used to wait the ENTIRE budget, so
@@ -1586,6 +1621,24 @@ impl UdpRelay {
         token: &str,
         target: SocketAddr,
     ) -> Result<Option<RelayAuthAckStatus>> {
+        let mut diagnostic = AuthAttempt::new(self.support_id, target, "renewal_or_switch");
+        let result = self
+            .authenticate_addr_serialized(token, target, &mut diagnostic)
+            .await;
+        diagnostic.outcome = match &result {
+            Ok(Some(status)) => status.as_str(),
+            Ok(None) => "ack_timeout",
+            Err(_) => "local_io_error",
+        };
+        result
+    }
+
+    async fn authenticate_addr_serialized(
+        &self,
+        token: &str,
+        target: SocketAddr,
+        diagnostic: &mut AuthAttempt,
+    ) -> Result<Option<RelayAuthAckStatus>> {
         let _auth_guard = self.auth_handshake_lock.lock().await;
         *self.last_auth_ack.lock() = None;
         self.pending_auth_addr.store(Arc::new(Some(target)));
@@ -1600,13 +1653,15 @@ impl UdpRelay {
             }
         }
         let _pending_window = PendingAuthWindow(self);
-        self.authenticate_addr_inner(token, target).await
+        self.authenticate_addr_inner(token, target, diagnostic)
+            .await
     }
 
     async fn authenticate_addr_inner(
         &self,
         token: &str,
         target: SocketAddr,
+        diagnostic: &mut AuthAttempt,
     ) -> Result<Option<RelayAuthAckStatus>> {
         let deadline = Instant::now() + AUTH_HANDSHAKE_TOTAL_TIMEOUT;
         let mut saw_replay = false;
@@ -1617,6 +1672,7 @@ impl UdpRelay {
                 break;
             }
 
+            diagnostic.attempts += 1;
             self.send_auth_hello_to(token, target)?;
 
             // Poll the ack recorded by the inbound receiver thread.
@@ -1835,25 +1891,38 @@ impl UdpRelay {
                         }
                     }
                     if from != **self.relay_addr.load() {
+                        self.record_receive_rejection(
+                            &self.receive_diagnostics.pending_candidate_data,
+                            "unauthenticated_candidate_data",
+                        );
                         return Ok(None);
                     }
                 }
 
                 // Verify it's from our relay server (current or previous during grace period)
                 if !self.is_expected_relay_source(from) {
-                    log::warn!("UDP Relay: Received packet from unexpected source {}", from);
+                    self.record_receive_rejection(
+                        &self.receive_diagnostics.unexpected_source,
+                        "unexpected_source",
+                    );
                     return Ok(None);
                 }
 
                 // Must have at least session ID
                 if len < SESSION_ID_LEN {
-                    log::warn!("UDP Relay: Received packet too small ({})", len);
+                    self.record_receive_rejection(
+                        &self.receive_diagnostics.short_frame,
+                        "short_frame",
+                    );
                     return Ok(None);
                 }
 
                 // Verify session ID matches
                 if frame_buffer[..SESSION_ID_LEN] != self.session_id {
-                    log::warn!("UDP Relay: Session ID mismatch, ignoring packet");
+                    self.record_receive_rejection(
+                        &self.receive_diagnostics.session_mismatch,
+                        "session_mismatch",
+                    );
                     return Ok(None);
                 }
 
@@ -1864,11 +1933,24 @@ impl UdpRelay {
                 if payload_len >= 1 {
                     match frame_buffer[SESSION_ID_LEN] {
                         AUTH_ACK_FRAME_TYPE => {
+                            if len != SESSION_ID_LEN + 2
+                                || RelayAuthAckStatus::from_u8(frame_buffer[SESSION_ID_LEN + 1])
+                                    .is_none()
+                            {
+                                self.record_receive_rejection(
+                                    &self.receive_diagnostics.malformed_control,
+                                    "malformed_auth_ack",
+                                );
+                            }
                             if len == SESSION_ID_LEN + 2
                                 && from == **self.relay_addr.load()
                                 && RelayAuthAckStatus::from_u8(frame_buffer[SESSION_ID_LEN + 1])
                                     == Some(RelayAuthAckStatus::ReauthRequired)
                             {
+                                self.record_receive_rejection(
+                                    &self.receive_diagnostics.reauth_hints,
+                                    "reauthentication_requested",
+                                );
                                 self.reauth_requested.notify_one();
                             }
                             return Ok(None);
@@ -1878,6 +1960,12 @@ impl UdpRelay {
                         }
                         PONG_FRAME_TYPE => {
                             let current_addr = **self.relay_addr.load();
+                            if len != PONG_FRAME_LEN {
+                                self.record_receive_rejection(
+                                    &self.receive_diagnostics.malformed_control,
+                                    "malformed_pong",
+                                );
+                            }
                             if len == PONG_FRAME_LEN && from == current_addr {
                                 self.record_current_relay_liveness(Instant::now());
 
@@ -1933,6 +2021,11 @@ impl UdpRelay {
                         RESOLVE_RESPONSE_FRAME_TYPE => {
                             if let Some(parsed) = parse_resolve_response(frame_buffer, len) {
                                 *self.last_resolve_response.lock() = Some(parsed);
+                            } else {
+                                self.record_receive_rejection(
+                                    &self.receive_diagnostics.malformed_control,
+                                    "malformed_dns_response",
+                                );
                             }
                             return Ok(None);
                         }
@@ -1950,8 +2043,41 @@ impl UdpRelay {
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Ok(None),
-            Err(e) => Err(e.into()),
+            Err(e) => {
+                let count = self
+                    .receive_diagnostics
+                    .socket_errors
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+                if log_counter_example(count) {
+                    log::warn!(
+                        "Relay receive error: diagnostic={:016x} endpoint={} count={} os_code={:?} kind={:?}",
+                        self.support_id,
+                        self.relay_addr(),
+                        count,
+                        e.raw_os_error(),
+                        e.kind()
+                    );
+                }
+                Err(e.into())
+            }
         }
+    }
+
+    fn record_receive_rejection(&self, counter: &AtomicU64, reason: &'static str) {
+        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        if log_counter_example(count) {
+            log::warn!(
+                "Relay receive event: diagnostic={:016x} reason={} count={}",
+                self.support_id,
+                reason,
+                count
+            );
+        }
+    }
+
+    pub(crate) fn support_id(&self) -> u64 {
+        self.support_id
     }
 
     /// Send a Roblox DNS resolve request (0xA6) for up to
@@ -2292,15 +2418,33 @@ impl UdpRelay {
     /// Roblox data returns, and enqueued data does not prove remote delivery.
     /// Reuse existing counters without adding work to each game packet.
     pub(crate) fn log_support_snapshot(&self, reason: &str) {
+        // Serialize sampling, not the packet path. Counters are still approximate
+        // because packets and route switches can happen while they are read.
+        let mut previous = self.support_previous.lock();
         let ping = self.ping.snapshot();
         let last_reply_age_s = self.last_receive_time.lock().map(|t| t.elapsed().as_secs());
+        let route_epoch = **self.switch_time.load();
+        let current = SupportSample {
+            at: Instant::now(),
+            endpoint: self.relay_addr(),
+            route_epoch,
+            switch_grace: route_epoch.is_some_and(|at| at.elapsed() < RELAY_SWITCH_GRACE_PERIOD),
+            enqueued: self.packets_sent.load(Ordering::Relaxed),
+            received: self.packets_received.load(Ordering::Relaxed),
+            pongs: ping.received,
+            ping_enabled: ping.enabled,
+        };
+        let interval = current.since(*previous);
+        *previous = Some(current);
+        drop(previous);
         log::info!(
-            "Relay support: reason={} endpoint={} health={} data_enqueued_total={} data_received_total={} control_probes_sent={} control_pongs_received={} control_rtt_ms={:?} last_current_relay_reply_age_s={:?} unanswered_keepalives={} send_queue_len={} outbound_backpressure_drops={} queue_expired_drops={} socket_send_errors={} oversize_drops={} fragmented_sends={} path_mtu={} mtu_fallback={} inject_error_streak={}",
+            "Relay support: diagnostic={:016x} reason={} endpoint={} health={} data_enqueued_total={} data_received_total={} control_probes_sent={} control_pongs_received={} control_rtt_ms={:?} last_current_relay_reply_age_s={:?} unanswered_keepalives={} send_queue_len={} outbound_backpressure_drops={} queue_expired_drops={} socket_send_errors={} oversize_drops={} fragmented_sends={} path_mtu={} mtu_fallback={} inject_error_streak={}",
+            self.support_id,
             reason,
-            self.relay_addr(),
+            current.endpoint,
             self.relay_health().as_str(),
-            self.packets_sent.load(Ordering::Relaxed),
-            self.packets_received.load(Ordering::Relaxed),
+            current.enqueued,
+            current.received,
             ping.sent,
             ping.received,
             ping.last_rtt_ms,
@@ -2315,6 +2459,40 @@ impl UdpRelay {
             self.relay_path_mtu.load(Ordering::Relaxed),
             self.relay_path_mtu_is_fallback.load(Ordering::Relaxed),
             self.inject_error_streak.load(Ordering::Relaxed),
+        );
+        if let Some(interval) = interval {
+            log::info!(
+                "Relay interval: diagnostic={:016x} elapsed_ms={} data_enqueued={} data_received={} control_pongs={} observation={} approximate=true",
+                self.support_id,
+                interval.elapsed_ms,
+                interval.enqueued,
+                interval.received,
+                interval.pongs,
+                interval.observation
+            );
+        } else {
+            log::info!(
+                "Relay interval: diagnostic={:016x} observation=new_baseline",
+                self.support_id
+            );
+        }
+        let receive = &self.receive_diagnostics;
+        log::info!(
+            "Relay receive totals: diagnostic={:016x} unexpected_source={} candidate_data={} short_frame={} session_mismatch={} malformed_control={} reauth_hints={} socket_errors={} ping_enabled={} rtt_samples={} rtt_p50_ms={:?} rtt_p99_ms={:?} send_failure_streak={} sender_panicked={}",
+            self.support_id,
+            receive.unexpected_source.load(Ordering::Relaxed),
+            receive.pending_candidate_data.load(Ordering::Relaxed),
+            receive.short_frame.load(Ordering::Relaxed),
+            receive.session_mismatch.load(Ordering::Relaxed),
+            receive.malformed_control.load(Ordering::Relaxed),
+            receive.reauth_hints.load(Ordering::Relaxed),
+            receive.socket_errors.load(Ordering::Relaxed),
+            ping.enabled,
+            ping.sample_count,
+            ping.p50_rtt_ms,
+            ping.p99_rtt_ms,
+            self.send_failure_streak.load(Ordering::Relaxed),
+            self.sender_panicked()
         );
     }
 
@@ -2360,6 +2538,7 @@ impl UdpRelay {
     /// Stores the old address so receive_inbound() can accept packets from both
     /// relays during a grace period, eliminating the inbound blackout.
     pub fn switch_relay(&self, new_addr: SocketAddr) {
+        self.log_support_snapshot("before_relay_switch");
         let old_addr = **self.relay_addr.load();
         self.previous_relay_addr.store(Arc::new(Some(old_addr)));
         self.switch_time.store(Arc::new(Some(Instant::now())));
@@ -2377,6 +2556,8 @@ impl UdpRelay {
         // as the new relay's ping. The UI reports "no data" until the first
         // pong from the new relay arrives.
         self.ping.reset(new_addr);
+        *self.support_previous.lock() = None;
+        self.log_support_snapshot("after_relay_switch");
         log::info!(
             "UDP Relay: Switched relay {} -> {} (session {:016x}, grace period {}s)",
             old_addr,
@@ -3387,6 +3568,77 @@ mod tests {
     }
 
     #[test]
+    fn receive_diagnostics_separate_rejections_from_return_data() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        let server = bind_fake_relay(&relay);
+        let destination = relay_loopback_addr(&relay);
+        let mut buffer = [0u8; 1600];
+        // Truncated control frames must stay out of the data/injection counters.
+        for kind in [
+            AUTH_ACK_FRAME_TYPE,
+            PONG_FRAME_TYPE,
+            RESOLVE_RESPONSE_FRAME_TYPE,
+        ] {
+            let mut frame = relay.session_id.to_vec();
+            frame.push(kind);
+            server.send_to(&frame, destination).unwrap();
+            assert!(
+                relay
+                    .receive_inbound_payload(&mut buffer)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        server.send_to(&[0; 3], destination).unwrap();
+        assert!(
+            relay
+                .receive_inbound_payload(&mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        let mut wrong_session = relay.session_id.to_vec();
+        wrong_session[0] ^= 1;
+        server.send_to(&wrong_session, destination).unwrap();
+        assert!(
+            relay
+                .receive_inbound_payload(&mut buffer)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            relay
+                .receive_diagnostics
+                .malformed_control
+                .load(Ordering::Relaxed),
+            3
+        );
+        assert_eq!(
+            relay
+                .receive_diagnostics
+                .short_frame
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            relay
+                .receive_diagnostics
+                .session_mismatch
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(relay.stats(), (0, 0));
+        assert!(relay.last_receive_time.lock().is_none());
+        let mut data = relay.session_id.to_vec();
+        data.extend_from_slice(&[0x45; 20]);
+        server.send_to(&data, destination).unwrap();
+        assert_eq!(
+            relay.receive_inbound_payload(&mut buffer).unwrap(),
+            Some(&[0x45; 20][..])
+        );
+        assert_eq!(relay.stats(), (0, 1));
+    }
+
+    #[test]
     fn test_malformed_current_pong_is_not_liveness_evidence() {
         let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
         let fake_relay = bind_fake_relay(&relay);
@@ -3464,6 +3716,13 @@ mod tests {
             .is_ok()
         );
         assert!(relay.last_auth_ack.lock().is_none());
+        assert_eq!(
+            relay
+                .receive_diagnostics
+                .reauth_hints
+                .load(Ordering::Relaxed),
+            1
+        );
         assert!(!RelayAuthAckStatus::ReauthRequired.is_authenticated());
     }
 

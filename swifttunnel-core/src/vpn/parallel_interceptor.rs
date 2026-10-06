@@ -6264,7 +6264,7 @@ fn run_packet_reader(
                         auto_routing_packet_action(data, auto_router.as_ref(), should_tunnel);
 
                     if let Some((_, src_port, dst_ip, dst_port)) = voice_flow_endpoints(data) {
-                        log::info!(
+                        log::trace!(
                             "VOICE out: :{} -> {}:{} len={} tunnel={} bypass={} action={:?}",
                             src_port,
                             dst_ip,
@@ -9321,7 +9321,7 @@ fn run_v3_inbound_receiver(
     log::info!("V3 INBOUND RECEIVER STARTING");
     log::info!("========================================");
     log::info!("  Relay: {}", relay.relay_addr());
-    log::info!("  Session ID: {:016x}", relay.session_id_u64());
+    log::info!("  Diagnostic ID: {:016x}", relay.support_id());
     log::info!("  Adapter: {}", config.physical_adapter_name);
     // Open driver ONCE at thread start (not per-packet!)
     let driver = match ndisapi::Ndisapi::new("NDISRD") {
@@ -9389,6 +9389,7 @@ fn run_v3_inbound_receiver(
     let mut packets_received = 0u64;
     let mut packets_injected = 0u64;
     let mut inject_errors = 0u64;
+    let mut inject_skipped = 0u64;
 
     // Health monitoring timestamps
     let start_time = std::time::Instant::now();
@@ -9471,11 +9472,13 @@ fn run_v3_inbound_receiver(
                 last_support_log = Some((now, health));
                 relay.log_support_snapshot(reason);
                 log::info!(
-                    "V3 receive support: uptime_s={} data_received={} data_injected={} inject_errors={} rx_bytes={} rx_average_Bps={} last_data_age_s={:?}",
+                    "V3 receive support: diagnostic={:016x} uptime_s={} data_received={} data_injected={} inject_errors={} inject_skipped={} rx_bytes={} rx_average_Bps={} last_data_age_s={:?}",
+                    relay.support_id(),
                     uptime_secs,
                     packets_received,
                     packets_injected,
                     inject_errors,
+                    inject_skipped,
                     rx_bytes,
                     rx_rate,
                     last_packet_time.map(|last| now.duration_since(last).as_secs())
@@ -9519,7 +9522,7 @@ fn run_v3_inbound_receiver(
                 last_packet_time = Some(now);
 
                 if let Some((src_ip, src_port, _, dst_port)) = voice_flow_endpoints(ip_packet) {
-                    log::info!(
+                    log::trace!(
                         "VOICE in: {}:{} -> :{} len={}",
                         src_ip,
                         src_port,
@@ -9551,7 +9554,7 @@ fn run_v3_inbound_receiver(
                     Some(true) => {
                         packets_injected += 1;
                         relay.record_inject_outcome(true);
-                        if packets_injected <= 10 || packets_injected.is_multiple_of(1000) {
+                        if packets_injected <= 10 {
                             log::info!(
                                 "V3 inbound: injected packet #{} ({} bytes)",
                                 packets_injected,
@@ -9563,9 +9566,7 @@ fn run_v3_inbound_receiver(
                         inject_errors += 1;
                         relay.record_inject_outcome(false);
                         let streak = relay.inject_error_streak();
-                        // First 10 errors at error level, then sample every 50th so a long
-                        // failure run stays visible without spamming the log.
-                        if inject_errors <= 10 || inject_errors.is_multiple_of(50) {
+                        if super::relay_support::log_counter_example(inject_errors) {
                             log::error!(
                                 "V3 inbound: FAILED to inject packet #{} (streak={}, total_errors={})",
                                 packets_received,
@@ -9575,7 +9576,8 @@ fn run_v3_inbound_receiver(
                         }
                     }
                     None => {
-                        // Packet skipped (e.g., too small)
+                        // Packet skipped (e.g., too small), distinct from driver rejection.
+                        inject_skipped += 1;
                     }
                 }
             }
@@ -9583,8 +9585,8 @@ fn run_v3_inbound_receiver(
                 // No packet available (socket timeout already acts as sleep)
                 continue;
             }
-            Err(e) => {
-                log::warn!("V3 inbound receiver: receive error: {}", e);
+            Err(_) => {
+                // UdpRelay samples the error with its OS code and keeps totals.
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
         }
@@ -9601,6 +9603,7 @@ fn run_v3_inbound_receiver(
     log::info!("  Packets received: {}", packets_received);
     log::info!("  Packets injected: {}", packets_injected);
     log::info!("  Inject errors: {}", inject_errors);
+    log::info!("  Inject skipped: {}", inject_skipped);
     log::info!("  Relay stats: sent={}, recv={}", sent, recv);
     log::info!(
         "  Total RX bytes: {}",

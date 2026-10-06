@@ -261,7 +261,11 @@ fn init_logging() {
 
     let _ = simplelog::WriteLogger::init(
         simplelog::LevelFilter::Info,
-        simplelog::Config::default(),
+        simplelog::ConfigBuilder::new()
+            .set_time_format_rfc3339()
+            .set_target_level(simplelog::LevelFilter::Error)
+            .set_location_level(simplelog::LevelFilter::Off)
+            .build(),
         file,
     );
 }
