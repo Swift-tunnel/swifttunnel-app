@@ -375,6 +375,11 @@ mod tests {
     /// The files as they still sit in the desktop crate, which is what gets
     /// uploaded to the component host.
     fn repo_component_dir() -> PathBuf {
+        // CI prepares the pinned upstream archive outside the checkout.
+        // This override is compiled only into tests, never the client.
+        if let Some(path) = std::env::var_os("SWIFTTUNNEL_TEST_COMPONENT_DIR") {
+            return PathBuf::from(path);
+        }
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("swifttunnel-desktop")

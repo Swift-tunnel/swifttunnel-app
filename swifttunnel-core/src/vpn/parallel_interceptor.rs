@@ -4378,6 +4378,24 @@ impl ParallelInterceptor {
         F: Fn(&str) -> Result<(), String>,
         P: Fn(u32) -> Option<bool>,
     {
+        self.disable_ipv6_with_filter_dependencies(
+            installer,
+            ipv6_probe,
+            remove_winpkfilter_ipv6_block_filters,
+        )
+    }
+
+    fn disable_ipv6_with_filter_dependencies<F, P, C>(
+        &mut self,
+        installer: F,
+        ipv6_probe: P,
+        cleanup: C,
+    ) -> VpnResult<()>
+    where
+        F: Fn(&str) -> Result<(), String>,
+        P: Fn(u32) -> Option<bool>,
+        C: FnOnce() -> Result<(), String>,
+    {
         let physical_name = match &self.physical_adapter_name {
             Some(name) => name.clone(),
             None => {
@@ -4448,7 +4466,7 @@ impl ParallelInterceptor {
             &mut self.ipv6_was_disabled,
             || write_ipv6_marker_winpkfilter(&friendly_name),
             || installer(&physical_name),
-            remove_winpkfilter_ipv6_block_filters,
+            cleanup,
             delete_ipv6_marker,
         ) {
             Ok(()) => {
@@ -13047,8 +13065,9 @@ mod tests {
         interceptor.physical_adapter_if_index = Some(42);
 
         let installer_calls = std::cell::Cell::new(0);
+        let cleanup_calls = std::cell::Cell::new(0);
         let error = interceptor
-            .disable_ipv6_with_filter_installer_and_probe(
+            .disable_ipv6_with_filter_dependencies(
                 |_| {
                     installer_calls.set(installer_calls.get() + 1);
                     Err("WinpkFilter driver rejected static filter table".to_string())
@@ -13057,10 +13076,15 @@ mod tests {
                     assert_eq!(if_index, 42);
                     None
                 },
+                || {
+                    cleanup_calls.set(cleanup_calls.get() + 1);
+                    Ok(())
+                },
             )
             .expect_err("unknown IPv6 probe must not skip the WinpkFilter block");
 
         assert_eq!(installer_calls.get(), 1);
+        assert_eq!(cleanup_calls.get(), 1);
         assert!(error.to_string().contains("WinpkFilter IPv6 block filters"));
         assert!(!interceptor.ipv6_was_disabled);
         delete_ipv6_marker();
@@ -13114,11 +13138,19 @@ mod tests {
         interceptor.physical_adapter_name = Some("\\DEVICE\\{ETHERNET}".to_string());
         interceptor.physical_adapter_friendly_name = Some("Ethernet".to_string());
         let error = interceptor
-            .disable_ipv6_with_filter_installer(|_| Err("Access is denied.".to_string()))
+            .disable_ipv6_with_filter_dependencies(
+                |_| Err("Access is denied.".to_string()),
+                |_| Some(true),
+                || Err("Driver unavailable during cleanup.".to_string()),
+            )
             .expect_err("IPv6 block failure must abort connect");
 
-        assert!(error.to_string().contains("WinpkFilter IPv6 block filters"));
-        assert!(!interceptor.ipv6_was_disabled);
+        assert!(error.to_string().contains("Access is denied."));
+        assert!(error.to_string().contains("Recovery remains pending"));
+        assert!(interceptor.ipv6_was_disabled);
+        assert!(crate::vpn::ipv6_recovery::read_ipv6_marker().is_some());
+        // The simulated failed cleanup must not invoke the real driver from Drop.
+        interceptor.ipv6_was_disabled = false;
         delete_ipv6_marker();
     }
 

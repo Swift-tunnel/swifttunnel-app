@@ -9,6 +9,7 @@ on:
       - "swifttunnel-msi-actions/**"
       - "scripts/*msi*"
       - "scripts/check-installer-ui.ps1"
+      - "scripts/prepare-optional-component-tests.ps1"
       - "installer/**"
       - "swifttunnel-lite/**"
       - "swifttunnel-setup/**"
@@ -27,6 +28,7 @@ on:
       - "swifttunnel-msi-actions/**"
       - "scripts/*msi*"
       - "scripts/check-installer-ui.ps1"
+      - "scripts/prepare-optional-component-tests.ps1"
       - "installer/**"
       - "swifttunnel-lite/**"
       - "swifttunnel-setup/**"
@@ -146,7 +148,10 @@ jobs:
         run: cargo check -p swifttunnel-desktop
 
       - name: Test core
-        run: cargo test -p swifttunnel-core -- --nocapture
+        shell: pwsh
+        run: |
+          ./scripts/prepare-optional-component-tests.ps1
+          cargo test -p swifttunnel-core -- --nocapture
 
       - name: Test desktop backend
         run: cargo test -p swifttunnel-desktop -- --nocapture
@@ -213,7 +218,10 @@ jobs:
         run: cargo check -p swifttunnel-desktop
 
       - name: Test core
-        run: cargo test -p swifttunnel-core -- --nocapture
+        shell: pwsh
+        run: |
+          ./scripts/prepare-optional-component-tests.ps1
+          cargo test -p swifttunnel-core -- --nocapture
 
       - name: Test desktop backend
         run: cargo test -p swifttunnel-desktop -- --nocapture
