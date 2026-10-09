@@ -14,6 +14,7 @@ import { useLiveUpdates } from "../../lib/useLiveUpdates";
 import { vpnGetThroughput } from "../../lib/commands";
 import { RouteDiagram } from "./RouteDiagram";
 import { RelayPicker } from "./RelayPicker";
+import { regionGameEstimate } from "../../lib/gamePing";
 import {
   isConnectActionBusy,
   resolveConnectStatus,
@@ -453,7 +454,7 @@ export function ConnectTab() {
         />
 
         {/* Stats strip */}
-        {isConnected && settings.auto_routing_enabled && (
+        {isConnected && (
           <div className="relative px-6 pb-4 text-[12px] text-text-muted" aria-live="polite">
             <span className="text-text-primary">
               Game server: {gameRoute?.game_location ?? "Waiting for a game"}
@@ -462,7 +463,7 @@ export function ConnectTab() {
               <span className="ml-2">
                 {gameRoute.bypassed ? "Direct connection (your bypass preference)" : `via ${connectedServerLabel}`}
                 {!gameRoute.bypassed && (gameRoute.estimated_path_ms != null
-                  ? ` · Estimated path ${gameRoute.estimated_path_ms} ms at join`
+                  ? ` · Estimated game ping ~${gameRoute.estimated_path_ms} ms`
                   : gameRoute.selection === "region_fallback"
                     ? " · Regional fallback (unmeasured)"
                     : " · Path measurement unavailable")}
@@ -618,7 +619,8 @@ export function ConnectTab() {
 
         {!selectedRegion && relayPickerRegion && !settings.auto_routing_enabled && (
           <RelayPicker region={relayPickerRegion} servers={servers} latencies={relayLatencies}
-            value={settings.manual_relay}
+            compareGamePaths={!settings.enable_api_tunneling && !settings.enable_country_ban}
+            gameRoute={gameRoute} value={settings.manual_relay}
             disabled={!isIdle || Boolean(settings.custom_relay_server)}
             onChange={manual_relay => { update({ manual_relay }); saveDebounced(); }} />
         )}
@@ -667,6 +669,7 @@ export function ConnectTab() {
                 // differently and refresh on different schedules, so leaving
                 // the probe here put a stale number next to the live one and
                 // made the same relay look like two different pings.
+                estimatedLatency={regionGameEstimate(gameRoute, r.servers, servers)}
                 latency={
                   isConnected && settings.selected_region === r.id && ping !== null
                     ? ping
@@ -677,7 +680,8 @@ export function ConnectTab() {
                 isLast={idx === regions.length - 1}
                 relayPicker={!settings.auto_routing_enabled && settings.selected_region === r.id ? (
                   <RelayPicker region={r} servers={servers} latencies={relayLatencies}
-                    value={settings.manual_relay}
+                    compareGamePaths={!settings.enable_api_tunneling && !settings.enable_country_ban}
+                    gameRoute={gameRoute} value={settings.manual_relay}
                     disabled={!isIdle || Boolean(settings.custom_relay_server)}
                     onChange={manual_relay => { update({ manual_relay }); saveDebounced(); }} />
                 ) : null}
@@ -1073,6 +1077,7 @@ function RegionRow({
   selected,
   lastUsed,
   latency,
+  estimatedLatency,
   disabled,
   onSelect,
   isLast,
@@ -1082,6 +1087,7 @@ function RegionRow({
   selected: boolean;
   lastUsed: boolean;
   latency: number | null;
+  estimatedLatency: number | null;
   disabled: boolean;
   onSelect: () => void;
   isLast: boolean;
@@ -1152,14 +1158,14 @@ function RegionRow({
       </button>
 
       {/* Fixed-width latency slot, always same position */}
-      <div className="flex w-[76px] shrink-0 items-center justify-end gap-2">
-        {latency !== null ? (
+        <div title={estimatedLatency !== null ? "Lowest measured estimate to the current game target; not every relay may have a measurement" : "Ping to the relay only"} className="flex w-[110px] shrink-0 items-center justify-end gap-2">
+          {(estimatedLatency ?? latency) !== null ? (
           <>
-            <LatencyBars latency={latency} />
+              <LatencyBars latency={(estimatedLatency ?? latency)!} />
             <span className="w-[28px] text-right font-mono text-[11.5px] font-medium tabular-nums text-text-primary">
-              {latency}
+                {estimatedLatency !== null ? `~${estimatedLatency}` : latency}
             </span>
-            <span className="w-[14px] text-[10px] text-text-muted">ms</span>
+              <span className="text-[10px] text-text-muted">{estimatedLatency !== null ? "game ms" : "relay ms"}</span>
           </>
         ) : null}
       </div>

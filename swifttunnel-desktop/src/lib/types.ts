@@ -39,8 +39,26 @@ export type VpnState =
   | "disconnecting"
   | "error";
 
+export interface RelayEstimate {
+  relay: string;
+  address: string;
+  relay_ms: number;
+  second_leg_ms: number;
+  estimated_game_ms: number;
+}
+
+export interface GameRouteStatus {
+  game_location: string;
+  game_server_ip?: string | null;
+  relay: string;
+  estimated_path_ms: number | null;
+  relay_estimates?: RelayEstimate[];
+  bypassed: boolean;
+  selection?: "measured" | "region_fallback" | "current";
+}
+
 export interface VpnStateResponse {
-  game_route?: { game_location: string; relay: string; estimated_path_ms: number | null; bypassed: boolean; selection?: "measured" | "region_fallback" | "current" };
+  game_route?: GameRouteStatus | null;
   state: VpnState;
   region: string | null;
   server_endpoint: string | null;

@@ -150,6 +150,15 @@ pub fn current_binding_preference(
     }
 }
 
+/// Keep regional Auto opt-in per connection, without overriding manual or TCP routes.
+pub fn regional_auto_scope(settings: &AppSettings, region: &str) -> Option<String> {
+    (settings.manual_relay.is_none()
+        && settings.custom_relay_server.is_empty()
+        && !settings.enable_api_tunneling
+        && !settings.enable_country_ban)
+        .then(|| region.to_string())
+}
+
 // ── Region and candidate selection ──────────────────────────────────────────
 
 /// The region with the lowest measured round trip.
@@ -246,6 +255,32 @@ pub fn build_available_servers(sl: &DynamicServerList) -> Vec<(String, SocketAdd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regional_auto_never_overrides_a_pin_custom_relay_or_tcp_assist() {
+        let mut settings = AppSettings {
+            manual_relay: None,
+            enable_api_tunneling: false,
+            enable_country_ban: false,
+            custom_relay_server: String::new(),
+            ..AppSettings::default()
+        };
+        assert_eq!(
+            regional_auto_scope(&settings, "mumbai"),
+            Some("mumbai".into())
+        );
+        settings.manual_relay = Some(manual_choice());
+        assert_eq!(regional_auto_scope(&settings, "mumbai"), None);
+        settings.manual_relay = None;
+        settings.enable_api_tunneling = true;
+        assert_eq!(regional_auto_scope(&settings, "mumbai"), None);
+        settings.enable_api_tunneling = false;
+        settings.enable_country_ban = true;
+        assert_eq!(regional_auto_scope(&settings, "mumbai"), None);
+        settings.enable_country_ban = false;
+        settings.custom_relay_server = "192.0.2.1:51821".into();
+        assert_eq!(regional_auto_scope(&settings, "mumbai"), None);
+    }
 
     fn manual_choice() -> crate::settings::ManualRelay {
         crate::settings::ManualRelay {

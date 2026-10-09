@@ -182,6 +182,9 @@ describe("stores/vpnStore", () => {
     } });
     await store.getState().fetchState();
     expect(store.getState().gameRoute?.estimated_path_ms).toBe(50);
+    vpnGetState.mockResolvedValue({ ...connectedState("mumbai"), game_route: null });
+    await store.getState().fetchState();
+    expect(store.getState().gameRoute).toBeNull();
     vpnGetState.mockResolvedValue(connectedState("tokyo"));
     await store.getState().fetchState();
     expect(store.getState().gameRoute).toBeNull();

@@ -1,14 +1,20 @@
 //! Join-time path estimates. Missing measurements never imply a fast route.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RouteSample {
     relay: String,
     rtt_ms: u32,
     age_ms: u64,
     samples: u32,
+}
+
+impl RouteSample {
+    pub(crate) fn remaining_ms(&self) -> u64 {
+        330_000_u64.saturating_sub(self.age_ms)
+    }
 }
 
 #[derive(Deserialize)]
@@ -26,16 +32,23 @@ pub(crate) struct PathChoice {
     pub improvement_ms: u32,
 }
 
-/// Every candidate must have both legs, and the current path must be measured
-/// before we claim another path improves it. A city name is not a measurement.
-pub(crate) fn choose_path(
+/// Two independently measured round trips, not Roblox's own NetworkPing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RelayEstimate {
+    pub relay: String,
+    pub address: SocketAddr,
+    pub relay_ms: u32,
+    pub second_leg_ms: u32,
+    pub estimated_game_ms: u32,
+}
+
+pub(crate) fn estimates(
     servers: &[(String, SocketAddr, Option<u32>)],
     samples: &[RouteSample],
-    current: SocketAddr,
-) -> Option<PathChoice> {
-    let totals: Vec<_> = servers
+) -> Vec<RelayEstimate> {
+    servers
         .iter()
-        .filter_map(|(id, addr, first)| {
+        .filter_map(|(id, address, first)| {
             let first = (*first).filter(|ms| *ms <= 2000)?;
             let mut rows = samples.iter().filter(|row| row.relay == *id);
             let row = rows.next()?;
@@ -46,16 +59,45 @@ pub(crate) fn choose_path(
             {
                 return None;
             }
-            Some((id, *addr, first + row.rtt_ms))
+            Some(RelayEstimate {
+                relay: id.clone(),
+                address: *address,
+                relay_ms: first,
+                second_leg_ms: row.rtt_ms,
+                estimated_game_ms: first + row.rtt_ms,
+            })
         })
+        .collect()
+}
+
+/// Every candidate must have both legs, and the current path must be measured
+/// before we claim another path improves it. A city name is not a measurement.
+pub(crate) fn choose_path(
+    servers: &[(String, SocketAddr, Option<u32>)],
+    samples: &[RouteSample],
+    current: SocketAddr,
+) -> Option<PathChoice> {
+    choose_path_with_margin(servers, samples, current, 10)
+}
+
+pub(crate) fn choose_path_with_margin(
+    servers: &[(String, SocketAddr, Option<u32>)],
+    samples: &[RouteSample],
+    current: SocketAddr,
+    minimum_improvement_ms: u32,
+) -> Option<PathChoice> {
+    let totals: Vec<_> = estimates(servers, samples)
+        .into_iter()
+        .map(|row| (row.relay, row.address, row.estimated_game_ms))
         .collect();
     let current_row = totals.iter().find(|(_, addr, _)| *addr == current)?;
     let best = totals
         .iter()
-        .min_by_key(|(id, addr, ms)| (*ms, *addr != current, *id))?;
+        .min_by_key(|(id, addr, ms)| (*ms, *addr != current, id.clone()))?;
     let improvement = current_row.2.saturating_sub(best.2);
-    // Require at least 10 ms and 10 percent, including cross-city changes.
-    let chosen = if improvement >= 10.max(current_row.2.div_ceil(10)) {
+    // Keep a ten-percent noise margin. Regional comparisons use a smaller
+    // absolute margin because a useful local improvement can be below 10 ms.
+    let chosen = if improvement >= minimum_improvement_ms.max(current_row.2.div_ceil(10)) {
         best
     } else {
         current_row

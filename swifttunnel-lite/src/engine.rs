@@ -1107,6 +1107,10 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
 
     let mut vpn = shared.vpn.lock().await;
     vpn.set_auth_manager(shared.auth.clone());
+    vpn.set_regional_auto_scope(swifttunnel_core::vpn::connect_policy::regional_auto_scope(
+        &settings,
+        &settings.selected_region,
+    ));
     vpn.connect(
         &token,
         &region,
@@ -1346,35 +1350,51 @@ fn spawn_regions(shared: Arc<Shared>) {
                     .read()
                     .map(|s| {
                         s.server_list
-                            .regions()
+                            .servers()
                             .iter()
-                            .filter_map(|region| {
-                                s.server_list
-                                    .servers_in_region(&region.id)
-                                    .first()
-                                    .map(|server| {
-                                        (
-                                            server.region.clone(),
-                                            server.ip.clone(),
-                                            server.effective_relay_port(),
-                                        )
-                                    })
-                            })
+                            .filter(|s| s.relay_available)
+                            .map(|s| (s.region.clone(), s.ip.clone(), s.effective_relay_port()))
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                for (server_id, ip, port) in targets {
-                    if shared.stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let measured = servers::measure_latency_icmp(&ip);
-                    shared.edit(|s| {
-                        s.server_list
-                            .set_endpoint_latency(&server_id, &ip, port, measured);
-                        for row in s.regions.iter_mut() {
-                            row.ping_ms = s.server_list.get_region_best_latency(&row.id);
+                // All siblings need a first leg. Bound concurrent blocking ICMP work.
+                let measured = runtime.block_on(async {
+                    let mut tasks = tokio::task::JoinSet::new();
+                    let mut measured = Vec::new();
+                    for (id, ip, port) in targets {
+                        if shared.stop.load(Ordering::Relaxed) {
+                            break;
                         }
-                    });
+                        if tasks.len() >= 8 {
+                            if let Some(Ok(row)) = tasks.join_next().await {
+                                measured.push(row);
+                            }
+                        }
+                        tasks.spawn_blocking(move || {
+                            let ping = servers::measure_latency_icmp(&ip);
+                            (id, ip, port, ping)
+                        });
+                    }
+                    while let Some(row) = tasks.join_next().await {
+                        if let Ok(row) = row {
+                            measured.push(row);
+                        }
+                    }
+                    measured
+                });
+                shared.edit(|s| {
+                    for (id, ip, port, ping) in measured {
+                        s.server_list.set_endpoint_latency(&id, &ip, port, ping);
+                    }
+                    s.regions = region_rows(&s.server_list);
+                });
+                // Feed the same recent first legs to join-time routing and the picker.
+                if let Ok(vpn) = shared.vpn.try_lock() {
+                    if let Some(router) = vpn.auto_router() {
+                        if let Ok(s) = shared.snapshot.read() {
+                            router.set_available_servers(build_available_servers(&s.server_list));
+                        }
+                    }
                 }
                 shared.notify();
 
@@ -1430,11 +1450,12 @@ fn spawn_poller(shared: Arc<Shared>) {
                     std::thread::sleep(Duration::from_millis(250));
                 }
 
-                let (state, throughput) = shared.runtime.block_on(async {
+                let (state, throughput, game_route) = shared.runtime.block_on(async {
                     let vpn = shared.vpn.lock().await;
                     (
                         vpn.state_handle().borrow().clone(),
                         vpn.get_throughput_stats(),
+                        vpn.auto_router().and_then(|r| r.game_route_status()),
                     )
                 });
 
@@ -1459,6 +1480,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                         shared.was_connected.store(true, Ordering::Relaxed);
                         since = Some(*started);
                         tunnel.status = Status::Connected;
+                        tunnel.game_route = game_route;
                         tunnel.region = Some(server_region.clone());
                         tunnel.elapsed = started.elapsed().as_secs();
                     }

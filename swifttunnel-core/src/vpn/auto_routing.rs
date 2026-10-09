@@ -7,6 +7,7 @@
 //! Similar to GearUp's AIR (Adaptive Intelligent Routing) and ExitLag's
 //! automatic region detection.
 
+pub use super::route_measurements::RelayEstimate;
 use crate::geolocation::RobloxRegion;
 use crate::vpn::connection::region_family;
 use parking_lot::RwLock;
@@ -21,6 +22,7 @@ const MIN_SWITCH_INTERVAL: Duration = Duration::from_secs(10);
 /// Maximum switches per minute
 const MAX_SWITCHES_PER_MINUTE: u32 = 3;
 pub(crate) const SAME_REGION_UPGRADE_THRESHOLD_MS: u32 = 10;
+const REGIONAL_MEASURED_UPGRADE_THRESHOLD_MS: u32 = 3;
 
 /// A new game-server IP is only a routing signal when every *other* tracked
 /// game-server IP has been quiet for at least this long. While another
@@ -55,7 +57,10 @@ struct RelaySelection {
 pub struct AutoRouter {
     /// TCP Route Assist must stay on one relay for the connection's lifetime.
     switching_allowed: bool,
+    regional_scope: Option<String>,
+    global_enabled: AtomicBool,
     route_status: RwLock<Option<GameRouteStatus>>,
+    route_status_deadline: RwLock<Instant>,
     servers_updated_at: RwLock<Instant>,
     /// Whether auto-routing is enabled
     enabled: AtomicBool,
@@ -119,13 +124,15 @@ pub struct AutoRoutingEvent {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct GameRouteStatus {
     pub game_location: String,
     pub relay: String,
     pub estimated_path_ms: Option<u32>,
     pub bypassed: bool,
     pub selection: String,
+    pub game_server_ip: Option<Ipv4Addr>,
+    pub relay_estimates: Vec<RelayEstimate>,
 }
 
 pub(crate) struct LookupRelease<'a> {
@@ -150,7 +157,10 @@ impl AutoRouter {
     pub fn new(enabled: bool, initial_region: &str) -> Self {
         Self {
             switching_allowed: true,
+            regional_scope: None,
+            global_enabled: AtomicBool::new(enabled),
             route_status: RwLock::new(None),
+            route_status_deadline: RwLock::new(Instant::now()),
             servers_updated_at: RwLock::new(Instant::now()),
             enabled: AtomicBool::new(enabled),
             current_game_region: RwLock::new(None),
@@ -206,7 +216,17 @@ impl AutoRouter {
     /// non-signals (their connections are already flowing through the
     /// current relay); only joins observed after the enable re-route.
     pub fn set_enabled(&self, enabled: bool) {
-        let enabled = enabled && self.switching_allowed;
+        let previous_global = self.global_enabled.swap(enabled, Ordering::AcqRel);
+        if previous_global != enabled && self.regional_scope.is_some() {
+            // Changing scope cannot resurrect a lookup started in the old mode.
+            self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
+            self.pending_lookups.write().clear();
+            self.pending_any.store(false, Ordering::Release);
+            if !enabled {
+                self.auto_routing_bypassed.store(false, Ordering::Release);
+            }
+        }
+        let enabled = (enabled || self.regional_scope.is_some()) && self.switching_allowed;
         let was_enabled = self.enabled.swap(enabled, Ordering::AcqRel);
         if !enabled {
             self.lookup_session_epoch.fetch_add(1, Ordering::AcqRel);
@@ -339,12 +359,90 @@ impl AutoRouter {
         router
     }
 
+    pub(crate) fn with_regional_scope(mut self, scope: Option<String>) -> Self {
+        self.regional_scope = scope.filter(|_| self.switching_allowed);
+        self.enabled.store(
+            self.switching_allowed
+                && (self.global_enabled.load(Ordering::Acquire) || self.regional_scope.is_some()),
+            Ordering::Release,
+        );
+        self
+    }
+
+    pub(crate) fn regional_only(&self) -> Option<&str> {
+        if self.global_enabled.load(Ordering::Acquire) {
+            None
+        } else {
+            self.regional_scope.as_deref()
+        }
+    }
+
+    fn upgrade_threshold_ms(&self) -> u32 {
+        if self.regional_only().is_some() {
+            REGIONAL_MEASURED_UPGRADE_THRESHOLD_MS
+        } else {
+            SAME_REGION_UPGRADE_THRESHOLD_MS
+        }
+    }
+
+    fn scope_allows(&self, id: &str, address: SocketAddr) -> bool {
+        self.regional_only().is_none_or(|scope| {
+            super::connection::relay_candidates_for_region(
+                scope,
+                &self.available_servers_snapshot(),
+            )
+            .iter()
+            .any(|(candidate, endpoint, _)| candidate == id && *endpoint == address)
+        })
+    }
+
+    /// Read-only telemetry uses a single active destination, never a guessed datacenter.
+    pub(crate) fn measurement_target(&self) -> Option<Ipv4Addr> {
+        let traffic = self.game_traffic.read();
+        let mut recent = traffic
+            .iter()
+            .filter(|(_, time)| time.elapsed() < GAME_TRAFFIC_QUIET_HANDOFF);
+        let (ip, _) = recent.next()?;
+        if recent.next().is_some() {
+            return None;
+        }
+        Some(*ip)
+    }
+
     pub fn game_route_status(&self) -> Option<GameRouteStatus> {
-        self.route_status.read().clone()
+        let mut status = self.route_status.read().clone()?;
+        if status.game_server_ip != self.measurement_target() || status.game_server_ip.is_none() {
+            return None;
+        }
+        if Instant::now() >= *self.route_status_deadline.read()
+            || self.servers_updated_at.read().elapsed() > Duration::from_secs(60)
+        {
+            status.estimated_path_ms = None;
+            status.relay_estimates.clear();
+        } else {
+            let servers = self.available_servers.read();
+            status.relay_estimates.retain(|row| {
+                servers
+                    .iter()
+                    .any(|(id, addr, _)| *id == row.relay && *addr == row.address)
+            });
+            status.estimated_path_ms = status
+                .relay_estimates
+                .iter()
+                .find(|row| {
+                    row.relay == status.relay
+                        && self
+                            .current_relay()
+                            .is_some_and(|(_, address)| row.address == address)
+                })
+                .map(|row| row.estimated_game_ms);
+        }
+        Some(status)
     }
 
     pub(crate) fn record_route_status(
         &self,
+        ip: Ipv4Addr,
         location: String,
         samples: &[super::route_measurements::RouteSample],
     ) {
@@ -373,7 +471,24 @@ impl AutoRouter {
                 "current"
             }
             .into(),
+            game_server_ip: Some(ip),
+            relay_estimates: if !bypassed
+                && self.servers_updated_at.read().elapsed() <= Duration::from_secs(60)
+            {
+                super::route_measurements::estimates(&self.available_servers_snapshot(), samples)
+            } else {
+                Vec::new()
+            },
         });
+        *self.route_status_deadline.write() = Instant::now()
+            + Duration::from_millis(
+                samples
+                    .iter()
+                    .map(|s| s.remaining_ms())
+                    .min()
+                    .unwrap_or(0)
+                    .min(30_000),
+            );
     }
 
     pub(crate) fn mark_region_fallback(&self) {
@@ -391,7 +506,17 @@ impl AutoRouter {
             return None;
         }
         let (_, address) = self.current_relay()?;
-        super::route_measurements::choose_path(&self.available_servers_snapshot(), samples, address)
+        let servers = self.available_servers_snapshot();
+        let candidates = match self.regional_only() {
+            Some(scope) => super::connection::relay_candidates_for_region(scope, &servers),
+            None => servers,
+        };
+        super::route_measurements::choose_path_with_margin(
+            &candidates,
+            samples,
+            address,
+            self.upgrade_threshold_ms(),
+        )
     }
 
     /// Snapshot available relay servers for async probing/selection.
@@ -706,6 +831,10 @@ impl AutoRouter {
         self.latest_lookup_generation.load(Ordering::Acquire) == generation
     }
 
+    pub(crate) fn lookup_session_epoch(&self) -> u64 {
+        self.lookup_session_epoch.load(Ordering::Acquire)
+    }
+
     pub fn is_current_lookup_session(&self, session_epoch: u64) -> bool {
         self.lookup_session_epoch.load(Ordering::Acquire) == session_epoch
     }
@@ -788,6 +917,10 @@ impl AutoRouter {
 
     /// Apply the user's region bypass preference before measured selection.
     pub(crate) fn apply_game_region_policy(&self, game_region: &RobloxRegion) -> bool {
+        if self.regional_only().is_some() {
+            self.auto_routing_bypassed.store(false, Ordering::Release);
+            return true;
+        }
         if *game_region == RobloxRegion::Unknown {
             return false;
         }
@@ -924,6 +1057,9 @@ impl AutoRouter {
         new_addr: SocketAddr,
         latency_improvement_ms: Option<u32>,
     ) -> bool {
+        if !self.scope_allows(to_region, new_addr) {
+            return false;
+        }
         let selection = self.relay_selection.read().clone();
         let current_region = selection.region;
         let current_addr = selection.address;
@@ -934,8 +1070,7 @@ impl AutoRouter {
         let same_region_upgrade = region_family(&current_region) == region_family(to_region)
             && current_addr != Some(new_addr);
         let allow_immediate_upgrade = same_region_upgrade
-            && latency_improvement_ms
-                .is_some_and(|delta| delta >= SAME_REGION_UPGRADE_THRESHOLD_MS);
+            && latency_improvement_ms.is_some_and(|delta| delta >= self.upgrade_threshold_ms());
         if same_region_upgrade && !allow_immediate_upgrade {
             return false;
         }
@@ -962,6 +1097,9 @@ impl AutoRouter {
         new_addr: SocketAddr,
         latency_improvement_ms: Option<u32>,
     ) -> bool {
+        if !self.scope_allows(to_region, new_addr) {
+            return false;
+        }
         let selection = self.relay_selection.read().clone();
         let current_region = selection.region;
         let current_addr = selection.address;
@@ -972,14 +1110,13 @@ impl AutoRouter {
         let same_region_upgrade = region_family(from_region) == region_family(to_region)
             && current_addr != Some(new_addr);
         let allow_immediate_upgrade = same_region_upgrade
-            && latency_improvement_ms
-                .is_some_and(|delta| delta >= SAME_REGION_UPGRADE_THRESHOLD_MS);
+            && latency_improvement_ms.is_some_and(|delta| delta >= self.upgrade_threshold_ms());
         let now = Instant::now();
 
         if same_region_upgrade && !allow_immediate_upgrade {
             log::debug!(
                 "Auto-routing: Rate limited (same-region upgrade below {}ms), skipping switch",
-                SAME_REGION_UPGRADE_THRESHOLD_MS
+                self.upgrade_threshold_ms()
             );
             return false;
         }
@@ -1151,7 +1288,9 @@ mod tests {
         router.set_available_servers(vec![("mumbai".into(), addr, Some(10))]);
         *router.servers_updated_at.write() = Instant::now() - Duration::from_secs(61);
         assert!(router.measured_path(&[]).is_none());
-        router.record_route_status("Singapore".into(), &[]);
+        let ip = "128.116.47.33".parse().unwrap();
+        router.note_game_traffic(ip);
+        router.record_route_status(ip, "Singapore".into(), &[]);
         assert_eq!(router.game_route_status().unwrap().estimated_path_ms, None);
         router.reset();
         assert!(router.game_route_status().is_none());
@@ -2212,5 +2351,146 @@ mod tests {
 
         router.clear_pending_lookup(ip);
         assert!(!router.is_lookup_pending(ip));
+    }
+}
+#[cfg(test)]
+mod estimate_tests {
+    use super::*;
+
+    #[test]
+    fn regional_telemetry_does_not_hold_or_reconsider_an_established_game() {
+        let router = measured_router();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        router.set_lookup_channel(tx);
+        let ip = "128.116.47.33".parse().unwrap();
+        router.evaluate_game_server(ip);
+        let (_, _, epoch) = rx.try_recv().unwrap();
+        assert!(router.pin_active_game_server_for_session(ip, epoch));
+        router.clear_pending_lookup(ip);
+        router.record_route_status(ip, "Mumbai".into(), &measured_samples());
+        router.evaluate_game_server(ip);
+        router.evaluate_game_server("128.116.48.33".parse().unwrap());
+        assert!(rx.try_recv().is_err());
+        assert!(!router.is_lookup_pending(ip));
+        assert_eq!(router.current_region(), "mumbai-04");
+    }
+
+    #[test]
+    fn regional_scope_change_invalidates_an_inflight_global_choice() {
+        let router = measured_router();
+        router.set_enabled(true);
+        let ip = "128.116.47.33".parse().unwrap();
+        let epoch = router.lookup_session_epoch();
+        router.note_game_traffic(ip);
+        assert!(router.pin_active_game_server_for_session(ip, epoch));
+        router.set_enabled(false);
+        assert!(
+            router
+                .commit_switch(
+                    ip,
+                    epoch,
+                    RobloxRegion::Singapore,
+                    "singapore-01".into(),
+                    "127.0.0.1:6".parse().unwrap(),
+                    Some(24)
+                )
+                .is_none()
+        );
+        assert_eq!(router.current_region(), "mumbai-04");
+    }
+    fn measured_samples() -> Vec<super::super::route_measurements::RouteSample> {
+        serde_json::from_str(
+            r#"[
+            {"relay":"mumbai-01","rtt_ms":2,"age_ms":0,"samples":2},
+            {"relay":"mumbai-04","rtt_ms":18,"age_ms":0,"samples":2},
+            {"relay":"singapore-01","rtt_ms":1,"age_ms":0,"samples":2}
+        ]"#,
+        )
+        .unwrap()
+    }
+
+    fn measured_router() -> AutoRouter {
+        let router = AutoRouter::for_connection(false, "mumbai-04", false)
+            .with_regional_scope(Some("mumbai".into()));
+        router.set_available_servers(vec![
+            ("mumbai-01".into(), "127.0.0.1:1".parse().unwrap(), Some(20)),
+            ("mumbai-04".into(), "127.0.0.1:4".parse().unwrap(), Some(8)),
+            (
+                "singapore-01".into(),
+                "127.0.0.1:6".parse().unwrap(),
+                Some(1),
+            ),
+        ]);
+        router.set_current_relay("127.0.0.1:4".parse().unwrap(), "mumbai-04");
+        router
+    }
+
+    #[test]
+    fn regional_auto_uses_both_legs_and_never_leaves_selected_city() {
+        let router = measured_router();
+        router.set_enabled(false); // Saving global Auto off must retain regional Auto.
+        assert!(router.is_enabled());
+        assert_eq!(
+            router.measured_path(&measured_samples()).unwrap().region,
+            "mumbai-01"
+        );
+        assert!(router.measured_path(&[]).is_none());
+        assert!(router.switch_allowed_precheck(
+            "mumbai-01",
+            "127.0.0.1:1".parse().unwrap(),
+            Some(4)
+        ));
+        assert!(!router.switch_allowed_precheck(
+            "singapore-01",
+            "127.0.0.1:6".parse().unwrap(),
+            Some(24)
+        ));
+        router.set_whitelisted_regions(vec!["Singapore".into()]);
+        assert!(router.apply_game_region_policy(&RobloxRegion::Singapore));
+        assert!(!router.is_bypassed());
+    }
+
+    #[test]
+    fn manual_and_assist_connections_do_not_enable_regional_routing() {
+        let manual = AutoRouter::for_connection(false, "mumbai-04", false);
+        assert!(!manual.is_enabled());
+        let assist = AutoRouter::for_connection(false, "mumbai-04", true)
+            .with_regional_scope(Some("mumbai".into()));
+        assert!(!assist.is_enabled());
+    }
+
+    #[test]
+    fn estimate_expires_and_cannot_follow_a_reused_relay_id_or_new_game() {
+        let router = measured_router();
+        let ip = "128.116.47.33".parse().unwrap();
+        router.note_game_traffic(ip);
+        router.record_route_status(ip, "Mumbai".into(), &measured_samples());
+        assert_eq!(
+            router.game_route_status().unwrap().estimated_path_ms,
+            Some(26)
+        );
+        let mut fleet = router.available_servers_snapshot();
+        fleet[1].1 = "127.0.0.2:4".parse().unwrap();
+        router.set_available_servers(fleet);
+        assert_eq!(router.game_route_status().unwrap().estimated_path_ms, None);
+        *router.route_status_deadline.write() = Instant::now();
+        assert!(
+            router
+                .game_route_status()
+                .unwrap()
+                .relay_estimates
+                .is_empty()
+        );
+        router.game_traffic.write().clear();
+        router.note_game_traffic("128.116.48.33".parse().unwrap());
+        assert!(router.game_route_status().is_none());
+    }
+
+    #[test]
+    fn ambiguous_targets_are_not_reported_as_game_ping() {
+        let router = measured_router();
+        router.note_game_traffic("128.116.47.33".parse().unwrap());
+        router.note_game_traffic("128.116.48.33".parse().unwrap());
+        assert!(router.measurement_target().is_none());
     }
 }

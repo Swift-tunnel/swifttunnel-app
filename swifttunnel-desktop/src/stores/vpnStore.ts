@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { repairIsBusy } from "./repairStore";
 import type {
   VpnState,
+  GameRouteStatus,
   VpnStateEvent,
   ThroughputEvent,
   DiagnosticsResponse,
@@ -391,7 +392,7 @@ function driverRebootRequiredStatus(reason: string): DriverCheckResponse {
 }
 
 interface VpnStore {
-  gameRoute: { game_location: string; relay: string; estimated_path_ms: number | null; bypassed: boolean; selection?: "measured" | "region_fallback" | "current" } | null;
+  gameRoute: GameRouteStatus | null;
   state: VpnState;
   region: string | null;
   serverEndpoint: string | null;
@@ -537,7 +538,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           gameRoute: nowConnected
             ? (resp.game_route
               ? (resp.game_route.relay === resp.region ? resp.game_route : null)
-              : (current.region === resp.region ? current.gameRoute : null))
+              : null)
             : null,
           region: resp.region,
           serverEndpoint: resp.server_endpoint,
@@ -550,7 +551,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       });
     } catch (e) {
       if (!currentRead()) return;
-      set({ error: String(e) });
+      set({ error: String(e), gameRoute: null });
     }
   },
 

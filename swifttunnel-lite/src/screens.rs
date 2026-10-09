@@ -353,7 +353,12 @@ fn relays(state: &State) -> Vec<Item> {
         || state.custom_relay
         || matches!(state.tunnel.status, Status::Connected | Status::Working);
     let mut rows = vec![
-        Row::new("Automatic (recommended)")
+        Row::new("Automatic")
+            .sub(if state.route_assist || state.country_ban {
+                "Lowest relay ping in this region"
+            } else {
+                "Compare game paths at join; stays in this region"
+            })
             .right(Right::Tick(state.manual_relay.is_none()))
             .action(Action::PickRelay(None))
             .disabled(disabled),
@@ -381,22 +386,44 @@ fn relays(state: &State) -> Vec<Item> {
                     && p.ip == relay.ip
                     && p.port == relay.port
             });
+            let estimate = state
+                .tunnel
+                .game_route
+                .as_ref()
+                .filter(|s| !s.bypassed)
+                .and_then(|s| {
+                    s.relay_estimates.iter().find(|e| {
+                        e.relay == relay.id
+                            && e.address.to_string() == format!("{}:{}", relay.ip, relay.port)
+                    })
+                });
             rows.push(
                 Row::new(&relay.id)
                     .sub(if !relay.available {
                         "Unavailable"
+                    } else if estimate.is_some() {
+                        "Estimated game ping"
                     } else if selected {
-                        "Selected"
+                        "Selected / ping to relay"
                     } else {
                         "Ping to relay"
                     })
-                    .right(Right::Latency(relay.ping_ms))
+                    .right(Right::Latency(
+                        estimate.map(|e| e.estimated_game_ms).or(relay.ping_ms),
+                    ))
                     .action(Action::PickRelay(Some(relay.id.clone())))
                     .disabled(disabled || !relay.available),
             );
         }
     }
-    vec![Item::Back("Relay".into()), Item::Group(rows)]
+    let mut items = vec![Item::Back("Relay".into()), Item::Group(rows)];
+    if let Some(route) = &state.tunnel.game_route {
+        items.push(Item::Note(format!(
+            "Game target: {}. Estimates add both network legs; they are not Roblox's own reading.",
+            route.game_location
+        )));
+    }
+    items
 }
 
 // Roblox
@@ -786,6 +813,56 @@ impl Row {
 #[cfg(test)]
 mod quota_retry_tests {
     use super::*;
+
+    #[test]
+    fn relay_picker_distinguishes_game_estimates_from_first_leg_and_endpoint_changes() {
+        use swifttunnel_core::vpn::auto_routing::{GameRouteStatus, RelayEstimate};
+        let mut state = State {
+            selected_region: "mumbai".into(),
+            ..State::default()
+        };
+        state.regions.push(crate::state::RegionRow {
+            id: "mumbai".into(),
+            name: "Mumbai".into(),
+            country: "IN".into(),
+            ping_ms: Some(8),
+            relays: vec![crate::state::RelayRow {
+                id: "mumbai-04".into(),
+                ip: "192.0.2.4".into(),
+                port: 51821,
+                available: true,
+                ping_ms: Some(8),
+            }],
+        });
+        state.tunnel.game_route = Some(GameRouteStatus {
+            game_location: "Mumbai".into(),
+            game_server_ip: Some("128.116.47.33".parse().unwrap()),
+            relay: "mumbai-04".into(),
+            estimated_path_ms: Some(26),
+            bypassed: false,
+            selection: "measured".into(),
+            relay_estimates: vec![RelayEstimate {
+                relay: "mumbai-04".into(),
+                address: "192.0.2.4:51821".parse().unwrap(),
+                relay_ms: 8,
+                second_leg_ms: 18,
+                estimated_game_ms: 26,
+            }],
+        });
+        let rows = relays(&state);
+        let Item::Group(rows) = &rows[1] else {
+            panic!("missing relay choices");
+        };
+        assert_eq!(rows[1].sub.as_deref(), Some("Estimated game ping"));
+        assert!(matches!(rows[1].right, Right::Latency(Some(26))));
+        state.regions[0].relays[0].ip = "192.0.2.5".into();
+        let rows = relays(&state);
+        let Item::Group(rows) = &rows[1] else {
+            panic!("missing relay choices");
+        };
+        assert_eq!(rows[1].sub.as_deref(), Some("Ping to relay"));
+        assert!(matches!(rows[1].right, Right::Latency(Some(8))));
+    }
 
     #[test]
     fn manual_relay_picker_handles_unavailable_and_connected_states() {

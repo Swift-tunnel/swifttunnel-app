@@ -46,6 +46,7 @@ pub struct Tunnel {
     /// from the one that was asked for.
     pub region: Option<String>,
     pub ping_ms: Option<u32>,
+    pub game_route: Option<swifttunnel_core::vpn::auto_routing::GameRouteStatus>,
     pub bytes_up: u64,
     pub bytes_down: u64,
     /// Seconds since the tunnel came up.

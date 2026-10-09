@@ -1341,6 +1341,8 @@ pub struct VpnConnection {
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     /// Background task that performs async auto-routing IP lookups.
     auto_lookup_handle: Option<tokio::task::JoinHandle<()>>,
+    route_telemetry_handle: Option<tokio::task::JoinHandle<()>>,
+    regional_auto_scope: Option<String>,
     /// Periodically renews the authenticated relay lease while connected.
     relay_lease_refresh_handle: Option<tokio::task::JoinHandle<()>>,
     /// Set by the lease refresh task when a terminal auth or quota failure
@@ -1371,6 +1373,8 @@ impl VpnConnection {
             etw_watcher: None,
             auto_router: None,
             auto_lookup_handle: None,
+            route_telemetry_handle: None,
+            regional_auto_scope: None,
             relay_lease_refresh_handle: None,
             terminal_cleanup_requested: Arc::new(AtomicBool::new(false)),
             auth_manager: None,
@@ -1379,6 +1383,11 @@ impl VpnConnection {
             goodbye_dpi_guard: None,
             country_ban_bypass_failure: None,
         }
+    }
+
+    /// Configure before connect. Pins, custom relays and TCP assist must pass None.
+    pub fn set_regional_auto_scope(&mut self, scope: Option<String>) {
+        self.regional_auto_scope = scope;
     }
 
     pub async fn state(&self) -> ConnectionState {
@@ -2291,11 +2300,18 @@ impl VpnConnection {
         log::debug!("V3: Relay ping telemetry enabled (20Hz when active)");
 
         // Set up auto-routing
-        let auto_router = Arc::new(super::auto_routing::AutoRouter::for_connection(
-            auto_routing_enabled,
-            &selected_relay_region,
-            enable_api_tunneling,
-        ));
+        let auto_router = Arc::new(
+            super::auto_routing::AutoRouter::for_connection(
+                auto_routing_enabled,
+                &selected_relay_region,
+                enable_api_tunneling,
+            )
+            .with_regional_scope(if custom_relay_server.is_none() {
+                self.regional_auto_scope.clone()
+            } else {
+                None
+            }),
+        );
         auto_router.set_current_relay(relay_addr, &selected_relay_region);
         auto_router.set_available_servers(available_servers);
         if !whitelisted_regions.is_empty() {
@@ -2335,7 +2351,7 @@ impl VpnConnection {
                         }
 
                         if router_for_lookup.is_current_lookup_session(session_epoch) {
-                            router_for_lookup.record_route_status("Unknown".into(), &[]);
+                            router_for_lookup.record_route_status(ip, "Unknown".into(), &[]);
                         }
 
                         // Resolve the region, with one bounded retry for
@@ -2367,6 +2383,13 @@ impl VpnConnection {
                         let (region, location) = match outcome {
                             GameServerRegionLookup::Resolved(region, location) => {
                                 (region, location)
+                            }
+                            GameServerRegionLookup::NoRegion | GameServerRegionLookup::Failed
+                                if router_for_lookup.regional_only().is_some() =>
+                            {
+                                // A city label is optional when comparing measured paths
+                                // within a city the player already chose.
+                                (crate::geolocation::RobloxRegion::Unknown, ip.to_string())
                             }
                             GameServerRegionLookup::NoRegion => {
                                 log::info!(
@@ -2436,7 +2459,7 @@ impl VpnConnection {
                         let old_region = router_for_lookup.current_region();
                         router_for_lookup.record_game_region(region.clone());
                         let route_allowed = router_for_lookup.apply_game_region_policy(&region);
-                        router_for_lookup.record_route_status(location.clone(), &path_samples);
+                        router_for_lookup.record_route_status(ip, location.clone(), &path_samples);
 
                         // Resolve the target relay from cached latency. Any switch
                         // happens *while this IP's packets are still held*: the game
@@ -2449,6 +2472,9 @@ impl VpnConnection {
                             None
                         } else if let Some(choice) = measured {
                             Some((choice.region, choice.address, Some(choice.improvement_ms)))
+                        } else if router_for_lookup.regional_only().is_some() {
+                            // Regional Auto requires measurements and stays in the chosen city.
+                            None
                         } else {
                             // Preserve the previous regional heuristic during partial
                             // rollout or ICMP failure. It is not a measured improvement.
@@ -2610,8 +2636,11 @@ impl VpnConnection {
                         // Release held packets , the relay is final for this
                         // game-server connection.
                         if router_for_lookup.lookup_commit_allowed(ip, session_epoch) {
-                            router_for_lookup.record_route_status(location, &path_samples);
-                            if route_allowed && region_fallback {
+                            router_for_lookup.record_route_status(ip, location, &path_samples);
+                            if route_allowed
+                                && region_fallback
+                                && router_for_lookup.regional_only().is_none()
+                            {
                                 router_for_lookup.mark_region_fallback();
                             }
                         }
@@ -2630,6 +2659,63 @@ impl VpnConnection {
                 log::debug!("Auto-routing: Lookup task exiting (channel closed)");
             });
             self.auto_lookup_handle = Some(lookup_handle);
+            let router = Arc::clone(&auto_router);
+            let auth = self.auth_manager.clone();
+            self.route_telemetry_handle = Some(tokio::spawn(async move {
+                let mut timer = tokio::time::interval(Duration::from_secs(15));
+                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let mut target_location: Option<(std::net::Ipv4Addr, String)> = None;
+                loop {
+                    timer.tick().await;
+                    let Some(ip) = router.measurement_target() else {
+                        continue;
+                    };
+                    // Display refreshes never switch relays or hold game packets.
+                    if router.is_lookup_pending(ip) {
+                        continue;
+                    }
+                    let epoch = router.lookup_session_epoch();
+                    if target_location.as_ref().map(|(target, _)| *target) != Some(ip) {
+                        let known = router.game_route_status().map(|s| s.game_location).filter(
+                            |location| location != "Unknown" && *location != ip.to_string(),
+                        );
+                        let location = match known {
+                            Some(location) => location,
+                            None => match tokio::time::timeout(
+                                Duration::from_secs(2),
+                                crate::geolocation::lookup_game_server_region(ip),
+                            )
+                            .await
+                            {
+                                Ok(crate::geolocation::GameServerRegionLookup::Resolved(
+                                    _,
+                                    location,
+                                )) => location,
+                                _ => ip.to_string(),
+                            },
+                        };
+                        target_location = Some((ip, location));
+                    }
+                    let result = tokio::time::timeout(Duration::from_secs(2), async {
+                        let auth = auth.as_ref()?;
+                        let token = auth.lock().await.get_access_token().await.ok()?;
+                        Some(super::route_measurements::measure(ip, &token).await)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    if router.is_current_lookup_session(epoch)
+                        && router.measurement_target() == Some(ip)
+                        && !router.is_lookup_pending(ip)
+                    {
+                        let location = target_location
+                            .as_ref()
+                            .map(|(_, location)| location.clone())
+                            .unwrap_or_else(|| ip.to_string());
+                        router.record_route_status(ip, location, &result.unwrap_or_default());
+                    }
+                }
+            }));
             log::info!("V3: Auto-routing lookup task spawned");
         }
 
@@ -3469,6 +3555,10 @@ impl VpnConnection {
             handle.abort();
             let _ = handle.await;
         }
+        if let Some(handle) = self.route_telemetry_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
 
         if let Some(manager) = self.process_performance_manager.take() {
             let mut guard = manager.lock().await;
@@ -3647,6 +3737,9 @@ impl Default for VpnConnection {
 impl Drop for VpnConnection {
     fn drop(&mut self) {
         self.process_monitor_stop.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.route_telemetry_handle.take() {
+            handle.abort();
+        }
 
         // Stop ETW watcher
         if let Some(mut watcher) = self.etw_watcher.take() {

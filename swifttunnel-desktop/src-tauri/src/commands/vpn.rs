@@ -553,6 +553,10 @@ pub async fn vpn_connect(
     // Auto-routing fetches relay tickets for mid-session switches through
     // the shared auth manager.
     vpn.set_auth_manager(state.auth_manager.clone());
+    vpn.set_regional_auto_scope(swifttunnel_core::vpn::connect_policy::regional_auto_scope(
+        &settings_snapshot,
+        &region,
+    ));
     let connect_result = tokio::time::timeout(
         VPN_CONNECT_COMMAND_TIMEOUT,
         vpn.connect(
