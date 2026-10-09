@@ -91,10 +91,8 @@ impl QuotaClock {
         let used = limit.saturating_sub(left).max(0) as i128;
         let percent = used * 100 / i128::from(limit);
         let stage = if left == 0 {
-            5
-        } else if left <= 60 {
             4
-        } else if percent >= 99 {
+        } else if left <= 60 {
             3
         } else if percent >= 90 {
             2
@@ -108,11 +106,11 @@ impl QuotaClock {
         }
         self.warned = stage;
         let (title, body) = match stage {
-            5 if grace.is_some_and(|v| v > 0) => ("Free time used up".into(), format!("The server granted {} of extra connection time.", duration(grace.unwrap()))),
-            5 => ("Free time used up".into(), "Your free allowance is exhausted. SwiftTunnel is disconnecting. Your allowance will return at its scheduled reset.".into()),
-            4 => ("1 minute of free time left".into(), format!("{} remaining before SwiftTunnel disconnects. Finish your match or disconnect now.", duration(left))),
+            4 if grace.is_some_and(|v| v > 0) => ("Free time used up".into(), format!("The server granted {} of extra connection time.", duration(grace.unwrap()))),
+            4 => ("Free time used up".into(), "Your free allowance is exhausted. SwiftTunnel is disconnecting. Your allowance will return at its scheduled reset.".into()),
+            3 => ("1 minute remaining".into(), format!("{} remaining before SwiftTunnel disconnects. Finish your match or disconnect now.", duration(left))),
             stage => {
-                let threshold = match stage { 1 => 50, 2 => 90, _ => 99 };
+                let threshold = if stage == 1 { 50 } else { 90 };
                 (format!("{threshold}% of free time used"), format!("{} remaining before SwiftTunnel disconnects.", duration(left)))
             }
         };
@@ -190,7 +188,6 @@ mod tests {
         for (elapsed, title, remaining) in [
             (5400, "50%", "1h 30m"),
             (9720, "90%", "18m 0s"),
-            (10692, "99%", "1m 48s"),
             (10740, "1 minute", "1m 0s"),
             (10800, "Free time used up", "disconnecting"),
         ] {
@@ -199,6 +196,15 @@ mod tests {
             assert!(notice.title.starts_with(title));
             assert!(notice.body.contains(remaining));
             assert!(q.next_notice(at, elapsed as i64).is_none());
+            if elapsed == 9720 {
+                // Crossing 99% or reaching 61 seconds must not warn early.
+                for elapsed in [10692, 10739] {
+                    assert!(
+                        q.next_notice(now + Duration::from_secs(elapsed), elapsed as i64)
+                            .is_none()
+                    );
+                }
+            }
         }
     }
     #[test]
