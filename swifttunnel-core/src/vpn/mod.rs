@@ -31,6 +31,7 @@ pub mod process_cache;
 pub mod process_performance;
 pub mod process_tracker;
 pub mod process_watcher;
+mod quota_notice;
 mod relay_support;
 pub(crate) mod route_measurements;
 pub mod routes;

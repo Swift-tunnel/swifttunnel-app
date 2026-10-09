@@ -1092,44 +1092,17 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   },
 
-  // Local 1s countdown between authoritative ticket refreshes, so the display
-  // keeps moving instead of freezing between them.
-  //
-  // Deliberately does NOT hang up when the allowance reaches zero. The backend
-  // grants a grace window past the limit and keeps renewing the relay lease
-  // through it; disconnecting here would end a session the server was still
-  // willing to carry, which is the difference between "warned before it ends"
-  // and "dropped mid-match".
+  // Display-only smoothing. Native core owns warnings and enforces the last
+  // server-reported budget even while the WebView is hidden or suspended.
   tickFreeTier: () => {
     const { state, freeTierRemaining, freeTierGraceRemaining } = get();
     if (state !== "connected") return;
-
-    // In grace: run the warning countdown down. The disconnect itself comes
-    // from the relay dropping an expired lease, not from here.
     if (freeTierGraceRemaining !== null) {
-      if (freeTierGraceRemaining <= 0) return;
-      const nextGrace = freeTierGraceRemaining - 1;
-      set({ freeTierGraceRemaining: nextGrace });
-      if (nextGrace === 0) {
-        void notify(
-          "Free time used up",
-          "Your extra time is over and SwiftTunnel is disconnecting. Your free time refills within 24 hours of when you started.",
-        );
-      }
+      if (freeTierGraceRemaining > 0) set({ freeTierGraceRemaining: freeTierGraceRemaining - 1 });
       return;
     }
-
-    if (freeTierRemaining === null || freeTierRemaining <= 0) return;
-    const next = Math.max(0, freeTierRemaining - 1);
-    set({ freeTierRemaining: next });
-
-    if (next === 0) {
-      // The next ticket refresh reports the grace window; until it lands the
-      // badge reads 0:00, which is honest — the allowance really is spent.
-      void notify(
-        "Time limit reached",
-        "You've used your free SwiftTunnel time. You have a few extra minutes before it disconnects.",
-      );
+    if (freeTierRemaining !== null && freeTierRemaining > 0) {
+      set({ freeTierRemaining: freeTierRemaining - 1 });
     }
   },
 

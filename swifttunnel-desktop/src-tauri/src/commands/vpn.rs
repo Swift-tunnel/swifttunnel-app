@@ -775,9 +775,9 @@ pub struct FreeTierQuota {
 
 /// Latest free-tier budget reported by the backend.
 ///
-/// Cheap: reads two atomics refreshed whenever a relay ticket is fetched
-/// (~2 min while connected). The UI ticks its own countdown in between and
-/// resyncs from this, so polling it often is pointless.
+/// The shared native clock subtracts connected time since the latest ticket.
+/// Repeated reads cannot restore time that has already elapsed. The UI only
+/// smooths this display; native core owns warnings and the local cutoff.
 #[tauri::command]
 pub async fn vpn_get_free_tier() -> Result<FreeTierQuota, String> {
     let (remaining_seconds, limit_seconds) = swifttunnel_core::vpn::connection::free_tier_quota();

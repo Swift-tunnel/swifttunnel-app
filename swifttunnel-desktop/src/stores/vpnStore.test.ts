@@ -1269,11 +1269,7 @@ describe("stores/vpnStore", () => {
     );
   });
 
-  // Enforcement is relay-side: the backend stops renewing the lease and the
-  // relay drops the session. The client's job is to warn, not to hang up —
-  // the backend grants a grace window past the allowance and keeps the lease
-  // alive through it, so a client that disconnected at zero would cut a session
-  // the server was deliberately still carrying.
+  // Native core owns warnings and cutoff, including while WebView is hidden.
   describe("free tier enforcement", () => {
     async function connectedWithRemaining(remaining: number) {
       const useVpnStore = await loadStore();
@@ -1285,16 +1281,13 @@ describe("stores/vpnStore", () => {
       return useVpnStore;
     }
 
-    it("warns at zero but leaves the session to the relay", async () => {
+    it("counts down without duplicating native quota warnings", async () => {
       const useVpnStore = await connectedWithRemaining(1);
 
       useVpnStore.getState().tickFreeTier();
 
       expect(useVpnStore.getState().freeTierRemaining).toBe(0);
-      expect(notify).toHaveBeenCalledWith(
-        "Time limit reached",
-        expect.stringContaining("extra minutes"),
-      );
+      expect(notify).not.toHaveBeenCalled();
       expect(vpnDisconnect).not.toHaveBeenCalled();
     });
 
@@ -1305,10 +1298,10 @@ describe("stores/vpnStore", () => {
       useVpnStore.getState().tickFreeTier();
       useVpnStore.getState().tickFreeTier();
 
-      expect(notify).toHaveBeenCalledTimes(1);
+      expect(notify).not.toHaveBeenCalled();
     });
 
-    it("counts the backend-granted grace down and warns as it ends", async () => {
+    it("counts explicitly granted legacy grace without another notification", async () => {
       const useVpnStore = await loadStore();
       useVpnStore.setState({
         state: "connected",
@@ -1322,11 +1315,8 @@ describe("stores/vpnStore", () => {
 
       useVpnStore.getState().tickFreeTier();
       expect(useVpnStore.getState().freeTierGraceRemaining).toBe(0);
-      expect(notify).toHaveBeenCalledWith(
-        "Free time used up",
-        expect.stringContaining("disconnecting"),
-      );
-      // Still not the client's call — the relay drops the expired lease.
+      expect(notify).not.toHaveBeenCalled();
+      // The native backend owns cutoff, not this display tick.
       expect(vpnDisconnect).not.toHaveBeenCalled();
     });
 

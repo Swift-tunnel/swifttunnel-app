@@ -1451,7 +1451,12 @@ fn spawn_poller(shared: Arc<Shared>) {
                 }
 
                 let (state, throughput, game_route) = shared.runtime.block_on(async {
-                    let vpn = shared.vpn.lock().await;
+                    let mut vpn = shared.vpn.lock().await;
+                    if vpn.take_terminal_cleanup_request() {
+                        // Quota/auth termination is not a transient drop to auto-retry.
+                        shared.was_connected.store(false, Ordering::Relaxed);
+                        vpn.cleanup_after_terminal_error().await;
+                    }
                     (
                         vpn.state_handle().borrow().clone(),
                         vpn.get_throughput_stats(),
