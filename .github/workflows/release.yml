@@ -23,6 +23,10 @@ jobs:
     name: Build & Publish (Tauri)
     runs-on: windows-2022
     timeout-minutes: 180
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout code
@@ -184,6 +188,12 @@ jobs:
         run: |
           git fetch origin main --deepen=200
           release_commit="$(git rev-parse HEAD)"
+          # Provenance records the workflow's triggering SHA. Never attest a
+          # different checkout when manually rebuilding an older tag.
+          if [[ "$release_commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::Dispatch this workflow with --ref <release-tag> so provenance identifies the actual build commit"
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "$release_commit" "origin/main"; then
             echo "::error::Tag commit is not on origin/main history"
             exit 1
@@ -798,6 +808,8 @@ jobs:
             if (-not $msi) { throw "No Desktop MSI for $target" }
             $saved = Join-Path $env:RUNNER_TEMP "desktop-standard-$target.msi"
             Copy-Item -LiteralPath $msi.FullName -Destination $saved
+            # Offline rebundling may replace the signature as well as the MSI.
+            Copy-Item -LiteralPath "$($msi.FullName).sig" -Destination "$saved.sig"
             $env:TAURI_SWIFTTUNNEL_MSI_ACTIONS_DLL = Join-Path $PWD "target/$target/release/swifttunnel_msi_actions.dll"
             try {
               Push-Location swifttunnel-desktop
@@ -812,6 +824,7 @@ jobs:
             } finally {
               # Later updater steps must retain the standard, small MSI.
               Copy-Item -LiteralPath $saved -Destination $msi.FullName -Force
+              Copy-Item -LiteralPath "$saved.sig" -Destination "$($msi.FullName).sig" -Force
             }
           }
 
@@ -973,6 +986,21 @@ jobs:
           node -e "const fs=require('fs');const crypto=require('crypto');const manifest=fs.readFileSync(process.env.MANIFEST_PATH);const signature=crypto.sign(null,manifest,process.env.SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY).toString('base64');fs.writeFileSync(process.env.SIGNATURE_PATH,signature+'\n');"
 
           gh release upload $env:TAG $manifestPath $signaturePath --repo $env:GITHUB_REPOSITORY --clobber
+
+      - name: Stage final release files for provenance
+        id: provenance_files
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $directory = node scripts/prepare-release-attestation.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Release provenance staging failed" }
+          "directory=$directory" >> $env:GITHUB_OUTPUT
+
+      - name: Attest final release files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-path: ${{ steps.provenance_files.outputs.directory }}/*
 
       - name: Announce release in Discord
         # Cosmetic only: a failed announcement must never mark a successfully

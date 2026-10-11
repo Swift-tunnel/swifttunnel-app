@@ -16,6 +16,7 @@ on:
       - "swifttunnel-desktop/**"
       - "scripts/check-desktop-version-sync.mjs"
       - "scripts/build-recovery-setup*"
+      - "scripts/prepare-release-attestation*"
       - "release-signing.toml"
       - "Cargo.toml"
       - ".github/workflows/ci.yml"
@@ -35,6 +36,7 @@ on:
       - "swifttunnel-desktop/**"
       - "scripts/check-desktop-version-sync.mjs"
       - "scripts/build-recovery-setup*"
+      - "scripts/prepare-release-attestation*"
       - "release-signing.toml"
       - "Cargo.toml"
       - ".github/workflows/ci.yml"
@@ -73,8 +75,8 @@ jobs:
       - name: Check desktop version sync
         run: node ../scripts/check-desktop-version-sync.mjs
 
-      - name: Test recovery setup packaging
-        run: node --test ../scripts/build-recovery-setup.test.mjs ../scripts/msi-build-paths.test.mjs
+      - name: Test release packaging
+        run: node --test ../scripts/build-recovery-setup.test.mjs ../scripts/msi-build-paths.test.mjs ../scripts/prepare-release-attestation.test.mjs
 
       - name: Install dependencies
         run: npm ci
@@ -228,6 +230,10 @@ jobs:
 
   split-tunnel-testbench-availability:
     name: Split Tunnel Testbench Availability
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     outputs:
       runner_available: ${{ steps.runner.outputs.available }}
@@ -274,7 +280,12 @@ jobs:
   split-tunnel-testbench:
     name: Split Tunnel Testbench (Windows)
     needs: split-tunnel-testbench-availability
-    if: needs.split-tunnel-testbench-availability.outputs.runner_available == 'true'
+    # Approval to run a fork's hosted checks must not authorize this machine.
+    if: >-
+      needs.split-tunnel-testbench-availability.outputs.runner_available == 'true' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+       github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: [self-hosted, Windows, X64, testbench, swifttunnel-app]
     timeout-minutes: 45
 
@@ -282,9 +293,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # This job shares the testbench runner workspace with release.yml.
-          # GitHub-backed caches do not help release tags, so preserve the
-          # runner-local Cargo outputs for the next release run.
+          # Preserve Cargo outputs for later trusted testbench runs only.
+          # Releases build separately on fresh GitHub-hosted windows-2022 runners.
           clean: false
 
       - name: Clean workspace but keep local Cargo outputs
