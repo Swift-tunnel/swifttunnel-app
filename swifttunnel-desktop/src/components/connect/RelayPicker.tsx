@@ -1,7 +1,7 @@
 import type { AppSettings, ServerInfo, ServerRegion, GameRouteStatus, ReferenceEstimate } from "../../lib/types";
-import { relayGameEstimate } from "../../lib/gamePing";
+import { relayReferenceEstimate } from "../../lib/gamePing";
 
-export function RelayPicker({ region, servers, latencies, value, disabled, onChange, gameRoute, previews = [], compareGamePaths = true }: {
+export function RelayPicker({ region, servers, latencies, value, disabled, onChange, previews = [], compareGamePaths = true }: {
   region: ServerRegion;
   gameRoute?: GameRouteStatus | null;
   previews?: ReferenceEstimate[];
@@ -16,7 +16,6 @@ export function RelayPicker({ region, servers, latencies, value, disabled, onCha
     server.region === value.server_id && server.ip === value.ip &&
     (server.relay_port ?? 51821) === value.port;
   const choices = region.servers.map(id => ({ id, server: servers.find(s => s.region === id) }));
-  const reference = !gameRoute && choices.map(({ server }) => relayGameEstimate(null, server, previews)).find(Boolean);
   const unavailable = value !== null && !choices.some(({ server }) => server?.relay_available && matches(server));
   return (
     <div className="pb-3 pl-[58px] pr-3.5" role="group" aria-label={`${region.name} relays`}>
@@ -25,21 +24,15 @@ export function RelayPicker({ region, servers, latencies, value, disabled, onCha
           disabled={disabled} onClick={() => onChange(null)} />
         {choices.map(({ id, server }) => {
           const ms = latencies.get(`relay:${id}`);
-          const estimate = relayGameEstimate(gameRoute, server, previews);
+          const estimate = relayReferenceEstimate(server, previews);
           return <RelayOption key={id} label={id}
-            detail={!server?.relay_available ? "Unavailable" : estimate ? `~${estimate.estimated_game_ms} ms game / ${estimate.relay_ms} ms relay` : ms == null ? "Relay ping unavailable" : `${ms} ms relay`}
+            detail={!server?.relay_available ? "Unavailable" : estimate ? `~${estimate.estimated_game_ms} ms` : ms == null ? "Unavailable" : `${ms} ms`}
+            title={estimate && "location" in estimate ? `Estimate to ${estimate.location} Roblox datacenter` : "Datacenter estimate unavailable; showing relay latency when measured"}
             active={!!server && matches(server)} disabled={disabled || !server?.relay_available}
             onClick={() => { if (server?.relay_available) onChange({ region: region.id,
               server_id: id, ip: server.ip, port: server.relay_port ?? 51821 }); }} />;
         })}
       </div>
-      <p className="mt-2 text-[11px] text-text-muted">
-        {gameRoute?.relay_estimates?.length && !gameRoute.bypassed
-          ? `Estimated game ping to ${gameRoute.game_location}. Not Roblox's own reading.`
-          : reference && "location" in reference
-            ? `Estimated game ping to the ${reference.location} Roblox reference datacenter, shared by every relay. Your game server may differ.`
-            : "Game estimate unavailable. Relay ping is shown separately; no connection is needed to measure a reference."}
-      </p>
       {unavailable && <p className="mt-2 text-[11px] text-text-muted">
         Your saved relay is unavailable or changed. Choose another relay or Auto.
       </p>}
@@ -47,10 +40,10 @@ export function RelayPicker({ region, servers, latencies, value, disabled, onCha
   );
 }
 
-function RelayOption({ label, detail, active, disabled, onClick }: {
-  label: string; detail: string; active: boolean; disabled: boolean; onClick: () => void;
+function RelayOption({ label, detail, title, active, disabled, onClick }: {
+  label: string; detail: string; title?: string; active: boolean; disabled: boolean; onClick: () => void;
 }) {
-  return <button type="button" disabled={disabled} aria-pressed={active} onClick={onClick}
+  return <button type="button" title={title} disabled={disabled} aria-pressed={active} onClick={onClick}
     className={`flex min-h-8 w-full items-center gap-2 px-2.5 py-1 text-left text-[11.5px] transition-colors hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50 ${active ? "bg-bg-hover text-text-primary" : "text-text-secondary"}`}>
     <span aria-hidden="true" className="w-4 shrink-0 text-center">{active ? "✓" : ""}</span>
     <span className="min-w-0 truncate font-mono font-medium">{label}</span>

@@ -1392,6 +1392,7 @@ fn spawn_regions(shared: Arc<Shared>) {
                     let previews = swifttunnel_core::vpn::route_preview::estimates(
                         &build_available_servers(&s.server_list),
                         &samples,
+                        s.server_list.regions(),
                     );
                     for relay in s.regions.iter_mut().flat_map(|region| &mut region.relays) {
                         relay.preview = previews

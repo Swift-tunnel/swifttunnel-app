@@ -1082,14 +1082,15 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
     }
 
     let samples = swifttunnel_core::vpn::route_preview::fetch().await;
-    let (mut entries, available_servers) = {
+    let (mut entries, available_servers, regions) = {
         let mut sl = state.server_list.lock();
         let entries = apply_latency_measurements(&mut sl, &measured);
         let available_servers = build_available_servers(&sl);
-        (entries, available_servers)
+        (entries, available_servers, sl.regions().to_vec())
     };
 
-    let previews = swifttunnel_core::vpn::route_preview::estimates(&available_servers, &samples);
+    let previews =
+        swifttunnel_core::vpn::route_preview::estimates(&available_servers, &samples, &regions);
     for entry in &mut entries {
         entry.preview = previews
             .iter()

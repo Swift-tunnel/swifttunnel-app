@@ -618,11 +618,6 @@ export function ConnectTab() {
           )}
         </div>
 
-        {!gameRoute && previews.length > 0 && (
-          <p className="mb-2 text-[11px] text-text-muted">
-            Estimated game ping to {previews[0].location}. All relays use the same Roblox reference.
-          </p>
-        )}
         {!selectedRegion && relayPickerRegion && !settings.auto_routing_enabled && (
           <RelayPicker region={relayPickerRegion} servers={servers} latencies={relayLatencies}
             compareGamePaths={!settings.enable_api_tunneling && !settings.enable_country_ban}
@@ -675,7 +670,7 @@ export function ConnectTab() {
                 // differently and refresh on different schedules, so leaving
                 // the probe here put a stale number next to the live one and
                 // made the same relay look like two different pings.
-                estimatedLatency={regionGameEstimate(gameRoute, r.servers, servers, previews)}
+                estimatedLatency={regionGameEstimate(r.servers, servers, previews)}
                 latency={
                   isConnected && settings.selected_region === r.id && ping !== null
                     ? ping
@@ -1164,14 +1159,14 @@ function RegionRow({
       </button>
 
       {/* Fixed-width latency slot, always same position */}
-        <div title={estimatedLatency !== null ? "Estimated game ping: regional reference before joining, actual target when measured. Some relays may be unmeasured." : "Ping to the relay only"} className="flex w-[110px] shrink-0 items-center justify-end gap-2">
+        <div title={estimatedLatency !== null ? "Estimated network latency to this region's Roblox datacenter" : "Ping to the relay only"} className="flex w-[110px] shrink-0 items-center justify-end gap-2">
           {(estimatedLatency ?? latency) !== null ? (
           <>
               <LatencyBars latency={(estimatedLatency ?? latency)!} />
             <span className="w-[28px] text-right font-mono text-[11.5px] font-medium tabular-nums text-text-primary">
                 {estimatedLatency !== null ? `~${estimatedLatency}` : latency}
             </span>
-              <span className="text-[10px] text-text-muted">{estimatedLatency !== null ? "game ms" : "relay ms"}</span>
+              <span className="text-[10px] text-text-muted">ms</span>
           </>
         ) : null}
       </div>
