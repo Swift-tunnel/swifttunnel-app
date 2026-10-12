@@ -79,7 +79,7 @@ export function MemoryCleaner() {
   const showLive = !isCleaning && percent >= 85;
 
   return (
-    <section className="flex flex-col gap-3">
+    <section data-search-anchor="clean_ram" className="flex flex-col gap-3">
       {/* ── Hero ── */}
       <div className="corner-frame relative isolate overflow-hidden rounded-[var(--radius-card)] surface-card px-5 pt-4 pb-3">
         <Watermark icon="memory" at="bottom-right" size={150} rotate={-10} />

@@ -2,6 +2,7 @@ import {
   OPTIMIZATIONS,
   SPEEDUP_OPTIMIZATIONS,
 } from "../components/optimization/optimizationCatalog";
+import { REPAIR_GUIDES } from "../components/repair/RepairGuidance";
 import { navItemFor } from "../components/shell/nav";
 import type { TabId } from "./types";
 import type { IconName } from "../components/ui/Icon";
@@ -76,7 +77,8 @@ const TABS: SearchEntry[] = [
     label: "Games",
     section: "Go to page",
     icon: gamesIcon,
-    keywords: "games roblox fps unlock graphics boost fflags",
+    keywords:
+      "games roblox library saved games favourites favorites play rejoin server picker fps unlock graphics boost fflags fastflags nvidia import launcher",
   },
   {
     id: "tab-ingame",
@@ -106,7 +108,7 @@ const TABS: SearchEntry[] = [
   },
 ];
 
-// ── Roblox boost settings (Games → Roblox → Optimize) ──
+// ── Roblox settings (Games → Roblox settings) ──
 const BOOST_SETTINGS: { anchor: string; label: string; keywords: string }[] = [
   {
     anchor: "unlock_fps",
@@ -124,11 +126,6 @@ const BOOST_SETTINGS: { anchor: string; label: string; keywords: string }[] = [
     label: "Reset Roblox to default",
     keywords:
       "reset roblox default undo remove fflags flags bloxstrap fishstrap froststrap voidstrap strap bootstrapper render distance graphics stuck revert clean vanilla",
-  },
-  {
-    anchor: "custom_fflags",
-    label: "FastFlags editor",
-    keywords: "custom fflags fflag flags json import advanced client flags",
   },
   {
     anchor: "window_resolution",
@@ -198,7 +195,231 @@ const BOOST: SearchEntry[] = BOOST_SETTINGS.map((s) => ({
   tab: "games",
   anchor: s.anchor,
   label: s.label,
-  section: "Roblox · Optimize",
+  section: "Games · Roblox settings",
+  icon: gamesIcon,
+  keywords: s.keywords,
+}));
+
+// ── Games → Library ──
+// Find a server, Rejoin and the per-game profile live on each game's card, so
+// those entries land on the cards rather than on one control.
+const LIBRARY: SearchEntry[] = (
+  [
+    {
+      anchor: "games_library",
+      label: "Game library",
+      keywords:
+        "library saved games recent favourites favorites my games play launch game list history find a game",
+    },
+    {
+      anchor: "games_add",
+      label: "Add a game",
+      keywords:
+        "add game favourite favorite save place id game link url paste roblox link new game",
+    },
+    {
+      anchor: "games_cards",
+      label: "Find a server",
+      keywords:
+        "find server picker server list browser datacenter data center region choose server join server low ping singapore mumbai tokyo frankfurt london sydney specific server",
+    },
+    {
+      anchor: "games_cards",
+      label: "Rejoin last server",
+      keywords:
+        "rejoin last server same server reconnect previous server join again",
+    },
+    {
+      anchor: "games_cards",
+      label: "Per-game settings",
+      keywords:
+        "per game settings game profile fps cap graphics level preferred datacenter connect before playing auto connect tunnel each game",
+    },
+    {
+      anchor: "games_cards",
+      label: "Copy join link",
+      keywords: "copy join link share invite friend send server link",
+    },
+    {
+      anchor: "join_notifications",
+      label: "Join notifications",
+      keywords:
+        "join notification server information notify popup toast detected server location estimate ping on join",
+    },
+  ] as const
+).map((s, i) => ({
+  id: `lib-${i}`,
+  tab: "games" as const,
+  anchor: s.anchor,
+  label: s.label,
+  section: "Games · Library",
+  icon: gamesIcon,
+  keywords: s.keywords,
+}));
+
+// ── Games → FastFlags ──
+const FLAGS: SearchEntry[] = (
+  [
+    {
+      anchor: "custom_fflags",
+      label: "FastFlags editor",
+      keywords:
+        "fastflags fast flags fflags fflag custom flags client flags editor overrides roblox flags",
+    },
+    {
+      anchor: "flag_manage",
+      label: "Manage FastFlags",
+      keywords:
+        "manage fastflags turn on off enable disable overrides reset remove flags",
+    },
+    {
+      anchor: "flag_presets",
+      label: "FastFlag presets",
+      keywords:
+        "preset presets starting point compatible rendering lowest detail roblox defaults stage preset potato",
+    },
+    {
+      anchor: "flag_renderer",
+      label: "Graphics renderer",
+      keywords:
+        "renderer graphics api direct3d d3d11 dx11 directx vulkan opengl rendering mode",
+    },
+    {
+      anchor: "flag_texture",
+      label: "Texture quality",
+      keywords: "texture quality textures low high blurry sharp override",
+    },
+    {
+      anchor: "flag_msaa",
+      label: "Anti-aliasing",
+      keywords:
+        "anti aliasing antialiasing msaa jagged edges smooth samples 2x 4x",
+    },
+    {
+      anchor: "flag_grass",
+      label: "Grass movement",
+      keywords: "grass movement motion sway wind reduce disable",
+    },
+    {
+      anchor: "flag_mesh",
+      label: "Mesh detail distance",
+      keywords:
+        "mesh detail distance lod level of detail csg render distance studs",
+    },
+    {
+      anchor: "flag_frm",
+      label: "FRM quality override",
+      keywords:
+        "frm quality level override rendering quality graphics level 21 frame rate manager",
+    },
+    {
+      anchor: "flag_gray_sky",
+      label: "Gray sky",
+      keywords: "gray grey sky skybox remove sky simple",
+    },
+    {
+      anchor: "flag_voxel",
+      label: "Pause voxel lighting",
+      keywords: "voxel lighting pause voxelizer shadows light updates",
+    },
+    {
+      anchor: "flag_dpi",
+      label: "Disable DPI scaling",
+      keywords: "dpi scaling scale resolution blurry high dpi display",
+    },
+    {
+      anchor: "flags_advanced",
+      label: "Advanced flag editor",
+      keywords:
+        "advanced editor json edit flags override list add flag custom flag raw paste supported flags allowlist",
+    },
+  ] as const
+).map((s) => ({
+  id: `flag-${s.anchor}`,
+  tab: "games" as const,
+  anchor: s.anchor,
+  label: s.label,
+  section: "Games · FastFlags",
+  icon: gamesIcon,
+  keywords: s.keywords,
+}));
+
+// ── Games → FastFlags → NVIDIA driver ──
+const NVIDIA: SearchEntry[] = (
+  [
+    {
+      anchor: "nvidia_profile",
+      label: "NVIDIA driver profile",
+      keywords:
+        "nvidia driver profile control panel gpu geforce rtx gtx graphics card roblox player profile",
+    },
+    {
+      anchor: "nvidia_power",
+      label: "NVIDIA power management",
+      keywords:
+        "nvidia power management prefer maximum performance adaptive power mode",
+    },
+    {
+      anchor: "nvidia_vsync",
+      label: "NVIDIA vertical sync",
+      keywords:
+        "nvidia vsync v-sync vertical sync screen tearing input lag latency",
+    },
+    {
+      anchor: "nvidia_prerender",
+      label: "NVIDIA pre-rendered frames",
+      keywords:
+        "nvidia maximum pre-rendered frames prerendered low latency queue input lag",
+    },
+    {
+      anchor: "nvidia_fps_limit",
+      label: "NVIDIA frame-rate limit",
+      keywords:
+        "nvidia driver frame rate limit fps limiter cap max frame rate",
+    },
+  ] as const
+).map((s) => ({
+  id: `nv-${s.anchor}`,
+  tab: "games" as const,
+  anchor: s.anchor,
+  label: s.label,
+  section: "Games · FastFlags · NVIDIA",
+  icon: gamesIcon,
+  keywords: s.keywords,
+}));
+
+// ── Games → Roblox settings → Maintenance ──
+// One collapsed section holds all of these, so they share its anchor and
+// selecting any of them opens it.
+const MAINTENANCE: SearchEntry[] = (
+  [
+    {
+      label: "Import launcher settings",
+      keywords:
+        "import launcher settings bring bloxstrap fishstrap froststrap voidstrap strap bootstrapper migrate move switch from existing fps graphics flags",
+    },
+    {
+      label: "Clean old Roblox logs",
+      keywords:
+        "clean logs old player logs storage disk space free up delete cleanup",
+    },
+    {
+      label: "Clean cached Roblox assets",
+      keywords:
+        "clean cache cached assets storage disk space free up delete cleanup temp",
+    },
+    {
+      label: "Clean unsupported flags",
+      keywords:
+        "unsupported invalid flags cleanup remove review undo backup restore last flag cleanup",
+    },
+  ] as const
+).map((s, i) => ({
+  id: `maint-${i}`,
+  tab: "games" as const,
+  anchor: "roblox_maintenance",
+  label: s.label,
+  section: "Games · Roblox settings · Maintenance",
   icon: gamesIcon,
   keywords: s.keywords,
 }));
@@ -242,6 +463,26 @@ const ACTIONS: SearchEntry[] = [
     section: "Optimize",
     icon: optimizeIcon,
     keywords: "preset presets save share import export code config settings copy",
+  },
+  {
+    id: "action-clean-ram",
+    tab: "optimization",
+    anchor: "clean_ram",
+    label: "Clean RAM",
+    section: "Optimize",
+    icon: optimizeIcon,
+    keywords:
+      "clean ram memory free standby clear memory cleaner system memory usage high memory",
+  },
+  {
+    id: "action-revert-tweaks",
+    tab: "optimization",
+    anchor: "revert_tweaks",
+    label: "Revert tweaks",
+    section: "Optimize",
+    icon: optimizeIcon,
+    keywords:
+      "revert undo restore tweaks reset optimizations back to default saved values",
   },
   {
     id: "action-language",
@@ -369,6 +610,18 @@ const SETTINGS_ROWS: SearchEntry[] = (
         "close to tray minimize tray background x button quit exit keep running system tray hide window",
     },
     {
+      anchor: "idle_when_unfocused",
+      label: "Go easy while you play",
+      keywords:
+        "go easy while you play background slow updates not in front unfocused idle cpu usage app uses resources lighter while gaming",
+    },
+    {
+      anchor: "show_live_graph",
+      label: "Live connection graph",
+      keywords:
+        "live connection graph traffic chart last 30 seconds connect tab hide show graph animation",
+    },
+    {
       anchor: "auto_reconnect",
       label: "Auto-reconnect tunnel",
       keywords:
@@ -387,6 +640,12 @@ const SETTINGS_ROWS: SearchEntry[] = (
         // "route assist" kept as an alias: it was the old name, and users who
         // learned it from Discord or older builds should still find the toggle.
         "route assist region placement server region join matchmaking gamejoin teleport singapore relay tunnel join traffic",
+    },
+    {
+      anchor: "updates",
+      label: "Update channel",
+      keywords:
+        "update channel stable live pre-release prerelease beta early builds",
     },
     {
       anchor: "auto_update",
@@ -468,13 +727,37 @@ const TOOLS: SearchEntry[] = [
   {
     id: "action-region",
     tab: "connect",
+    anchor: "change_region",
     label: "Change region",
     section: "Connect",
     icon: connectIcon,
     keywords:
-      "region server location change switch relay node singapore mumbai india japan tokyo germany europe us east america nearest ping",
+      "region server location change switch relay node auto automatic best singapore mumbai india japan tokyo germany europe us east america nearest ping",
+  },
+  {
+    id: "action-adapter",
+    tab: "connect",
+    anchor: "network_adapter",
+    label: "Network adapter",
+    section: "Connect",
+    icon: connectIcon,
+    keywords:
+      "network adapter ethernet wifi wi-fi lan choose adapter manual smart auto binding interface network card wrong adapter",
   },
 ];
+
+// ── Repair → "What are you trying to fix?" ──
+// Built from the guides themselves, so a reworded guide stays searchable by
+// its own symptoms.
+const GUIDES: SearchEntry[] = REPAIR_GUIDES.map((guide, i) => ({
+  id: `guide-${i}`,
+  tab: "repair",
+  anchor: "repair_guidance",
+  label: guide.title,
+  section: "Repair · Troubleshooting",
+  icon: repairIcon,
+  keywords: `${guide.title} ${guide.steps.join(" ")}`,
+}));
 
 const SPEEDUP: SearchEntry[] = SPEEDUP_OPTIMIZATIONS.map((def) => ({
   id: `su-${def.id}`,
@@ -490,9 +773,14 @@ const ALL_ENTRIES: SearchEntry[] = [
   ...TABS,
   ...ACTIONS,
   ...TOOLS,
+  ...GUIDES,
   ...OVERLAY,
   ...SETTINGS_ROWS,
+  ...LIBRARY,
+  ...FLAGS,
+  ...NVIDIA,
   ...BOOST,
+  ...MAINTENANCE,
   ...OPTS,
   ...SPEEDUP,
 ];

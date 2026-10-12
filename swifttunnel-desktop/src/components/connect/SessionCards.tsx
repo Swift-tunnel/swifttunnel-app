@@ -114,6 +114,7 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
           size="sm"
           variant="secondary"
           className="shrink-0 whitespace-nowrap"
+          data-search-anchor="change_region"
           leadingIcon={<Icon name="globe" size={13} strokeWidth={2} />}
           onClick={scrollToRegions}
         >

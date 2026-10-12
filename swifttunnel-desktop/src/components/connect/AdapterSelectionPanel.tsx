@@ -199,6 +199,7 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
 
   return (
     <section
+      data-search-anchor="network_adapter"
       className="rounded-[var(--radius-card)] px-4 py-3 transition-colors"
       style={{
         backgroundColor: "var(--color-bg-card)",

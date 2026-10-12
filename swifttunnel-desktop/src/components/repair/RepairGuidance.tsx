@@ -2,7 +2,8 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import type { TabId } from "../../lib/types";
 import { Button } from "../ui";
 
-const GUIDES: { title: string; steps: string[]; tab: TabId; action: string }[] = [
+/** Also the source of the search entries for these symptoms, so the two cannot drift apart. */
+export const REPAIR_GUIDES: { title: string; steps: string[]; tab: TabId; action: string }[] = [
   {
     title: "Connected, but Roblox cannot join (error 279 or no returning traffic)",
     steps: [
@@ -39,11 +40,11 @@ const GUIDES: { title: string; steps: string[]; tab: TabId; action: string }[] =
 export function RepairGuidance() {
   const setTab = useSettingsStore((s) => s.setTab);
   return (
-    <section className="instrument px-4 py-3">
+    <section data-search-anchor="repair_guidance" className="instrument px-4 py-3">
       <h3 className="text-[13px] font-semibold text-text-primary">What are you trying to fix?</h3>
       <p className="mt-1 text-[12px] text-text-muted">Start with Repair above. If the problem continues, use these checks to narrow down the cause.</p>
       <div className="mt-3 divide-y divide-[color:var(--color-border-subtle)]">
-        {GUIDES.map((guide) => (
+        {REPAIR_GUIDES.map((guide) => (
           <details key={guide.title} className="py-2 text-[12px]">
             <summary className="cursor-pointer font-medium text-text-primary">{guide.title}</summary>
             <ol className="my-3 list-decimal space-y-2 pl-5 text-text-muted">{guide.steps.map((step) => <li key={step}>{step}</li>)}</ol>

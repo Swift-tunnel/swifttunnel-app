@@ -134,16 +134,16 @@ export function GameLibraryPanel() {
       <div className="min-w-0 flex-1"><p className="eyebrow">Game session</p><h2 className="mt-1.5 truncate text-[15px] font-semibold leading-tight text-text-primary">{active?.name ?? `Place ${current.place_id}`}</h2><p className="mt-1 text-[11.5px] leading-snug text-text-muted">{gameSessionDescription(current, tunnelState === "connected" ? route : null)}</p></div>
       <p className="hidden shrink-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[.1em] text-text-muted min-[950px]:flex"><span className={`h-1.5 w-1.5 rounded-full ${tunnelState === "connected" ? "bg-status-connected" : "bg-text-dimmed"}`} />{tunnelState === "connected" ? "Tunnel active" : "Current connection"}</p>
     </section>}
-    <div className="flex flex-wrap items-center gap-2">
+    <div data-search-anchor="games_library" className="flex flex-wrap items-center gap-2">
       <div className="flex items-center gap-0.5">{(["all", "favourites"] as const).map(value => <button key={value} type="button" aria-pressed={filter === value} className={`h-[30px] rounded-[var(--radius-button)] px-3 text-[11.5px] font-medium transition-colors ${filter === value ? "bg-bg-active text-text-primary" : "text-text-muted hover:text-text-primary"}`} onClick={() => setFilter(value)}>{value === "all" ? "Recent & saved" : "Favourites"}</button>)}</div>
       <label className="relative min-w-[170px] flex-1"><Icon name="search" size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" /><input aria-label="Find a saved game" placeholder="Find a game" value={query} onChange={e => setQuery(e.target.value)} className="h-[30px] w-full rounded-[var(--radius-input)] border border-border-subtle bg-bg-card pl-8 pr-3 text-[11.5px] text-text-primary outline-none transition-colors placeholder:text-text-dimmed focus-visible:border-border-focus" /></label>
-      <Button size="sm" variant="secondary" disabled={locked || !library} onClick={() => { setError(null); setAdding(true); }}>Add game</Button>
+      <Button data-search-anchor="games_add" size="sm" variant="secondary" disabled={locked || !library} onClick={() => { setError(null); setAdding(true); }}>Add game</Button>
       <button type="button" title="Refresh games" aria-label="Refresh games" disabled={locked || loading} className={iconButtonClass} onClick={() => void run(() => gamesRefreshMetadata())}><Icon name="refresh" size={14} /></button>
     </div>
     {!library && loading && <div className="grid grid-cols-2 gap-3" aria-label="Loading games">{[1,2,3,4].map(i => <div key={i} className="h-[122px] animate-pulse rounded-[var(--radius-card)] bg-bg-card" />)}</div>}
     {library && !entries.length && <EmptyState icon={<Icon name="games" size={18} strokeWidth={1.8} style={{ color: "var(--color-text-muted)" }} />} title="Your next game starts here." description="Join a game with SwiftTunnel open, or add a favourite above. Keep a small library of the games you actually play." />}
     {library && !!entries.length && !shown.length && <p className="py-10 text-center text-[12px] text-text-muted">No games match this view.</p>}
-    {!!shown.length && <div className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">{shown.map(entry => {
+    {!!shown.length && <div data-search-anchor="games_cards" className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">{shown.map(entry => {
       const preferences = defaultGamePreferences(entry);
       return <article key={`${entry.client}:${entry.place_id}`} className="instrument flex flex-col gap-3.5 p-3.5">
         <div className="flex items-start gap-3"><Artwork entry={entry} /><div className="min-w-0 flex-1"><h3 className="line-clamp-2 text-[13.5px] font-semibold leading-snug text-text-primary" title={entry.name}>{entry.name}</h3><p className="mt-1 text-[11px] text-text-muted">{entry.client === "vng" ? "Roblox VNG" : "Roblox"}{entry.last_played ? ` · ${new Date(entry.last_played * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : " · Saved"}</p><p className="mt-1 text-[10.5px] text-text-dimmed">{preferences.fps_cap ? `${preferences.fps_cap === 99999 ? "Uncapped" : `${preferences.fps_cap} FPS`} · ` : ""}{preferences.datacenter_id ? "Preferred region" : preferences.use_tunnel ? "Automatic connection" : "Use current connection"}</p></div>
@@ -159,7 +159,7 @@ export function GameLibraryPanel() {
         </div>
       </article>;
     })}</div>}
-    {library && <section className="instrument"><Row label="Join notifications" desc="Show the detected server and its verified estimate once per join."><Toggle enabled={library.notify_joins} disabled={locked || !!loadError} ariaLabel="Server information notification" onChange={enabled => void run(() => gamesSetNotifications(enabled))} /></Row></section>}
+    {library && <section className="instrument"><Row anchorId="join_notifications" label="Join notifications" desc="Show the detected server and its verified estimate once per join."><Toggle enabled={library.notify_joins} disabled={locked || !!loadError} ariaLabel="Server information notification" onChange={enabled => void run(() => gamesSetNotifications(enabled))} /></Row></section>}
     <GamePreferencesDialog entry={profile} onClose={() => setProfile(null)} onSaved={() => void refresh()} />
     <GameServerDialog entry={servers} onClose={() => setServers(null)} onJoin={(entry, server, center) => { setServers(null); void prepare(entry, server.job_id, center.id, false); }} />
     <Dialog open={adding} onClose={() => { if (!busy) setAdding(false); }} title="Add a game" description="Paste its official Roblox game link or place ID. No Roblox sign-in is needed here.">

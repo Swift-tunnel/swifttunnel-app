@@ -806,6 +806,7 @@ function RestoreDefaultsButton() {
       onClick={() => void restore()}
       disabled={busy || active.length === 0}
       title="Restore saved values for catalog tweaks. Power Plan and Auto-clean RAM are separate."
+      data-search-anchor="revert_tweaks"
       className="flex shrink-0 items-center gap-1.5 rounded-[8px] px-3 py-1.5 text-[11.5px] font-medium transition-colors hover:bg-bg-hover disabled:opacity-45"
       style={{ color: "var(--color-text-muted)" }}
     >

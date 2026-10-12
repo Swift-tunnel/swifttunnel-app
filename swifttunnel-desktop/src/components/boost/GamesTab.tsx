@@ -21,8 +21,9 @@ export function GamesTab() {
   const anchor = useDeepLinkStore(s => s.anchor);
   useEffect(() => {
     if (!anchor) return;
-    if (anchor === "custom_fflags") { setView("flags"); setFlagsVisited(true); }
-    else setView("settings");
+    if (anchor === "custom_fflags" || anchor === "flags_advanced" || anchor.startsWith("flag_") || anchor.startsWith("nvidia_")) { setView("flags"); setFlagsVisited(true); }
+    else if (anchor.startsWith("games_") || anchor === "join_notifications") setView("library");
+    else { setView("settings"); if (anchor === "roblox_maintenance") setToolsOpen(true); }
   }, [anchor]);
 
   return <div className="flex flex-col gap-4 pb-12">
@@ -55,7 +56,7 @@ export function GamesTab() {
     {view === "settings" && <div className="flex flex-col gap-4">
       <BoostTab importPatch={imported} onImportConsumed={() => setImported(null)} />
       {/* Collapsed like Repair's "Last repair", so occasional maintenance stays out of the way. */}
-      <section className="instrument">
+      <section data-search-anchor="roblox_maintenance" className="instrument">
         <button type="button" aria-expanded={toolsOpen} onClick={() => setToolsOpen(open => !open)} className="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left">
           <span className="flex items-center gap-2">
             <Icon name="chevron-right" size={12} strokeWidth={2.2} style={{ color: "var(--color-text-muted)", transform: toolsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} />
