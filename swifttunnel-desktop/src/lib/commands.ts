@@ -1,4 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+const invoke = <T,>(command: string, args?: Record<string, unknown>): Promise<T> => {
+  if (import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("game-preview")) {
+    return import("./gamePreviewApi").then(module => module.previewInvoke<T>(command, args));
+  }
+  return args === undefined ? nativeInvoke<T>(command) : nativeInvoke<T>(command, args);
+};
 import type {
   AppSettings,
   AuthStateResponse,
@@ -32,6 +38,11 @@ import type {
   RobloxImportPreview,
   RobloxCleanupKind,
   RobloxCleanupReport,
+  RobloxDatacenter,
+  RobloxServerPage,
+  GamePreferences,
+  GameLaunchPlan,
+  FlagCleanupReport,
 } from "./types";
 
 export const gamesGetLibrary = () => invoke<RobloxLibrarySnapshot>("games_get_library");
@@ -44,6 +55,14 @@ export const gamesJoin = (placeId: string, client: RobloxClient, jobId: string |
 export const gamesSetNotifications = (enabled: boolean) => invoke<void>("games_set_notifications", { enabled });
 export const gamesScanImports = () => invoke<RobloxImportPreview>("games_scan_imports");
 export const gamesCleanup = (kind: RobloxCleanupKind, remove = false) => invoke<RobloxCleanupReport>("games_cleanup", { kind, delete: remove });
+export const gamesDatacenters = () => invoke<RobloxDatacenter[]>("games_datacenters");
+export const gamesSearchServers = (placeId: string, datacenterId: number, cursor: number | null = null) => invoke<RobloxServerPage>("games_search_servers", { placeId, datacenterId, cursor });
+export const gamesSetPreferences = (placeId: string, client: RobloxClient, preferences: GamePreferences) => invoke<void>("games_set_preferences", { placeId, client, preferences });
+export const gamesLaunchPlan = (placeId: string, client: RobloxClient, jobId: string | null = null, datacenterId: number | null = null, usePreferredRegion = true) => invoke<GameLaunchPlan>("games_launch_plan", { placeId, client, jobId, datacenterId, usePreferredRegion });
+export const gamesLaunch = (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, connectionStarted: boolean) => invoke<void>("games_launch", { placeId, client, jobId, datacenterId, allowUnverified, connectionStarted });
+export const gamesFlags = (action: "preview" | "clean" | "undo") => invoke<FlagCleanupReport>("games_flags", { action });
+export const gamesRefreshMetadata = () => invoke<void>("games_refresh_metadata");
+export const vpnConnectGame = (region: string, gamePresets: string[]) => invoke<void>("vpn_connect", { region, gamePresets, gameRegion: true });
 
 // ── Auth ──
 

@@ -13,6 +13,7 @@ import {
   vpnGetState,
   vpnPreflightBinding,
   vpnConnect,
+  vpnConnectGame,
   vpnDisconnect,
   vpnGetThroughput,
   vpnGetPing,
@@ -454,7 +455,7 @@ interface VpnStore {
   repairDriver: () => Promise<void>;
   installDriver: () => Promise<void>;
   resetDriver: () => Promise<void>;
-  connect: (region: string, gamePresets: string[]) => Promise<void>;
+  connect: (region: string, gamePresets: string[], gameRegion?: boolean) => Promise<void>;
   resumeConnectWithAdapter: (guid: string) => Promise<void>;
   dismissBindingChooser: () => void;
   disconnect: () => Promise<void>;
@@ -684,7 +685,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   },
 
-  connect: async (region, gamePresets) => {
+  connect: async (region, gamePresets, gameRegion = false) => {
     if (repairIsBusy()) {
       set({ error: "Repair is still running. Wait for it to finish before connecting." });
       return;
@@ -770,7 +771,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           return;
         }
         if (!isCurrentConnectAttempt(attempt)) return;
-        await get().connect(region, gamePresets);
+        await get().connect(region, gamePresets, gameRegion);
         return;
       }
       if (isRepairableBindingPreflight(preflight)) {
@@ -823,7 +824,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       }
       try {
         await withTimeout(
-          vpnConnect(region, gamePresets),
+          (gameRegion ? vpnConnectGame(region, gamePresets) : vpnConnect(region, gamePresets)),
           "VPN connection",
           VPN_CONNECT_TIMEOUT_MS,
         );
@@ -872,7 +873,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
               throw new Error(driverStatusMessage(repaired));
             }
             if (!isCurrentConnectAttempt(attempt)) return;
-            await get().connect(region, gamePresets);
+            await get().connect(region, gamePresets, gameRegion);
             return;
           }
           const status = bindingRepairFailedStatus(message);
@@ -913,7 +914,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
               throw new Error(repaired.message || message);
             }
             if (!isCurrentConnectAttempt(attempt)) return;
-            await get().connect(region, gamePresets);
+            await get().connect(region, gamePresets, gameRegion);
             return;
           }
           throw new Error(

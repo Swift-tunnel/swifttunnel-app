@@ -48,6 +48,9 @@ if (isOverlay || isStatsOverlay) {
   trackTunnelSessions();
 }
 
+if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("game-preview")) {
+  void import("./lib/GamePreview").then(({ GamePreview }) => ReactDOM.createRoot(document.getElementById("root")!).render(<GamePreview />));
+} else {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <MotionConfig reducedMotion="user">
@@ -61,3 +64,5 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     </MotionConfig>
   </React.StrictMode>,
 );
+
+}

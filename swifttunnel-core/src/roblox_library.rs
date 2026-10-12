@@ -17,7 +17,7 @@ pub enum RobloxClient {
     Vng,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameEntry {
     pub place_id: String,
     pub name: String,
@@ -26,6 +26,29 @@ pub struct GameEntry {
     pub favourite: bool,
     #[serde(default)]
     pub client: RobloxClient,
+    #[serde(default)]
+    pub preferences: GamePreferences,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GamePreferences {
+    pub datacenter_id: Option<u32>,
+    pub fps_cap: Option<u32>,
+    pub graphics_quality: Option<crate::structs::GraphicsQuality>,
+    pub use_tunnel: bool,
+}
+impl GamePreferences {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.datacenter_id == Some(0)
+            || self.fps_cap.is_some_and(|fps| !(30..=99999).contains(&fps))
+        {
+            return Err("Choose a valid datacenter and a frame-rate cap from 30 to 99999.".into());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -85,6 +108,11 @@ impl GameLibrary {
             || library.entries.iter().filter(|e| e.favourite).count() > MAX_FAVOURITES
             || library.entries.iter().any(|entry| {
                 !valid_place_id(&entry.place_id)
+                    || entry.preferences.validate().is_err()
+                    || entry
+                        .icon_url
+                        .as_deref()
+                        .is_some_and(|url| !valid_icon_url(url))
                     || entry.name.len() > 400
                     || entry.name.chars().any(char::is_control)
                     || entry.job_id.as_deref().is_some_and(|id| !valid_job_id(id))
@@ -174,6 +202,8 @@ impl GameLibrary {
             last_played: None,
             favourite: false,
             client,
+            preferences: GamePreferences::default(),
+            icon_url: None,
         });
         Ok(self.entries.len() - 1)
     }
@@ -213,6 +243,28 @@ impl GameLibrary {
         }
     }
 
+    pub fn set_icon(&mut self, place_id: &str, client: RobloxClient, icon: &str) {
+        if valid_icon_url(icon)
+            && let Some(entry) = self
+                .entries
+                .iter_mut()
+                .find(|e| e.place_id == place_id && e.client == client)
+        {
+            entry.icon_url = Some(icon.into());
+        }
+    }
+    pub fn set_preferences(
+        &mut self,
+        place_id: &str,
+        client: RobloxClient,
+        preferences: GamePreferences,
+    ) -> Result<(), String> {
+        preferences.validate()?;
+        let index = self.ensure_entry(place_id, client)?;
+        self.entries[index].preferences = preferences;
+        Ok(())
+    }
+
     pub fn forget(&mut self, place_id: &str, client: RobloxClient) {
         self.entries
             .retain(|e| e.place_id != place_id || e.client != client);
@@ -225,6 +277,21 @@ impl GameLibrary {
                 .then(b.last_played.cmp(&a.last_played))
         });
     }
+}
+
+pub fn valid_icon_url(value: &str) -> bool {
+    if value.len() > 512 {
+        return false;
+    }
+    url::Url::parse(value).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+            && url
+                .host_str()
+                .is_some_and(|host| host == "rbxcdn.com" || host.ends_with(".rbxcdn.com"))
+    })
 }
 
 /// Build only known Roblox URLs from validated identifiers. Never pass user
@@ -255,6 +322,24 @@ pub fn join_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preferences_reject_bad_frame_caps_and_icons_cannot_point_at_local_files() {
+        let mut lib = GameLibrary::default();
+        assert!(
+            lib.set_preferences(
+                "1818",
+                RobloxClient::Standard,
+                GamePreferences {
+                    fps_cap: Some(1),
+                    ..Default::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(!valid_icon_url("file:///C:/Users/private.png"));
+        assert!(!valid_icon_url("https://rbxcdn.com.evil/image.png"));
+        assert!(valid_icon_url("https://tr.rbxcdn.com/image.png"));
+    }
     const JOB: &str = "550e8400-e29b-41d4-a716-446655440000";
     #[test]
     fn joins_update_one_entry_and_preserve_favourites() {

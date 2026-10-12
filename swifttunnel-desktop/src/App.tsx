@@ -12,7 +12,7 @@ import { LoginScreen } from "./components/auth/LoginScreen";
 import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
 import { OptimizationTab } from "./components/optimization/OptimizationTab";
-import { BoostTab } from "./components/boost/BoostTab";
+import { GamesTab } from "./components/boost/GamesTab";
 import { InGameTab } from "./components/ingame/InGameTab";
 import { NetworkTab } from "./components/network/NetworkTab";
 import { RepairTab } from "./components/repair/RepairTab";
@@ -53,7 +53,7 @@ function tabComponent(tab: TabId) {
     case "optimization":
       return <OptimizationTab />;
     case "games":
-      return <BoostTab />;
+      return <GamesTab />;
     case "ingame":
       return <InGameTab />;
     case "network":

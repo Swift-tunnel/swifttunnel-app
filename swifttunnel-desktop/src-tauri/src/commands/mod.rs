@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod game_launch;
 pub mod games;
 pub mod i18n;
 pub mod network;

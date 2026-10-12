@@ -25,8 +25,6 @@ import {
   type WatermarkProps,
 } from "../ui";
 import { FpsSlider } from "./FpsSlider";
-import { GameLibraryPanel } from "./GameLibraryPanel";
-import { GameToolsPanel } from "./GameToolsPanel";
 import {
   PROFILES,
   configsEqual,
@@ -171,7 +169,7 @@ function configValidationError(config: Config): string | null {
   );
 }
 
-export function BoostTab() {
+export function BoostTab({ importPatch, onImportConsumed }: { importPatch?: Partial<RobloxSettingsConfig> | null; onImportConsumed?: () => void } = {}) {
   const settings = useSettingsStore((s) => s.settings);
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
@@ -187,6 +185,11 @@ export function BoostTab() {
   useEffect(() => {
     setDraft(savedConfig);
   }, [savedConfig]);
+  useEffect(() => {
+    if (!importPatch) return;
+    setDraft(prev => ({ ...prev, profile: "Custom", roblox_settings: { ...prev.roblox_settings, ...importPatch } }));
+    onImportConsumed?.();
+  }, [importPatch]);
 
   const savedGPP = settings.game_process_performance;
   const [draftGPP, setDraftGPP] =
@@ -590,10 +593,6 @@ export function BoostTab() {
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
       <SettingsSaveNotice />
-      <GameLibraryPanel />
-      <GameToolsPanel disabled={robloxControlsLocked} onImport={patch => setDraft(prev => ({
-        ...prev, profile: "Custom", roblox_settings: { ...prev.roblox_settings, ...patch },
-      }))} />
       {boost.error && <ErrorBanner tone="error">{boost.error}</ErrorBanner>}
 
       {boost.warning && (

@@ -601,7 +601,21 @@ export interface RobloxGameEntry {
   last_played: number | null;
   favourite: boolean;
   client: RobloxClient;
+  preferences?: GamePreferences;
+  icon_url?: string | null;
 }
+export interface GamePreferences {
+  datacenter_id: number | null;
+  fps_cap: number | null;
+  graphics_quality: RobloxSettingsConfig["graphics_quality"] | null;
+  use_tunnel: boolean;
+}
+export interface RobloxDatacenter { id: number; city: string; country: string; datacenter_ids: number[]; relay_region: string | null; }
+export type ServerAvailability = "available" | "full" | "unavailable" | "unknown";
+export interface RobloxDirectoryServer { job_id: string; datacenter_id: number; ip: string | null; first_seen: string; playing: number | null; capacity: number | null; availability: ServerAvailability; }
+export interface RobloxServerPage { servers: RobloxDirectoryServer[]; next_cursor: number | null; warning: string | null; }
+export interface GameLaunchPlan { job_id: string | null; datacenter: RobloxDatacenter | null; preferences: GamePreferences; availability: ServerAvailability; needs_close: boolean; relay_region: string | null; }
+export interface FlagCleanupReport { files_changed: number; flags_removed: number; skipped: string[]; can_undo: boolean; }
 export interface RobloxGameSession {
   place_id: string;
   job_id: string;
@@ -609,12 +623,15 @@ export interface RobloxGameSession {
   client: RobloxClient;
   fresh_join: boolean;
   observed_at: number;
+  location?: string | null;
+  location_source?: "rovalra" | "ip_location" | null;
 }
 export interface RobloxLibrarySnapshot {
   entries: RobloxGameEntry[];
   current: RobloxGameSession | null;
   warning: string | null;
   notify_joins: boolean;
+  launch_pending?: boolean;
 }
 export interface LauncherFlagImport {
   source: string;

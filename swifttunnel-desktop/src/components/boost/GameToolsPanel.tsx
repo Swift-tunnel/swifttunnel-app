@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Button, Dialog, ErrorBanner, Panel } from "../ui";
-import { gamesCleanup, gamesScanImports } from "../../lib/commands";
+import { gamesCleanup, gamesScanImports, gamesFlags } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
-import type { RobloxCleanupKind, RobloxCleanupReport, RobloxImportPreview, RobloxSettingsConfig } from "../../lib/types";
+import type { FlagCleanupReport, RobloxCleanupKind, RobloxCleanupReport, RobloxImportPreview, RobloxSettingsConfig } from "../../lib/types";
 
 export function GameToolsPanel({ onImport, disabled }: { onImport: (patch: Partial<RobloxSettingsConfig>) => void; disabled: boolean }) {
   const [busy, setBusy] = useState(false);
@@ -13,6 +13,7 @@ export function GameToolsPanel({ onImport, disabled }: { onImport: (patch: Parti
   const [fps, setFps] = useState(true);
   const [graphics, setGraphics] = useState(true);
   const [cleanup, setCleanup] = useState<{ kind: RobloxCleanupKind; report: RobloxCleanupReport } | null>(null);
+  const [flagsPreview, setFlagsPreview] = useState<FlagCleanupReport | null>(null);
   async function run(action: () => Promise<void>) {
     setBusy(true); setError(null); setNotice(null);
     try { await action(); } catch (error) { setError(formatErrorMessage(error)); }
@@ -28,12 +29,23 @@ export function GameToolsPanel({ onImport, disabled }: { onImport: (patch: Parti
   return <Panel eyebrow="Roblox tools" title="Import settings & reclaim space" desc="Review imports before applying. Cleanup only includes eligible files older than seven days.">
     {error && <ErrorBanner tone="error">{error}</ErrorBanner>}
     {notice && <p role="status" className="mb-3 text-xs text-text-secondary">{notice}</p>}
-    <div className="flex flex-wrap gap-2">
-      <Button size="sm" variant="secondary" disabled={busy || disabled} onClick={() => void run(async () => {
-        const result = await gamesScanImports(); setPreview(result); setSource(-1); setFps(true); setGraphics(true);
-      })}>Import launcher settings</Button>
-      {(["logs", "assets"] as const).map(kind => <Button key={kind} size="sm" variant="ghost" disabled={busy || disabled}
-        onClick={() => void run(async () => { setCleanup({ kind, report: await gamesCleanup(kind) }); })}>{kind === "logs" ? "Clean old logs" : "Clean old assets"}</Button>)}
+    <div className="grid gap-3 min-[1100px]:grid-cols-3">
+      <section className="rounded-xl border border-border-subtle bg-bg-base p-4">
+        <h3 className="text-sm font-semibold text-text-primary">Bring your settings</h3>
+        <p className="mb-4 mt-2 text-xs leading-relaxed text-text-muted">Review supported launcher flags, FPS and graphics. Your old launcher and accounts stay intact.</p>
+        <Button size="sm" variant="secondary" disabled={busy || disabled} onClick={() => void run(async () => { const result = await gamesScanImports(); setPreview(result); setSource(-1); setFps(true); setGraphics(true); })}>Import launcher settings</Button>
+      </section>
+      <section className="rounded-xl border border-border-subtle bg-bg-base p-4">
+        <h3 className="text-sm font-semibold text-text-primary">Reclaim storage</h3>
+        <p className="mb-4 mt-2 text-xs leading-relaxed text-text-muted">Preview old player logs and cached assets. Only eligible files older than seven days are included.</p>
+        <div className="flex flex-wrap gap-2">{(["logs", "assets"] as const).map(kind => <Button key={kind} size="sm" variant="secondary" disabled={busy || disabled} onClick={() => void run(async () => { setCleanup({ kind, report: await gamesCleanup(kind) }); })}>{kind === "logs" ? "Clean old logs" : "Clean old assets"}</Button>)}</div>
+      </section>
+      <section className="rounded-xl border border-border-subtle bg-bg-base p-4">
+        <h3 className="text-sm font-semibold text-text-primary">Keep useful flags</h3>
+        <p className="mb-4 mt-2 text-xs leading-relaxed text-text-muted">Remove unsupported or invalid overrides with an exact backup. Undo preserves edits made after cleanup.</p>
+        <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" disabled={busy || disabled} onClick={() => void run(async () => setFlagsPreview(await gamesFlags("preview")))}>Review unsupported flags</Button>
+        <Button size="sm" variant="ghost" disabled={busy || disabled} onClick={() => void run(async () => { const report = await gamesFlags("undo"); setNotice(`Restored ${report.files_changed} flag files.${report.skipped.length ? ` ${report.skipped.length} items were preserved because their files changed or moved.` : ""}`); })}>Undo last flag cleanup</Button></div>
+      </section>
     </div>
     <Dialog open={!!preview} title="Import Roblox settings" onClose={() => { if (!busy) setPreview(null); }}
       description="Copies supported values into your pending settings. Review them below, then use Apply. Your other launcher stays installed.">
@@ -57,6 +69,10 @@ export function GameToolsPanel({ onImport, disabled }: { onImport: (patch: Parti
       </div>
       <div className="flex justify-end gap-2 border-t border-border-subtle p-4"><Button size="sm" variant="ghost" onClick={() => setPreview(null)}>Cancel</Button>
         <Button size="sm" disabled={!hasPatch || disabled} onClick={() => { onImport(patch); setPreview(null); setNotice("Imported into pending settings. Review the values, then use Apply."); }}>Use these settings</Button></div>
+    </Dialog>
+    <Dialog open={!!flagsPreview} title="Clean unsupported flag overrides?" onClose={() => { if (!busy) setFlagsPreview(null); }} description="Review the count before cleaning. An exact backup is kept for undo, and newer edits are preserved.">
+      <div className="space-y-3 p-5 text-xs text-text-secondary"><p>{flagsPreview?.flags_removed ?? 0} unsupported or invalid flags in {flagsPreview?.files_changed ?? 0} files.</p><p className="text-text-muted">Close Roblox Player and Studio first. This changes existing flag files; it does not uninstall a launcher.</p>{flagsPreview?.skipped.map((message,i) => <p key={i} className="text-text-muted">{message}</p>)}{error && <ErrorBanner tone="error">{error}</ErrorBanner>}</div>
+      <div className="flex justify-end gap-2 border-t border-border-subtle p-4"><Button variant="ghost" disabled={busy} onClick={() => setFlagsPreview(null)}>Cancel</Button><Button variant="destructive" loading={busy} disabled={!flagsPreview?.flags_removed} onClick={() => void run(async () => { const report = await gamesFlags("clean"); setFlagsPreview(null); setNotice(`Removed ${report.flags_removed} overrides from ${report.files_changed} files. Use Undo last flag cleanup to restore them.${report.skipped.length ? ` ${report.skipped.length} items were left unchanged.` : ""}`); })}>Clean & keep backup</Button></div>
     </Dialog>
     <Dialog open={!!cleanup} title={cleanup?.kind === "logs" ? "Clean old player logs?" : "Clean old cached assets?"}
       onClose={() => { if (!busy) setCleanup(null); }} description="Close Roblox first. Cleanup preserves settings, databases and login files. Cached assets may need to download again.">

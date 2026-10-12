@@ -3,9 +3,63 @@ use serde::Serialize;
 use swifttunnel_core::roblox_library::{
     GameEntry, GameLibrary, RobloxClient, join_url, library_path,
 };
-use tauri::State;
+use tauri::{Emitter, State};
 
 pub const LIBRARY_CHANGED: &str = "roblox-library-changed";
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlagAction {
+    Preview,
+    Clean,
+    Undo,
+}
+#[tauri::command]
+pub async fn games_flags(
+    state: State<'_, AppState>,
+    action: FlagAction,
+) -> Result<swifttunnel_core::roblox_flag_cleanup::FlagCleanupReport, String> {
+    let optimizer = state.roblox_optimizer.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = optimizer.lock();
+        if !matches!(action, FlagAction::Preview)
+            && swifttunnel_core::roblox_game_profile::pending()
+        {
+            return Err(
+                "Close Roblox and let its game settings restore before changing flag files.".into(),
+            );
+        }
+        match action {
+            FlagAction::Preview => swifttunnel_core::roblox_flag_cleanup::preview(),
+            FlagAction::Clean => swifttunnel_core::roblox_flag_cleanup::clean(),
+            FlagAction::Undo => swifttunnel_core::roblox_flag_cleanup::undo(),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn games_refresh_metadata(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let targets: Vec<_> = state
+        .games
+        .lock()
+        .library()?
+        .entries
+        .iter()
+        .filter(|e| e.icon_url.is_none())
+        .take(6)
+        .map(|e| (e.place_id.clone(), e.client))
+        .collect();
+    for (place, client) in targets {
+        let _ = refresh_name(&state, &place, client).await;
+    }
+    let _ = app.emit(LIBRARY_CHANGED, ());
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn games_scan_imports(
@@ -47,6 +101,8 @@ pub struct CurrentGame {
     pub client: RobloxClient,
     pub fresh_join: bool,
     pub observed_at: u64,
+    pub location: Option<String>,
+    pub location_source: Option<String>,
 }
 
 #[derive(Default)]
@@ -54,6 +110,21 @@ pub struct GamesState {
     pub library: Option<GameLibrary>,
     pub current: Option<CurrentGame>,
     pub warning: Option<String>,
+    pub search: Option<ServerSearch>,
+    pub launch_started: Option<std::time::Instant>,
+    pub owned_connection: Option<std::time::Instant>,
+    pub cleanup_scheduled: bool,
+    pub last_cleanup: Option<std::time::Instant>,
+    pub idle_since: Option<std::time::Instant>,
+    pub left_confirmed: bool,
+    pub game_traffic_seen: bool,
+}
+
+pub struct ServerSearch {
+    pub place_id: String,
+    pub center: swifttunnel_core::roblox_directory::Datacenter,
+    pub servers: Vec<swifttunnel_core::roblox_directory::GameServer>,
+    pub fetched: std::time::Instant,
 }
 
 #[derive(Serialize)]
@@ -62,10 +133,11 @@ pub struct LibrarySnapshot {
     pub current: Option<CurrentGame>,
     pub warning: Option<String>,
     pub notify_joins: bool,
+    pub launch_pending: bool,
 }
 
 impl GamesState {
-    fn library(&mut self) -> Result<&GameLibrary, String> {
+    pub(super) fn library(&mut self) -> Result<&GameLibrary, String> {
         if self.library.is_none() {
             self.library = Some(GameLibrary::load(&library_path()?)?);
         }
@@ -105,6 +177,7 @@ pub fn games_get_library(state: State<'_, AppState>) -> Result<LibrarySnapshot, 
         notify_joins: library.notify_joins,
         current: games.current.clone(),
         warning: games.warning.clone(),
+        launch_pending: games.launch_started.is_some(),
     })
 }
 
@@ -152,7 +225,7 @@ pub fn games_join(
 }
 
 #[cfg(windows)]
-fn launch_url(url: &str) -> Result<(), String> {
+pub(super) fn launch_url(url: &str) -> Result<(), String> {
     // No command shell, arbitrary executable path, account cookie, or auth
     // ticket. Windows invokes the player's registered Roblox handler.
     use windows::{
@@ -179,7 +252,7 @@ fn launch_url(url: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn launch_url(_: &str) -> Result<(), String> {
+pub(super) fn launch_url(_: &str) -> Result<(), String> {
     Err("Game launching is available on Windows.".into())
 }
 
@@ -195,7 +268,9 @@ pub async fn refresh_name(
         return Ok(false);
     };
     let needs_name = state.games.lock().library()?.entries.iter().any(|e| {
-        e.place_id == place_id && e.client == client && e.name == format!("Place {place_id}")
+        e.place_id == place_id
+            && e.client == client
+            && (e.name == format!("Place {place_id}") || e.icon_url.is_none())
     });
     if !needs_name {
         return Ok(false);
@@ -237,8 +312,18 @@ pub async fn refresh_name(
         .and_then(|d| d.get("name"))
         .and_then(|n| n.as_str())
         .ok_or("Game name is unavailable.")?;
+    let icon = async {
+        let response = http.get(format!("https://thumbnails.roblox.com/v1/games/icons?universeIds={universe}&size=256x256&format=Png&isCircular=false"))
+            .send().await.ok()?.error_for_status().ok()?;
+        let bytes = swifttunnel_core::http_body::read_bounded(response, 32 * 1024, "game icon").await.ok()?;
+        let data: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        data.get("data")?.get(0)?.get("imageUrl")?.as_str().map(str::to_string)
+    }.await;
     state.games.lock().mutate(|lib| {
         lib.set_name(place_id, client, name);
+        if let Some(icon) = icon {
+            lib.set_icon(place_id, client, &icon);
+        }
         Ok(())
     })?;
     Ok(true)

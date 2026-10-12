@@ -17,8 +17,13 @@ use std::time::Duration;
 /// Events emitted by the Roblox watcher
 #[derive(Debug, Clone)]
 pub enum RobloxEvent {
+    GameLeft {
+        job_id: Option<String>,
+    },
     /// Detected a game server connection
-    GameServerDetected { ip: Ipv4Addr },
+    GameServerDetected {
+        ip: Ipv4Addr,
+    },
     GameJoined {
         ip: Ipv4Addr,
         place_id: String,
@@ -100,6 +105,73 @@ fn parse_join(line: &str) -> Option<(String, String, Ipv4Addr)> {
     Some((place.into(), job.to_ascii_lowercase(), ip))
 }
 
+#[derive(Default)]
+struct JoinTracker {
+    pending: Option<(String, String, Ipv4Addr, bool)>,
+    last: Option<String>,
+}
+impl JoinTracker {
+    fn feed(&mut self, lines: &[String], fresh: bool, client: RobloxClient) -> Vec<RobloxEvent> {
+        let mut events = Vec::new();
+        for line in lines {
+            if line.contains("[FLog::SingleSurfaceApp] leaveUGCGameInternal")
+                || line.contains("[FLog::Network] Time to disconnect replication data:")
+            {
+                if fresh {
+                    events.push(RobloxEvent::GameLeft {
+                        job_id: self.last.clone(),
+                    });
+                }
+                self.last = None;
+                self.pending = None;
+                if !fresh {
+                    events.clear();
+                }
+            } else if let Some((place, job, ip)) = parse_join(line) {
+                self.pending = Some((place, job, ip, fresh));
+            } else if line.contains("[FLog::Network] serverId:")
+                && let Some((place_id, job_id, mut ip, join_fresh)) = self.pending.take()
+            {
+                static SERVER: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+                let pattern =
+                    SERVER.get_or_init(|| Regex::new(r"serverId:\s*(\d+\.\d+\.\d+\.\d+)").unwrap());
+                if let Some(actual) = pattern
+                    .captures(line)
+                    .and_then(|c| c.get(1))
+                    .and_then(|value| value.as_str().parse::<Ipv4Addr>().ok())
+                    .filter(|ip| !is_private_ip(*ip))
+                {
+                    ip = actual;
+                }
+                if self.last.as_ref() != Some(&job_id) {
+                    self.last = Some(job_id.clone());
+                    events.push(RobloxEvent::GameJoined {
+                        ip,
+                        place_id,
+                        job_id,
+                        client,
+                        fresh_join: join_fresh || fresh,
+                    });
+                }
+            }
+        }
+        // Existing logs may contain several old sessions; attach only the
+        // latest state, with no notification/cleaning replay.
+        if !fresh
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|(_, job, _, _)| self.last.as_ref() != Some(job))
+        {
+            events.clear();
+        }
+        if !fresh && events.len() > 1 {
+            events = events.into_iter().rev().take(1).collect();
+        }
+        events
+    }
+}
+
 /// Compile regex patterns once at startup (panics if patterns are invalid - programmer error)
 fn get_patterns() -> (&'static Regex, &'static Regex) {
     use std::sync::OnceLock;
@@ -132,7 +204,7 @@ fn watch_logs(
     let mut seen_ips: HashSet<Ipv4Addr> = HashSet::new();
     let mut current_file: Option<TailedFile> = None;
     let mut last_file_check = std::time::Instant::now();
-    let mut last_join: Option<(String, String)> = None;
+    let mut tracker = JoinTracker::default();
     let started = std::time::SystemTime::now();
 
     loop {
@@ -159,7 +231,7 @@ fn watch_logs(
                         Ok(file) => {
                             current_file = Some(file);
                             seen_ips.clear(); // Reset seen IPs for new session
-                            last_join = None;
+                            tracker = JoinTracker::default();
                         }
                         Err(e) => {
                             log::warn!("Failed to open log file {:?}: {}", newest, e);
@@ -184,30 +256,17 @@ fn watch_logs(
                     .is_ok_and(|created| created >= started);
             match file.read_new_lines() {
                 Ok(lines) => {
-                    // A newly tailed file can contain several old teleports.
-                    // Only the newest complete join in this poll is current.
-                    let join = lines.iter().filter_map(|line| parse_join(line)).last();
-                    if let Some((place_id, job_id, ip)) = join {
-                        let key = (place_id.clone(), job_id.clone());
-                        if last_join.as_ref() != Some(&key) {
-                            last_join = Some(key);
-                            let client = if file
-                                .path
-                                .components()
-                                .any(|c| c.as_os_str() == "RobloxPCVNG")
-                            {
-                                RobloxClient::Vng
-                            } else {
-                                RobloxClient::Standard
-                            };
-                            let _ = sender.try_send(RobloxEvent::GameJoined {
-                                ip,
-                                place_id,
-                                job_id,
-                                client,
-                                fresh_join,
-                            });
-                        }
+                    let client = if file
+                        .path
+                        .components()
+                        .any(|c| c.as_os_str() == "RobloxPCVNG")
+                    {
+                        RobloxClient::Vng
+                    } else {
+                        RobloxClient::Standard
+                    };
+                    for event in tracker.feed(&lines, fresh_join, client) {
+                        let _ = sender.try_send(event);
                     }
                     for line in lines {
                         // Try each pattern
@@ -368,6 +427,44 @@ impl TailedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn notifications_require_a_confirmed_connection_not_a_failed_join_attempt() {
+        let mut tracker = JoinTracker::default();
+        let join = "[FLog::Output] ! Joining game '550e8400-e29b-41d4-a716-446655440000' place 1818 at 34.1.2.3".to_string();
+        assert!(
+            tracker
+                .feed(&[join], true, RobloxClient::Standard)
+                .is_empty()
+        );
+        let events = tracker.feed(
+            &["[FLog::Network] serverId: 34.1.2.3|49152".into()],
+            true,
+            RobloxClient::Standard,
+        );
+        assert!(
+            matches!(&events[0], RobloxEvent::GameJoined { place_id, fresh_join: true, .. } if place_id == "1818")
+        );
+        let events = tracker.feed(
+            &["[FLog::Network] Time to disconnect replication data: 0".into()],
+            true,
+            RobloxClient::Standard,
+        );
+        assert!(matches!(&events[0], RobloxEvent::GameLeft { .. }));
+    }
+    #[test]
+    fn opening_after_a_closed_session_does_not_attach_old_game_metadata() {
+        let mut tracker = JoinTracker::default();
+        let lines = vec![
+            "[FLog::Output] ! Joining game '550e8400-e29b-41d4-a716-446655440000' place 1818 at 34.1.2.3".into(),
+            "[FLog::Network] serverId: 34.1.2.3|49152".into(),
+            "[FLog::SingleSurfaceApp] leaveUGCGameInternal".into(),
+        ];
+        assert!(
+            tracker
+                .feed(&lines, false, RobloxClient::Standard)
+                .is_empty()
+        );
+    }
     #[test]
     fn join_metadata_accepts_cloud_destinations_but_not_tokens_or_invalid_ids() {
         let join = "! Joining game '550e8400-e29b-41d4-a716-446655440000' place 1818 at 34.1.2.3";

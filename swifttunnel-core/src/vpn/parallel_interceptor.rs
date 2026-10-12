@@ -55,6 +55,7 @@ use serde::Serialize;
 
 use crate::process_names::process_name_matches_any_tunnel_app;
 
+use super::game_destination::known_or_observed as is_roblox_game_server_ip;
 use super::ipv6_recovery::{
     delete_ipv6_marker, finish_recorded_ipv6_restore, has_ipv6_binding_native,
     install_recorded_ipv6_block, remove_winpkfilter_ipv6_block_filters, restore_ipv6_from_marker,
@@ -66,7 +67,6 @@ use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
 use super::tso_recovery::{delete_tso_marker, restore_tso_from_marker, write_tso_marker};
 use super::{VpnError, VpnResult};
-use crate::geolocation::is_roblox_game_server_ip;
 
 // ============================================================================
 // ZERO-ALLOCATION BUFFER MANAGEMENT
@@ -8158,6 +8158,9 @@ fn should_relay_udp_for_mode(
     }
 
     super::process_cache::is_likely_gameplay_udp(dst_ip, dst_port, protocol)
+        || (dst_port != super::process_cache::DNS_PORT
+            && dst_port != 443
+            && super::game_destination::contains(dst_ip))
 }
 
 fn should_route_to_vpn_with_routing_flags(
@@ -14328,6 +14331,8 @@ mod tests {
 
     #[test]
     fn test_tcp_api_tunneling_does_not_bootstrap_unknown_owner_non_roblox_http_syn() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let unrelated_ip = Ipv4Addr::new(93, 184, 216, 34);
         let src_port = 40020;

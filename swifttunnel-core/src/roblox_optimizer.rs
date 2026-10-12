@@ -116,6 +116,28 @@ impl RobloxOptimizer {
         }
     }
 
+    pub fn game_preferences_path(
+        client: crate::roblox_library::RobloxClient,
+    ) -> std::result::Result<PathBuf, String> {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .ok_or("Windows could not find your app-data folder.")?;
+        let root = base.join(if client == crate::roblox_library::RobloxClient::Vng {
+            "RobloxPCVNG"
+        } else {
+            "Roblox"
+        });
+        Ok(Self::find_settings_file(&root))
+    }
+
+    pub fn existing_client_flag_files() -> Result<Vec<PathBuf>> {
+        Ok(Self::get_client_settings_paths(false)?
+            .into_iter()
+            .map(|p| p.join("ClientAppSettings.json"))
+            .filter(|p| p.is_file())
+            .collect())
+    }
+
     /// Find the GlobalBasicSettings XML file
     fn find_settings_file(roblox_dir: &Path) -> PathBuf {
         // Prefer any discovered GlobalBasicSettings_*.xml file and pick the highest index.
@@ -1973,6 +1995,7 @@ impl RobloxOptimizer {
     /// Roblox is first so a plain install behaves exactly as it always has.
     const ROBLOX_INSTALL_ROOTS: &[&str] = &[
         "Roblox",
+        "RobloxPCVNG",
         "Bloxstrap",
         "Bloxstrap-QA",
         "Fishstrap",

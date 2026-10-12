@@ -1,0 +1,481 @@
+use crate::{
+    commands::games::{self, ServerSearch},
+    state::AppState,
+};
+use serde::Serialize;
+use std::time::{Duration, Instant};
+use swifttunnel_core::{
+    roblox_directory::{self, Availability, Datacenter, ServerPage},
+    roblox_library::{GamePreferences, RobloxClient, valid_job_id, valid_place_id},
+    vpn::{
+        ConnectionState,
+        game_destination::{self, ObservedGame},
+    },
+};
+use tauri::{Emitter, State};
+
+#[derive(Serialize)]
+pub struct LaunchPlan {
+    pub job_id: Option<String>,
+    pub datacenter: Option<Datacenter>,
+    pub preferences: GamePreferences,
+    pub availability: Availability,
+    pub needs_close: bool,
+    pub relay_region: Option<String>,
+}
+
+struct LaunchGuard<'a> {
+    state: &'a AppState,
+    complete: bool,
+}
+impl Drop for LaunchGuard<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.state.games.lock().launch_started = None;
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn games_datacenters() -> Result<Vec<Datacenter>, String> {
+    roblox_directory::datacenters().await
+}
+
+#[tauri::command]
+pub async fn games_search_servers(
+    state: State<'_, AppState>,
+    place_id: String,
+    datacenter_id: u32,
+    cursor: Option<u32>,
+) -> Result<ServerPage, String> {
+    let page = roblox_directory::servers(&place_id, datacenter_id, cursor).await?;
+    let center = roblox_directory::datacenters()
+        .await?
+        .into_iter()
+        .find(|c| c.id == datacenter_id)
+        .ok_or("Refresh the datacenter list.")?;
+    let mut games = state.games.lock();
+    match &mut games.search {
+        Some(search)
+            if search.place_id == place_id
+                && search.center.id == datacenter_id
+                && cursor.is_some() =>
+        {
+            for server in &page.servers {
+                if !search.servers.iter().any(|s| s.job_id == server.job_id)
+                    && search.servers.len() < 200
+                {
+                    search.servers.push(server.clone());
+                }
+            }
+            search.fetched = Instant::now();
+        }
+        _ => {
+            games.search = Some(ServerSearch {
+                place_id,
+                center,
+                servers: page.servers.clone(),
+                fetched: Instant::now(),
+            })
+        }
+    }
+    Ok(page)
+}
+
+#[tauri::command]
+pub async fn games_set_preferences(
+    state: State<'_, AppState>,
+    place_id: String,
+    client: RobloxClient,
+    preferences: GamePreferences,
+) -> Result<(), String> {
+    preferences.validate()?;
+    let previous = state
+        .games
+        .lock()
+        .library()?
+        .entries
+        .iter()
+        .find(|e| e.place_id == place_id && e.client == client)
+        .and_then(|e| e.preferences.datacenter_id);
+    if preferences.datacenter_id != previous
+        && let Some(id) = preferences.datacenter_id
+        && !roblox_directory::datacenters()
+            .await?
+            .iter()
+            .any(|c| c.id == id)
+    {
+        return Err("This datacenter is no longer listed. Choose another location.".into());
+    }
+    state
+        .games
+        .lock()
+        .mutate(|lib| lib.set_preferences(&place_id, client, preferences))
+}
+
+#[tauri::command]
+pub async fn games_launch_plan(
+    state: State<'_, AppState>,
+    place_id: String,
+    client: RobloxClient,
+    job_id: Option<String>,
+    datacenter_id: Option<u32>,
+    use_preferred_region: bool,
+) -> Result<LaunchPlan, String> {
+    if !valid_place_id(&place_id) || job_id.as_deref().is_some_and(|j| !valid_job_id(j)) {
+        return Err("Choose a valid game and server.".into());
+    }
+    let preferences = state
+        .games
+        .lock()
+        .library()?
+        .entries
+        .iter()
+        .find(|e| e.place_id == place_id && e.client == client)
+        .map(|e| e.preferences.clone())
+        .unwrap_or_default();
+    let target = datacenter_id.or(if use_preferred_region {
+        preferences.datacenter_id
+    } else {
+        None
+    });
+    let center = if let Some(id) = target {
+        Some(roblox_directory::datacenters().await?.into_iter().find(|c| c.id == id).ok_or("Your preferred datacenter is no longer listed. Choose another location or Play normally.".to_string())?)
+    } else {
+        None
+    };
+    let mut job_id = job_id;
+    let mut availability = Availability::Unknown;
+    if let Some(center) = &center {
+        if client == RobloxClient::Vng {
+            return Err(
+                "VNG region joining is not verified yet. Use Play to open its official game page."
+                    .into(),
+            );
+        }
+        let cached = state.games.lock().search.as_ref().is_some_and(|s| {
+            s.place_id == place_id
+                && s.center.id == center.id
+                && s.fetched.elapsed() < Duration::from_secs(30)
+        });
+        if !cached {
+            games_search_servers(state.clone(), place_id.clone(), center.id, None).await?;
+        }
+        let games = state.games.lock();
+        let search = games
+            .search
+            .as_ref()
+            .filter(|s| s.place_id == place_id && s.center.id == center.id)
+            .ok_or("The server search changed. Refresh this game's server list.")?;
+        if job_id.is_none() {
+            job_id = search
+                .servers
+                .iter()
+                .filter(|s| {
+                    matches!(
+                        s.availability,
+                        Availability::Available | Availability::Unknown
+                    )
+                })
+                .min_by_key(|s| {
+                    (
+                        s.availability != Availability::Available,
+                        s.playing.unwrap_or(u32::MAX),
+                    )
+                })
+                .map(|s| s.job_id.clone());
+            if job_id.is_none() {
+                return Err("No joinable server was found in this datacenter. Refresh or choose another location.".into());
+            }
+        }
+        let server = search
+            .servers
+            .iter()
+            .find(|s| Some(&s.job_id) == job_id.as_ref())
+            .ok_or("This server is no longer in the current search. Refresh the list.")?;
+        availability = server.availability;
+    } else if let Some(job) = &job_id {
+        availability = roblox_directory::availability(&place_id, job)
+            .await
+            .unwrap_or(Availability::Unknown);
+    }
+    let relay_region = center
+        .as_ref()
+        .and_then(|c| c.relay_region.clone())
+        .filter(|_| preferences.use_tunnel);
+    if preferences.use_tunnel && center.is_some() && relay_region.is_none() {
+        return Err("SwiftTunnel has no matching relay region for this datacenter. Turn off automatic connection for this game to join with your current route.".into());
+    }
+    if let Some(region) = &relay_region
+        && !state
+            .server_list
+            .lock()
+            .regions()
+            .iter()
+            .any(|r| r.id == *region && !r.servers.is_empty())
+    {
+        return Err("The matching relay region is currently unavailable. Choose another datacenter or use your current connection.".into());
+    }
+    let needs_close = preferences.fps_cap.is_some()
+        || preferences.graphics_quality.is_some()
+        || preferences.use_tunnel;
+    Ok(LaunchPlan {
+        job_id,
+        datacenter: center,
+        preferences,
+        availability,
+        needs_close,
+        relay_region,
+    })
+}
+
+#[tauri::command]
+pub async fn games_launch(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    place_id: String,
+    client: RobloxClient,
+    job_id: Option<String>,
+    datacenter_id: Option<u32>,
+    allow_unverified: bool,
+    connection_started: bool,
+) -> Result<(), String> {
+    let plan = games_launch_plan(
+        state.clone(),
+        place_id.clone(),
+        client,
+        job_id,
+        datacenter_id,
+        false,
+    )
+    .await?;
+    if matches!(
+        plan.availability,
+        Availability::Full | Availability::Unavailable
+    ) {
+        return Err(
+            "That server is full or closed. Use Play normally or choose another server.".into(),
+        );
+    }
+    if plan.job_id.is_some() && plan.availability == Availability::Unknown && !allow_unverified {
+        return Err(
+            "Server availability could not be verified. Review the warning before joining.".into(),
+        );
+    }
+    if plan.needs_close && state.performance_monitor.lock().is_roblox_running() {
+        return Err(
+            "Close Roblox before starting this game's connection or settings profile.".into(),
+        );
+    }
+    if plan.preferences.use_tunnel {
+        let connection = state.vpn_state_handle.borrow().clone();
+        let ConnectionState::Connected { server_region, .. } = connection else {
+            return Err(
+                "Connect SwiftTunnel before starting this game's automatic connection profile."
+                    .into(),
+            );
+        };
+        if let Some(requested) = &plan.relay_region
+            && !state.server_list.lock().regions().iter().any(|region| {
+                region.id == *requested
+                    && (server_region == region.id || region.servers.contains(&server_region))
+            })
+        {
+            return Err("The current connection is not in this game's requested relay region. Reconnect before joining.".into());
+        }
+    }
+    {
+        let mut games = state.games.lock();
+        if games.cleanup_scheduled {
+            return Err("The previous game's settings are still being restored. Try Play again in a moment.".into());
+        }
+        if games
+            .launch_started
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            return Err("A Roblox launch is already in progress.".into());
+        }
+        games.launch_started = Some(Instant::now());
+        games.idle_since = None;
+        games.left_confirmed = false;
+        games.game_traffic_seen = false;
+    }
+    let mut launch_guard = LaunchGuard {
+        state: &state,
+        complete: false,
+    };
+    let profile = plan.preferences.clone();
+    let optimizer = state.roblox_optimizer.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = optimizer.lock();
+        match swifttunnel_core::roblox_game_profile::apply(client, &profile) {
+            Ok(applied) => Ok(applied),
+            Err(error) => {
+                if let Err(restore_error) = swifttunnel_core::roblox_game_profile::restore() {
+                    return Err(format!(
+                        "{error} The previous settings could not be restored: {restore_error}"
+                    ));
+                }
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if let Some(job) = &plan.job_id {
+        let games = state.games.lock();
+        if let Some(search) = &games.search
+            && search.place_id == place_id
+            && plan
+                .datacenter
+                .as_ref()
+                .is_some_and(|center| center.id == search.center.id)
+            && search.fetched.elapsed() < Duration::from_secs(60)
+            && let Some(server) = search.servers.iter().find(|s| &s.job_id == job)
+            && let Some(ip) = server.ip
+        {
+            game_destination::register(ObservedGame {
+                ip,
+                job_id: job.clone(),
+                location: Some(search.center.city.clone()),
+                region: native_region(&search.center),
+                prelaunch: true,
+            });
+        }
+    }
+    let url =
+        swifttunnel_core::roblox_library::join_url(&place_id, plan.job_id.as_deref(), client)?;
+    if let Err(error) = games::launch_url(&url) {
+        let _guard = state.roblox_optimizer.lock();
+        let restored = swifttunnel_core::roblox_game_profile::restore();
+        game_destination::clear();
+        if let Err(restore_error) = restored {
+            return Err(format!(
+                "{error} The previous settings could not be restored: {restore_error}"
+            ));
+        }
+        return Err(error);
+    }
+    let owned_connection = if connection_started {
+        match &*state.vpn_state_handle.borrow() {
+            ConnectionState::Connected { since, .. } => Some(*since),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let mut games = state.games.lock();
+    games.launch_started = if games
+        .current
+        .as_ref()
+        .is_some_and(|g| g.place_id == place_id && g.client == client)
+    {
+        None
+    } else {
+        Some(Instant::now())
+    };
+    games.owned_connection = owned_connection;
+    launch_guard.complete = true;
+    drop(games);
+    let _ = app.emit(games::LIBRARY_CHANGED, ());
+    Ok(())
+}
+
+pub fn native_region(center: &Datacenter) -> Option<swifttunnel_core::geolocation::RobloxRegion> {
+    use swifttunnel_core::geolocation::RobloxRegion::*;
+    Some(match center.relay_region.as_deref()? {
+        "singapore" => Singapore,
+        "mumbai" => Mumbai,
+        "tokyo" => Tokyo,
+        "germany" => Frankfurt,
+        "sydney" => Sydney,
+        "london" => London,
+        "amsterdam" => Amsterdam,
+        "paris" => Paris,
+        "jakarta" => Jakarta,
+        "israel" => TelAviv,
+        "brazil" => Brazil,
+        "us-east" => UsEast,
+        "us-central" => UsCentral,
+        "us-west" => UsWest,
+        _ => Unknown,
+    })
+}
+
+pub fn update_session_location(
+    state: &AppState,
+    job: &str,
+    ip: std::net::Ipv4Addr,
+    location: String,
+    source: &str,
+    region: Option<swifttunnel_core::geolocation::RobloxRegion>,
+) -> bool {
+    let mut games = state.games.lock();
+    let Some(current) = games
+        .current
+        .as_mut()
+        .filter(|g| g.job_id == job && g.ip == ip.to_string())
+    else {
+        return false;
+    };
+    current.location = Some(location.clone());
+    current.location_source = Some(source.into());
+    game_destination::register(ObservedGame {
+        ip,
+        job_id: job.into(),
+        location: Some(location),
+        region,
+        prelaunch: false,
+    });
+    true
+}
+
+pub async fn finish_game_connection(state: &AppState) {
+    {
+        let games = state.games.lock();
+        if games.current.is_some() || games.launch_started.is_some() {
+            return;
+        }
+    }
+    if state
+        .vpn_connection
+        .lock()
+        .await
+        .auto_router()
+        .is_some_and(|router| router.has_recent_game_traffic())
+    {
+        return;
+    }
+    let owned = state.games.lock().owned_connection;
+    if let Some(owned) = owned {
+        let matches = matches!(&*state.vpn_state_handle.borrow(), ConnectionState::Connected { since, .. } if *since == owned);
+        if matches {
+            match crate::commands::vpn::disconnect_game_session(state, owned).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    state.games.lock().warning = Some(format!(
+                        "The automatic game connection could not be stopped: {error}"
+                    ));
+                    return;
+                }
+            }
+        }
+        let mut games = state.games.lock();
+        if games.owned_connection == Some(owned) {
+            games.owned_connection = None;
+        }
+    }
+    let optimizer = state.roblox_optimizer.clone();
+    let restored = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = optimizer.lock();
+        swifttunnel_core::roblox_game_profile::restore()
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
+    if let Err(error) = restored {
+        state.games.lock().warning = Some(error);
+    }
+    game_destination::clear();
+}

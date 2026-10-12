@@ -409,6 +409,13 @@ impl AutoRouter {
         Some(*ip)
     }
 
+    pub fn has_recent_game_traffic(&self) -> bool {
+        self.game_traffic
+            .read()
+            .values()
+            .any(|last| last.elapsed() < GAME_TRAFFIC_QUIET_HANDOFF)
+    }
+
     pub fn game_route_status(&self) -> Option<GameRouteStatus> {
         let mut status = self.route_status.read().clone()?;
         if status.game_server_ip != self.measurement_target() || status.game_server_ip.is_none() {
@@ -684,6 +691,29 @@ impl AutoRouter {
         // mid-session, set_enabled(true) uses this history to tell flowing
         // connections apart from fresh joins.
         let candidate_was_quiet = self.note_game_traffic(game_server_ip);
+
+        // A log identifies a connection that has already begun. It may supply
+        // telemetry, but must never move that live connection to another relay.
+        if super::game_destination::contains(game_server_ip)
+            && !super::game_destination::routing_candidate(game_server_ip)
+        {
+            let needs_status = self.route_status.try_read().is_some_and(|status| {
+                status
+                    .as_ref()
+                    .is_none_or(|s| s.game_server_ip != Some(game_server_ip))
+            });
+            if needs_status && let Some(game) = super::game_destination::details(game_server_ip) {
+                if let Some(region) = game.region {
+                    self.record_game_region(region);
+                }
+                self.record_route_status(
+                    game_server_ip,
+                    game.location.unwrap_or_else(|| "Unknown".into()),
+                    &[],
+                );
+            }
+            return AutoRoutingAction::NoAction;
+        }
 
         if !self.is_enabled() {
             return AutoRoutingAction::NoAction;

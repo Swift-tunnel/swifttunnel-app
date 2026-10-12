@@ -24,6 +24,7 @@ pub mod connect_policy;
 pub mod connection;
 pub(crate) mod diskless_passthrough;
 pub mod error_messages;
+pub mod game_destination;
 pub mod ipv6_recovery;
 pub mod local_connectivity;
 pub mod parallel_interceptor;

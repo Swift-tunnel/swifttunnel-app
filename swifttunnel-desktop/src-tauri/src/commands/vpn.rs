@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::events::{
@@ -10,7 +10,7 @@ use crate::events::{
 use crate::state::AppState;
 use swifttunnel_core::auth::types::AuthError;
 use swifttunnel_core::vpn::{
-    BindingPreferenceSource, BindingPreflightInfo, VpnError, preflight_binding,
+    BindingPreferenceSource, BindingPreflightInfo, ConnectionState, VpnError, preflight_binding,
     preflight_binding_for_connect,
 };
 // The connect-time policy: which adapter to bind, which region to land in,
@@ -318,6 +318,32 @@ pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), Strin
     result
 }
 
+/// Auto-stop only the game-owned connection, checking identity while holding
+/// the same mutex as every connect/disconnect. A newer manual reconnect wins.
+pub(crate) async fn disconnect_game_session(
+    state: &AppState,
+    owned: Instant,
+) -> Result<bool, String> {
+    let mut vpn = state.vpn_connection.lock().await;
+    if !matches!(&*state.vpn_state_handle.borrow(), ConnectionState::Connected { since, .. } if *since == owned)
+        || vpn
+            .auto_router()
+            .is_some_and(|router| router.has_recent_game_traffic())
+    {
+        return Ok(false);
+    }
+    let result = vpn
+        .disconnect()
+        .await
+        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+    *state.split_tunnel_handle.write() = None;
+    *state.throughput_stats.write() = None;
+    drop(vpn);
+    state.discord_manager.lock().set_idle();
+    persist_session_settings(state, None)?;
+    result.map(|_| true)
+}
+
 async fn cleanup_terminal_vpn_error(state: &AppState) {
     let mut vpn = state.vpn_connection.lock().await;
     if !vpn.take_terminal_cleanup_request() {
@@ -432,6 +458,7 @@ pub async fn vpn_connect(
     app: AppHandle,
     region: String,
     game_presets: Vec<String>,
+    game_region: Option<bool>,
 ) -> Result<(), String> {
     // Startup crash-recovery (stale adapter/tunnel-mode reset) runs in the
     // background so launch is instant - but a tunnel must never start while
@@ -444,7 +471,7 @@ pub async fn vpn_connect(
     .await?;
 
     // Gather needed data from settings and server list before locking vpn
-    let (settings_snapshot, binding_preference, overrides_changed) = {
+    let (mut settings_snapshot, binding_preference, overrides_changed) = {
         let mut settings = state.settings.lock();
         let previous_overrides = settings.network_binding_overrides.clone();
         let preflight = build_connect_binding_preflight(&mut settings)?;
@@ -464,6 +491,18 @@ pub async fn vpn_connect(
         })
         .await
         .map_err(|e| format!("save_settings task failed: {}", e))??;
+    }
+
+    if game_region == Some(true) {
+        // A game-specific region is deliberate. Keep the user's saved Auto
+        // and manual relay preferences intact, but don't let them replace this
+        // one connection's requested datacenter route.
+        if !settings_snapshot.custom_relay_server.is_empty() {
+            return Err("Game region routing is unavailable while a custom relay is configured. Use your current connection or clear the custom relay first.".into());
+        }
+        settings_snapshot.auto_routing_enabled = false;
+        settings_snapshot.manual_relay = None;
+        settings_snapshot.whitelisted_regions.clear();
     }
 
     let (

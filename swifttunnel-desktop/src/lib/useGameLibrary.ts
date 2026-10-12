@@ -34,14 +34,15 @@ export function useGameLibrary() {
       await useVpnStore.getState().fetchState();
       if (disposed) return;
       const route = useVpnStore.getState().gameRoute;
-      if ((!route || route.game_server_ip !== current.ip) && ++attempts < 5 && useVpnStore.getState().state === "connected") {
+      const latest = useGameLibraryStore.getState().library?.current;
+      if ((!route || route.game_server_ip !== current.ip) && !latest?.location && ++attempts < 5) {
         timer = setTimeout(() => void show(), 2000);
         return;
       }
       const library = useGameLibraryStore.getState().library;
       if (!library?.notify_joins) return;
       const entry = library.entries.find(e => e.place_id === current.place_id && e.client === current.client);
-      await notify(entry?.name ?? "Roblox game joined", gameSessionDescription(current, route));
+      await notify(entry?.name ?? "Roblox game joined", gameSessionDescription(latest ?? current, route));
     };
     timer = setTimeout(() => void show(), 2000);
     return () => { disposed = true; clearTimeout(timer); };

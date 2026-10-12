@@ -120,6 +120,10 @@ impl AppState {
     /// config. Moved out of `new()`: it repairs file ACLs (spawns icacls) and
     /// reads Roblox's settings file, which is too slow for the setup path.
     pub fn sync_roblox_window_settings(&self) {
+        // A temporary game profile is not the player's global default.
+        if swifttunnel_core::roblox_game_profile::pending() {
+            return;
+        }
         let optimizer = self.roblox_optimizer.lock();
         if let Err(e) = optimizer.repair_global_basic_settings_permissions() {
             log::warn!("Failed to repair Roblox settings permissions: {}", e);

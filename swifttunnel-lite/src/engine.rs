@@ -209,6 +209,7 @@ impl Engine {
         });
 
         spawn_regions(shared.clone());
+        spawn_game_logs(shared.clone());
         spawn_poller(shared.clone());
         spawn_auto_update(shared.clone());
 
@@ -1319,6 +1320,97 @@ async fn refresh_fleet(shared: &Arc<Shared>) -> Result<(), String> {
     }
     shared.notify();
     Ok(())
+}
+
+fn spawn_game_logs(shared: Arc<Shared>) {
+    std::thread::Builder::new()
+        .name("lite-game-logs".into())
+        .spawn(move || {
+            use swifttunnel_core::{
+                roblox_watcher::{RobloxEvent, RobloxWatcher},
+                vpn::game_destination::{self, ObservedGame},
+            };
+            let Some(watcher) = RobloxWatcher::new() else {
+                return;
+            };
+            let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            let mut game_started: Option<Instant> = None;
+            while !shared.stop.load(Ordering::Relaxed) {
+                for event in watcher.poll() {
+                    match event {
+                        RobloxEvent::GameJoined {
+                            ip,
+                            place_id,
+                            job_id,
+                            ..
+                        } => {
+                            if !RobloxOptimizer::new().is_roblox_running() {
+                                continue;
+                            }
+                            game_started = Some(Instant::now());
+                            game_destination::register(ObservedGame {
+                                ip,
+                                job_id: job_id.clone(),
+                                location: None,
+                                region: None,
+                                prelaunch: false,
+                            });
+                            if !swifttunnel_core::geolocation::is_roblox_game_server_ip(ip)
+                                && let Some(center) = runtime.block_on(
+                                    swifttunnel_core::roblox_directory::resolve_session(
+                                        &place_id, &job_id, ip,
+                                    ),
+                                )
+                            {
+                                let region =
+                                    swifttunnel_core::geolocation::RobloxRegion::all_regions()
+                                        .iter()
+                                        .find(|region| {
+                                            region.best_swifttunnel_region()
+                                                == center.relay_region.as_deref()
+                                        })
+                                        .cloned();
+                                if !RobloxOptimizer::new().is_roblox_running() {
+                                    continue;
+                                }
+                                game_started = Some(Instant::now());
+                                game_destination::register(ObservedGame {
+                                    ip,
+                                    job_id,
+                                    location: Some(center.city),
+                                    region,
+                                    prelaunch: false,
+                                });
+                            }
+                        }
+                        RobloxEvent::GameLeft { .. } => {
+                            game_started = None;
+                            game_destination::clear();
+                        }
+                        RobloxEvent::GameServerDetected { .. } => {}
+                    }
+                }
+                let running = shared
+                    .snapshot
+                    .read()
+                    .map(|s| s.roblox.running)
+                    .unwrap_or(false);
+                if running || game_started.is_some_and(|at| at.elapsed() < Duration::from_secs(8)) {
+                    game_destination::refresh();
+                } else {
+                    game_started = None;
+                    game_destination::clear();
+                }
+                std::thread::sleep(Duration::from_secs(1));
+            }
+            game_destination::clear();
+        })
+        .expect("Lite game log watcher");
 }
 
 fn spawn_regions(shared: Arc<Shared>) {

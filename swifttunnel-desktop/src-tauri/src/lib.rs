@@ -407,6 +407,9 @@ fn reapply_saved_network_boosts(_state: &AppState) {}
 
 #[cfg(windows)]
 fn reapply_saved_roblox_fflags(state: &AppState) {
+    if swifttunnel_core::roblox_game_profile::pending() {
+        return;
+    }
     let roblox_config = {
         let settings = state.settings.lock();
         settings.config.roblox_settings.clone()
@@ -527,6 +530,9 @@ fn spawn_roblox_version_watcher(app: tauri::AppHandle) {
                 if current == last_seen {
                     continue;
                 }
+                if swifttunnel_core::roblox_game_profile::pending() {
+                    continue;
+                }
                 last_seen = current;
 
                 let Some(state) = app.try_state::<AppState>() else {
@@ -601,6 +607,16 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                 if let Some(ref w) = watcher {
                     for event in w.poll() {
                         match event {
+                            RobloxEvent::GameLeft { job_id } => {
+                                let state = app.state::<AppState>();
+                                let mut games = state.games.lock();
+                                games.left_confirmed = true;
+                                if games.current.as_ref().is_some_and(|current| job_id.as_ref().is_none_or(|id| *id == current.job_id)) {
+                                    games.current = None;
+                                    games.launch_started = None;
+                                    let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
+                                }
+                            }
                             RobloxEvent::GameServerDetected { ip } => {
                                 if !swifttunnel_core::geolocation::is_roblox_game_server_ip(ip) {
                                     log::info!("Roblox log destination outside the known game ranges: {ip}; route detection has not verified this destination");
@@ -609,10 +625,21 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                             RobloxEvent::GameJoined { ip, place_id, job_id, client, fresh_join } => {
                                 let state = app.state::<AppState>();
                                 if !state.performance_monitor.lock().is_roblox_running() { continue; }
-                                state.games.lock().record_join(commands::games::CurrentGame {
-                                    ip: ip.to_string(), place_id: place_id.clone(), job_id, client, fresh_join,
-                                    observed_at: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                                let previous = swifttunnel_core::vpn::game_destination::details(ip)
+                                    .filter(|game| game.job_id == job_id);
+                                swifttunnel_core::vpn::game_destination::register(swifttunnel_core::vpn::game_destination::ObservedGame {
+                                    ip, job_id: job_id.clone(), location: previous.as_ref().and_then(|g| g.location.clone()),
+                                    region: previous.as_ref().and_then(|g| g.region.clone()), prelaunch: previous.is_some_and(|g| g.prelaunch),
                                 });
+                                let mut games = state.games.lock();
+                                games.record_join(commands::games::CurrentGame {
+                                    ip: ip.to_string(), place_id: place_id.clone(), job_id: job_id.clone(), client, fresh_join,
+                                    observed_at: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                                    location: None, location_source: None,
+                                });
+                                games.launch_started = None;
+                                games.left_confirmed = false;
+                                drop(games);
                                 let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                                 if fresh_join { let _ = app.emit(
                                     events::ROBLOX_GAME_JOINED,
@@ -624,6 +651,15 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                                     if commands::games::refresh_name(&state, &place_id, client).await == Ok(true) {
                                         let _ = metadata_app.emit(commands::games::LIBRARY_CHANGED, ());
                                     }
+                                    if let Some(center) = swifttunnel_core::roblox_directory::resolve_session(&place_id, &job_id, ip).await
+                                        && state.games.lock().current.as_ref().is_some_and(|g| g.job_id == job_id && g.ip == ip.to_string()) {
+                                        commands::game_launch::update_session_location(&state, &job_id, ip, center.city.clone(), "rovalra", commands::game_launch::native_region(&center));
+                                        let _ = metadata_app.emit(commands::games::LIBRARY_CHANGED, ());
+                                    } else if state.games.lock().current.as_ref().is_some_and(|g| g.job_id == job_id && g.ip == ip.to_string())
+                                        && let swifttunnel_core::geolocation::GameServerRegionLookup::Resolved(region,location) = swifttunnel_core::geolocation::lookup_game_server_region(ip).await {
+                                        commands::game_launch::update_session_location(&state, &job_id, ip, location, "ip_location", Some(region));
+                                        let _ = metadata_app.emit(commands::games::LIBRARY_CHANGED, ());
+                                    }
                                 });
                             }
                         }
@@ -631,10 +667,40 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                 }
                 let state = app.state::<AppState>();
                 let has_game = state.games.lock().current.is_some();
-                if has_game && !state.performance_monitor.lock().is_roblox_running() {
+                let check_process = { let games = state.games.lock(); has_game || games.owned_connection.is_some() || games.launch_started.is_some() || swifttunnel_core::roblox_game_profile::pending() };
+                let running = check_process && state.performance_monitor.lock().is_roblox_running();
+                if running { swifttunnel_core::vpn::game_destination::refresh(); }
+                if has_game && !running {
                     state.games.lock().current = None;
                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                 }
+                let traffic = state.vpn_connection.try_lock().ok().and_then(|vpn| vpn.auto_router().cloned()).is_some_and(|router| router.has_recent_game_traffic());
+                let mut games = state.games.lock();
+                let expired = games.launch_started.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(60));
+                if traffic { games.game_traffic_seen = true; if games.launch_started.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(5)) { games.launch_started = None; let _ = app.emit(commands::games::LIBRARY_CHANGED, ()); } }
+                if expired && !traffic && games.current.is_none() {
+                    games.launch_started = None;
+                    if !games.game_traffic_seen { games.left_confirmed = true; }
+                    games.warning = Some("A running game was not detected within a minute. Retry Play after Roblox finishes updating, or check its logs.".into());
+                    let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
+                }
+                let idle = games.current.is_none() && games.launch_started.is_none() && !traffic
+                    && (!running || games.left_confirmed || expired && !games.game_traffic_seen);
+                if idle { games.idle_since.get_or_insert(std::time::Instant::now()); } else { games.idle_since = None; }
+                let settled = games.idle_since.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(5));
+                let needs_cleanup = games.owned_connection.is_some() || swifttunnel_core::roblox_game_profile::pending();
+                if idle && settled && needs_cleanup && !games.cleanup_scheduled && games.last_cleanup.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(10)) {
+                    games.cleanup_scheduled = true;
+                    games.last_cleanup = Some(std::time::Instant::now());
+                    let cleanup_app = app.clone();
+                    state.runtime.spawn(async move {
+                        let state = cleanup_app.state::<AppState>();
+                        commands::game_launch::finish_game_connection(&state).await;
+                        state.games.lock().cleanup_scheduled = false;
+                        let _ = cleanup_app.emit(commands::games::LIBRARY_CHANGED, ());
+                    });
+                }
+                drop(games);
                 std::thread::sleep(std::time::Duration::from_millis(1500));
             }
         });
@@ -669,6 +735,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::games::games_get_library,
+            commands::games::games_flags,
+            commands::games::games_refresh_metadata,
+            commands::game_launch::games_datacenters,
+            commands::game_launch::games_search_servers,
+            commands::game_launch::games_set_preferences,
+            commands::game_launch::games_launch_plan,
+            commands::game_launch::games_launch,
             commands::games::games_scan_imports,
             commands::games::games_cleanup,
             commands::games::games_set_notifications,

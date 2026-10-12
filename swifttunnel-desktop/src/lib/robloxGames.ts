@@ -17,7 +17,9 @@ export function parsePlaceInput(input: string): string | null {
 // relay or a picker reference is not proof of the server the player joined.
 export function gameSessionDescription(session: RobloxGameSession | null, route: GameRouteStatus | null): string {
   if (!session) return "Join a Roblox game to see its server information.";
-  if (!route || route.game_server_ip !== session.ip) return "Game detected. Server location and route have not been verified.";
+  if (!route || route.game_server_ip !== session.ip) return session.location
+    ? `Roblox ${session.location}${session.location_source === "ip_location" ? " · Approximate location" : ""}`
+    : "Game detected. Server location and route have not been verified.";
   if (route.bypassed) return `Roblox ${route.game_location} · Direct connection`;
   const ping = route.estimated_path_ms;
   return `Roblox ${route.game_location}${ping !== null && Number.isFinite(ping) && ping >= 0 ? ` · ~${Math.round(ping)} ms` : ""}`;

@@ -203,6 +203,8 @@ pub fn is_roblox_game_server_ip(ip: Ipv4Addr) -> bool {
 /// Roblox game server region detected from IP address
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RobloxRegion {
+    Jakarta,
+    TelAviv,
     Singapore,
     Tokyo,
     Mumbai,
@@ -224,6 +226,8 @@ impl RobloxRegion {
     pub fn all_regions() -> &'static [RobloxRegion] {
         &[
             RobloxRegion::Singapore,
+            RobloxRegion::Jakarta,
+            RobloxRegion::TelAviv,
             RobloxRegion::Tokyo,
             RobloxRegion::Mumbai,
             RobloxRegion::Sydney,
@@ -242,6 +246,8 @@ impl RobloxRegion {
     /// Get the best SwiftTunnel gaming region for this Roblox region
     pub fn best_swifttunnel_region(&self) -> Option<&'static str> {
         match self {
+            RobloxRegion::Jakarta => Some("jakarta"),
+            RobloxRegion::TelAviv => Some("israel"),
             RobloxRegion::Unknown => None,
             RobloxRegion::Singapore => Some("singapore"),
             RobloxRegion::Tokyo => Some("tokyo"),
@@ -261,6 +267,8 @@ impl RobloxRegion {
 
     pub fn display_name(&self) -> &'static str {
         match self {
+            RobloxRegion::Jakarta => "Jakarta",
+            RobloxRegion::TelAviv => "Tel Aviv",
             RobloxRegion::Singapore => "Singapore",
             RobloxRegion::Tokyo => "Tokyo",
             RobloxRegion::Mumbai => "Mumbai",
@@ -592,6 +600,14 @@ pub enum GameServerRegionLookup {
 /// the provider token/cache/overrides. Auto-routing only receives a region when
 /// the resolver returns a recognized structured region id.
 pub async fn lookup_game_server_region(ip: Ipv4Addr) -> GameServerRegionLookup {
+    if let Some(game) = crate::vpn::game_destination::details(ip)
+        && let Some(location) = game.location
+    {
+        return GameServerRegionLookup::Resolved(
+            game.region.unwrap_or(RobloxRegion::Unknown),
+            location,
+        );
+    }
     // Serve a fresh cached answer if we have one — regions are stable, so this
     // avoids re-resolving the same server on reconnects/new sessions.
     {
