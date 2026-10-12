@@ -34,6 +34,7 @@ pub mod process_watcher;
 mod quota_notice;
 mod relay_support;
 pub(crate) mod route_measurements;
+pub mod route_preview;
 pub mod routes;
 pub mod servers;
 pub mod split_tunnel;

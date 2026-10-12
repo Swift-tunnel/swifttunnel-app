@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ServerRegion, ServerInfo } from "../lib/types";
+import type { ServerRegion, ServerInfo, ReferenceEstimate } from "../lib/types";
 import {
   serverGetList,
   serverGetLatencies,
@@ -16,6 +16,7 @@ interface ServerStore {
   regions: ServerRegion[];
   servers: ServerInfo[];
   latencies: Map<string, number | null>;
+  previews: ReferenceEstimate[];
   source: string;
   isLoading: boolean;
   /** True once the first list fetch has resolved (success OR failure). The
@@ -38,6 +39,14 @@ export const useServerStore = create<ServerStore>((set, get) => {
   let listRevision = 0;
   let fleetRevision = 0;
   let fleetSignature = "";
+  let previewExpiry: ReturnType<typeof setTimeout> | undefined;
+  function setPreviews(previews: ReferenceEstimate[]) {
+    clearTimeout(previewExpiry);
+    const fresh = previews.filter(row => row.expiresAt > performance.now());
+    set({ previews: fresh });
+    if (fresh.length) previewExpiry = setTimeout(() => setPreviews(get().previews),
+      Math.max(1, Math.min(...fresh.map(row => row.expiresAt)) - performance.now()));
+  }
 
   function loadList(): Promise<void> {
     if (pendingList) return pendingList;
@@ -55,6 +64,7 @@ export const useServerStore = create<ServerStore>((set, get) => {
           fleetSignature = signature;
           ++fleetRevision;
           set({ latencies: new Map() });
+          setPreviews([]);
         }
         set({ regions: resp.regions, servers: resp.servers, source: resp.source,
           isLoading: false, hasLoaded: true, error: null });
@@ -72,6 +82,7 @@ export const useServerStore = create<ServerStore>((set, get) => {
   regions: [],
   servers: [],
   latencies: new Map(),
+  previews: [],
   source: "",
   isLoading: false,
   hasLoaded: false,
@@ -84,6 +95,7 @@ export const useServerStore = create<ServerStore>((set, get) => {
     const revision = fleetRevision;
     pendingLatencies = (async () => {
       try {
+        const started = performance.now();
         const entries = await serverGetLatencies();
         if (revision !== fleetRevision) return;
         const latencies = new Map<string, number | null>();
@@ -91,7 +103,10 @@ export const useServerStore = create<ServerStore>((set, get) => {
           latencies.set(entry.server_id ? `relay:${entry.server_id}` : entry.region, entry.latency_ms);
         }
         set({ latencies });
+        setPreviews(entries.flatMap(entry => entry.preview ? [{ ...entry.preview,
+          expiresAt: started + Math.min(45_000, entry.preview.valid_for_ms) }] : []));
       } catch (error) {
+        if (revision === fleetRevision) setPreviews([]);
         reportError("Failed to fetch server latencies", error, {
           dedupeKey: "server-fetch-latencies",
         });

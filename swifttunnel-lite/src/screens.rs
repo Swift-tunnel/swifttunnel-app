@@ -329,12 +329,30 @@ fn regions(state: &State) -> Vec<Item> {
 
     for region in &state.regions {
         let selected = !state.auto_routing && state.selected_region == region.id;
+        let reference = if state.tunnel.game_route.is_none() {
+            region
+                .relays
+                .iter()
+                .filter_map(|relay| relay.reference())
+                .min_by_key(|row| row.estimate.estimated_game_ms)
+        } else {
+            None
+        };
         rows.push(
             Row::new(format!("{}  {}", region.country, region.name))
+                .sub(
+                    reference
+                        .map(|row| format!("Est. game ping / {} reference", row.location))
+                        .unwrap_or_else(|| "Ping to relay".into()),
+                )
                 .right(if selected {
                     Right::Tick(true)
                 } else {
-                    Right::Latency(region.ping_ms)
+                    Right::Latency(
+                        reference
+                            .map(|row| row.estimate.estimated_game_ms)
+                            .or(region.ping_ms),
+                    )
                 })
                 .action(Action::PickRegion(region.id.clone()))
                 .disabled(state.auto_routing || busy),
@@ -397,19 +415,29 @@ fn relays(state: &State) -> Vec<Item> {
                             && e.address.to_string() == format!("{}:{}", relay.ip, relay.port)
                     })
                 });
+            let reference = if state.tunnel.game_route.is_none() {
+                relay.reference()
+            } else {
+                None
+            };
             rows.push(
                 Row::new(&relay.id)
                     .sub(if !relay.available {
-                        "Unavailable"
+                        "Unavailable".into()
                     } else if estimate.is_some() {
-                        "Estimated game ping"
+                        "Estimated game ping".into()
+                    } else if let Some(row) = reference {
+                        format!("Est. game ping / {} reference", row.location)
                     } else if selected {
-                        "Selected / ping to relay"
+                        "Selected / ping to relay".into()
                     } else {
-                        "Ping to relay"
+                        "Ping to relay".into()
                     })
                     .right(Right::Latency(
-                        estimate.map(|e| e.estimated_game_ms).or(relay.ping_ms),
+                        estimate
+                            .map(|e| e.estimated_game_ms)
+                            .or(reference.map(|row| row.estimate.estimated_game_ms))
+                            .or(relay.ping_ms),
                     ))
                     .action(Action::PickRelay(Some(relay.id.clone())))
                     .disabled(disabled || !relay.available),
@@ -422,6 +450,8 @@ fn relays(state: &State) -> Vec<Item> {
             "Game target: {}. Estimates add both network legs; they are not Roblox's own reading.",
             route.game_location
         )));
+    } else {
+        items.push(Item::Note("Estimates use a regional Roblox reference before you connect. Your game server may differ.".into()));
     }
     items
 }
@@ -827,6 +857,7 @@ mod quota_retry_tests {
             country: "IN".into(),
             ping_ms: Some(8),
             relays: vec![crate::state::RelayRow {
+                preview: None,
                 id: "mumbai-04".into(),
                 ip: "192.0.2.4".into(),
                 port: 51821,
@@ -876,6 +907,7 @@ mod quota_retry_tests {
             country: "SG".into(),
             ping_ms: Some(5),
             relays: vec![crate::state::RelayRow {
+                preview: None,
                 id: "singapore-01".into(),
                 ip: "192.0.2.1".into(),
                 port: 51821,

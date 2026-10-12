@@ -78,6 +78,7 @@ export function ConnectTab() {
   const serversLoading = useServerStore((s) => s.isLoading);
   const serversError = useServerStore((s) => s.error);
   const getLatency = useServerStore((s) => s.getLatency);
+  const previews = useServerStore((s) => s.previews);
   const fetchLatencies = useServerStore((s) => s.fetchLatencies);
   const refreshServers = useServerStore((s) => s.refresh);
 
@@ -620,7 +621,7 @@ export function ConnectTab() {
         {!selectedRegion && relayPickerRegion && !settings.auto_routing_enabled && (
           <RelayPicker region={relayPickerRegion} servers={servers} latencies={relayLatencies}
             compareGamePaths={!settings.enable_api_tunneling && !settings.enable_country_ban}
-            gameRoute={gameRoute} value={settings.manual_relay}
+            gameRoute={gameRoute} previews={previews} value={settings.manual_relay}
             disabled={!isIdle || Boolean(settings.custom_relay_server)}
             onChange={manual_relay => { update({ manual_relay }); saveDebounced(); }} />
         )}
@@ -669,7 +670,7 @@ export function ConnectTab() {
                 // differently and refresh on different schedules, so leaving
                 // the probe here put a stale number next to the live one and
                 // made the same relay look like two different pings.
-                estimatedLatency={regionGameEstimate(gameRoute, r.servers, servers)}
+                estimatedLatency={regionGameEstimate(gameRoute, r.servers, servers, previews)}
                 latency={
                   isConnected && settings.selected_region === r.id && ping !== null
                     ? ping
@@ -681,7 +682,7 @@ export function ConnectTab() {
                 relayPicker={!settings.auto_routing_enabled && settings.selected_region === r.id ? (
                   <RelayPicker region={r} servers={servers} latencies={relayLatencies}
                     compareGamePaths={!settings.enable_api_tunneling && !settings.enable_country_ban}
-                    gameRoute={gameRoute} value={settings.manual_relay}
+                    gameRoute={gameRoute} previews={previews} value={settings.manual_relay}
                     disabled={!isIdle || Boolean(settings.custom_relay_server)}
                     onChange={manual_relay => { update({ manual_relay }); saveDebounced(); }} />
                 ) : null}
@@ -1158,7 +1159,7 @@ function RegionRow({
       </button>
 
       {/* Fixed-width latency slot, always same position */}
-        <div title={estimatedLatency !== null ? "Lowest measured estimate to the current game target; not every relay may have a measurement" : "Ping to the relay only"} className="flex w-[110px] shrink-0 items-center justify-end gap-2">
+        <div title={estimatedLatency !== null ? "Estimated game ping: regional reference before joining, actual target when measured. Some relays may be unmeasured." : "Ping to the relay only"} className="flex w-[110px] shrink-0 items-center justify-end gap-2">
           {(estimatedLatency ?? latency) !== null ? (
           <>
               <LatencyBars latency={(estimatedLatency ?? latency)!} />

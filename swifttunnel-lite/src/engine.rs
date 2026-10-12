@@ -1289,6 +1289,7 @@ fn region_rows(list: &DynamicServerList) -> Vec<RegionRow> {
                 .iter()
                 .filter(|s| region.servers.contains(&s.region))
                 .map(|s| crate::state::RelayRow {
+                    preview: None,
                     id: s.region.clone(),
                     ip: s.ip.clone(),
                     port: s.effective_relay_port(),
@@ -1382,11 +1383,31 @@ fn spawn_regions(shared: Arc<Shared>) {
                     }
                     measured
                 });
+                let samples = runtime.block_on(async {
+                    match tokio::time::timeout(Duration::from_secs(2), async {
+                        shared.auth.lock().await.get_access_token().await
+                    })
+                    .await
+                    {
+                        Ok(Ok(token)) => swifttunnel_core::vpn::route_preview::fetch(&token).await,
+                        _ => Vec::new(),
+                    }
+                });
                 shared.edit(|s| {
                     for (id, ip, port, ping) in measured {
                         s.server_list.set_endpoint_latency(&id, &ip, port, ping);
                     }
                     s.regions = region_rows(&s.server_list);
+                    let previews = swifttunnel_core::vpn::route_preview::estimates(
+                        &build_available_servers(&s.server_list),
+                        &samples,
+                    );
+                    for relay in s.regions.iter_mut().flat_map(|region| &mut region.relays) {
+                        relay.preview = previews
+                            .iter()
+                            .find(|row| row.estimate.relay == relay.id)
+                            .cloned();
+                    }
                 });
                 // Feed the same recent first legs to join-time routing and the picker.
                 if let Ok(vpn) = shared.vpn.try_lock() {

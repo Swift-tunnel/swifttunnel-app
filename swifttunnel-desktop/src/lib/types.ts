@@ -47,6 +47,13 @@ export interface RelayEstimate {
   estimated_game_ms: number;
 }
 
+export interface ReferenceEstimate extends RelayEstimate {
+  location: string;
+  target: string;
+  valid_for_ms: number;
+  expiresAt: number;
+}
+
 export interface GameRouteStatus {
   game_location: string;
   game_server_ip?: string | null;
@@ -157,6 +164,7 @@ export interface ServerListResponse {
 }
 
 export interface LatencyEntry {
+  preview?: Omit<ReferenceEstimate, "expiresAt"> | null;
   region: string;
   latency_ms: number | null;
   server_id?: string | null;

@@ -222,11 +222,23 @@ pub struct RegionRow {
 
 #[derive(Debug, Clone)]
 pub struct RelayRow {
+    pub preview: Option<swifttunnel_core::vpn::route_preview::ReferenceEstimate>,
     pub id: String,
     pub ip: String,
     pub port: u16,
     pub available: bool,
     pub ping_ms: Option<u32>,
+}
+
+impl RelayRow {
+    pub fn reference(&self) -> Option<&swifttunnel_core::vpn::route_preview::ReferenceEstimate> {
+        self.preview.as_ref().filter(|row| {
+            self.available
+                && row.is_fresh()
+                && row.estimate.relay == self.id
+                && row.estimate.address.to_string() == format!("{}:{}", self.ip, self.port)
+        })
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { serverGetLatencies, serverGetList, serverRefresh } = vi.hoisted(() => ({ serverGetLatencies: vi.fn(), serverGetList: vi.fn(), serverRefresh: vi.fn() }));
 vi.mock("../lib/commands", () => ({
@@ -9,6 +9,20 @@ vi.mock("../lib/commands", () => ({
 }));
 
 beforeEach(() => { vi.resetModules(); vi.resetAllMocks(); });
+afterEach(() => { vi.useRealTimers(); });
+
+it("expires startup estimates while idle without waiting for a connection or another scan", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+  serverGetLatencies.mockResolvedValue([{ region: "mumbai-01", server_id: "mumbai-01", latency_ms: 20,
+    preview: { relay: "mumbai-01", address: "1.2.3.4:51821", relay_ms: 20, second_leg_ms: 2,
+      estimated_game_ms: 22, location: "Mumbai", target: "128.116.47.3", valid_for_ms: 1000 } }]);
+  const store = (await import("./serverStore")).useServerStore;
+  await store.getState().fetchLatencies();
+  expect(store.getState().previews[0].estimated_game_ms).toBe(22);
+  await vi.advanceTimersByTimeAsync(1001);
+  expect(store.getState().previews).toEqual([]);
+  expect(store.getState().getLatency("relay:mumbai-01")).toBe(20);
+});
 
 it("keeps city-best ping distinct from each relay's own ping", async () => {
   serverGetLatencies.mockResolvedValue([

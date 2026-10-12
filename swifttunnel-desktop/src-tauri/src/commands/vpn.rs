@@ -964,6 +964,7 @@ pub struct LatencyEntry {
     pub region: String,
     pub latency_ms: Option<u32>,
     pub server_id: Option<String>,
+    pub preview: Option<swifttunnel_core::vpn::route_preview::ReferenceEstimate>,
 }
 
 const LATENCY_PROBE_CONCURRENCY: usize = 8;
@@ -998,6 +999,7 @@ fn apply_latency_measurements(
             region: region.id.clone(),
             latency_ms: sl.get_region_best_latency(&region.id),
             server_id: None,
+            preview: None,
         })
         .chain(sl.servers().iter().map(|server| LatencyEntry {
             region: server.region.clone(),
@@ -1007,6 +1009,7 @@ fn apply_latency_measurements(
                 None
             },
             server_id: Some(server.region.clone()),
+            preview: None,
         }))
         .collect()
 }
@@ -1078,13 +1081,28 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
         }
     }
 
-    let (entries, available_servers) = {
+    let samples = match tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        state.auth_manager.lock().await.get_access_token().await
+    })
+    .await
+    {
+        Ok(Ok(token)) => swifttunnel_core::vpn::route_preview::fetch(&token).await,
+        _ => Vec::new(),
+    };
+    let (mut entries, available_servers) = {
         let mut sl = state.server_list.lock();
         let entries = apply_latency_measurements(&mut sl, &measured);
         let available_servers = build_available_servers(&sl);
         (entries, available_servers)
     };
 
+    let previews = swifttunnel_core::vpn::route_preview::estimates(&available_servers, &samples);
+    for entry in &mut entries {
+        entry.preview = previews
+            .iter()
+            .find(|row| entry.server_id.as_deref() == Some(&row.estimate.relay))
+            .cloned();
+    }
     sync_auto_router_available_servers(&state, available_servers).await;
 
     Ok(entries)

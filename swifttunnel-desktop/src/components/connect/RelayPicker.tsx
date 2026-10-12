@@ -1,9 +1,10 @@
-import type { AppSettings, ServerInfo, ServerRegion, GameRouteStatus } from "../../lib/types";
+import type { AppSettings, ServerInfo, ServerRegion, GameRouteStatus, ReferenceEstimate } from "../../lib/types";
 import { relayGameEstimate } from "../../lib/gamePing";
 
-export function RelayPicker({ region, servers, latencies, value, disabled, onChange, gameRoute, compareGamePaths = true }: {
+export function RelayPicker({ region, servers, latencies, value, disabled, onChange, gameRoute, previews = [], compareGamePaths = true }: {
   region: ServerRegion;
   gameRoute?: GameRouteStatus | null;
+  previews?: ReferenceEstimate[];
   compareGamePaths?: boolean;
   servers: ServerInfo[];
   latencies: Map<string, number | null>;
@@ -15,6 +16,7 @@ export function RelayPicker({ region, servers, latencies, value, disabled, onCha
     server.region === value.server_id && server.ip === value.ip &&
     (server.relay_port ?? 51821) === value.port;
   const choices = region.servers.map(id => ({ id, server: servers.find(s => s.region === id) }));
+  const reference = !gameRoute && choices.map(({ server }) => relayGameEstimate(null, server, previews)).find(Boolean);
   const unavailable = value !== null && !choices.some(({ server }) => server?.relay_available && matches(server));
   return (
     <div className="pb-3 pl-[58px] pr-3.5" role="group" aria-label={`${region.name} relays`}>
@@ -23,18 +25,20 @@ export function RelayPicker({ region, servers, latencies, value, disabled, onCha
           disabled={disabled} onClick={() => onChange(null)} />
         {choices.map(({ id, server }) => {
           const ms = latencies.get(`relay:${id}`);
-          const estimate = relayGameEstimate(gameRoute, server);
+          const estimate = relayGameEstimate(gameRoute, server, previews);
           return <RelayOption key={id} label={id}
-            detail={!server?.relay_available ? "Unavailable" : estimate ? `~${estimate.estimated_game_ms} ms game Â· ${estimate.relay_ms} ms relay` : ms == null ? "Relay ping unavailable" : `${ms} ms relay`}
+            detail={!server?.relay_available ? "Unavailable" : estimate ? `~${estimate.estimated_game_ms} ms game / ${estimate.relay_ms} ms relay` : ms == null ? "Relay ping unavailable" : `${ms} ms relay`}
             active={!!server && matches(server)} disabled={disabled || !server?.relay_available}
             onClick={() => { if (server?.relay_available) onChange({ region: region.id,
               server_id: id, ip: server.ip, port: server.relay_port ?? 51821 }); }} />;
         })}
       </div>
       <p className="mt-2 text-[11px] text-text-muted">
-        {gameRoute?.relay_estimates?.length
-          ? `Estimated game ping to ${gameRoute.game_location}: relay ping + relay-to-game network ping. Not Robloxâ€™s own reading.`
-          : "Relay ping only. Game estimates appear when connected and a game path is measured."}
+        {gameRoute?.relay_estimates?.length && !gameRoute.bypassed
+          ? `Estimated game ping to ${gameRoute.game_location}. Not Roblox's own reading.`
+          : reference && "location" in reference
+            ? `Estimated game ping to the ${reference.location} Roblox reference datacenter. Your game server may differ.`
+            : "Game estimate unavailable. Relay ping is shown separately; no connection is needed to measure a reference."}
       </p>
       {unavailable && <p className="mt-2 text-[11px] text-text-muted">
         Your saved relay is unavailable or changed. Choose another relay or Auto.
