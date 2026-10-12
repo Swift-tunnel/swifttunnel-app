@@ -37,7 +37,7 @@ export function RelayPicker({ region, servers, latencies, value, disabled, onCha
         {gameRoute?.relay_estimates?.length && !gameRoute.bypassed
           ? `Estimated game ping to ${gameRoute.game_location}. Not Roblox's own reading.`
           : reference && "location" in reference
-            ? `Estimated game ping to the ${reference.location} Roblox reference datacenter. Your game server may differ.`
+            ? `Estimated game ping to the ${reference.location} Roblox reference datacenter, shared by every relay. Your game server may differ.`
             : "Game estimate unavailable. Relay ping is shown separately; no connection is needed to measure a reference."}
       </p>
       {unavailable && <p className="mt-2 text-[11px] text-text-muted">

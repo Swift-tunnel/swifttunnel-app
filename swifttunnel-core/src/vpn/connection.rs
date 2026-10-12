@@ -2633,9 +2633,18 @@ impl VpnConnection {
                             .await
                             {
                                 Ok(crate::geolocation::GameServerRegionLookup::Resolved(
-                                    _,
+                                    region,
                                     location,
-                                )) => location,
+                                )) => {
+                                    if router.is_current_lookup_session(epoch)
+                                        && router.measurement_target() == Some(ip)
+                                    {
+                                        super::route_preview::remember_location(
+                                            region.display_name(),
+                                        );
+                                    }
+                                    location
+                                }
                                 _ => ip.to_string(),
                             },
                         };

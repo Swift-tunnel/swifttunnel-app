@@ -1383,16 +1383,7 @@ fn spawn_regions(shared: Arc<Shared>) {
                     }
                     measured
                 });
-                let samples = runtime.block_on(async {
-                    match tokio::time::timeout(Duration::from_secs(2), async {
-                        shared.auth.lock().await.get_access_token().await
-                    })
-                    .await
-                    {
-                        Ok(Ok(token)) => swifttunnel_core::vpn::route_preview::fetch(&token).await,
-                        _ => Vec::new(),
-                    }
-                });
+                let samples = runtime.block_on(swifttunnel_core::vpn::route_preview::fetch());
                 shared.edit(|s| {
                     for (id, ip, port, ping) in measured {
                         s.server_list.set_endpoint_latency(&id, &ip, port, ping);

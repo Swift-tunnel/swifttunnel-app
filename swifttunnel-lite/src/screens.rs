@@ -363,7 +363,21 @@ fn regions(state: &State) -> Vec<Item> {
         rows.push(Row::new("Fetching relays...").disabled(true));
     }
 
-    vec![Item::Back("Region".into()), Item::Group(rows)]
+    let mut items = vec![Item::Back("Region".into()), Item::Group(rows)];
+    if state.tunnel.game_route.is_none() {
+        if let Some(reference) = state
+            .regions
+            .iter()
+            .flat_map(|region| &region.relays)
+            .find_map(|relay| relay.reference())
+        {
+            items.push(Item::Note(format!(
+                "Estimated game ping to {}. All relays use the same Roblox reference.",
+                reference.location
+            )));
+        }
+    }
+    items
 }
 
 fn relays(state: &State) -> Vec<Item> {
@@ -451,7 +465,7 @@ fn relays(state: &State) -> Vec<Item> {
             route.game_location
         )));
     } else {
-        items.push(Item::Note("Estimates use a regional Roblox reference before you connect. Your game server may differ.".into()));
+        items.push(Item::Note("All relays use your last game datacenter, or the closest measured Roblox reference. Your next game server may differ.".into()));
     }
     items
 }

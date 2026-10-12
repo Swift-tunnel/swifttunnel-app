@@ -541,6 +541,7 @@ impl AutoRouter {
     /// Record the detected game region without switching relays (used when
     /// the current relay is already the best match for the region).
     pub fn record_game_region(&self, region: RobloxRegion) {
+        super::route_preview::remember_location(region.display_name());
         *self.current_game_region.write() = Some(region);
     }
 

@@ -1081,14 +1081,7 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
         }
     }
 
-    let samples = match tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        state.auth_manager.lock().await.get_access_token().await
-    })
-    .await
-    {
-        Ok(Ok(token)) => swifttunnel_core::vpn::route_preview::fetch(&token).await,
-        _ => Vec::new(),
-    };
+    let samples = swifttunnel_core::vpn::route_preview::fetch().await;
     let (mut entries, available_servers) = {
         let mut sl = state.server_list.lock();
         let entries = apply_latency_measurements(&mut sl, &measured);

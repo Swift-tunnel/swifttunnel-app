@@ -618,6 +618,11 @@ export function ConnectTab() {
           )}
         </div>
 
+        {!gameRoute && previews.length > 0 && (
+          <p className="mb-2 text-[11px] text-text-muted">
+            Estimated game ping to {previews[0].location}. All relays use the same Roblox reference.
+          </p>
+        )}
         {!selectedRegion && relayPickerRegion && !settings.auto_routing_enabled && (
           <RelayPicker region={relayPickerRegion} servers={servers} latencies={relayLatencies}
             compareGamePaths={!settings.enable_api_tunneling && !settings.enable_country_ban}
