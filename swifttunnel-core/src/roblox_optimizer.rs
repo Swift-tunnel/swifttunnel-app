@@ -52,6 +52,22 @@ pub struct RobloxResetReport {
     pub failures: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LauncherFlagImport {
+    pub source: String,
+    pub json: String,
+    pub accepted: usize,
+    pub skipped: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RobloxImportPreview {
+    pub sources: Vec<LauncherFlagImport>,
+    pub fps_cap: Option<u32>,
+    pub graphics_quality: Option<GraphicsQuality>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum FFlagApplyOutcome {
     Applied,
@@ -1630,6 +1646,105 @@ impl RobloxOptimizer {
         Self::CUSTOM_FFLAG_ALLOWLIST.iter().map(|(key, _)| *key)
     }
 
+    /// Read existing launcher flag files without changing them. Imported
+    /// values are checked by the same validator as the normal Apply action.
+    pub fn inspect_launcher_imports(&self) -> Result<RobloxImportPreview> {
+        use std::io::Read;
+        let mut sources = Vec::new();
+        for folder in Self::get_client_settings_paths(false)? {
+            let source =
+                Self::describe_client_settings_source(&folder).unwrap_or_else(|| "Roblox".into());
+            let path = folder.join("ClientAppSettings.json");
+            if !path.exists() {
+                continue;
+            }
+            let read = (|| -> Result<String> {
+                let mut bytes = Vec::new();
+                fs::File::open(&path)?
+                    .take(256 * 1024 + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes.len() > 256 * 1024 {
+                    anyhow::bail!("Flag file is larger than 256 KB.");
+                }
+                Ok(String::from_utf8(bytes)?)
+            })();
+            match read {
+                Ok(raw) => sources.push(Self::preview_flag_import(&source, &raw)),
+                Err(error) => sources.push(LauncherFlagImport {
+                    source,
+                    json: "{}".into(),
+                    accepted: 0,
+                    skipped: Vec::new(),
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+        let current = self.read_current_settings().ok();
+        Ok(RobloxImportPreview {
+            sources,
+            fps_cap: current
+                .as_ref()
+                .map(|s| s.fps_cap)
+                .filter(|fps| (30..=99999).contains(fps)),
+            graphics_quality: current
+                .as_ref()
+                .map(|s| GraphicsQuality::from_level(s.graphics_quality)),
+        })
+    }
+
+    pub fn preview_flag_import(source: &str, raw: &str) -> LauncherFlagImport {
+        let mut report = LauncherFlagImport {
+            source: source.into(),
+            json: "{}".into(),
+            accepted: 0,
+            skipped: Vec::new(),
+            error: None,
+        };
+        let parse = (|| -> Result<()> {
+            if raw.len() > 256 * 1024 {
+                anyhow::bail!("Flag file is larger than 256 KB.");
+            }
+            let value: serde_json::Value =
+                serde_json::from_str(raw.trim_start_matches('\u{feff}'))?;
+            let object = value
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("Flags must be a JSON object."))?;
+            if object.len() > 2048 {
+                anyhow::bail!("Flag file has too many entries.");
+            }
+            let mut accepted = serde_json::Map::new();
+            for (key, value) in object {
+                let allowed = Self::CUSTOM_FFLAG_ALLOWLIST
+                    .iter()
+                    .find(|(name, _)| *name == key);
+                if let Some((_, expected)) = allowed {
+                    match Self::normalize_custom_fflag_value(key, expected, value) {
+                        Ok(value) => {
+                            accepted.insert(key.clone(), serde_json::Value::String(value));
+                        }
+                        Err(_) => report.skipped.push(format!("{key}: invalid value")),
+                    }
+                } else {
+                    report
+                        .skipped
+                        .push(format!("{key}: unsupported or ignored by Roblox"));
+                }
+            }
+            report.accepted = accepted.len();
+            report.json = serde_json::to_string_pretty(&accepted)?;
+            if report.accepted > 0 {
+                Self::validate_custom_fflags(&report.json).map_err(anyhow::Error::msg)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = parse {
+            report.error = Some(error.to_string());
+            report.accepted = 0;
+            report.json = "{}".into();
+        }
+        report
+    }
+
     fn parse_custom_fflags(config: &RobloxSettingsConfig) -> Result<HashMap<String, String>> {
         if !config.custom_fflags_enabled {
             return Ok(HashMap::new());
@@ -2622,6 +2737,40 @@ impl RobloxOptimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launcher_import_keeps_supported_flags_and_explains_every_skipped_value() {
+        let report = RobloxOptimizer::preview_flag_import(
+            "Fishstrap",
+            r#"{
+            "FFlagDebugGraphicsPreferD3D11": true,
+            "FIntDebugForceMSAASamples": "not a number",
+            "FFlagImaginaryPerformanceBoost": true,
+            "DFIntTaskSchedulerTargetFps": 240
+        }"#,
+        );
+        assert!(report.error.is_none());
+        assert_eq!(report.accepted, 1);
+        assert_eq!(report.skipped.len(), 3);
+        assert_eq!(
+            RobloxOptimizer::validate_custom_fflags(&report.json).unwrap(),
+            1
+        );
+        assert!(!report.json.contains("Imaginary"));
+        assert!(!report.json.contains("TaskScheduler"));
+    }
+    #[test]
+    fn launcher_import_reads_utf8_bom_files_and_never_accepts_a_non_object() {
+        let report = RobloxOptimizer::preview_flag_import(
+            "Froststrap",
+            "\u{feff}{\"FFlagDebugGraphicsPreferD3D11\":true}",
+        );
+        assert_eq!(report.accepted, 1);
+        for raw in ["broken", "[]", "null"] {
+            let report = RobloxOptimizer::preview_flag_import("Bloxstrap", raw);
+            assert!(report.error.is_some());
+            assert_eq!(report.accepted, 0);
+        }
+    }
 
     /// The fingerprint changes exactly when a client is added or removed.
     ///

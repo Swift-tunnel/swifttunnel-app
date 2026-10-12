@@ -34,6 +34,7 @@ use tokio::sync::watch;
 /// `VPN_STATE_CHANGED` Tauri event, so the UI can't get stuck displaying
 /// a state the backend has silently left behind.
 pub struct AppState {
+    pub games: Mutex<crate::commands::games::GamesState>,
     pub auth_manager: Arc<tokio::sync::Mutex<AuthManager>>,
     pub vpn_connection: Arc<tokio::sync::Mutex<VpnConnection>>,
     pub vpn_state_handle: watch::Receiver<ConnectionState>,
@@ -93,6 +94,7 @@ impl AppState {
         let (startup_recovery_signal, startup_recovery_done) = watch::channel(false);
 
         Ok(Self {
+            games: Mutex::new(crate::commands::games::GamesState::default()),
             auth_manager: Arc::new(tokio::sync::Mutex::new(auth_manager)),
             vpn_connection: Arc::new(tokio::sync::Mutex::new(vpn_connection)),
             vpn_state_handle,

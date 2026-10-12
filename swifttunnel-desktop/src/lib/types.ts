@@ -593,6 +593,49 @@ export interface UpdaterProgressEvent {
 
 // ── Tabs ──
 
+export type RobloxClient = "standard" | "vng";
+export interface RobloxGameEntry {
+  place_id: string;
+  name: string;
+  job_id: string | null;
+  last_played: number | null;
+  favourite: boolean;
+  client: RobloxClient;
+}
+export interface RobloxGameSession {
+  place_id: string;
+  job_id: string;
+  ip: string;
+  client: RobloxClient;
+  fresh_join: boolean;
+  observed_at: number;
+}
+export interface RobloxLibrarySnapshot {
+  entries: RobloxGameEntry[];
+  current: RobloxGameSession | null;
+  warning: string | null;
+  notify_joins: boolean;
+}
+export interface LauncherFlagImport {
+  source: string;
+  json: string;
+  accepted: number;
+  skipped: string[];
+  error: string | null;
+}
+export interface RobloxImportPreview {
+  sources: LauncherFlagImport[];
+  fps_cap: number | null;
+  graphics_quality: RobloxSettingsConfig["graphics_quality"] | null;
+}
+export type RobloxCleanupKind = "logs" | "assets";
+export interface RobloxCleanupReport {
+  files: number;
+  bytes: number;
+  skipped: number;
+  partial: boolean;
+}
+
 export type TabId =
   | "connect"
   | "optimization"

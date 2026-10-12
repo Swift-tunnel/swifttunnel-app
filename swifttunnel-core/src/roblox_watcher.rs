@@ -3,13 +3,14 @@
 //! Monitors Roblox log files to detect game server IPs.
 //! Similar to Bloxstrap's server location notification feature.
 
+use crate::roblox_library::{RobloxClient, valid_job_id, valid_place_id};
 use regex_lite::Regex;
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 use std::time::Duration;
 
@@ -18,6 +19,13 @@ use std::time::Duration;
 pub enum RobloxEvent {
     /// Detected a game server connection
     GameServerDetected { ip: Ipv4Addr },
+    GameJoined {
+        ip: Ipv4Addr,
+        place_id: String,
+        job_id: String,
+        client: RobloxClient,
+        fresh_join: bool,
+    },
 }
 
 /// Watches Roblox log files for game server connections
@@ -30,21 +38,22 @@ impl RobloxWatcher {
     /// Create a new Roblox watcher
     /// Returns None if the Roblox logs directory doesn't exist
     pub fn new() -> Option<Self> {
-        let logs_dir = get_roblox_logs_dir()?;
-
-        if !logs_dir.exists() {
-            log::warn!("Roblox logs directory not found: {:?}", logs_dir);
-            return None;
-        }
-
-        let (sender, receiver) = mpsc::channel();
+        let base = PathBuf::from(std::env::var("LOCALAPPDATA").ok()?);
+        let directories = vec![
+            base.join("Roblox").join("logs"),
+            base.join("RobloxPCVNG").join("logs"),
+        ];
+        let (sender, receiver) = mpsc::sync_channel(64);
         let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_flag_clone = stop_flag.clone();
 
         // Spawn watcher thread
-        thread::spawn(move || {
-            watch_logs(logs_dir, sender, stop_flag_clone);
-        });
+        thread::Builder::new()
+            .name("roblox-log-tail".into())
+            .spawn(move || {
+                watch_logs(directories, sender, stop_flag_clone);
+            })
+            .ok()?;
 
         log::info!("Roblox log watcher started");
         Some(Self {
@@ -75,10 +84,20 @@ impl Drop for RobloxWatcher {
     }
 }
 
-/// Get Roblox logs directory path
-fn get_roblox_logs_dir() -> Option<PathBuf> {
-    let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-    Some(PathBuf::from(local_app_data).join("Roblox").join("logs"))
+fn parse_join(line: &str) -> Option<(String, String, Ipv4Addr)> {
+    static JOIN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let pattern = JOIN.get_or_init(|| {
+        Regex::new(r"! Joining game '([0-9a-fA-F\-]+)' place (\d+) at (\d+\.\d+\.\d+\.\d+)")
+            .unwrap()
+    });
+    let captures = pattern.captures(line)?;
+    let job = captures.get(1)?.as_str();
+    let place = captures.get(2)?.as_str();
+    let ip = captures.get(3)?.as_str().parse().ok()?;
+    if !valid_job_id(job) || !valid_place_id(place) || is_private_ip(ip) {
+        return None;
+    }
+    Some((place.into(), job.to_ascii_lowercase(), ip))
 }
 
 /// Compile regex patterns once at startup (panics if patterns are invalid - programmer error)
@@ -103,8 +122,8 @@ fn get_patterns() -> (&'static Regex, &'static Regex) {
 
 /// Main log watching loop
 fn watch_logs(
-    logs_dir: PathBuf,
-    sender: Sender<RobloxEvent>,
+    directories: Vec<PathBuf>,
+    sender: SyncSender<RobloxEvent>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Get compiled regex patterns (compiled once, reused)
@@ -113,6 +132,8 @@ fn watch_logs(
     let mut seen_ips: HashSet<Ipv4Addr> = HashSet::new();
     let mut current_file: Option<TailedFile> = None;
     let mut last_file_check = std::time::Instant::now();
+    let mut last_join: Option<(String, String)> = None;
+    let started = std::time::SystemTime::now();
 
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -122,7 +143,11 @@ fn watch_logs(
 
         // Check for new/updated log file every 2 seconds
         if last_file_check.elapsed() > Duration::from_secs(2) {
-            if let Some(newest) = find_newest_log_file(&logs_dir) {
+            if let Some(newest) = directories
+                .iter()
+                .filter_map(|dir| find_newest_log_file(dir))
+                .max_by_key(|path| fs::metadata(path).ok().and_then(|m| m.modified().ok()))
+            {
                 let should_switch = current_file
                     .as_ref()
                     .map(|f| f.path != newest)
@@ -134,6 +159,7 @@ fn watch_logs(
                         Ok(file) => {
                             current_file = Some(file);
                             seen_ips.clear(); // Reset seen IPs for new session
+                            last_join = None;
                         }
                         Err(e) => {
                             log::warn!("Failed to open log file {:?}: {}", newest, e);
@@ -147,8 +173,42 @@ fn watch_logs(
 
         // Read new lines from current file
         if let Some(ref mut file) = current_file {
+            // Catch an existing session for the library, but do not replay its
+            // notifications or RAM-clean side effects when SwiftTunnel opens.
+            let fresh_join = file
+                .reader
+                .stream_position()
+                .is_ok_and(|pos| pos >= file.initial_end)
+                || fs::metadata(&file.path)
+                    .and_then(|meta| meta.created())
+                    .is_ok_and(|created| created >= started);
             match file.read_new_lines() {
                 Ok(lines) => {
+                    // A newly tailed file can contain several old teleports.
+                    // Only the newest complete join in this poll is current.
+                    let join = lines.iter().filter_map(|line| parse_join(line)).last();
+                    if let Some((place_id, job_id, ip)) = join {
+                        let key = (place_id.clone(), job_id.clone());
+                        if last_join.as_ref() != Some(&key) {
+                            last_join = Some(key);
+                            let client = if file
+                                .path
+                                .components()
+                                .any(|c| c.as_os_str() == "RobloxPCVNG")
+                            {
+                                RobloxClient::Vng
+                            } else {
+                                RobloxClient::Standard
+                            };
+                            let _ = sender.try_send(RobloxEvent::GameJoined {
+                                ip,
+                                place_id,
+                                job_id,
+                                client,
+                                fresh_join,
+                            });
+                        }
+                    }
                     for line in lines {
                         // Try each pattern
                         for pattern in [joining_pattern, udmux_pattern] {
@@ -160,7 +220,10 @@ fn watch_logs(
                                 if !is_private_ip(ip) && !seen_ips.contains(&ip) {
                                     seen_ips.insert(ip);
                                     log::info!("Detected game server: {}", ip);
-                                    let _ = sender.send(RobloxEvent::GameServerDetected { ip });
+                                    if seen_ips.len() > 1024 {
+                                        seen_ips.clear();
+                                    }
+                                    let _ = sender.try_send(RobloxEvent::GameServerDetected { ip });
                                 }
                             }
                         }
@@ -184,10 +247,8 @@ fn find_newest_log_file(dir: &Path) -> Option<PathBuf> {
         .ok()?
         .filter_map(|e| e.ok())
         .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "log")
-                .unwrap_or(false)
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            name.ends_with(".log") && name.contains("player")
         })
         .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
         .map(|e| e.path())
@@ -196,6 +257,16 @@ fn find_newest_log_file(dir: &Path) -> Option<PathBuf> {
 /// Check if IP is private (RFC 1918)
 fn is_private_ip(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
+    if ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_link_local()
+        || octets[0] == 0
+        || octets[0] >= 240
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+    {
+        return true;
+    }
     // 10.0.0.0/8
     if octets[0] == 10 {
         return true;
@@ -221,6 +292,7 @@ struct TailedFile {
     path: PathBuf,
     pending_line: Vec<u8>,
     discarding_line: bool,
+    initial_end: u64,
 }
 
 impl TailedFile {
@@ -244,6 +316,7 @@ impl TailedFile {
             path: path.to_path_buf(),
             pending_line: Vec::new(),
             discarding_line: false,
+            initial_end: file_size as u64,
         })
     }
 
@@ -295,6 +368,33 @@ impl TailedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn join_metadata_accepts_cloud_destinations_but_not_tokens_or_invalid_ids() {
+        let join = "! Joining game '550e8400-e29b-41d4-a716-446655440000' place 1818 at 34.1.2.3";
+        let (place, job, ip) = parse_join(join).unwrap();
+        assert_eq!(place, "1818");
+        assert!(valid_job_id(&job));
+        assert_eq!(ip.to_string(), "34.1.2.3");
+        assert!(parse_join(&join.replace("34.1.2.3", "169.254.169.254")).is_none());
+        assert!(parse_join(&join.replace("34.1.2.3", "10.0.0.1")).is_none());
+        assert!(parse_join(&join.replace("1818", "0")).is_none());
+        assert!(
+            parse_join(&join.replace("550e8400-e29b-41d4-a716-446655440000", "abc-def")).is_none()
+        );
+    }
+    #[test]
+    fn player_log_selection_never_uses_studio_or_installer_logs() {
+        let dir = std::env::temp_dir().join(format!("swift-log-selection-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("roblox_Player.log"), "player").unwrap();
+        fs::write(dir.join("roblox_Studio.log"), "studio").unwrap();
+        fs::write(dir.join("roblox_Installer.log"), "installer").unwrap();
+        assert_eq!(
+            find_newest_log_file(&dir).unwrap(),
+            dir.join("roblox_Player.log")
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
     use std::fs;
     use std::net::Ipv4Addr;
 
@@ -450,14 +550,14 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         // Create older file
-        let old_path = dir.join("old.log");
+        let old_path = dir.join("old_Player.log");
         fs::write(&old_path, "old").unwrap();
 
         // Small delay to ensure different modification times
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         // Create newer file
-        let new_path = dir.join("new.log");
+        let new_path = dir.join("new_Player.log");
         fs::write(&new_path, "new").unwrap();
 
         let result = find_newest_log_file(&dir).unwrap();
@@ -473,10 +573,10 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         fs::write(dir.join("data.txt"), "not a log").unwrap();
-        fs::write(dir.join("actual.log"), "a log").unwrap();
+        fs::write(dir.join("actual_Player.log"), "a log").unwrap();
 
         let result = find_newest_log_file(&dir).unwrap();
-        assert_eq!(result, dir.join("actual.log"));
+        assert_eq!(result, dir.join("actual_Player.log"));
 
         let _ = fs::remove_dir_all(&dir);
     }

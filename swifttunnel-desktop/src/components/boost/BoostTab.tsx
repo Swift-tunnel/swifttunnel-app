@@ -25,6 +25,8 @@ import {
   type WatermarkProps,
 } from "../ui";
 import { FpsSlider } from "./FpsSlider";
+import { GameLibraryPanel } from "./GameLibraryPanel";
+import { GameToolsPanel } from "./GameToolsPanel";
 import {
   PROFILES,
   configsEqual,
@@ -588,6 +590,10 @@ export function BoostTab() {
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
       <SettingsSaveNotice />
+      <GameLibraryPanel />
+      <GameToolsPanel disabled={robloxControlsLocked} onImport={patch => setDraft(prev => ({
+        ...prev, profile: "Custom", roblox_settings: { ...prev.roblox_settings, ...patch },
+      }))} />
       {boost.error && <ErrorBanner tone="error">{boost.error}</ErrorBanner>}
 
       {boost.warning && (

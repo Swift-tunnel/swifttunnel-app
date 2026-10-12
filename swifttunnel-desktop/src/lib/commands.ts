@@ -27,7 +27,23 @@ import type {
   UpdaterCheckResponse,
   UpdaterInstallResponse,
   UpdateChannel,
+  RobloxClient,
+  RobloxLibrarySnapshot,
+  RobloxImportPreview,
+  RobloxCleanupKind,
+  RobloxCleanupReport,
 } from "./types";
+
+export const gamesGetLibrary = () => invoke<RobloxLibrarySnapshot>("games_get_library");
+export const gamesSetFavourite = (placeId: string, client: RobloxClient, favourite: boolean) =>
+  invoke<void>("games_set_favourite", { placeId, client, favourite });
+export const gamesAddFavourite = (placeId: string) => invoke<void>("games_add_favourite", { placeId });
+export const gamesForget = (placeId: string, client: RobloxClient) => invoke<void>("games_forget", { placeId, client });
+export const gamesJoin = (placeId: string, client: RobloxClient, jobId: string | null = null) =>
+  invoke<void>("games_join", { placeId, client, jobId });
+export const gamesSetNotifications = (enabled: boolean) => invoke<void>("games_set_notifications", { enabled });
+export const gamesScanImports = () => invoke<RobloxImportPreview>("games_scan_imports");
+export const gamesCleanup = (kind: RobloxCleanupKind, remove = false) => invoke<RobloxCleanupReport>("games_cleanup", { kind, delete: remove });
 
 // ── Auth ──
 

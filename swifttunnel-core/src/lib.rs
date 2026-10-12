@@ -24,6 +24,8 @@ pub mod optional_components;
 pub mod performance_monitor;
 mod process_names;
 pub mod ram_cleaner;
+pub mod roblox_cleanup;
+pub mod roblox_library;
 pub mod roblox_optimizer;
 pub mod roblox_proxy;
 pub mod roblox_watcher;

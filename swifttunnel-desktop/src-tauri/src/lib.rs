@@ -602,13 +602,38 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                     for event in w.poll() {
                         match event {
                             RobloxEvent::GameServerDetected { ip } => {
-                                let _ = app.emit(
+                                if !swifttunnel_core::geolocation::is_roblox_game_server_ip(ip) {
+                                    log::info!("Roblox log destination outside the known game ranges: {ip}; route detection has not verified this destination");
+                                }
+                            }
+                            RobloxEvent::GameJoined { ip, place_id, job_id, client, fresh_join } => {
+                                let state = app.state::<AppState>();
+                                if !state.performance_monitor.lock().is_roblox_running() { continue; }
+                                state.games.lock().record_join(commands::games::CurrentGame {
+                                    ip: ip.to_string(), place_id: place_id.clone(), job_id, client, fresh_join,
+                                    observed_at: chrono::Utc::now().timestamp_millis().max(0) as u64,
+                                });
+                                let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
+                                if fresh_join { let _ = app.emit(
                                     events::ROBLOX_GAME_JOINED,
                                     events::RobloxGameJoinedEvent { ip: ip.to_string() },
-                                );
+                                ); }
+                                let metadata_app = app.clone();
+                                state.runtime.spawn(async move {
+                                    let state = metadata_app.state::<AppState>();
+                                    if commands::games::refresh_name(&state, &place_id, client).await == Ok(true) {
+                                        let _ = metadata_app.emit(commands::games::LIBRARY_CHANGED, ());
+                                    }
+                                });
                             }
                         }
                     }
+                }
+                let state = app.state::<AppState>();
+                let has_game = state.games.lock().current.is_some();
+                if has_game && !state.performance_monitor.lock().is_roblox_running() {
+                    state.games.lock().current = None;
+                    let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1500));
             }
@@ -643,6 +668,14 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            commands::games::games_get_library,
+            commands::games::games_scan_imports,
+            commands::games::games_cleanup,
+            commands::games::games_set_notifications,
+            commands::games::games_set_favourite,
+            commands::games::games_add_favourite,
+            commands::games::games_forget,
+            commands::games::games_join,
             // Auth
             commands::auth::auth_get_state,
             commands::auth::auth_login,

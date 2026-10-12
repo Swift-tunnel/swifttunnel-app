@@ -31,6 +31,7 @@ import { runAppBootstrap } from "./lib/appBootstrap";
 import { resolveValidRegion } from "./lib/regionMatch";
 import { useAutoRamClean } from "./lib/useAutoRamClean";
 import { useOverlayDriver } from "./lib/useOverlayDriver";
+import { useGameLibrary } from "./lib/useGameLibrary";
 import { reportError } from "./lib/errors";
 import { addTunneledMs } from "./lib/tunnelTime";
 import {
@@ -52,8 +53,6 @@ function tabComponent(tab: TabId) {
     case "optimization":
       return <OptimizationTab />;
     case "games":
-      // Straight to Roblox: it is the only supported game, so a library page
-      // holding one card was just an extra click before the settings.
       return <BoostTab />;
     case "ingame":
       return <InGameTab />;
@@ -139,6 +138,7 @@ function App() {
   useAutoRamClean();
   // Drive the in-game stats overlay window when enabled.
   useOverlayDriver();
+  useGameLibrary();
 
   useEffect(() => {
     let disposed = false;

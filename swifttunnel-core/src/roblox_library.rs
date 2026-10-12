@@ -1,0 +1,327 @@
+//! Small local game library. No account cookies, join tickets or server IPs.
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
+
+const MAX_ENTRIES: usize = 50;
+const MAX_FAVOURITES: usize = 20;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RobloxClient {
+    #[default]
+    Standard,
+    Vng,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameEntry {
+    pub place_id: String,
+    pub name: String,
+    pub job_id: Option<String>,
+    pub last_played: Option<u64>,
+    pub favourite: bool,
+    #[serde(default)]
+    pub client: RobloxClient,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GameLibrary {
+    pub entries: Vec<GameEntry>,
+    pub notify_joins: bool,
+}
+
+pub fn valid_place_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 19
+        && id.bytes().all(|b| b.is_ascii_digit())
+        && !id.starts_with('0')
+        && id.parse::<u64>().is_ok_and(|n| n <= i64::MAX as u64)
+}
+
+pub fn valid_job_id(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+        && id.bytes().any(|b| b != b'0' && b != b'-')
+}
+
+pub fn library_path() -> Result<PathBuf, String> {
+    dirs::config_dir()
+        .map(|p| p.join("SwiftTunnel").join("games.json"))
+        .ok_or_else(|| "Windows could not find your settings folder.".into())
+}
+
+impl GameLibrary {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        match fs::metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(format!("Could not read your game library: {e}")),
+            Ok(meta) if meta.len() > 128 * 1024 => {
+                return Err("Your game library is too large to read safely.".into());
+            }
+            _ => {}
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .and_then(|file| file.take(128 * 1024 + 1).read_to_end(&mut bytes))
+            .map_err(|e| format!("Could not read your game library: {e}"))?;
+        if bytes.len() > 128 * 1024 {
+            return Err("Your game library is too large to read safely.".into());
+        }
+        let library: Self = serde_json::from_slice(&bytes).map_err(|_| {
+            "Your game library could not be read. The original file has been kept.".to_string()
+        })?;
+        if library.entries.len() > MAX_ENTRIES
+            || library.entries.iter().filter(|e| e.favourite).count() > MAX_FAVOURITES
+            || library.entries.iter().any(|entry| {
+                !valid_place_id(&entry.place_id)
+                    || entry.name.len() > 400
+                    || entry.name.chars().any(char::is_control)
+                    || entry.job_id.as_deref().is_some_and(|id| !valid_job_id(id))
+            })
+            || library.entries.iter().enumerate().any(|(i, e)| {
+                library.entries[..i]
+                    .iter()
+                    .any(|other| other.place_id == e.place_id && other.client == e.client)
+            })
+        {
+            return Err(
+                "Your game library contains invalid entries. The original file has been kept."
+                    .into(),
+            );
+        }
+        Ok(library)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        let parent = path.parent().ok_or("Invalid game-library location.")?;
+        fs::create_dir_all(parent).map_err(|e| format!("Could not save your game library: {e}"))?;
+        let bytes = serde_json::to_vec(self).map_err(|e| e.to_string())?;
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        let mut created = false;
+        let result = (|| -> std::io::Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            created = true;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, path)
+        })();
+        // Only remove a file we created; an existing temporary file belongs to
+        // another operation or is recoverable data from an interrupted save.
+        if result.is_err() && created {
+            let _ = fs::remove_file(&temporary);
+        }
+        result.map_err(|e| format!("Could not save your game library: {e}"))
+    }
+
+    pub fn record_join(
+        &mut self,
+        place_id: &str,
+        job_id: &str,
+        client: RobloxClient,
+        at: u64,
+    ) -> Result<(), String> {
+        if !valid_place_id(place_id) || !valid_job_id(job_id) {
+            return Err("Invalid Roblox game or server ID.".into());
+        }
+        let index = self.ensure_entry(place_id, client)?;
+        self.entries[index].job_id = Some(job_id.to_ascii_lowercase());
+        self.entries[index].last_played = Some(at);
+        self.sort();
+        Ok(())
+    }
+
+    fn ensure_entry(&mut self, place_id: &str, client: RobloxClient) -> Result<usize, String> {
+        if !valid_place_id(place_id) {
+            return Err("Enter a valid Roblox place ID.".into());
+        }
+        if let Some(i) = self
+            .entries
+            .iter()
+            .position(|e| e.place_id == place_id && e.client == client)
+        {
+            return Ok(i);
+        }
+        if self.entries.len() >= MAX_ENTRIES {
+            let oldest = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| !e.favourite)
+                .min_by_key(|(_, e)| e.last_played)
+                .map(|(i, _)| i)
+                .ok_or("Your game library is full.")?;
+            self.entries.remove(oldest);
+        }
+        self.entries.push(GameEntry {
+            place_id: place_id.into(),
+            name: format!("Place {place_id}"),
+            job_id: None,
+            last_played: None,
+            favourite: false,
+            client,
+        });
+        Ok(self.entries.len() - 1)
+    }
+
+    pub fn set_favourite(
+        &mut self,
+        place_id: &str,
+        client: RobloxClient,
+        favourite: bool,
+    ) -> Result<(), String> {
+        if favourite
+            && self.entries.iter().filter(|e| e.favourite).count() >= MAX_FAVOURITES
+            && !self
+                .entries
+                .iter()
+                .any(|e| e.place_id == place_id && e.client == client && e.favourite)
+        {
+            return Err("You can save up to 20 favourites. Remove one first.".into());
+        }
+        let index = self.ensure_entry(place_id, client)?;
+        self.entries[index].favourite = favourite;
+        self.sort();
+        Ok(())
+    }
+
+    pub fn set_name(&mut self, place_id: &str, client: RobloxClient, name: &str) {
+        let name = name.trim();
+        if !name.is_empty()
+            && name.len() <= 400
+            && !name.chars().any(char::is_control)
+            && let Some(entry) = self
+                .entries
+                .iter_mut()
+                .find(|e| e.place_id == place_id && e.client == client)
+        {
+            entry.name = name.into();
+        }
+    }
+
+    pub fn forget(&mut self, place_id: &str, client: RobloxClient) {
+        self.entries
+            .retain(|e| e.place_id != place_id || e.client != client);
+    }
+
+    fn sort(&mut self) {
+        self.entries.sort_by(|a, b| {
+            b.favourite
+                .cmp(&a.favourite)
+                .then(b.last_played.cmp(&a.last_played))
+        });
+    }
+}
+
+/// Build only known Roblox URLs from validated identifiers. Never pass user
+/// input to a command shell or accept private-server access tokens here.
+pub fn join_url(
+    place_id: &str,
+    job_id: Option<&str>,
+    client: RobloxClient,
+) -> Result<String, String> {
+    if !valid_place_id(place_id) || job_id.is_some_and(|id| !valid_job_id(id)) {
+        return Err("Invalid Roblox game or server ID.".into());
+    }
+    if client == RobloxClient::Vng {
+        // Keep VNG joins on its official site until its native scheme is verified.
+        return if job_id.is_some() {
+            Err("Rejoining a specific VNG server is not supported yet. Use Play to open its game page.".into())
+        } else {
+            Ok(format!("https://robloxapp.vnggames.com/games/{place_id}"))
+        };
+    }
+    let mut url = format!("roblox://placeId={place_id}");
+    if let Some(job) = job_id {
+        url.push_str(&format!("&gameInstanceId={job}"));
+    }
+    Ok(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const JOB: &str = "550e8400-e29b-41d4-a716-446655440000";
+    #[test]
+    fn joins_update_one_entry_and_preserve_favourites() {
+        let mut lib = GameLibrary::default();
+        lib.set_favourite("1818", RobloxClient::Standard, true)
+            .unwrap();
+        lib.record_join("1818", JOB, RobloxClient::Standard, 10)
+            .unwrap();
+        lib.record_join("1818", JOB, RobloxClient::Standard, 20)
+            .unwrap();
+        assert_eq!(lib.entries.len(), 1);
+        assert!(lib.entries[0].favourite);
+        assert_eq!(lib.entries[0].last_played, Some(20));
+    }
+    #[test]
+    fn histories_are_bounded_and_keep_favourites() {
+        let mut lib = GameLibrary::default();
+        lib.set_favourite("1818", RobloxClient::Standard, true)
+            .unwrap();
+        for id in 1..100 {
+            lib.record_join(&id.to_string(), JOB, RobloxClient::Standard, id)
+                .unwrap();
+        }
+        assert_eq!(lib.entries.len(), 50);
+        assert!(lib.entries.iter().any(|e| e.place_id == "1818"));
+        assert!(!lib.entries.iter().any(|e| e.place_id == "1"));
+    }
+    #[test]
+    fn hostile_identifiers_cannot_become_launch_commands() {
+        for id in [
+            "0",
+            "1&accessCode=secret",
+            "1\";calc",
+            "9223372036854775808",
+        ] {
+            assert!(join_url(id, None, RobloxClient::Standard).is_err());
+        }
+        assert!(join_url("1818", Some("x&userId=1"), RobloxClient::Standard).is_err());
+        assert_eq!(
+            join_url("1818", Some(JOB), RobloxClient::Standard).unwrap(),
+            format!("roblox://placeId=1818&gameInstanceId={JOB}")
+        );
+        assert!(join_url("1818", Some(JOB), RobloxClient::Vng).is_err());
+    }
+    #[test]
+    fn damaged_library_is_never_silently_replaced() {
+        let path =
+            std::env::temp_dir().join(format!("swift-library-test-{}.json", std::process::id()));
+        fs::write(&path, b"broken").unwrap();
+        assert!(GameLibrary::load(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"broken");
+        fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn saved_library_round_trips_without_server_addresses_or_tokens() {
+        let path = std::env::temp_dir().join(format!(
+            "swift-library-roundtrip-{}.json",
+            std::process::id()
+        ));
+        let mut lib = GameLibrary::default();
+        lib.record_join("1818", JOB, RobloxClient::Standard, 20)
+            .unwrap();
+        lib.save(&path).unwrap();
+        lib.set_favourite("1818", RobloxClient::Standard, true)
+            .unwrap();
+        lib.save(&path).unwrap();
+        assert_eq!(GameLibrary::load(&path).unwrap().entries, lib.entries);
+        fs::remove_file(path).unwrap();
+    }
+}

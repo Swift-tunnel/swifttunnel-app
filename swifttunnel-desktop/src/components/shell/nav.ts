@@ -47,7 +47,7 @@ const ALL_SECTIONS: NavSection[] = [
       {
         id: "games",
         label: "Games",
-        description: "Roblox FPS, graphics and boosts",
+        description: "Recent Roblox games, favourites and settings",
         shortcut: "3",
         icon: "games",
       },
