@@ -39,6 +39,7 @@ const SHIELD = "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z";
 const ROCKET_BODY =
   "M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z";
 const LAYER_TOP = "M12 3l9 5-9 5-9-5z";
+const FLAG = "M5 4h13l-2.5 4.5L18 13H5z";
 const BIN = "M5 6h14l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2z";
 const PANEL =
   "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z";
@@ -110,6 +111,7 @@ const ICONS = {
     stroke: `${ROCKET_BODY} M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0 M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5`,
   },
   layers: { fill: LAYER_TOP, stroke: `${LAYER_TOP} M3 13l9 5 9-5 M3 17.5l9 5 9-5` },
+  flag: { fill: FLAG, stroke: `${FLAG} M5 21V4` },
   memory: {
     fill: RAM,
     stroke: `${RAM} M6.5 10v3 M10.5 10v3 M14.5 10v3 M18.5 10v3 M5 16v2.5 M9 16v2.5 M15 16v2.5 M19 16v2.5`,

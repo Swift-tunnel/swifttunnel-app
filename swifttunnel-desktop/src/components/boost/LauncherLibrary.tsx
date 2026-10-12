@@ -129,7 +129,7 @@ export function GameLibraryPanel() {
     {(error || loadError || library?.warning) && <ErrorBanner tone="error">{error || loadError || library?.warning}</ErrorBanner>}
     {failedEntry && <Button size="sm" variant="secondary" className="self-start" disabled={busy} onClick={() => void prepare(failedEntry, null, null, false)}>Play normally without a preferred server</Button>}
     {(notice || progress) && <Notice busy={!!progress}>{progress ?? notice}</Notice>}
-    {current && <section className="instrument relative isolate flex items-center gap-3.5 px-4 py-3.5"><Watermark icon="roblox" at="right" size={150} rotate={-14} fade opacity={.045} />
+    {current && <section className="instrument relative isolate flex items-center gap-3.5 px-4 py-3.5"><Watermark icon="games" at="right" size={124} rotate={-14} opacity={.05} />
       {active && <Artwork entry={active} />}
       <div className="min-w-0 flex-1"><p className="eyebrow">Game session</p><h2 className="mt-1.5 truncate text-[15px] font-semibold leading-tight text-text-primary">{active?.name ?? `Place ${current.place_id}`}</h2><p className="mt-1 text-[11.5px] leading-snug text-text-muted">{gameSessionDescription(current, tunnelState === "connected" ? route : null)}</p></div>
       <p className="hidden shrink-0 items-center gap-2 font-mono text-[10px] uppercase tracking-[.1em] text-text-muted min-[950px]:flex"><span className={`h-1.5 w-1.5 rounded-full ${tunnelState === "connected" ? "bg-status-connected" : "bg-text-dimmed"}`} />{tunnelState === "connected" ? "Tunnel active" : "Current connection"}</p>

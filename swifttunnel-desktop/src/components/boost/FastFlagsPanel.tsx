@@ -71,7 +71,7 @@ export function FastFlagsPanel() {
       {error && <ErrorBanner tone="error">{error}</ErrorBanner>}
       {notice && <Notice>{notice}</Notice>}
       {externalChange && <ErrorBanner tone="warning">Saved settings changed elsewhere. <button type="button" className="underline underline-offset-2" onClick={reload} disabled={busy}>Reload saved overrides</button> before saving this draft.</ErrorBanner>}
-      <Panel flush watermark={{ icon: "roblox", at: "right", size: 140, opacity: .035 }}>
+      <Panel flush watermark={{ icon: "flag", at: "right", size: 118, rotate: -10, opacity: .05 }}>
         <Row label="Manage FastFlags" desc="Turn off to remove the supported override set from Roblox." ><Toggle enabled={enabled} onChange={toggleManage} disabled={busy} ariaLabel="Manage FastFlags" /></Row>
         {baseline.ultraboost && <p className="px-3.5 pb-2.5 text-[11px] leading-snug text-status-warning">Ultraboost currently controls these flags. Saving here replaces it with your editor selection.</p>}
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border-subtle px-3.5 py-1.5"><Button variant="ghost" size="sm" className="-ml-3" onClick={() => setReset(true)} disabled={busy}>Reset overrides</Button><button type="button" onClick={() => void systemOpenUrl("https://devforum.roblox.com/t/allowlist-for-local-client-configuration-via-fast-flags/3966569").catch(e => setError(formatErrorMessage(e)))} className="flex items-center gap-1.5 text-[11px] text-text-muted transition-colors hover:text-text-primary">Roblox's allowed flags<Icon name="external" size={11} /></button></div>
