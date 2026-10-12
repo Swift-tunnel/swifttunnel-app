@@ -499,7 +499,7 @@ export function BoostTab({ importPatch, onImportConsumed }: { importPatch?: Part
   ].filter(Boolean).length;
 
   return (
-    <div className="flex w-full flex-col gap-4 pb-24">
+    <div className="flex w-full flex-col gap-4">
       <SettingsSaveNotice />
       {boost.error && <ErrorBanner tone="error">{boost.error}</ErrorBanner>}
 

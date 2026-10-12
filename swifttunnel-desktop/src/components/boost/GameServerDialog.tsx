@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Dialog, ErrorBanner, Icon } from "../ui";
+import { Button, Dialog, ErrorBanner, Icon, Spinner } from "../ui";
 import { Flag } from "../ui/Flag";
 import { gamesDatacenters, gamesSearchServers, systemOpenUrl } from "../../lib/commands";
 import { defaultGamePreferences } from "../../lib/gameLaunchFlow";
@@ -36,28 +36,29 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
   }
   const center = centers.find(c => c.id === selected);
   const rows = page?.servers ?? [];
-  return <Dialog open={!!entry} onClose={onClose} maxWidth={860} title={`Find a server · ${entry?.name ?? "Roblox"}`} description="Choose a Roblox datacenter. A listed server can become full or close before you join.">
-    <div className="grid min-h-[300px] grid-cols-[190px_minmax(0,1fr)] max-[700px]:grid-cols-1">
-      <div className="max-h-[55vh] overflow-y-auto border-r border-border-subtle p-2 max-[700px]:max-h-[150px]">
-        {centers.map(c => <button key={c.id} disabled={busy} onClick={() => void search(c.id)}
-          className={`flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-xs transition-colors ${selected === c.id ? "bg-bg-hover text-text-primary" : "text-text-secondary hover:bg-bg-hover"}`}>
-          <Flag code={c.country} size={18} /><span className="min-w-0 truncate">{c.city}</span>{selected === c.id && <Icon name="check" size={13} className="ml-auto shrink-0" />}
+  return <Dialog flush open={!!entry} onClose={onClose} maxWidth={820} title={`Find a server · ${entry?.name ?? "Roblox"}`} description="Choose a Roblox datacenter. A listed server can become full or close before you join.">
+    <div className="grid h-[min(360px,calc(100vh-13rem))] grid-cols-[200px_minmax(0,1fr)] max-[700px]:h-auto max-[700px]:grid-cols-1">
+      <div className="overflow-y-auto border-r border-border-subtle p-2 max-[700px]:max-h-[150px] max-[700px]:border-b max-[700px]:border-r-0">
+        <p className="eyebrow px-2.5 pb-2 pt-1.5">Datacenter</p>
+        {centers.map(c => <button key={c.id} type="button" disabled={busy} aria-current={selected === c.id ? "true" : undefined} onClick={() => void search(c.id)}
+          className={`flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-left text-[12px] transition-colors disabled:cursor-not-allowed ${selected === c.id ? "bg-bg-active font-medium text-text-primary" : "text-text-secondary hover:bg-bg-hover"}`}>
+          <Flag code={c.country} size={16} /><span className="min-w-0 truncate">{c.city}</span>{selected === c.id && <Icon name="check" size={13} strokeWidth={2.2} className="ml-auto shrink-0" />}
         </button>)}
       </div>
-      <div className="max-h-[55vh] overflow-y-auto p-4">
+      <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-4">
         {error && <ErrorBanner tone="error">{error}</ErrorBanner>}
         {page?.warning && <ErrorBanner tone="warning">{page.warning}</ErrorBanner>}
-        {center && <div className="mb-4 flex items-center justify-between gap-3"><div><p className="text-sm font-semibold text-text-primary">{center.city}</p><p className="mt-1 text-[11px] text-text-muted">{center.relay_region ? `${center.relay_region} relay region` : "No matching SwiftTunnel relay region"}</p></div><Button size="sm" variant="ghost" disabled={busy} onClick={() => void search(center.id)}>Refresh</Button></div>}
-        {busy && <div role="status" className="flex items-center gap-2 py-8 text-xs text-text-muted"><span className="h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" />Checking server information...</div>}
-        {!busy && !page && !error && <div className="grid min-h-[220px] place-content-center gap-3 text-center text-text-muted"><Icon name="globe" size={32} className="mx-auto" /><p className="text-sm">Choose a datacenter to see its servers.</p>{center && <Button size="sm" variant="secondary" onClick={() => void search(center.id)}>Search {center.city}</Button>}</div>}
-        {!busy && page && !rows.length && <p className="py-10 text-center text-xs text-text-muted">No listed server was found here. Refresh or choose another datacenter.</p>}
-        <div className="space-y-2">{rows.map(server => <div key={server.job_id} className="flex items-center justify-between gap-3 rounded-xl border border-border-subtle bg-bg-base p-3">
-          <div className="min-w-0"><p className="text-xs font-medium text-text-primary">Server {server.job_id.slice(0,8)}</p><p className="mt-1 text-[11px] text-text-muted">{server.playing != null && server.capacity != null ? `${server.playing}/${server.capacity} players · ` : ""}{server.availability === "available" ? "Listed as available" : server.availability === "full" ? "Full" : server.availability === "unavailable" ? "No longer listed" : "Availability unverified"}</p></div>
+        {center && <div className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="text-[13.5px] font-semibold leading-tight text-text-primary">{center.city}</p><p className="mt-1 text-[11px] text-text-muted">{center.relay_region ? `${center.relay_region} relay region` : "No matching SwiftTunnel relay region"}</p></div><Button size="sm" variant="secondary" disabled={busy} leadingIcon={<Icon name="refresh" size={13} />} onClick={() => void search(center.id)}>Refresh</Button></div>}
+        {busy && <div role="status" className={`flex items-center gap-2.5 text-[12px] text-text-muted ${rows.length ? "py-1" : "flex-1 justify-center py-8"}`}><Spinner size={13} />Checking server information...</div>}
+        {!busy && !page && !error && <div className="flex flex-1 flex-col items-center justify-center gap-3 py-6 text-center"><div className="icon-orb flex h-10 w-10 items-center justify-center"><Icon name="globe" size={18} strokeWidth={1.8} className="text-text-muted" /></div><p className="text-[12.5px] font-medium text-text-primary">Choose a datacenter to see its servers.</p>{center && <Button size="sm" variant="secondary" onClick={() => void search(center.id)}>Search {center.city}</Button>}</div>}
+        {!busy && page && !rows.length && <p className="flex flex-1 items-center justify-center py-8 text-center text-[12px] text-text-muted">No listed server was found here. Refresh or choose another datacenter.</p>}
+        {!!rows.length && <div className="divide-y divide-border-subtle rounded-[10px] bg-bg-base">{rows.map(server => <div key={server.job_id} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+          <div className="min-w-0"><p className="font-mono text-[12px] font-medium text-text-primary">Server {server.job_id.slice(0,8)}</p><p className="mt-1 text-[11px] text-text-muted">{server.playing != null && server.capacity != null ? `${server.playing}/${server.capacity} players · ` : ""}{server.availability === "available" ? "Listed as available" : server.availability === "full" ? "Full" : server.availability === "unavailable" ? "No longer listed" : "Availability unverified"}</p></div>
           <Button size="sm" variant="secondary" disabled={busy || server.availability === "full" || server.availability === "unavailable"} onClick={() => { if (entry && center) onJoin(entry, server, center); }}>Join</Button>
-        </div>)}</div>
-        {page?.next_cursor != null && rows.length < 200 && <Button size="sm" variant="ghost" className="mt-3" disabled={busy} onClick={() => { if (selected) void search(selected, true); }}>Load more</Button>}
+        </div>)}</div>}
+        {page?.next_cursor != null && rows.length < 200 && <Button size="sm" variant="ghost" className="self-start" disabled={busy} onClick={() => { if (selected) void search(selected, true); }}>Load more</Button>}
       </div>
     </div>
-    <footer className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3 text-[11px] text-text-muted"><span>Server locations by <button className="text-text-secondary underline decoration-border-subtle underline-offset-2" onClick={() => void systemOpenUrl("https://www.rovalra.com")}>RoValra</button>. Availability by Roblox.</span><Button size="sm" variant="ghost" onClick={onClose}>Done</Button></footer>
+    <footer className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3 text-[11px] text-text-muted"><span>Server locations by <button type="button" className="text-text-secondary underline decoration-border-strong underline-offset-2 hover:text-text-primary" onClick={() => void systemOpenUrl("https://www.rovalra.com")}>RoValra</button>. Availability by Roblox.</span><Button size="sm" variant="secondary" onClick={onClose}>Done</Button></footer>
   </Dialog>;
 }

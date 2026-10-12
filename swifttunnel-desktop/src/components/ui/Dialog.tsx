@@ -9,6 +9,8 @@ interface DialogProps {
   description?: string;
   children: ReactNode;
   maxWidth?: number;
+  /** Edge-to-edge body, for a dialog that lays out its own columns and footer. */
+  flush?: boolean;
 }
 
 export function Dialog({
@@ -18,6 +20,7 @@ export function Dialog({
   description,
   children,
   maxWidth = 480,
+  flush,
 }: DialogProps) {
   const dialog = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
@@ -90,7 +93,7 @@ export function Dialog({
             <Icon name="close" size={14} strokeWidth={2} />
           </button>
         </div>
-        <div className="px-5 py-4">{children}</div>
+        <div className={flush ? "" : "px-5 py-4"}>{children}</div>
       </div>
     </div>,
     document.body,
