@@ -7,6 +7,74 @@ use tauri::{Emitter, State};
 
 pub const LIBRARY_CHANGED: &str = "roblox-library-changed";
 
+#[tauri::command]
+pub async fn games_nvidia_profile()
+-> Result<swifttunnel_core::nvidia_profile::DriverProfile, String> {
+    tauri::async_runtime::spawn_blocking(swifttunnel_core::nvidia_profile::inspect)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn games_save_nvidia(
+    state: State<'_, AppState>,
+    changes: Vec<swifttunnel_core::nvidia_profile::DriverChange>,
+    expected: Vec<swifttunnel_core::nvidia_profile::DriverSetting>,
+) -> Result<swifttunnel_core::nvidia_profile::DriverProfile, String> {
+    let optimizer = state.roblox_optimizer.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let optimizer = optimizer.lock();
+        if optimizer.is_roblox_running() {
+            return Err("Close Roblox before changing its NVIDIA profile.".into());
+        }
+        swifttunnel_core::nvidia_profile::apply(changes, expected)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn games_save_flags(
+    state: State<'_, AppState>,
+    enabled: bool,
+    json: String,
+    expected_json: String,
+    expected_enabled: bool,
+    expected_ultraboost: bool,
+) -> Result<crate::commands::optimizer::BoostUpdateResult, String> {
+    if json.len() > 8192 {
+        return Err("FastFlags must be under 8 KB.".into());
+    }
+    let optimizer = state.roblox_optimizer.clone();
+    let settings = state.settings.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let optimizer = optimizer.lock();
+        if swifttunnel_core::roblox_game_profile::pending() {
+            return Err("Close Roblox and let its temporary game settings restore before applying FastFlags.".into());
+        }
+        let mut settings = settings.lock();
+        let previous = &settings.config.roblox_settings;
+        if previous.custom_fflags_json != expected_json
+            || previous.custom_fflags_enabled != expected_enabled
+            || previous.ultraboost != expected_ultraboost
+        {
+            return Err("FastFlags changed in another view. Reload the saved overrides before applying.".into());
+        }
+        let mut config = settings.config.clone();
+        config.roblox_settings.custom_fflags_enabled = enabled;
+        config.roblox_settings.custom_fflags_json = json;
+        config.roblox_settings.ultraboost = false;
+        let warnings = optimizer.apply_flag_overrides(&config.roblox_settings).map_err(|e| format!("Could not apply FastFlags: {e}. Some files may already be changed; review and retry."))?;
+        let previous_config = settings.config.clone();
+        settings.config = config.clone();
+        if let Err(error) = swifttunnel_core::settings::save_settings(&settings) {
+            settings.config = previous_config;
+            return Err(format!("Flags were applied, but saving the configuration failed: {error}. Retry Save before closing."));
+        }
+        Ok(crate::commands::optimizer::BoostUpdateResult { warnings, applied_config: config })
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FlagAction {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Dialog, ErrorBanner, Icon, Toggle } from "../ui";
+import { Button, Dialog, ErrorBanner, Icon, Toggle, Watermark } from "../ui";
 import { useGameLibraryStore } from "../../stores/gameLibraryStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -107,7 +107,7 @@ export function GameLibraryPanel() {
     {(error || loadError || library?.warning) && <ErrorBanner tone="error">{error || loadError || library?.warning}</ErrorBanner>}
     {failedEntry && <Button size="sm" variant="secondary" disabled={busy} onClick={() => void prepare(failedEntry, null, null, false)}>Play normally without a preferred server</Button>}
     {(notice || progress) && <p role="status" className="rounded-xl border border-border-subtle bg-bg-hover px-4 py-3 text-xs text-text-secondary">{progress ?? notice}</p>}
-    {current && <section className="flex items-center gap-4 rounded-2xl border border-border-subtle px-5 py-4" style={{ background: "linear-gradient(110deg,var(--color-accent-primary-soft-8),var(--color-bg-elevated))" }}>
+    {current && <section className="instrument relative isolate flex items-center gap-4 px-5 py-4"><Watermark icon="roblox" at="right" size={150} rotate={-14} fade opacity={.045} />
       {active && <Artwork entry={active} large />}<div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[.14em] text-text-muted">Game session</p><h2 className="mt-1 truncate text-lg font-semibold text-text-primary">{active?.name ?? `Place ${current.place_id}`}</h2><p className="mt-1 text-xs text-text-secondary">{gameSessionDescription(current, tunnelState === "connected" ? route : null)}</p></div>
       <span className="hidden rounded-full border border-border-subtle px-3 py-1.5 text-[11px] text-text-secondary min-[950px]:block">{tunnelState === "connected" ? "Tunnel active" : "Current connection"}</span>
     </section>}
@@ -122,7 +122,7 @@ export function GameLibraryPanel() {
     {library && !!entries.length && !shown.length && <p className="py-12 text-center text-xs text-text-muted">No games match this view.</p>}
     <div className="grid grid-cols-[repeat(auto-fit,minmax(270px,1fr))] gap-3">{shown.map(entry => {
       const preferences = defaultGamePreferences(entry);
-      return <article key={`${entry.client}:${entry.place_id}`} className="group overflow-hidden rounded-2xl border border-border-subtle bg-bg-elevated transition-colors hover:border-border-default">
+      return <article key={`${entry.client}:${entry.place_id}`} className="instrument group relative isolate overflow-hidden transition-colors hover:border-border-default"><Watermark icon="games" at="bottom-right" size={120} rotate={-12} opacity={.025} />
         <div className="flex items-start gap-3.5 p-4"><Artwork entry={entry} /><div className="min-w-0 flex-1"><h3 className="line-clamp-2 text-[14px] font-semibold leading-snug text-text-primary" title={entry.name}>{entry.name}</h3><p className="mt-1.5 text-[11px] text-text-muted">{entry.client === "vng" ? "Roblox VNG" : "Roblox"}{entry.last_played ? ` · ${new Date(entry.last_played * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : " · Saved"}</p><p className="mt-2 text-[10px] text-text-secondary">{preferences.fps_cap ? `${preferences.fps_cap === 99999 ? "Uncapped" : `${preferences.fps_cap} FPS`} · ` : ""}{preferences.datacenter_id ? "Preferred region" : preferences.use_tunnel ? "Automatic connection" : "Use current connection"}</p></div>
           <button aria-label={`${entry.favourite ? "Remove" : "Add"} ${entry.name} ${entry.favourite ? "from" : "to"} favourites`} aria-pressed={entry.favourite} disabled={locked || !!loadError} className="rounded-lg p-1.5 text-text-secondary hover:bg-bg-hover" onClick={() => void run(() => gamesSetFavourite(entry.place_id, entry.client, !entry.favourite))}><Star filled={entry.favourite} /></button></div>
         <div className="flex items-center gap-1.5 border-t border-border-subtle px-3 py-2.5"><Button size="sm" fullWidth disabled={locked} onClick={() => void prepare(entry)}>Play</Button>

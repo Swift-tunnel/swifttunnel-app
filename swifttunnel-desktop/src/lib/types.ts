@@ -661,3 +661,5 @@ export type TabId =
   | "network"
   | "repair"
   | "settings";
+export interface NvidiaDriverSetting { id: number; current: number | null; override_value: number | null }
+export interface NvidiaDriverProfile { available: boolean; writable: boolean; reason: string | null; settings: NvidiaDriverSetting[] }

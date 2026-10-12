@@ -127,7 +127,7 @@ const BOOST_SETTINGS: { anchor: string; label: string; keywords: string }[] = [
   },
   {
     anchor: "custom_fflags",
-    label: "Custom FFlag Import",
+    label: "FastFlags editor",
     keywords: "custom fflags fflag flags json import advanced client flags",
   },
   {

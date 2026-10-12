@@ -736,6 +736,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::games::games_get_library,
             commands::games::games_flags,
+            commands::games::games_save_flags,
+            commands::games::games_nvidia_profile,
+            commands::games::games_save_nvidia,
             commands::games::games_refresh_metadata,
             commands::game_launch::games_datacenters,
             commands::game_launch::games_search_servers,

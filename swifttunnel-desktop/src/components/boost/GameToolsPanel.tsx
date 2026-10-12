@@ -21,18 +21,17 @@ export function GameToolsPanel({ onImport, disabled }: { onImport: (patch: Parti
   }
   const flags = preview?.sources[source];
   const patch: Partial<RobloxSettingsConfig> = {};
-  if (flags?.accepted && !flags.error) Object.assign(patch, { custom_fflags_enabled: true, custom_fflags_json: flags.json, ultraboost: false });
   if (fps && preview?.fps_cap != null) Object.assign(patch, { unlock_fps: true, target_fps: preview.fps_cap });
   if (graphics && preview?.graphics_quality) patch.graphics_quality = preview.graphics_quality;
   const hasPatch = Object.keys(patch).length > 0;
   const size = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return <Panel eyebrow="Roblox tools" title="Import settings & reclaim space" desc="Review imports before applying. Cleanup only includes eligible files older than seven days.">
+  return <Panel eyebrow="Maintenance" title="Existing settings & storage" desc="Review imports before applying. Cleanup only includes eligible files older than seven days." watermark={{icon:"repair",at:"top-right",size:130,rotate:-12,opacity:.04}}>
     {error && <ErrorBanner tone="error">{error}</ErrorBanner>}
     {notice && <p role="status" className="mb-3 text-xs text-text-secondary">{notice}</p>}
     <div className="grid gap-3 min-[1100px]:grid-cols-3">
       <section className="rounded-xl border border-border-subtle bg-bg-base p-4">
         <h3 className="text-sm font-semibold text-text-primary">Bring your settings</h3>
-        <p className="mb-4 mt-2 text-xs leading-relaxed text-text-muted">Review supported launcher flags, FPS and graphics. Your old launcher and accounts stay intact.</p>
+        <p className="mb-4 mt-2 text-xs leading-relaxed text-text-muted">Import FPS and graphics preferences. Review flag files here and edit your overrides in FastFlags.</p>
         <Button size="sm" variant="secondary" disabled={busy || disabled} onClick={() => void run(async () => { const result = await gamesScanImports(); setPreview(result); setSource(-1); setFps(true); setGraphics(true); })}>Import launcher settings</Button>
       </section>
       <section className="rounded-xl border border-border-subtle bg-bg-base p-4">
@@ -50,7 +49,7 @@ export function GameToolsPanel({ onImport, disabled }: { onImport: (patch: Parti
     <Dialog open={!!preview} title="Import Roblox settings" onClose={() => { if (!busy) setPreview(null); }}
       description="Copies supported values into your pending settings. Review them below, then use Apply. Your other launcher stays installed.">
       <div className="max-h-[60vh] overflow-y-auto p-4 text-xs text-text-secondary">
-        <label className="block">Launcher flags<select aria-label="Launcher flag source" value={source} disabled={busy}
+        <label className="block">Inspect existing flags<select aria-label="Launcher flag source" value={source} disabled={busy}
           onChange={e => setSource(Number(e.target.value))} className="mt-2 block w-full rounded-lg border border-border-subtle bg-bg-base p-2 text-text-primary">
           <option value={-1}>Keep my current flags</option>
           {preview?.sources.map((entry, i) => <option key={i} value={i}>{entry.source} ({entry.accepted} supported{entry.error ? ", could not read" : ""})</option>)}
@@ -65,7 +64,7 @@ export function GameToolsPanel({ onImport, disabled }: { onImport: (patch: Parti
         <p className="mt-4 text-text-muted">These shared Roblox preferences come from the current Roblox settings file:</p>
         {preview?.fps_cap != null && <label className="mt-3 flex gap-2"><input type="checkbox" checked={fps} onChange={e => setFps(e.target.checked)} />Frame-rate cap: {preview.fps_cap} FPS</label>}
         {preview?.graphics_quality && <label className="mt-3 flex gap-2"><input type="checkbox" checked={graphics} onChange={e => setGraphics(e.target.checked)} />Graphics: {preview.graphics_quality}</label>}
-        <p className="mt-4 text-[11px] text-text-muted">Themes, mods, accounts and launcher integrations are not imported.</p>
+        <p className="mt-4 text-[11px] text-text-muted">Only FPS and graphics are imported here. Flag files are shown for inspection; use FastFlags to edit them. Themes, mods, accounts and integrations are not imported.</p>
       </div>
       <div className="flex justify-end gap-2 border-t border-border-subtle p-4"><Button size="sm" variant="ghost" onClick={() => setPreview(null)}>Cancel</Button>
         <Button size="sm" disabled={!hasPatch || disabled} onClick={() => { onImport(patch); setPreview(null); setNotice("Imported into pending settings. Review the values, then use Apply."); }}>Use these settings</Button></div>

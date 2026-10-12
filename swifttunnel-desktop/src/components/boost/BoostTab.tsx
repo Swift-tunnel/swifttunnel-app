@@ -24,6 +24,7 @@ import {
   Dialog,
   type WatermarkProps,
 } from "../ui";
+import { validateCustomFflags } from "../../lib/fastFlags";
 import { FpsSlider } from "./FpsSlider";
 import {
   PROFILES,
@@ -46,93 +47,6 @@ const MIN_WINDOW_WIDTH = 800;
 const MAX_WINDOW_WIDTH = 3840;
 const MIN_WINDOW_HEIGHT = 600;
 const MAX_WINDOW_HEIGHT = 2160;
-const CUSTOM_FFLAG_ALLOWLIST: Record<string, string> = {
-  FFlagHandleAltEnterFullscreenManually: "False",
-  FFlagDebugGraphicsPreferD3D11: "True",
-  FFlagDebugGraphicsPreferVulkan: "False",
-  FFlagDebugGraphicsPreferOpenGL: "False",
-  FIntDebugForceMSAASamples: "1",
-  DFFlagTextureQualityOverrideEnabled: "True",
-  DFIntTextureQualityOverride: "0",
-  DFFlagDisableDPIScale: "False",
-  DFIntDebugFRMQualityLevelOverride: "1",
-  FFlagDebugSkyGray: "True",
-  FIntFRMMinGrassDistance: "0",
-  FIntFRMMaxGrassDistance: "0",
-  FIntGrassMovementReducedMotionFactor: "0",
-  DFFlagDebugPauseVoxelizer: "True",
-  DFIntCSGLevelOfDetailSwitchingDistance: "0",
-  DFIntCSGLevelOfDetailSwitchingDistanceL12: "0",
-  DFIntCSGLevelOfDetailSwitchingDistanceL23: "0",
-  DFIntCSGLevelOfDetailSwitchingDistanceL34: "0",
-};
-
-function customFflagExpectsBoolean(key: string, defaultValue: string) {
-  return (
-    defaultValue.toLowerCase() === "true" ||
-    defaultValue.toLowerCase() === "false" ||
-    key.startsWith("FFlag") ||
-    key.startsWith("DFFlag")
-  );
-}
-
-function validateCustomFflags(enabled: boolean, raw: string): string | null {
-  if (!enabled) return null;
-  if (raw.trim().length === 0) {
-    return "Paste a JSON object before applying custom FFlags.";
-  }
-  if (raw.length > 8192) return "Custom FFlags must be under 8 KB.";
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return "Custom FFlags must be valid JSON.";
-  }
-
-  if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") {
-    return "Custom FFlags must be a JSON object.";
-  }
-
-  const entries = Object.entries(parsed);
-  if (entries.length === 0) {
-    return "Custom FFlags must include at least one allowlisted key.";
-  }
-
-  for (const [key, value] of entries) {
-    const defaultValue = CUSTOM_FFLAG_ALLOWLIST[key];
-    if (defaultValue === undefined) {
-      return `${key} is not in Roblox's FFlag allowlist.`;
-    }
-
-    if (customFflagExpectsBoolean(key, defaultValue)) {
-      if (typeof value === "boolean") continue;
-      if (
-        typeof value === "string" &&
-        ["true", "false"].includes(value.trim().toLowerCase())
-      ) {
-        continue;
-      }
-      return `${key} must be true or false.`;
-    }
-
-    const integer =
-      typeof value === "number"
-        ? value
-        : typeof value === "string" && value.trim() !== ""
-          ? Number(value.trim())
-          : Number.NaN;
-    if (!Number.isInteger(integer)) {
-      return `${key} must be an integer.`;
-    }
-    if (integer < -1_000_000 || integer > 1_000_000) {
-      return `${key} is outside the allowed integer range.`;
-    }
-  }
-
-  return null;
-}
-
 /**
  * Everything that stops a config being written, for any config.
  *
@@ -160,7 +74,7 @@ function configValidationError(config: Config): string | null {
     config.roblox_settings.ultraboost &&
     config.roblox_settings.custom_fflags_enabled
   ) {
-    return "Choose either Ultraboost or Custom FFlag Import, not both.";
+    return "Turn off Ultraboost before managing overrides in the FastFlags editor.";
   }
 
   return validateCustomFflags(
@@ -322,12 +236,6 @@ export function BoostTab({ importPatch, onImportConsumed }: { importPatch?: Part
     MAX_WINDOW_HEIGHT,
   );
   const windowValidationError = windowWidthError ?? windowHeightError;
-  // The combined check is what gates applying; this one is shown against the
-  // custom FFlag field itself, so it stays specific to that field.
-  const customFflagError = validateCustomFflags(
-    draft.roblox_settings.custom_fflags_enabled,
-    draft.roblox_settings.custom_fflags_json,
-  );
   const validationError = configValidationError(draft);
 
   useFocusAwareInterval(() => void boost.fetchMetrics(), 2000);
@@ -688,20 +596,6 @@ export function BoostTab({ importPatch, onImportConsumed }: { importPatch?: Part
             )
           }
           disabled={robloxControlsLocked}
-        />
-        <CustomFflagsRow
-          enabled={draft.roblox_settings.custom_fflags_enabled}
-          json={draft.roblox_settings.custom_fflags_json}
-          error={customFflagError}
-          disabled={robloxControlsLocked}
-          onEnabledChange={(v) =>
-            updateRblxOpt(
-              v
-                ? { custom_fflags_enabled: true, ultraboost: false }
-                : { custom_fflags_enabled: false },
-            )
-          }
-          onJsonChange={(v) => updateRblxOpt({ custom_fflags_json: v })}
         />
         <ResolutionRow
           width={draft.roblox_settings.window_width}
@@ -1100,92 +994,6 @@ function SettingRow({
         ariaLabel={title}
       />
     </Row>
-  );
-}
-
-function CustomFflagsRow({
-  enabled,
-  json,
-  error,
-  disabled,
-  onEnabledChange,
-  onJsonChange,
-}: {
-  enabled: boolean;
-  json: string;
-  error: string | null;
-  disabled?: boolean;
-  onEnabledChange: (v: boolean) => void;
-  onJsonChange: (v: string) => void;
-}) {
-  return (
-    <div className="px-4 py-3" data-search-anchor="custom_fflags">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="text-[13px] font-medium text-text-primary">
-              Custom FFlag Import
-            </span>
-            <span
-              className="rounded-[3px] px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-[0.1em]"
-              style={{
-                backgroundColor: "var(--color-bg-elevated)",
-                color: "var(--color-text-muted)",
-                border: "1px solid var(--color-border-subtle)",
-              }}
-            >
-              JSON
-            </span>
-            <Tooltip content="Only Roblox's allowlisted FFlags are accepted. Unknown keys are rejected.">
-              <span className="inline-flex">
-                <InfoIcon />
-              </span>
-            </Tooltip>
-          </div>
-          <p className="mt-0.5 text-[11px] text-text-muted">
-            Import custom values for allowlisted Roblox client flags.
-          </p>
-        </div>
-        <Toggle
-          enabled={enabled}
-          onChange={onEnabledChange}
-          disabled={disabled}
-          ariaLabel="Custom FFlag Import"
-        />
-      </div>
-      {enabled && (
-        <div className="mt-3 flex flex-col gap-2">
-          <textarea
-            value={json}
-            onChange={(e) => onJsonChange(e.target.value)}
-            disabled={disabled}
-            spellCheck={false}
-            placeholder={`{\n  "FFlagDebugSkyGray": true,\n  "DFIntTextureQualityOverride": 0\n}`}
-            className="boost-input min-h-[118px] resize-y rounded-[4px] px-3 py-2 font-mono text-[11px] leading-relaxed outline-none transition-colors"
-            style={{
-              backgroundColor: "var(--color-bg-elevated)",
-              border: `1px solid ${
-                error
-                  ? "var(--color-status-error-soft-40)"
-                  : "var(--color-border-default)"
-              }`,
-              color: "var(--color-text-primary)",
-            }}
-          />
-          <p
-            className="text-[10.5px] leading-relaxed"
-            style={{
-              color: error
-                ? "var(--color-status-error)"
-                : "var(--color-text-muted)",
-            }}
-          >
-            {error ??
-              "Accepted keys are limited to Roblox's local client FFlag allowlist."}
-          </p>
-        </div>
-      )}
-    </div>
   );
 }
 

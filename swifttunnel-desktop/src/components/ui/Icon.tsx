@@ -114,6 +114,10 @@ const ICONS = {
     fill: RAM,
     stroke: `${RAM} M6.5 10v3 M10.5 10v3 M14.5 10v3 M18.5 10v3 M5 16v2.5 M9 16v2.5 M15 16v2.5 M19 16v2.5`,
   },
+  gpu: {
+    fill: "M5 6h14v12H5z",
+    stroke: "M5 6h14v12H5z M9 9h6v6H9z M8 3v3 M12 3v3 M16 3v3 M8 18v3 M12 18v3 M16 18v3 M2 9h3 M2 15h3 M19 9h3 M19 15h3",
+  },
   gauge: {
     fill: DIAL,
     stroke: "M4 17a8 8 0 1 1 16 0z M12 15.5l3.6-4.4",

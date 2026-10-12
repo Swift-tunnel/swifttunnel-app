@@ -43,6 +43,8 @@ import type {
   GamePreferences,
   GameLaunchPlan,
   FlagCleanupReport,
+  NvidiaDriverProfile,
+  NvidiaDriverSetting,
 } from "./types";
 
 export const gamesGetLibrary = () => invoke<RobloxLibrarySnapshot>("games_get_library");
@@ -61,6 +63,9 @@ export const gamesSetPreferences = (placeId: string, client: RobloxClient, prefe
 export const gamesLaunchPlan = (placeId: string, client: RobloxClient, jobId: string | null = null, datacenterId: number | null = null, usePreferredRegion = true) => invoke<GameLaunchPlan>("games_launch_plan", { placeId, client, jobId, datacenterId, usePreferredRegion });
 export const gamesLaunch = (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, connectionStarted: boolean) => invoke<void>("games_launch", { placeId, client, jobId, datacenterId, allowUnverified, connectionStarted });
 export const gamesFlags = (action: "preview" | "clean" | "undo") => invoke<FlagCleanupReport>("games_flags", { action });
+export const gamesSaveFlags = (enabled: boolean, json: string, expected: { custom_fflags_json: string; custom_fflags_enabled: boolean; ultraboost: boolean }) => invoke<BoostUpdateResult>("games_save_flags", { enabled, json, expectedJson: expected.custom_fflags_json, expectedEnabled: expected.custom_fflags_enabled, expectedUltraboost: expected.ultraboost });
+export const gamesNvidiaProfile = () => invoke<NvidiaDriverProfile>("games_nvidia_profile");
+export const gamesSaveNvidia = (changes: { id: number; value: number | null }[], expected: NvidiaDriverSetting[]) => invoke<NvidiaDriverProfile>("games_save_nvidia", { changes, expected });
 export const gamesRefreshMetadata = () => invoke<void>("games_refresh_metadata");
 export const vpnConnectGame = (region: string, gamePresets: string[]) => invoke<void>("vpn_connect", { region, gamePresets, gameRegion: true });
 

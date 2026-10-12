@@ -2414,10 +2414,33 @@ impl RobloxOptimizer {
         deduped
     }
 
-    /// Apply FFlag optimizations to ClientAppSettings.json
-    /// When ultraboost or custom FFlags are enabled, writes curated allowlisted performance FFlags.
-    /// FPS unlock is handled separately via GlobalBasicSettings `FramerateCap`.
-    /// Always cleans up old blocked or retired FFlags from previous versions.
+    /// Apply only flag overrides. The dedicated editor must not rewrite FPS,
+    /// graphics XML, system optimizations or network settings.
+    pub fn apply_flag_overrides(&self, config: &RobloxSettingsConfig) -> Result<Vec<String>> {
+        if self.is_roblox_running() {
+            return Err(anyhow::anyhow!("Close Roblox before applying FastFlags."));
+        }
+        let custom = Self::parse_custom_fflags(config)?;
+        let paths = Self::get_client_settings_paths(config.ultraboost || !custom.is_empty())?;
+        if paths.is_empty() && (config.ultraboost || !custom.is_empty()) {
+            return Err(anyhow::anyhow!(
+                "Launch Roblox or your installed launcher once before applying flag overrides."
+            ));
+        }
+        let mut warnings = Vec::new();
+        for (index, path) in paths.iter().enumerate() {
+            if let Err(error) = self.apply_client_fflags_in_path(config, path) {
+                if index == 0 {
+                    return Err(error);
+                }
+                warnings.push(format!(
+                    "An additional launcher or Roblox version could not be updated: {error}"
+                ));
+            }
+        }
+        Ok(warnings)
+    }
+
     fn apply_client_fflags(&self, config: &RobloxSettingsConfig) -> Result<FFlagApplyOutcome> {
         let custom_fflags_requested = !Self::parse_custom_fflags(config)?.is_empty();
         let should_write_fflags = config.ultraboost || custom_fflags_requested;
@@ -2548,6 +2571,12 @@ impl RobloxOptimizer {
             settings.remove(*key);
         }
 
+        // The editor owns the supported override set. Remove stale managed
+        // entries, including DPI scaling (not part of Ultraboost), before
+        // inserting the current selection. Other flags remain untouched.
+        for (key, _) in Self::CUSTOM_FFLAG_ALLOWLIST {
+            settings.remove(*key);
+        }
         if config.ultraboost {
             // Insert all ultraboost FFlags
             for (key, value) in Self::ULTRABOOST_FFLAGS {
@@ -3735,6 +3764,38 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editor_removes_stale_supported_overrides_but_keeps_unmanaged_flags() {
+        let dir =
+            std::env::temp_dir().join(format!("st-editor-flags-reset-{}", std::process::id()));
+        let client = dir.join("ClientSettings");
+        fs::create_dir_all(&client).unwrap();
+        let file = client.join("ClientAppSettings.json");
+        fs::write(
+            &file,
+            r#"{"DFFlagDisableDPIScale":"True","FFlagDebugSkyGray":"True","UserOtherFlag":"keep"}"#,
+        )
+        .unwrap();
+        let opt = optimizer_with_path(dir.join("settings.xml"));
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#"{"FFlagDebugSkyGray":false}"#.into(),
+            ..Default::default()
+        };
+        opt.apply_client_fflags_in_path(&config, &client).unwrap();
+        let flags: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(flags.get("DFFlagDisableDPIScale").is_none());
+        assert_eq!(flags["FFlagDebugSkyGray"], "False");
+        assert_eq!(flags["UserOtherFlag"], "keep");
+        opt.apply_client_fflags_in_path(&RobloxSettingsConfig::default(), &client)
+            .unwrap();
+        let flags: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(flags, serde_json::json!({"UserOtherFlag":"keep"}));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -51,6 +51,14 @@ export async function previewInvoke<T>(command: string, args: Record<string, unk
     case "games_scan_imports": result = { sources: [{ source: "Fishstrap", accepted: 2, json: '{"FFlagDebugGraphicsPreferD3D11":"True","DFIntTextureQualityOverride":"0"}', skipped: ["FFlagOldUnsupportedFlag: unsupported or ignored by Roblox"], error: null }], fps_cap: 240, graphics_quality: "Level5" }; break;
     case "games_cleanup": result = { files: 28, bytes: 24 * 1024 * 1024, skipped: 0, partial: false }; break;
     case "games_flags": result = { files_changed: 2, flags_removed: 7, skipped: [], can_undo: true }; break;
+    case "games_save_flags": {
+      const { useSettingsStore } = await import("../stores/settingsStore");
+      const config = structuredClone(useSettingsStore.getState().settings.config);
+      Object.assign(config.roblox_settings, { custom_fflags_enabled: args.enabled, custom_fflags_json: args.json, ultraboost: false });
+      result = { applied_config: config, warnings: [] }; break;
+    }
+    case "games_nvidia_profile": result = { available: true, writable: true, reason: null, settings: [0x1057eb71, 0x00a879cf, 0x10835002, 0x007ba09e].map(id => ({ id, current: id === 0x00a879cf ? 0x60925292 : 0, override_value: null })) }; break;
+    case "games_save_nvidia": result = { available: true, writable: true, reason: null, settings: (args.expected as { id:number;current:number|null;override_value:number|null }[]).map(s => { const change=(args.changes as {id:number;value:number|null}[]).find(c=>c.id===s.id); return change?{...s,current:change.value,override_value:change.value}:s; }) }; break;
     case "system_open_url": break;
     default: throw new Error(`This action is not simulated in the design preview (${command}).`);
   }
