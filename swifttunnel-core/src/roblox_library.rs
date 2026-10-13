@@ -307,19 +307,13 @@ pub fn valid_icon_url(value: &str) -> bool {
 pub fn join_url(
     place_id: &str,
     job_id: Option<&str>,
-    client: RobloxClient,
+    _client: RobloxClient,
 ) -> Result<String, String> {
     if !valid_place_id(place_id) || job_id.is_some_and(|id| !valid_job_id(id)) {
         return Err("Invalid Roblox game or server ID.".into());
     }
-    if client == RobloxClient::Vng {
-        // Keep VNG joins on its official site until its native scheme is verified.
-        return if job_id.is_some() {
-            Err("Rejoining a specific VNG server is not supported yet. Use Play to open its game page.".into())
-        } else {
-            Ok(format!("https://robloxapp.vnggames.com/games/{place_id}"))
-        };
-    }
+    // Both installed players accept Roblox deep links. The executable selected
+    // by native launch determines the client; do not use the Windows URI handler.
     let mut url = format!("roblox://experiences/start?placeId={place_id}");
     if let Some(job) = job_id {
         url.push_str(&format!("&gameInstanceId={job}"));
@@ -417,7 +411,11 @@ mod tests {
             join_url("1818", Some(JOB), RobloxClient::Standard).unwrap(),
             format!("roblox://experiences/start?placeId=1818&gameInstanceId={JOB}")
         );
-        assert!(join_url("1818", Some(JOB), RobloxClient::Vng).is_err());
+        assert_eq!(
+            join_url("1818", Some(JOB), RobloxClient::Vng).unwrap(),
+            join_url("1818", Some(JOB), RobloxClient::Standard).unwrap()
+        );
+        assert!(join_url("1818", Some("x&ticket=secret"), RobloxClient::Vng).is_err());
     }
     #[test]
     fn damaged_library_is_never_silently_replaced() {

@@ -1,8 +1,6 @@
 use crate::state::AppState;
 use serde::Serialize;
-use swifttunnel_core::roblox_library::{
-    GameEntry, GameLibrary, RobloxClient, join_url, library_path,
-};
+use swifttunnel_core::roblox_library::{GameEntry, GameLibrary, RobloxClient, library_path};
 use tauri::{Emitter, State};
 
 pub const LIBRARY_CHANGED: &str = "roblox-library-changed";
@@ -373,40 +371,9 @@ pub fn games_join(
     job_id: Option<String>,
     client: RobloxClient,
 ) -> Result<(), String> {
-    let url = join_url(&place_id, job_id.as_deref(), client)?;
-    launch_url(&url)
-}
-
-#[cfg(windows)]
-pub(super) fn launch_url(url: &str) -> Result<(), String> {
-    // No command shell, arbitrary executable path, account cookie, or auth
-    // ticket. Windows invokes the player's registered Roblox handler.
-    use windows::{
-        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
-        core::PCWSTR,
-    };
-    let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
-    let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(verb.as_ptr()),
-            PCWSTR(wide.as_ptr()),
-            None,
-            None,
-            SW_SHOWNORMAL,
-        )
-    };
-    match result.0 as isize {
-        code if code > 32 => Ok(()),
-        31 => Err("Windows has no Roblox launcher registered. Install Roblox or choose your launcher as the default, then try again.".into()),
-        code => Err(format!("Windows could not open Roblox (error {code}). Check your Roblox installation and default launcher.")),
-    }
-}
-
-#[cfg(not(windows))]
-pub(super) fn launch_url(_: &str) -> Result<(), String> {
-    Err("Game launching is available on Windows.".into())
+    let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
+    swifttunnel_core::roblox_native_launch::launch(&player, &place_id, job_id.as_deref(), client)
+        .map(|_| ())
 }
 
 /// Resolve a display name through public Roblox endpoints. Failure leaves the
@@ -486,13 +453,15 @@ pub async fn refresh_name(
 pub async fn games_add_favourite(
     state: State<'_, AppState>,
     place_id: String,
+    client: Option<RobloxClient>,
 ) -> Result<(), String> {
+    let client = client.unwrap_or_default();
     state
         .games
         .lock()
-        .mutate(|lib| lib.set_favourite(&place_id, RobloxClient::Standard, true))?;
+        .mutate(|lib| lib.set_favourite(&place_id, client, true))?;
     // The favourite is safely saved even when Roblox's metadata is unavailable.
-    let _ = refresh_name(&state, &place_id, RobloxClient::Standard).await;
+    let _ = refresh_name(&state, &place_id, client).await;
     Ok(())
 }
 

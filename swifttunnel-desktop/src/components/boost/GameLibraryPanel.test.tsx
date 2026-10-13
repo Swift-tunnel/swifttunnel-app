@@ -14,15 +14,16 @@ vi.mock("../../stores/gameLibraryStore", async () => {
 vi.mock("../../lib/commands", () => ({ gamesGetLibrary: vi.fn(), gamesAddFavourite: vi.fn(), gamesForget: vi.fn(), gamesJoin: vi.fn(), gamesSetFavourite: vi.fn(), gamesSetNotifications: vi.fn() }));
 afterEach(() => { useGameLibraryStore.setState({ library: null, error: null, loading: false }); useVpnStore.setState({ gameRoute: null }); });
 describe("game library panel", () => {
-  it("shows supported rejoin actions while keeping VNG's unverified native join unavailable", () => {
+  it("offers rejoin and copy-link actions for both installed Roblox clients", () => {
     useGameLibraryStore.setState({ library: { current: null, warning: null, notify_joins: false, entries: [
       { place_id: "1818", name: "Crossroads", job_id: "550e8400-e29b-41d4-a716-446655440000", favourite: true, last_played: 20, client: "standard" },
       { place_id: "1818", name: "Crossroads VNG", job_id: "550e8400-e29b-41d4-a716-446655440000", favourite: true, last_played: 20, client: "vng" },
     ] } });
     const html = renderToStaticMarkup(<GameLibraryPanel />);
     expect(html).toContain("Crossroads");
-    expect(html.match(/>Rejoin</g)).toHaveLength(1);
-    expect(html.match(/>Copy link</g)).toHaveLength(1);
+    expect(html.match(/>Rejoin</g)).toHaveLength(2);
+    expect(html.match(/>Copy link</g)).toHaveLength(2);
+    expect(html.match(/>Safe launch \(no FastFlags\)</g)).toHaveLength(2);
     expect(html).toContain("Roblox VNG");
   });
   it("keeps a failed library load visibly unavailable instead of claiming an empty history", () => {

@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Button, Dialog, EmptyState, ErrorBanner, Icon, Row, Toggle, Watermark, fieldClass } from "../ui";
+import { Button, Dialog, EmptyState, ErrorBanner, Icon, Row, Segmented, Toggle, Watermark, fieldClass } from "../ui";
 import { useGameLibraryStore } from "../../stores/gameLibraryStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
 import { boostCloseRoblox, boostGetMetrics, gamesAddFavourite, gamesForget, gamesLaunch, gamesLaunchPlan, gamesRefreshMetadata, gamesSetNotifications, gamesDismissRecovery, gamesCreateShortcut, gamesSuggestServer } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
-import { gameSessionDescription, gameShareUrl, parsePlaceInput } from "../../lib/robloxGames";
+import { gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "../../lib/robloxGames";
 import { defaultGamePreferences, executeGameLaunch } from "../../lib/gameLaunchFlow";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import type { GameLaunchPlan, RobloxGameEntry } from "../../lib/types";
+import type { GameLaunchPlan, RobloxClient, RobloxGameEntry } from "../../lib/types";
 import { GamePreferencesDialog } from "./GamePreferencesDialog";
 import { GameServerDialog } from "./GameServerDialog";
 import { Notice, iconButtonClass } from "./Notice";
@@ -64,6 +64,7 @@ export function GameLibraryPanel() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "favourites">("all");
   const [input, setInput] = useState("");
+  const [addClient, setAddClient] = useState<RobloxClient>("standard");
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
@@ -79,8 +80,8 @@ export function GameLibraryPanel() {
     if(!pendingAction||!library)return;
     useGameLibraryStore.getState().requestAction(null);
     if(pendingAction==="favourites"){setFilter("favourites");return;}
-    if(pendingAction==="copy"){const current=library.current;if(current)void run(()=>navigator.clipboard.writeText(gameShareUrl(current.place_id,current.job_id)),"Join link copied.");return;}
-    const last=library.entries.filter(e=>e.client==="standard"&&e.last_played&&e.job_id).sort((a,b)=>(b.last_played??0)-(a.last_played??0))[0];
+    if(pendingAction==="copy"){const current=library.current;if(current)void run(()=>navigator.clipboard.writeText(gameShareUrl(current.place_id,current.job_id,current.client)),"Join link copied.");return;}
+    const last=library.entries.filter(e=>e.last_played&&e.job_id).sort((a,b)=>(b.last_played??0)-(a.last_played??0))[0];
     const place=pendingAction.startsWith("play:")?parsePlaceInput(pendingAction.slice(5)):null;
     const entry=place?(library.entries.find(e=>e.place_id===place&&e.client==="standard")??{place_id:place,name:`Place ${place}`,client:"standard" as const,job_id:null,last_played:null,favourite:false}):pendingAction==="rejoin"?last:null;
     if(entry)void prepare(entry,pendingAction==="rejoin"?entry.job_id:null,null,pendingAction!=="rejoin");
@@ -95,7 +96,7 @@ export function GameLibraryPanel() {
   async function addFavourite() {
     const place = parsePlaceInput(input);
     if (!place) { setError("Enter a Roblox game link or a numeric place ID."); return; }
-    await run(async () => { await gamesAddFavourite(place); setInput(""); setAdding(false); });
+    await run(async () => { await gamesAddFavourite(place, addClient); setInput(""); setAdding(false); });
   }
   async function launch(entry: RobloxGameEntry, plan: GameLaunchPlan, close: boolean, safe=false) {
     setReview(null);
@@ -125,7 +126,7 @@ export function GameLibraryPanel() {
           await gamesLaunch(entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, true, safe);
         },
       });
-    }, entry.client === "vng" ? "Opened the official VNG game page." : undefined);
+    });
   }
   async function prepare(entry: RobloxGameEntry, job: string | null = null, center: number | null = null, preferred = true, safe=false) {
     setFailedEntry(null);
@@ -169,12 +170,13 @@ export function GameLibraryPanel() {
         <div className="flex items-start gap-3"><Artwork entry={entry} /><div className="min-w-0 flex-1"><h3 className="line-clamp-2 text-[13.5px] font-semibold leading-snug text-text-primary" title={entry.name}>{entry.name}</h3><p className="mt-1 text-[11px] text-text-muted">{entry.client === "vng" ? "Roblox VNG" : "Roblox"}{entry.last_played ? ` · ${new Date(entry.last_played * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : " · Saved"}</p><p className="mt-1 text-[10.5px] text-text-dimmed">{preferences.fps_cap ? `${preferences.fps_cap === 99999 ? "Uncapped" : `${preferences.fps_cap} FPS`} · ` : ""}{preferences.datacenter_id ? "Preferred region" : preferences.use_tunnel ? "Automatic connection" : "Use current connection"}</p></div>
           <button type="button" aria-label={`${entry.favourite ? "Remove" : "Add"} ${entry.name} ${entry.favourite ? "from" : "to"} favourites`} aria-pressed={entry.favourite} disabled={locked || !!loadError} className={`${iconButtonClass} -mr-1 -mt-1 ${entry.favourite ? "!text-text-primary" : ""}`} onClick={() => void useGameLibraryStore.getState().setFavourite(entry.place_id, entry.client, !entry.favourite).catch(error => setError(formatErrorMessage(error)))}><Star filled={entry.favourite} /></button></div>
         <div className="flex items-center gap-1.5"><Button size="sm" className="min-w-[92px]" disabled={locked} onClick={() => void prepare(entry)}>Play</Button>
-          {entry.job_id && entry.client === "standard" && <Button size="sm" variant="secondary" disabled={locked} onClick={() => void prepare(entry, entry.job_id, null, false)}>Rejoin</Button>}
+          {entry.job_id && <Button size="sm" variant="secondary" disabled={locked} onClick={() => void prepare(entry, entry.job_id, null, false)}>Rejoin</Button>}
           <span className="flex-1" />
           <button type="button" title="Game settings" aria-label={`Settings for ${entry.name}`} disabled={locked} className={iconButtonClass} onClick={() => setProfile(entry)}><Icon name="settings" size={15} /></button>
           <ActionMenu label={`More actions for ${entry.name}`}>
-            {entry.client === "standard" && <><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void prepare(entry,null,null,false,true)}>Safe launch (no FastFlags)</button><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void run(async()=>{const path=await gamesCreateShortcut(entry.place_id,entry.name);setNotice(`Game shortcut saved: ${path}`);})}>Create game shortcut</button></>}
-            {entry.client === "standard" && <><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary hover:text-text-primary`} onClick={() => setServers(entry)}>Find server</button><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary hover:text-text-primary`} onClick={() => void run(() => navigator.clipboard.writeText(gameShareUrl(entry.place_id, entry.job_id)), "Join link copied.")}>Copy link</button></>}
+            <button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void prepare(entry,null,null,false,true)}>Safe launch (no FastFlags)</button>
+            {entry.client === "standard" && <button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void run(async()=>{const path=await gamesCreateShortcut(entry.place_id,entry.name);setNotice(`Game shortcut saved: ${path}`);})}>Create game shortcut</button>}
+            <button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary hover:text-text-primary`} onClick={() => setServers(entry)}>Find server</button><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary hover:text-text-primary`} onClick={() => void run(() => navigator.clipboard.writeText(gameShareUrl(entry.place_id, entry.job_id, entry.client)), "Join link copied.")}>Copy link</button>
             <button type="button" disabled={locked || !!loadError} className={`${menuItemClass} text-status-error`} onClick={() => setRemove(entry)}>Forget game</button>
           </ActionMenu>
         </div>
@@ -186,7 +188,9 @@ export function GameLibraryPanel() {
     <Dialog open={!!library?.recovery} onClose={()=>void run(()=>gamesDismissRecovery())} title="Roblox closed unexpectedly" description="Want to rejoin the server you were in?"><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>void run(()=>gamesDismissRecovery())}>Stay closed</Button><Button size="sm" disabled={busy} onClick={()=>{const previous=library?.recovery;const entry=entries.find(e=>e.place_id===previous?.place_id&&e.client===previous.client);if(entry&&previous){void gamesDismissRecovery().then(()=>prepare(entry,previous.job_id,null,false));}}}>Rejoin</Button></div></Dialog>
     <GameServerDialog entry={servers} onClose={() => setServers(null)} onJoin={(entry, server, center) => { setServers(null); void prepare(entry, server.job_id, center.id, false); }} />
     <Dialog open={adding} onClose={() => { if (!busy) setAdding(false); }} title="Add a game" description="Paste its Roblox link or place ID.">
-      <form onSubmit={e => { e.preventDefault(); void addFavourite(); }} className="flex flex-col gap-4">{error && <ErrorBanner tone="error">{error}</ErrorBanner>}<input autoFocus aria-label="Roblox game link or place ID" value={input} onChange={e => setInput(e.target.value)} maxLength={2048} placeholder="https://www.roblox.com/games/..." disabled={busy} className={fieldClass} /><div className="flex justify-end gap-2"><Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => setAdding(false)}>Cancel</Button><Button type="submit" size="sm" loading={busy} disabled={!input.trim()}>Add favourite</Button></div></form>
+      <form onSubmit={e => { e.preventDefault(); void addFavourite(); }} className="flex flex-col gap-4">{error && <ErrorBanner tone="error">{error}</ErrorBanner>}
+        <Row label="Player"><Segmented<RobloxClient> ariaLabel="Roblox player" value={addClient} disabled={busy} options={[{value:"standard",label:"Roblox"},{value:"vng",label:"Roblox VNG"}]} onChange={setAddClient} /></Row>
+        <input autoFocus aria-label="Roblox game link or place ID" value={input} onChange={e => { setInput(e.target.value); const client=gameLinkClient(e.target.value); if(client) setAddClient(client); }} maxLength={2048} placeholder="https://www.roblox.com/games/..." disabled={busy} className={fieldClass} /><div className="flex justify-end gap-2"><Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => setAdding(false)}>Cancel</Button><Button type="submit" size="sm" loading={busy} disabled={!input.trim()}>Add favourite</Button></div></form>
     </Dialog>
     <Dialog open={!!review} onClose={() => { if (!busy) setReview(null); }} title={review?.blocked ? "That server is unavailable" : review?.running ? "Ready to change games?" : "Join this server?"}
       description={review?.blocked ? "It's full or gone. You can still join the game normally." : review?.running ? review.plan.needs_close ? "Roblox will close first so this game's settings can be applied." : "This may leave your current game." : "Couldn't check whether this server still has room. Roblox may say it's full."}>

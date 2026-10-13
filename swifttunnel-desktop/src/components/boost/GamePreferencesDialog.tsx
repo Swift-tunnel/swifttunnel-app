@@ -64,7 +64,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
       <Group title="Server">
         <Setting label="Preferred location">
           <Select width={210} aria-label="Preferred datacenter" value={preferences.datacenter_id ?? ""}
-            disabled={busy || entry?.client === "vng"} onChange={e => patch({ datacenter_id: e.target.value ? Number(e.target.value) : null })}>
+            disabled={busy} onChange={e => patch({ datacenter_id: e.target.value ? Number(e.target.value) : null })}>
             <option value="">Default matchmaking</option>
             {preferences.datacenter_id && !centers.some(c => c.id === preferences.datacenter_id) && <option value={preferences.datacenter_id}>Saved location unavailable</option>}
             {centers.map(c => <option key={c.id} value={c.id}>{c.city}, {c.country}</option>)}
@@ -100,7 +100,6 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
           </button>;
         })}</div>} />
       </Group>
-      {entry?.client === "vng" && <p className="text-[11.5px] leading-relaxed text-text-muted">VNG opens its official game page, so a preferred location does not apply.</p>}
     </div>
     <div className="flex justify-end gap-2 border-t border-border-subtle px-5 py-3"><Button size="sm" variant="secondary" disabled={busy} onClick={onClose}>Cancel</Button><Button size="sm" loading={busy} onClick={() => void save()}>Save</Button></div>
   </Dialog>;

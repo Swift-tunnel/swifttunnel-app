@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { gameSessionDescription, gameShareUrl, parsePlaceInput } from "./robloxGames";
+import { gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "./robloxGames";
 import type { GameRouteStatus, RobloxGameSession } from "./types";
 
 const session: RobloxGameSession = { place_id: "1818", job_id: "550e8400-e29b-41d4-a716-446655440000", ip: "128.116.47.33", client: "standard", fresh_join: true, observed_at: 1 };
@@ -20,6 +20,19 @@ describe("game library", () => {
   it("builds join links without authentication or private-server credentials", () => {
     const link = new URL(gameShareUrl("1818", session.job_id));
     expect(link.host).toBe("www.roblox.com");
+    expect([...link.searchParams.keys()]).toEqual(["placeId", "gameInstanceId"]);
+  });
+  it("recognises official VNG game links without accepting lookalike hosts", () => {
+    expect(parsePlaceInput("https://www.robloxapp.vnggames.com/games/1818/Crossroads")).toBe("1818");
+    expect(gameLinkClient("https://robloxapp.vnggames.com/games/1818")).toBe("vng");
+    expect(gameLinkClient("https://www.roblox.com/games/1818")).toBe("standard");
+    expect(gameLinkClient("1818")).toBeNull();
+    for (const input of ["https://robloxapp.vnggames.com.evil/games/1818", "http://robloxapp.vnggames.com/games/1818", "https://evil@robloxapp.vnggames.com/games/1818"]) {
+      expect(gameLinkClient(input)).toBeNull();
+      expect(parsePlaceInput(input)).toBeNull();
+    }
+    const link = new URL(gameShareUrl("1818", session.job_id, "vng"));
+    expect(link.hostname).toBe("www.robloxapp.vnggames.com");
     expect([...link.searchParams.keys()]).toEqual(["placeId", "gameInstanceId"]);
   });
 });

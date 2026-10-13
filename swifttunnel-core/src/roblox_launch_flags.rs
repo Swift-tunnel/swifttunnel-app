@@ -78,18 +78,29 @@ fn allowed(path: &Path) -> bool {
     let Some(base) = std::env::var_os("LOCALAPPDATA") else {
         return false;
     };
-    let versions = PathBuf::from(base).join("Roblox/Versions");
-    let Ok(relative) = path.strip_prefix(versions) else {
-        return false;
-    };
-    let parts = relative.components().collect::<Vec<_>>();
-    parts.len() == 3
-        && parts[0]
-            .as_os_str()
-            .to_string_lossy()
-            .starts_with("version-")
-        && parts[1].as_os_str() == "ClientSettings"
-        && parts[2].as_os_str() == "ClientAppSettings.json"
+    allowed_in(&PathBuf::from(base), path)
+}
+fn allowed_in(base: &Path, path: &Path) -> bool {
+    [
+        crate::roblox_library::RobloxClient::Standard,
+        crate::roblox_library::RobloxClient::Vng,
+    ]
+    .into_iter()
+    .any(|client| {
+        let versions =
+            crate::roblox_native_launch::installation_root(base, client).join("Versions");
+        let Ok(relative) = path.strip_prefix(versions) else {
+            return false;
+        };
+        let parts = relative.components().collect::<Vec<_>>();
+        parts.len() == 3
+            && parts[0]
+                .as_os_str()
+                .to_string_lossy()
+                .starts_with("version-")
+            && parts[1].as_os_str() == "ClientSettings"
+            && parts[2].as_os_str() == "ClientAppSettings.json"
+    })
 }
 pub fn prepare(player: &Path, flags: HashMap<String, String>) -> Result<(), String> {
     if !crate::roblox_game_profile::player_stopped() {
@@ -176,8 +187,22 @@ pub fn diagnostic() -> Result<Option<String>, String> {
             return Ok(Some("Something else changed Roblox's flags during this launch. Check whether another launcher is running.".into()));
         }
     }
+    let client = if std::env::var_os("LOCALAPPDATA").is_some_and(|base| {
+        journal.entries.first().is_some_and(|entry| {
+            entry
+                .path
+                .starts_with(crate::roblox_native_launch::installation_root(
+                    &PathBuf::from(base),
+                    crate::roblox_library::RobloxClient::Vng,
+                ))
+        })
+    }) {
+        crate::roblox_library::RobloxClient::Vng
+    } else {
+        crate::roblox_library::RobloxClient::Standard
+    };
     if !journal.flags.is_empty()
-        && let Ok(player) = crate::roblox_native_launch::official_player()
+        && let Ok(player) = crate::roblox_native_launch::official_player_for(client)
         && journal
             .entries
             .iter()
@@ -231,11 +256,20 @@ mod tests {
         assert!(allowed(&root.join(
             "Roblox/Versions/version-test/ClientSettings/ClientAppSettings.json"
         )));
+        assert!(allowed(&root.join(
+            "RobloxPCVNG/Versions/version-test/ClientSettings/ClientAppSettings.json"
+        )));
         assert!(!allowed(&root.join(
             "Voidstrap/Versions/version-test/ClientSettings/ClientAppSettings.json"
         )));
         assert!(!allowed(&root.join(
             "Roblox/Versions/version-test/../ClientSettings/ClientAppSettings.json"
+        )));
+        assert!(!allowed(&root.join(
+            "RobloxPCVNG/Versions/version-test/../ClientSettings/ClientAppSettings.json"
+        )));
+        assert!(!allowed(&root.join(
+            "RobloxPCVNG/Versions/version-test/ClientSettings/not-flags.json"
         )));
     }
 }

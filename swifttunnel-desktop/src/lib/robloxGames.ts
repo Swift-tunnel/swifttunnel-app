@@ -1,11 +1,21 @@
-import type { GameRouteStatus, RobloxGameSession } from "./types";
+import type { GameRouteStatus, RobloxClient, RobloxGameSession } from "./types";
+
+export function gameLinkClient(input: string): RobloxClient | null {
+  try {
+    const url = new URL(input.trim());
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    if (["robloxapp.vnggames.com", "www.robloxapp.vnggames.com"].includes(url.hostname)) return "vng";
+    if (["roblox.com", "www.roblox.com"].includes(url.hostname)) return "standard";
+  } catch { /* A numeric place ID keeps the selected client. */ }
+  return null;
+}
 
 export function parsePlaceInput(input: string): string | null {
   let id = input.trim();
   if (!/^\d+$/.test(id)) {
     try {
       const url = new URL(id);
-      if (url.protocol !== "https:" || !["www.roblox.com", "roblox.com"].includes(url.hostname) || url.username || url.password) return null;
+      if (!gameLinkClient(input)) return null;
       id = /^\/games\/(\d+)(?:\/|$)/.exec(url.pathname)?.[1] ?? "";
     } catch { return null; }
   }
@@ -25,8 +35,8 @@ export function gameSessionDescription(session: RobloxGameSession | null, route:
   return `Roblox ${route.game_location}${ping !== null && Number.isFinite(ping) && ping >= 0 ? ` · ~${Math.round(ping)} ms` : ""}`;
 }
 
-export function gameShareUrl(placeId: string, jobId: string | null): string {
-  const url = new URL("https://www.roblox.com/games/start");
+export function gameShareUrl(placeId: string, jobId: string | null, client: RobloxClient = "standard"): string {
+  const url = new URL(client === "vng" ? "https://www.robloxapp.vnggames.com/games/start" : "https://www.roblox.com/games/start");
   url.searchParams.set("placeId", placeId);
   if (jobId) url.searchParams.set("gameInstanceId", jobId);
   return url.toString();

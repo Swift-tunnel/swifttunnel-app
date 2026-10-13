@@ -7,22 +7,40 @@ use std::{
 };
 
 pub fn official_player() -> Result<PathBuf, String> {
+    official_player_for(RobloxClient::Standard)
+}
+pub fn installation_root(base: &Path, client: RobloxClient) -> PathBuf {
+    base.join(match client {
+        RobloxClient::Standard => "Roblox",
+        RobloxClient::Vng => "RobloxPCVNG",
+    })
+}
+pub fn official_player_for(client: RobloxClient) -> Result<PathBuf, String> {
     let root = std::env::var_os("LOCALAPPDATA")
         .ok_or("Windows could not find the Roblox installation.")?;
-    find_player(&PathBuf::from(root).join("Roblox/Versions"))
+    find_player_for(&PathBuf::from(root), client)
+}
+fn find_player_for(base: &Path, client: RobloxClient) -> Result<PathBuf, String> {
+    find_player(&installation_root(base, client).join("Versions")).map_err(|_| match client {
+        RobloxClient::Standard => "Install Roblox from roblox.com first.".into(),
+        RobloxClient::Vng => "Install Roblox VNG from robloxapp.vnggames.com first.".into(),
+    })
 }
 pub fn updater_running() -> bool {
     let Some(root) = std::env::var_os("LOCALAPPDATA") else {
         return false;
     };
-    let root = PathBuf::from(root).join("Roblox");
+    let roots = [RobloxClient::Standard, RobloxClient::Vng]
+        .map(|client| installation_root(&PathBuf::from(&root), client));
     let mut system = sysinfo::System::new();
     system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     system.processes().values().any(|p| {
         matches!(
             p.name().to_string_lossy().as_ref(),
             "RobloxPlayerInstaller.exe" | "RobloxInstaller.exe" | "RobloxPlayerLauncher.exe"
-        ) && p.exe().is_some_and(|p| p.starts_with(&root))
+        ) && p
+            .exe()
+            .is_some_and(|p| roots.iter().any(|root| p.starts_with(root)))
     })
 }
 fn find_player(versions: &Path) -> Result<PathBuf, String> {
@@ -69,8 +87,13 @@ pub fn safe_path(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-pub fn launch(player: &Path, place: &str, job: Option<&str>) -> Result<u32, String> {
-    let uri = join_url(place, job, RobloxClient::Standard)?;
+pub fn launch(
+    player: &Path,
+    place: &str,
+    job: Option<&str>,
+    client: RobloxClient,
+) -> Result<u32, String> {
+    let uri = join_url(place, job, client)?;
     if player
         .file_name()
         .is_none_or(|n| n != "RobloxPlayerBeta.exe")
@@ -100,5 +123,26 @@ mod tests {
             root.join("version-player/RobloxPlayerBeta.exe")
         );
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn vng_and_standard_players_are_resolved_separately() {
+        let base = std::env::temp_dir().join(format!("swift-native-vng-{}", std::process::id()));
+        for client in [RobloxClient::Standard, RobloxClient::Vng] {
+            let version = installation_root(&base, client).join("Versions/version-player");
+            fs::create_dir_all(&version).unwrap();
+            fs::write(version.join("RobloxPlayerBeta.exe"), b"fixture").unwrap();
+            assert_eq!(
+                find_player_for(&base, client).unwrap(),
+                version.join("RobloxPlayerBeta.exe")
+            );
+        }
+        fs::remove_dir_all(installation_root(&base, RobloxClient::Vng)).unwrap();
+        assert!(
+            find_player_for(&base, RobloxClient::Vng)
+                .unwrap_err()
+                .contains("Install Roblox VNG")
+        );
+        assert!(find_player_for(&base, RobloxClient::Standard).is_ok());
+        fs::remove_dir_all(base).unwrap();
     }
 }

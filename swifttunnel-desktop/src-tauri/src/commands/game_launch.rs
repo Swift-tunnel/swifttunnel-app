@@ -34,9 +34,7 @@ pub async fn games_suggest_server(
 ) -> Result<Option<LaunchPlan>, String> {
     let config = swifttunnel_core::roblox_launcher::LauncherConfig::load()?;
     let current = state.games.lock().current.clone();
-    let Some(current) = current
-        .filter(|g| g.client == RobloxClient::Standard && g.fresh_join && g.location.is_some())
-    else {
+    let Some(current) = current.filter(|g| g.fresh_join && g.location.is_some()) else {
         return Ok(None);
     };
     if !config.matchmaker.offer_better_server || !config.matchmaker.applies(&current.place_id) {
@@ -326,8 +324,7 @@ pub async fn games_launch_plan(
     let launcher = swifttunnel_core::roblox_launcher::LauncherConfig::load()?;
     preferences.use_tunnel |= launcher.matchmaker.prepare_tunnel
         && launcher.matchmaker.applies(&place_id)
-        && !preferences.skip_matchmaker
-        && client == RobloxClient::Standard;
+        && !preferences.skip_matchmaker;
     let global = state.settings.lock().config.roblox_settings.clone();
     // Keep old library files readable, but removed named profiles no longer apply.
     preferences.flag_profile = None;
@@ -348,7 +345,6 @@ pub async fn games_launch_plan(
     if target.is_none()
         && job_id.is_none()
         && use_preferred_region
-        && client == RobloxClient::Standard
         && !preferences.skip_matchmaker
         && launcher.matchmaker.applies(&place_id)
     {
@@ -373,12 +369,6 @@ pub async fn games_launch_plan(
     let mut job_id = job_id.or(automatic_job);
     let mut availability = Availability::Unknown;
     if let Some(center) = &center {
-        if client == RobloxClient::Vng {
-            return Err(
-                "VNG region joining is not verified yet. Use Play to open its official game page."
-                    .into(),
-            );
-        }
         let cached = state.games.lock().search.as_ref().is_some_and(|s| {
             s.place_id == place_id
                 && s.center.id == center.id
@@ -535,7 +525,13 @@ pub async fn games_launch(
         games.launch_updating = false;
         games.launch_gone_since = None;
         games.warning = None;
-        games.status = Some("Roblox is opening.".into());
+        games.status = Some(
+            match client {
+                RobloxClient::Standard => "Roblox is opening.",
+                RobloxClient::Vng => "Roblox VNG is opening.",
+            }
+            .into(),
+        );
         games.recovery = None;
         games.idle_since = None;
         games.left_confirmed = false;
@@ -546,11 +542,7 @@ pub async fn games_launch(
         complete: false,
     };
     let profile = plan.preferences.clone();
-    let player = if client == RobloxClient::Standard {
-        Some(swifttunnel_core::roblox_native_launch::official_player()?)
-    } else {
-        None
-    };
+    let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
     let global = state.settings.lock().config.roblox_settings.clone();
     let mut flags = if safe_launch.unwrap_or(false) {
         std::collections::HashMap::new()
@@ -575,9 +567,7 @@ pub async fn games_launch(
         let _guard = optimizer.lock();
         match (|| {
             let applied = swifttunnel_core::roblox_game_profile::apply_native(client, &profile)?;
-            if let Some(player) = profile_player {
-                swifttunnel_core::roblox_launch_flags::prepare(&player, flags)?;
-            }
+            swifttunnel_core::roblox_launch_flags::prepare(&profile_player, flags)?;
             Ok::<_, String>(applied)
         })() {
             Ok(applied) => Ok(applied),
@@ -615,14 +605,13 @@ pub async fn games_launch(
             });
         }
     }
-    let url =
-        swifttunnel_core::roblox_library::join_url(&place_id, plan.job_id.as_deref(), client)?;
-    let launched = if let Some(player) = player {
-        swifttunnel_core::roblox_native_launch::launch(&player, &place_id, plan.job_id.as_deref())
-            .map(|_| ())
-    } else {
-        games::launch_url(&url)
-    };
+    let launched = swifttunnel_core::roblox_native_launch::launch(
+        &player,
+        &place_id,
+        plan.job_id.as_deref(),
+        client,
+    )
+    .map(|_| ());
     if let Err(error) = launched {
         let _guard = state.roblox_optimizer.lock();
         let restored = swifttunnel_core::roblox_game_profile::restore();

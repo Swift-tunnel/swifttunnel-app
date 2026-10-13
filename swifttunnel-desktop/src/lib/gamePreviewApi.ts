@@ -38,7 +38,7 @@ export async function previewInvoke<T>(command: string, args: Record<string, unk
     case "games_set_notifications": library.notify_joins = Boolean(args.enabled); break;
     case "games_set_preferences": if (entry) entry.preferences = args.preferences as GamePreferences; break;
     case "games_forget": library.entries = library.entries.filter(e => e !== entry); break;
-    case "games_add_favourite": library.entries.push({ place_id: String(args.placeId), name: `Place ${args.placeId}`, client: "standard", job_id: null, favourite: true, last_played: null, preferences: { ...preferences } }); break;
+    case "games_add_favourite": library.entries.push({ place_id: String(args.placeId), name: `Place ${args.placeId}`, client: args.client === "vng" ? "vng" : "standard", job_id: null, favourite: true, last_played: null, preferences: { ...preferences } }); break;
     case "games_launch_plan": {
       const prefs = entry?.preferences ?? preferences;
       const center = centers.find(c => c.id === (args.datacenterId ?? (args.usePreferredRegion ? prefs.datacenter_id : null))) ?? null;
@@ -48,7 +48,7 @@ export async function previewInvoke<T>(command: string, args: Record<string, unk
     case "games_search_servers": result = { servers: Array.from({ length: 3 }, (_,i) => ({ job_id: i ? `${i}50e8400-e29b-41d4-a716-446655440000` : job, datacenter_id: 1, ip: "128.116.47.33", first_seen: "2026-10-12T12:00:00Z", playing: [5,12,15][i], capacity: 15, availability: i === 2 ? "full" : "available" })), next_cursor: null, warning: null }; break;
     case "games_launch": {
       running = true;
-      library.current = { place_id: String(args.placeId), job_id: String(args.jobId ?? job), ip: "128.116.47.33", client: "standard", fresh_join: false, observed_at: Date.now() };
+      library.current = { place_id: String(args.placeId), job_id: String(args.jobId ?? job), ip: "128.116.47.33", client: args.client === "vng" ? "vng" : "standard", fresh_join: false, observed_at: Date.now() };
       const { useVpnStore } = await import("../stores/vpnStore");
       useVpnStore.setState({ gameRoute: { game_location: "Mumbai", game_server_ip: "128.116.47.33", estimated_path_ms: 26, relay: "mumbai-01", bypassed: false } });
       break;

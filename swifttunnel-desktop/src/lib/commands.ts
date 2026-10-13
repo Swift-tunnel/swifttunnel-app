@@ -59,7 +59,7 @@ export const gamesDismissRecovery = () => invoke<void>("games_dismiss_recovery")
 export const gamesSuggestServer = () => invoke<GameLaunchPlan | null>("games_suggest_server");
 export const gamesSetFavourite = (placeId: string, client: RobloxClient, favourite: boolean) =>
   invoke<void>("games_set_favourite", { placeId, client, favourite });
-export const gamesAddFavourite = (placeId: string) => invoke<void>("games_add_favourite", { placeId });
+export const gamesAddFavourite = (placeId: string, client: RobloxClient = "standard") => invoke<void>("games_add_favourite", { placeId, client });
 export const gamesForget = (placeId: string, client: RobloxClient) => invoke<void>("games_forget", { placeId, client });
 export const gamesJoin = (placeId: string, client: RobloxClient, jobId: string | null = null) =>
   invoke<void>("games_join", { placeId, client, jobId });

@@ -433,6 +433,21 @@ impl TailedFile {
 mod tests {
     use super::*;
     #[test]
+    fn vng_joins_keep_the_client_identity_for_library_and_rejoin() {
+        let events = JoinTracker::default().feed(
+            &[
+                "! Joining game '550e8400-e29b-41d4-a716-446655440000' place 1818 at 128.116.47.33"
+                    .into(),
+                "[FLog::Network] serverId: 128.116.47.33".into(),
+            ],
+            true,
+            RobloxClient::Vng,
+        );
+        assert!(
+            matches!(&events[..], [RobloxEvent::GameJoined { client: RobloxClient::Vng, place_id, fresh_join: true, .. }] if place_id == "1818")
+        );
+    }
+    #[test]
     fn player_open_and_close_are_detected_without_a_game_connection() {
         let mut tracker = JoinTracker::default();
         let lines = vec![
