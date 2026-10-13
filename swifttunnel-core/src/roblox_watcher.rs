@@ -134,9 +134,7 @@ impl JoinTracker {
                 }
             } else if let Some((place, job, ip)) = parse_join(line) {
                 self.pending = Some((place, job, ip, fresh));
-            } else if line.contains("[FLog::Network] serverId:")
-                && let Some((place_id, job_id, _, join_fresh)) = self.pending.take()
-            {
+            } else if line.contains("[FLog::Network] serverId:") {
                 static SERVER: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
                 let pattern =
                     SERVER.get_or_init(|| Regex::new(r"serverId:\s*(\d+\.\d+\.\d+\.\d+)").unwrap());
@@ -146,6 +144,9 @@ impl JoinTracker {
                     .and_then(|value| value.as_str().parse::<Ipv4Addr>().ok())
                     .filter(|ip| !is_private_ip(*ip))
                 else {
+                    continue;
+                };
+                let Some((place_id, job_id, _, join_fresh)) = self.pending.take() else {
                     continue;
                 };
                 if !is_private_ip(ip) && self.last.as_ref() != Some(&job_id) {
@@ -228,7 +229,7 @@ fn watch_logs(
             {
                 let should_switch = current_file
                     .as_ref()
-                    .map(|f| f.path != newest)
+                    .map(|f| f.path != newest || !f.matches_current_file(&newest))
                     .unwrap_or(true);
 
                 if should_switch {
@@ -262,6 +263,11 @@ fn watch_logs(
                     .is_ok_and(|created| created >= started);
             match file.read_new_lines() {
                 Ok(lines) => {
+                    let was_reset = std::mem::take(&mut file.reset_observed);
+                    if was_reset {
+                        tracker = JoinTracker::default();
+                        seen_ips.clear();
+                    }
                     let client = if file
                         .path
                         .components()
@@ -271,7 +277,7 @@ fn watch_logs(
                     } else {
                         RobloxClient::Standard
                     };
-                    for event in tracker.feed(&lines, fresh_join, client) {
+                    for event in tracker.feed(&lines, fresh_join || was_reset, client) {
                         let _ = sender.try_send(event);
                     }
                     for line in lines {
@@ -402,11 +408,15 @@ struct TailedFile {
     pending_line: Vec<u8>,
     discarding_line: bool,
     initial_end: u64,
+    identity: Option<(u64, [u8; 16])>,
+    reset_observed: bool,
+    observed_len: u64,
 }
 
 impl TailedFile {
     fn new(path: &Path) -> std::io::Result<Self> {
         let file = File::open(path)?;
+        let identity = file_identity(&file);
         let mut reader = BufReader::new(file);
 
         // Read last 64KB to catch current session
@@ -426,6 +436,17 @@ impl TailedFile {
             pending_line: Vec::new(),
             discarding_line: false,
             initial_end: file_size as u64,
+            identity,
+            reset_observed: false,
+            observed_len: file_size as u64,
+        })
+    }
+
+    fn matches_current_file(&self, path: &Path) -> bool {
+        self.identity.is_none_or(|identity| {
+            File::open(path)
+                .ok()
+                .is_some_and(|file| file_identity(&file).is_none_or(|current| current == identity))
         })
     }
 
@@ -434,9 +455,21 @@ impl TailedFile {
         // or actively growing log must not monopolize the watcher thread.
         const MAX_LINE_BYTES: usize = 64 * 1024;
         const MAX_POLL_BYTES: usize = 256 * 1024;
+        const MAX_POLL_LINES: usize = 2048;
+        // A log reused/truncated in place must not leave the old reader stuck
+        // past EOF forever, or combine an old partial line with a new session.
+        let length = self.reader.get_ref().metadata()?.len();
+        if length < self.observed_len || length < self.reader.stream_position()? {
+            self.reader.seek(SeekFrom::Start(0))?;
+            self.pending_line.clear();
+            self.discarding_line = false;
+            self.initial_end = 0;
+            self.reset_observed = true;
+        }
+        self.observed_len = length;
         let mut lines = Vec::new();
         let mut remaining = MAX_POLL_BYTES;
-        while remaining > 0 {
+        while remaining > 0 && lines.len() < MAX_POLL_LINES {
             let available = self.reader.fill_buf()?;
             let available = &available[..available.len().min(remaining)];
             if available.is_empty() {
@@ -471,6 +504,41 @@ impl TailedFile {
         }
 
         Ok(lines)
+    }
+}
+
+fn file_identity(file: &File) -> Option<(u64, [u8; 16])> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+        };
+        let mut info = FILE_ID_INFO::default();
+        unsafe {
+            GetFileInformationByHandleEx(
+                HANDLE(file.as_raw_handle()),
+                FileIdInfo,
+                (&mut info as *mut FILE_ID_INFO).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        }
+        .ok()?;
+        Some((info.VolumeSerialNumber, info.FileId.Identifier))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().ok()?;
+        let mut id = [0; 16];
+        id[..8].copy_from_slice(&metadata.ino().to_le_bytes());
+        Some((metadata.dev(), id))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = file;
+        None
     }
 }
 
@@ -539,6 +607,18 @@ mod tests {
                     RobloxClient::Standard
                 )
                 .is_empty()
+        );
+        // Private/invalid intermediate lines cannot consume the pending join.
+        let events = tracker.feed(
+            &[
+                "[FLog::Network] serverId: invalid".into(),
+                "[FLog::Network] serverId: 128.116.47.33|59611".into(),
+            ],
+            true,
+            RobloxClient::Standard,
+        );
+        assert!(
+            matches!(&events[..], [RobloxEvent::GameJoined { place_id, .. }] if place_id == "10449761463")
         );
     }
     #[test]
@@ -647,6 +727,48 @@ mod tests {
         let lines = tail.read_new_lines().unwrap();
         assert_eq!(lines, ["UDMUX Address = 198.51.100.10, Port = 54321"]);
         drop(writer);
+        drop(tail);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn a_truncated_log_cannot_leave_the_reader_at_old_eof_or_mix_partial_lines() {
+        let (path, mut tail) = tail_fixture(b"old partial line without its delimiter");
+        assert!(tail.read_new_lines().unwrap().is_empty());
+        fs::write(&path, b"new\n").unwrap();
+        assert_eq!(tail.read_new_lines().unwrap(), ["new"]);
+        assert!(tail.reset_observed);
+        assert_eq!(tail.initial_end, 0);
+        assert!(tail.read_new_lines().unwrap().is_empty());
+        drop(tail);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn same_path_replacement_is_not_the_same_open_log() {
+        let (path, tail) = tail_fixture(b"old log\n");
+        assert!(tail.matches_current_file(&path));
+        assert!(tail.identity.is_some());
+        let replacement = path.with_extension("replacement.log");
+        fs::write(&replacement, b"new log\n").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert!(!tail.matches_current_file(&path));
+        drop(tail);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn many_tiny_log_rows_are_read_in_bounded_batches_without_losing_the_join() {
+        let mut contents = "noise\n".repeat(3000);
+        contents.push_str("! Joining game '550e8400-e29b-41d4-a716-446655440000' place 1818 at 10.0.0.1\n[FLog::Network] serverId: 128.116.47.33\n");
+        let (path, mut tail) = tail_fixture(contents.as_bytes());
+        let first = tail.read_new_lines().unwrap();
+        assert_eq!(first.len(), 2048);
+        let second = tail.read_new_lines().unwrap();
+        let events = JoinTracker::default().feed(&second, true, RobloxClient::Standard);
+        assert!(
+            matches!(&events[..], [RobloxEvent::GameJoined { place_id, .. }] if place_id == "1818")
+        );
         drop(tail);
         fs::remove_file(path).unwrap();
     }
