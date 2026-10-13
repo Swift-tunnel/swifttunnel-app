@@ -22,6 +22,72 @@ pub(crate) use swifttunnel_core::vpn::connect_policy::{
 
 const VPN_CONNECT_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 
+type BindingSnapshot = (
+    swifttunnel_core::settings::AppSettings,
+    Option<swifttunnel_core::vpn::AdapterBindingPreference>,
+    BindingPreflightInfo,
+);
+
+fn binding_snapshot_with(
+    settings: &parking_lot::Mutex<swifttunnel_core::settings::AppSettings>,
+    probe: impl FnOnce(
+        &mut swifttunnel_core::settings::AppSettings,
+    ) -> Result<
+        (
+            BindingPreflightInfo,
+            Option<swifttunnel_core::vpn::AdapterBindingPreference>,
+        ),
+        String,
+    >,
+    save: impl FnOnce(&swifttunnel_core::settings::AppSettings) -> Result<(), String>,
+) -> Result<BindingSnapshot, String> {
+    let original = settings.lock().clone();
+    let mut validated = original.clone();
+    // Adapter enumeration and binding repair can block for seconds. Never
+    // hold the shared settings lock while Windows performs that work.
+    let (preflight, preference) = probe(&mut validated)?;
+    let mut current = settings.lock();
+    if current.adapter_binding_mode != original.adapter_binding_mode
+        || current.preferred_physical_adapter_guid != original.preferred_physical_adapter_guid
+        || current.network_binding_overrides != original.network_binding_overrides
+    {
+        return Err("Your network adapter choice changed. Try connecting again.".into());
+    }
+    if validated.network_binding_overrides != original.network_binding_overrides {
+        let mut updated = current.clone();
+        updated.network_binding_overrides = validated.network_binding_overrides;
+        save(&updated)?;
+        *current = updated;
+    }
+    // Keep unrelated settings changed during the probe instead of restoring
+    // the older snapshot over the user's edits.
+    Ok((current.clone(), preference, preflight))
+}
+
+async fn binding_snapshot(
+    settings: std::sync::Arc<parking_lot::Mutex<swifttunnel_core::settings::AppSettings>>,
+    repair: bool,
+) -> Result<BindingSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        log::info!("Adapter preflight started: repair={repair}");
+        let result = binding_snapshot_with(
+            &settings,
+            |snapshot| validated_binding_preflight(snapshot, repair),
+            swifttunnel_core::settings::save_settings,
+        );
+        log::info!(
+            "Adapter preflight finished: repair={} elapsed_ms={} success={}",
+            repair,
+            started.elapsed().as_millis(),
+            result.is_ok()
+        );
+        result
+    })
+    .await
+    .map_err(|e| format!("Adapter preflight task failed: {e}"))?
+}
+
 #[derive(Serialize)]
 pub struct VpnStateResponse {
     pub state: String,
@@ -169,24 +235,38 @@ fn build_binding_preflight_with_repair(
     settings: &mut swifttunnel_core::settings::AppSettings,
     repair_winpkfilter_binding: bool,
 ) -> Result<BindingPreflightInfo, String> {
-    let binding_preference = current_binding_preference(settings)?;
+    validated_binding_preflight(settings, repair_winpkfilter_binding).map(|(info, _)| info)
+}
+
+fn validated_binding_preflight(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+    repair_winpkfilter_binding: bool,
+) -> Result<
+    (
+        BindingPreflightInfo,
+        Option<swifttunnel_core::vpn::AdapterBindingPreference>,
+    ),
+    String,
+> {
+    let mut binding_preference = current_binding_preference(settings)?;
     let preflight = if repair_winpkfilter_binding {
         preflight_binding_for_connect(binding_preference.clone()).map_err(|e| e.to_string())?
     } else {
         preflight_binding(binding_preference.clone()).map_err(|e| e.to_string())?
     };
 
-    if let Some(preference) = binding_preference
+    if let Some(preference) = &binding_preference
         && preference.source == BindingPreferenceSource::RememberedAuto
         && !preflight.cached_override_used
         && preflight.recommended_guid.as_deref() != Some(preference.guid.as_str())
     {
         settings
             .network_binding_overrides
-            .remove(&preference.network_signature.unwrap_or_default());
+            .remove(&preference.network_signature.clone().unwrap_or_default());
+        binding_preference = None;
     }
 
-    Ok(preflight)
+    Ok((preflight, binding_preference))
 }
 
 fn apply_connected_session_settings(
@@ -407,23 +487,8 @@ pub async fn vpn_preflight_binding(
     _region: String,
     _game_presets: Vec<String>,
 ) -> Result<BindingPreflightInfo, String> {
-    let settings_arc = state.settings.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut settings = settings_arc.lock();
-        let previous_overrides = settings.network_binding_overrides.clone();
-        let preflight = build_connect_binding_preflight(&mut settings)?;
-        let settings_snapshot = settings.clone();
-        let overrides_changed = previous_overrides != settings.network_binding_overrides;
-        drop(settings);
-
-        if overrides_changed {
-            swifttunnel_core::settings::save_settings(&settings_snapshot)?;
-        }
-
-        Ok(preflight)
-    })
-    .await
-    .map_err(|e| format!("Preflight binding task failed: {}", e))?
+    let (_, _, preflight) = binding_snapshot(state.settings.clone(), true).await?;
+    Ok(preflight)
 }
 
 #[tauri::command]
@@ -444,27 +509,12 @@ pub async fn vpn_connect(
     )
     .await?;
 
-    // Gather needed data from settings and server list before locking vpn
-    let (mut settings_snapshot, binding_preference, overrides_changed) = {
-        let mut settings = state.settings.lock();
-        let previous_overrides = settings.network_binding_overrides.clone();
-        let preflight = build_connect_binding_preflight(&mut settings)?;
-        if preflight.status != "ok" {
-            return Err(preflight.reason);
-        }
-        let binding_preference = current_binding_preference(&mut settings)?;
-        let snapshot = settings.clone();
-        let overrides_changed = previous_overrides != settings.network_binding_overrides;
-        (snapshot, binding_preference, overrides_changed)
-    };
-
-    if overrides_changed {
-        let snapshot_for_save = settings_snapshot.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            swifttunnel_core::settings::save_settings(&snapshot_for_save)
-        })
-        .await
-        .map_err(|e| format!("save_settings task failed: {}", e))??;
+    // Commands can also be invoked without the UI preflight. Preserve their
+    // repair behavior, but run Windows checks off async executor threads.
+    let (mut settings_snapshot, binding_preference, preflight) =
+        binding_snapshot(state.settings.clone(), true).await?;
+    if preflight.status != "ok" {
+        return Err(preflight.reason);
     }
 
     if game_region == Some(true) {
@@ -1203,6 +1253,102 @@ mod tests {
         assert!(!vpn_error_is_user_banned(&VpnError::Connection(
             "Account banned appears in unrelated text".to_string()
         )));
+    }
+
+    fn fake_preflight() -> BindingPreflightInfo {
+        BindingPreflightInfo {
+            status: "ok".into(),
+            reason: String::new(),
+            network_signature: "test".into(),
+            route_resolution_source: "test".into(),
+            route_resolution_target_ip: None,
+            resolved_if_index: None,
+            recommended_guid: None,
+            cached_override_used: false,
+            binding_stage: None,
+            candidates: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn preflight_releases_settings_lock_and_preserves_concurrent_edits() {
+        let settings = parking_lot::Mutex::new(swifttunnel_core::settings::AppSettings::default());
+        let (snapshot, _, _) = binding_snapshot_with(
+            &settings,
+            |_| {
+                let mut current = settings
+                    .try_lock()
+                    .expect("adapter probe must not hold settings");
+                current.selected_region = "tokyo".into();
+                Ok((fake_preflight(), None))
+            },
+            |_| panic!("no settings change needs persistence"),
+        )
+        .unwrap();
+        assert_eq!(snapshot.selected_region, "tokyo");
+        assert_eq!(settings.lock().selected_region, "tokyo");
+    }
+
+    #[test]
+    fn preflight_rejects_a_changed_binding_without_losing_the_new_choice() {
+        let settings = parking_lot::Mutex::new(swifttunnel_core::settings::AppSettings::default());
+        let result = binding_snapshot_with(
+            &settings,
+            |snapshot| {
+                snapshot.network_binding_overrides.clear();
+                settings.lock().preferred_physical_adapter_guid = Some("new-choice".into());
+                Ok((fake_preflight(), None))
+            },
+            |_| panic!("stale validation must not save"),
+        );
+        assert!(result.unwrap_err().contains("choice changed"));
+        assert_eq!(
+            settings.lock().preferred_physical_adapter_guid.as_deref(),
+            Some("new-choice")
+        );
+    }
+
+    #[test]
+    fn preflight_saves_only_merged_settings_and_retains_state_if_save_fails() {
+        let mut original = swifttunnel_core::settings::AppSettings::default();
+        original
+            .network_binding_overrides
+            .insert("test".into(), "stale".into());
+        let settings = parking_lot::Mutex::new(original);
+        let result = binding_snapshot_with(
+            &settings,
+            |snapshot| {
+                snapshot.network_binding_overrides.clear();
+                settings.lock().selected_region = "tokyo".into();
+                Ok((fake_preflight(), None))
+            },
+            |updated| {
+                assert_eq!(updated.selected_region, "tokyo");
+                assert!(updated.network_binding_overrides.is_empty());
+                Err("fixture save failure".into())
+            },
+        );
+        assert_eq!(result.unwrap_err(), "fixture save failure");
+        assert_eq!(
+            settings
+                .lock()
+                .network_binding_overrides
+                .get("test")
+                .map(String::as_str),
+            Some("stale")
+        );
+        assert_eq!(settings.lock().selected_region, "tokyo");
+        let (snapshot, _, _) = binding_snapshot_with(
+            &settings,
+            |snapshot| {
+                snapshot.network_binding_overrides.clear();
+                Ok((fake_preflight(), None))
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(snapshot.network_binding_overrides.is_empty());
+        assert!(settings.lock().network_binding_overrides.is_empty());
     }
 
     #[test]
