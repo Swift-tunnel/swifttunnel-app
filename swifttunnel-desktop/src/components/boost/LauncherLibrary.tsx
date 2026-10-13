@@ -129,7 +129,7 @@ export function GameLibraryPanel() {
         },
         cleanup: async token => { if (token !== null && useVpnStore.getState().connectedAt === token) await useVpnStore.getState().disconnect(); },
       });
-    }, entry.client === "vng" ? "Opened the official VNG game page." : "Roblox is opening.");
+    }, entry.client === "vng" ? "Opened the official VNG game page." : undefined);
   }
   async function prepare(entry: RobloxGameEntry, job: string | null = null, center: number | null = null, preferred = true, safe=false) {
     setFailedEntry(null);

@@ -97,7 +97,7 @@ pub async fn games_suggest_server(
 impl Drop for LaunchGuard<'_> {
     fn drop(&mut self) {
         if !self.complete {
-            self.state.games.lock().launch_started = None;
+            self.state.games.lock().clear_launch();
         }
     }
 }
@@ -531,15 +531,19 @@ pub async fn games_launch(
         if games.cleanup_scheduled {
             return Err("The previous game's settings are still being restored. Try Play again in a moment.".into());
         }
-        if games
-            .launch_started
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        if games.launch_pending()
+            && games
+                .launch_started
+                .is_some_and(|at| games.launch_updating || at.elapsed() < Duration::from_secs(60))
         {
             return Err("A Roblox launch is already in progress.".into());
         }
         games.launch_started = Some(Instant::now());
+        games.launch_player_seen = false;
+        games.launch_updating = false;
+        games.launch_gone_since = None;
         games.warning = None;
-        games.status = None;
+        games.status = Some("Roblox is opening.".into());
         games.recovery = None;
         games.idle_since = None;
         games.left_confirmed = false;
@@ -660,15 +664,8 @@ pub async fn games_launch(
         }
     };
     let mut games = state.games.lock();
-    games.launch_started = if games
-        .current
-        .as_ref()
-        .is_some_and(|g| g.place_id == place_id && g.client == client)
-    {
-        None
-    } else {
-        Some(Instant::now())
-    };
+    // The watcher owns completion. Do not revive a launch it already saw close,
+    // or mistake an older session in the same place for this new launch.
     games.owned_connection = owned_connection;
     launch_guard.complete = true;
     drop(games);

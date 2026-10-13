@@ -62,6 +62,18 @@ describe("game favourites", () => {
     read.resolve(snapshot()); await refresh;
     expect(favourite()).toBe(true);
   });
+  it("keeps the close status from a snapshot that overlaps a favourite save", async () => {
+    useGameLibraryStore.setState({ library: { ...snapshot(), launch_pending: true, status: "Roblox is opening." } });
+    const read = deferred<RobloxLibrarySnapshot>();
+    vi.mocked(gamesGetLibrary).mockReturnValue(read.promise);
+    vi.mocked(gamesSetFavourite).mockResolvedValue(undefined);
+    const refresh = useGameLibraryStore.getState().refresh();
+    await useGameLibraryStore.getState().setFavourite("1818", "standard", true);
+    read.resolve({ ...snapshot(), launch_pending: false, status: null }); await refresh;
+    expect(favourite()).toBe(true);
+    expect(useGameLibraryStore.getState().library!.launch_pending).toBe(false);
+    expect(useGameLibraryStore.getState().library!.status).toBeNull();
+  });
   it("restores the last saved choice when the final click cannot be saved", async () => {
     const first = deferred<void>();
     vi.mocked(gamesSetFavourite).mockReturnValueOnce(first.promise).mockRejectedValueOnce(new Error("Disk full"));

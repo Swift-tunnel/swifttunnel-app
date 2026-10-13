@@ -612,16 +612,29 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                 if let Some(ref w) = watcher {
                     for event in w.poll() {
                         match event {
+                            RobloxEvent::PlayerOpened => {
+                                let state = app.state::<AppState>();
+                                if state.games.lock().player_opened() {
+                                    let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
+                                }
+                            }
                             RobloxEvent::GameLeft { job_id } => {
                                 let state = app.state::<AppState>();
                                 let mut games = state.games.lock();
-                                games.left_confirmed = true;
                                 if games.current.as_ref().is_some_and(|current| job_id.as_ref().is_none_or(|id| *id == current.job_id)) {
+                                    games.left_confirmed = true;
                                     games.current = None;
                                     if let Some(recorder)=games.recorder.take() {
                                         if let Err(error)=swifttunnel_core::roblox_launcher::save_report(recorder.finish(chrono::Utc::now().timestamp().max(0) as u64,false)) {log::warn!("Session report: {error}");}
                                     }
-                                    games.launch_started = None;
+                                    games.clear_launch();
+                                    let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
+                                } else if games.current.is_none() && games.launch_player_seen
+                                    && !state.performance_monitor.lock().is_roblox_running()
+                                    && !swifttunnel_core::roblox_native_launch::updater_running() {
+                                    games.left_confirmed = true;
+                                    games.clear_launch();
+                                    games.warning = None;
                                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                                 }
                             }
@@ -645,7 +658,7 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                                     observed_at: chrono::Utc::now().timestamp_millis().max(0) as u64,
                                     location: None, location_source: None,
                                 });
-                                games.launch_started = None;
+                                games.clear_launch();
                                 games.left_confirmed = false;
                                 drop(games);
                                 let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
@@ -706,20 +719,8 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                     recorder.sample(fps,estimate);recorder.report.frame_spikes=recorder.report.frame_spikes.saturating_add(spikes);
                     if let Some(peak)=peak {recorder.report.peak_frame_ms=Some(recorder.report.peak_frame_ms.unwrap_or(0).max(peak));}
                 }
-                let expired = games.launch_started.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(60));
-                if traffic { games.game_traffic_seen = true; if games.launch_started.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(5)) { games.launch_started = None; let _ = app.emit(commands::games::LIBRARY_CHANGED, ()); } }
-                if expired && !traffic && games.current.is_none() && !running && !updating {
-                    games.launch_started = None;
-                    games.status = None;
-                    if !games.game_traffic_seen { games.left_confirmed = true; }
-                    games.warning = Some("Roblox did not open a game within a minute. Try Play again.".into());
-                    let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
-                }
-                if updating && games.status.is_none() {games.status=Some("Roblox is updating. The game opens when it is done.".into());let _=app.emit(commands::games::LIBRARY_CHANGED,());}
-                if expired && running && games.current.is_none() {
-                    games.launch_started = None;
-                    games.warning = None;
-                    games.status = Some("Roblox is running. Server details have not been detected yet.".into());
+                if traffic { games.game_traffic_seen = true; }
+                if games.track_launch(std::time::Instant::now(), running || traffic, updating) {
                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                 }
                 if !running && !updating && games.launch_started.is_none() && games.status.take().is_some() {let _=app.emit(commands::games::LIBRARY_CHANGED,());}

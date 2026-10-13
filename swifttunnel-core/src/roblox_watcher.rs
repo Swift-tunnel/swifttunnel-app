@@ -17,6 +17,7 @@ use std::time::Duration;
 /// Events emitted by the Roblox watcher
 #[derive(Debug, Clone)]
 pub enum RobloxEvent {
+    PlayerOpened,
     GameLeft {
         job_id: Option<String>,
     },
@@ -116,7 +117,9 @@ impl JoinTracker {
     fn feed(&mut self, lines: &[String], fresh: bool, client: RobloxClient) -> Vec<RobloxEvent> {
         let mut events = Vec::new();
         for line in lines {
-            if line.contains("[FLog::SingleSurfaceApp] leaveUGCGameInternal")
+            if fresh && line.contains("[FLog::DataModelStarterModule] Launching Lua App") {
+                events.push(RobloxEvent::PlayerOpened);
+            } else if line.contains("[FLog::SingleSurfaceApp] leaveUGCGameInternal")
                 || line.contains("[FLog::Network] Time to disconnect replication data:")
             {
                 if fresh {
@@ -429,6 +432,23 @@ impl TailedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn player_open_and_close_are_detected_without_a_game_connection() {
+        let mut tracker = JoinTracker::default();
+        let lines = vec![
+            "2026-10-13T07:35:01.660Z [FLog::DataModelStarterModule] Launching Lua App".into(),
+            "2026-10-13T07:35:14.289Z [FLog::SingleSurfaceApp] leaveUGCGameInternal".into(),
+        ];
+        let events = tracker.feed(&lines, true, RobloxClient::Standard);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], RobloxEvent::PlayerOpened));
+        assert!(matches!(events[1], RobloxEvent::GameLeft { job_id: None }));
+        assert!(
+            JoinTracker::default()
+                .feed(&lines, false, RobloxClient::Standard)
+                .is_empty()
+        );
+    }
     #[test]
     fn private_rcc_address_is_confirmed_only_by_public_transport() {
         let mut tracker = JoinTracker::default();

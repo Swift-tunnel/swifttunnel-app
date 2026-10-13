@@ -9,6 +9,15 @@ vi.mock("../../stores/gameLibraryStore", async () => {
 });
 afterEach(() => useGameLibraryStore.setState({ library: null, error: null, pendingAction: null }));
 describe("native launch library", () => {
+  it("acknowledges an open player and enables Play before server metadata arrives", () => {
+    useGameLibraryStore.setState({ library: { entries: [{ place_id:"1818",name:"Crossroads",job_id:null,last_played:null,favourite:true,client:"standard" }], current:null,warning:null,status:"Roblox is open.",launch_pending:false,notify_joins:false } });
+    const html=renderToStaticMarkup(<GameLibraryPanel />);
+    expect(html).toContain("Roblox is open.");
+    expect(html).not.toContain("Roblox is opening.");
+    const play=html.match(/<button\b[^>]*>[\s\S]*?<\/button>/g)?.find(button=>button.includes(">Play</span>"));
+    expect(play).toBeDefined();
+    expect(play).not.toMatch(/\sdisabled(?:=|\s|>)/);
+  });
   it("shows a running player with missing details as status rather than a failed join", () => {
     useGameLibraryStore.setState({ library: { entries: [], current: null, warning: null, status: "Roblox is running. Server details have not been detected yet.", notify_joins: false } });
     const html=renderToStaticMarkup(<GameLibraryPanel />);

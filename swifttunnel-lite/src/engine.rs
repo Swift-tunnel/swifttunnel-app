@@ -1392,7 +1392,7 @@ fn spawn_game_logs(shared: Arc<Shared>) {
                             game_started = None;
                             game_destination::clear();
                         }
-                        RobloxEvent::GameServerDetected { .. } => {}
+                        RobloxEvent::PlayerOpened | RobloxEvent::GameServerDetected { .. } => {}
                     }
                 }
                 let running = shared

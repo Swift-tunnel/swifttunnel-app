@@ -185,6 +185,9 @@ pub struct GamesState {
     pub status: Option<String>,
     pub search: Option<ServerSearch>,
     pub launch_started: Option<std::time::Instant>,
+    pub launch_player_seen: bool,
+    pub launch_updating: bool,
+    pub launch_gone_since: Option<std::time::Instant>,
     pub owned_connection: Option<std::time::Instant>,
     pub cleanup_scheduled: bool,
     pub last_cleanup: Option<std::time::Instant>,
@@ -212,6 +215,70 @@ pub struct LibrarySnapshot {
 }
 
 impl GamesState {
+    pub fn launch_pending(&self) -> bool {
+        self.launch_started.is_some() && (!self.launch_player_seen || self.launch_updating)
+    }
+
+    pub fn clear_launch(&mut self) {
+        self.launch_started = None;
+        self.launch_player_seen = false;
+        self.launch_updating = false;
+        self.launch_gone_since = None;
+        self.status = None;
+    }
+
+    pub fn player_opened(&mut self) -> bool {
+        if self.launch_started.is_none() || self.launch_player_seen && !self.launch_updating {
+            return false;
+        }
+        self.launch_player_seen = true;
+        self.launch_updating = false;
+        self.launch_gone_since = None;
+        self.warning = None;
+        self.status = Some("Roblox is open.".into());
+        log::info!("Roblox launch: player opened; waiting for confirmed game metadata");
+        true
+    }
+
+    pub fn track_launch(&mut self, now: std::time::Instant, running: bool, updating: bool) -> bool {
+        let Some(started) = self.launch_started else {
+            return false;
+        };
+        if running {
+            self.launch_gone_since = None;
+            return self.player_opened();
+        }
+        if updating {
+            self.launch_gone_since = None;
+            let message = "Roblox is updating. The game opens when it is done.";
+            if self.launch_updating {
+                return false;
+            }
+            self.launch_updating = true;
+            self.status = Some(message.into());
+            return true;
+        }
+        if self.launch_player_seen {
+            let gone = self.launch_gone_since.get_or_insert(now);
+            if now.saturating_duration_since(*gone) < std::time::Duration::from_secs(3) {
+                return false;
+            }
+            self.clear_launch();
+            self.warning = None;
+            self.left_confirmed = true;
+            log::info!("Roblox launch: player closed before game metadata was confirmed");
+            return true;
+        }
+        if now.saturating_duration_since(started) > std::time::Duration::from_secs(60) {
+            self.clear_launch();
+            self.left_confirmed = true;
+            self.warning = Some("Roblox did not open within a minute. Try Play again.".into());
+            log::warn!("Roblox launch: no player or active updater was observed before timeout");
+            return true;
+        }
+        false
+    }
+
     pub(super) fn library(&mut self) -> Result<&GameLibrary, String> {
         if self.library.is_none() {
             self.library = Some(GameLibrary::load(&library_path()?)?);
@@ -283,7 +350,7 @@ pub fn games_get_library(state: State<'_, AppState>) -> Result<LibrarySnapshot, 
         current: games.current.clone(),
         warning: games.warning.clone(),
         status: games.status.clone(),
-        launch_pending: games.launch_started.is_some(),
+        launch_pending: games.launch_pending(),
         recovery: games.recovery.clone(),
     })
 }
@@ -458,4 +525,77 @@ pub async fn games_add_favourite(
     // The favourite is safely saved even when Roblox's metadata is unavailable.
     let _ = refresh_name(&state, &place_id, RobloxClient::Standard).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod launch_activity_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn launch(at: Instant) -> GamesState {
+        GamesState {
+            launch_started: Some(at),
+            status: Some("Roblox is opening.".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn opening_and_closing_without_metadata_cannot_later_become_a_failed_launch() {
+        let at = Instant::now();
+        let mut games = launch(at);
+        assert!(games.launch_pending());
+        assert!(games.track_launch(at + Duration::from_secs(2), true, false));
+        assert!(!games.launch_pending());
+        assert_eq!(games.status.as_deref(), Some("Roblox is open."));
+        assert!(!games.track_launch(at + Duration::from_secs(14), false, false));
+        assert!(games.track_launch(at + Duration::from_secs(17), false, false));
+        assert!(games.launch_started.is_none());
+        assert!(games.status.is_none());
+        assert!(games.warning.is_none());
+        assert!(games.left_confirmed);
+        assert!(!games.track_launch(at + Duration::from_secs(65), false, false));
+        assert!(games.warning.is_none());
+    }
+
+    #[test]
+    fn a_fresh_open_log_covers_a_player_that_closed_between_process_polls() {
+        let at = Instant::now();
+        let mut games = launch(at);
+        assert!(games.player_opened());
+        assert!(!games.track_launch(at + Duration::from_secs(1), false, false));
+        assert!(games.track_launch(at + Duration::from_secs(4), false, false));
+        assert!(games.warning.is_none());
+        assert!(!games.launch_pending());
+    }
+
+    #[test]
+    fn update_handoffs_keep_the_launch_and_acknowledge_the_new_player() {
+        let at = Instant::now();
+        let mut games = launch(at);
+        games.track_launch(at + Duration::from_secs(1), true, false);
+        assert!(!games.track_launch(at + Duration::from_secs(2), false, false));
+        assert!(games.track_launch(at + Duration::from_secs(3), false, true));
+        assert!(games.launch_pending());
+        assert!(games.launch_gone_since.is_none());
+        assert!(!games.track_launch(at + Duration::from_secs(90), false, true));
+        assert!(games.launch_started.is_some());
+        assert!(games.track_launch(at + Duration::from_secs(91), true, false));
+        assert_eq!(games.status.as_deref(), Some("Roblox is open."));
+        assert!(!games.launch_pending());
+        assert!(games.warning.is_none());
+    }
+
+    #[test]
+    fn a_player_that_never_opened_still_times_out() {
+        let at = Instant::now();
+        let mut games = launch(at);
+        assert!(!games.track_launch(at + Duration::from_secs(30), false, false));
+        assert!(games.track_launch(at + Duration::from_secs(61), false, false));
+        assert!(!games.launch_pending());
+        assert_eq!(
+            games.warning.as_deref(),
+            Some("Roblox did not open within a minute. Try Play again.")
+        );
+    }
 }

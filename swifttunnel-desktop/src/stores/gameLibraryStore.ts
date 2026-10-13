@@ -4,6 +4,8 @@ import { formatErrorMessage } from "../lib/errors";
 import type { RobloxClient, RobloxLibrarySnapshot } from "../lib/types";
 
 let request = 0;
+let favouriteRevision = 0;
+const favouriteRevisions = new Map<string, number>();
 interface FavouriteWrite {
   desired: boolean;
   confirmed: boolean;
@@ -26,13 +28,19 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
   library: null, error: null, loading: false,
   refresh: async () => {
     const generation = ++request;
+    const observedFavourites = favouriteRevision;
     set(state => ({ loading: state.library === null }));
     try {
       const library = await gamesGetLibrary();
       if (generation === request) set({
         library: { ...library, entries: library.entries.map(entry => {
           const write = favourites.get(favouriteKey(entry.place_id, entry.client));
-          return write ? { ...entry, favourite: write.desired } : entry;
+          if (write) return { ...entry, favourite: write.desired };
+          if ((favouriteRevisions.get(favouriteKey(entry.place_id, entry.client)) ?? 0) > observedFavourites) {
+            const latest = get().library?.entries.find(e => e.place_id === entry.place_id && e.client === entry.client);
+            if (latest) return { ...entry, favourite: latest.favourite };
+          }
+          return entry;
         }) },
         loading: false, error: null,
       });
@@ -49,7 +57,9 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
         e.place_id === placeId && e.client === client ? { ...e, favourite: value } : e,
       ) } : null,
     }));
-    ++request; // An older snapshot must not undo a click or a completed save.
+    // Merge just the star into old reads. New session/close metadata must still
+    // arrive, even when a favourite save overlaps the event-driven refresh.
+    favouriteRevisions.set(key, ++favouriteRevision);
     const existing = favourites.get(key);
     if (existing) {
       existing.desired = favourite;
@@ -76,7 +86,7 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
         if (write.revision === revision) break;
       }
     })().finally(() => {
-      ++request;
+      favouriteRevisions.set(key, ++favouriteRevision);
       favourites.delete(key);
       set({ loading: false });
     });
