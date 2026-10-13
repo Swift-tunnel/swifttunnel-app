@@ -1,5 +1,6 @@
-import type { ReactNode, SelectHTMLAttributes } from "react";
+import { useEffect, useState, type ReactNode, type SelectHTMLAttributes } from "react";
 import { Icon } from "./Icon";
+import { Slider } from "./Slider";
 
 /** Text boxes in a dialog form, matching the preset dialogs. */
 export const fieldClass =
@@ -61,5 +62,79 @@ export function Select({ block, width = 190, className, children, ...rest }: Sel
         className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-text-muted"
       />
     </span>
+  );
+}
+
+interface SliderInputProps {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (value: number) => void;
+  disabled?: boolean;
+  ariaLabel: string;
+  unit?: string;
+  /** Width of the slider track; the typed box sits to its right. */
+  width?: number;
+}
+
+/**
+ * A slider with a box you can type into. The slider moves in steps; a typed
+ * number can be anything in range, and is applied on Enter or when you leave
+ * the box.
+ */
+export function SliderInput({
+  value,
+  min,
+  max,
+  step = 1,
+  onChange,
+  disabled,
+  ariaLabel,
+  unit,
+  width = 150,
+}: SliderInputProps) {
+  const [text, setText] = useState(String(value));
+  const [typing, setTyping] = useState(false);
+  useEffect(() => {
+    if (!typing) setText(String(value));
+  }, [value, typing]);
+
+  function commit() {
+    setTyping(false);
+    const typed = Number.parseInt(text, 10);
+    if (Number.isFinite(typed)) onChange(Math.max(min, Math.min(max, typed)));
+  }
+
+  return (
+    <div className="flex items-center gap-2.5">
+      <div className="flex items-center" style={{ width }}>
+        <Slider
+          ariaLabel={`${ariaLabel} slider`}
+          value={Math.max(min, Math.min(max, value))}
+          min={min}
+          max={max}
+          step={step}
+          onChange={onChange}
+          disabled={disabled}
+        />
+      </div>
+      <input
+        aria-label={ariaLabel}
+        inputMode="numeric"
+        value={text}
+        disabled={disabled}
+        onFocus={() => setTyping(true)}
+        onChange={(e) => setText(e.target.value.replace(/\D/g, ""))}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur();
+        }}
+        className={`${compactFieldClass} w-[58px] text-right font-mono font-semibold`}
+      />
+      {unit && (
+        <span className="w-7 font-mono text-[10px] text-text-dimmed">{unit}</span>
+      )}
+    </div>
   );
 }

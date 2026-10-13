@@ -42,7 +42,7 @@ pub async fn games_launch_diagnostics(state: State<'_, AppState>) -> Result<Vec<
         let mut notes = vec![];
         match swifttunnel_core::roblox_native_launch::official_player() {
             Ok(_) => notes.push(
-                "Official Roblox player found. SwiftTunnel Play bypasses registered strap handlers."
+                "Official Roblox player found."
                     .into(),
             ),
             Err(e) => notes.push(e),
@@ -55,7 +55,7 @@ pub async fn games_launch_diagnostics(state: State<'_, AppState>) -> Result<Vec<
         }
         if let Ok(preview) = optimizer.lock().inspect_launcher_imports() {
             if preview.sources.len() > 1 {
-                notes.push("Multiple launcher flag files exist. Native Play uses only SwiftTunnel's selected profile; other launcher files are kept.".into());
+                notes.push("Other launchers' flag files were found. SwiftTunnel uses only its own profile.".into());
             }
         }
         if config.custom_fflags_enabled {
@@ -77,7 +77,7 @@ pub async fn games_launch_diagnostics(state: State<'_, AppState>) -> Result<Vec<
                     if matches!(adapter.kind.as_str(), "tunnel" | "virtual")
                         && !adapter.friendly_name.contains("SwiftTunnel")
                     {
-                        notes.push("Another virtual adapter owns a default route. Check other VPNs if game packets or joins are failing; this alone does not prove a conflict.".into());
+                        notes.push("Another virtual adapter owns a default route. If joins are failing, check other VPNs.".into());
                     }
                 }
             }

@@ -4,6 +4,8 @@ interface SegmentedProps<T extends string> {
   onChange: (value: T) => void;
   size?: "sm" | "md";
   disabled?: boolean;
+  /** Names the group for screen readers when no visible label sits beside it. */
+  ariaLabel?: string;
 }
 
 export function Segmented<T extends string>({
@@ -12,6 +14,7 @@ export function Segmented<T extends string>({
   onChange,
   size = "md",
   disabled,
+  ariaLabel,
 }: SegmentedProps<T>) {
   const items = options.map((o) =>
     typeof o === "string" ? { value: o, label: o } : o,
@@ -20,6 +23,8 @@ export function Segmented<T extends string>({
 
   return (
     <div
+      role="group"
+      aria-label={ariaLabel}
       className="inline-flex rounded-[var(--radius-button)] p-0.5"
       style={{
         backgroundColor: "var(--color-bg-elevated)",
@@ -33,8 +38,9 @@ export function Segmented<T extends string>({
             key={item.value}
             type="button"
             disabled={disabled}
+            aria-pressed={active}
             onClick={() => onChange(item.value)}
-            className={`${sizeClass} rounded-[3px] font-medium transition-colors duration-100 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50`}
+            className={`${sizeClass} whitespace-nowrap rounded-[3px] font-medium transition-colors duration-100 focus:outline-none disabled:cursor-not-allowed disabled:opacity-50`}
             style={{
               backgroundColor: active
                 ? "var(--color-accent-primary)"

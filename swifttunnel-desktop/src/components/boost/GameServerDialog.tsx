@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Dialog, ErrorBanner, Icon, Spinner, Select, fieldClass } from "../ui";
+import { Button, Dialog, ErrorBanner, Icon, Segmented, SliderInput, Spinner } from "../ui";
 import { Flag } from "../ui/Flag";
 import { gamesDatacenters, gamesSearchServers, systemOpenUrl } from "../../lib/commands";
 import { defaultGamePreferences } from "../../lib/gameLaunchFlow";
@@ -49,7 +49,7 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
         </button>)}
       </div>
       <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-4">
-        <div className="flex flex-wrap items-center gap-2"><label className="text-[11px] text-text-muted">Free slots <input aria-label="Server minimum free slots" type="number" min={1} max={20} value={minSlots} onChange={e=>setMinSlots(Math.max(1,Math.min(20,Number(e.target.value))))} className={`${fieldClass} w-16`}/></label><Select aria-label="Sort public servers" value={population?"few":"listed"} onChange={e=>setPopulation(e.target.value==="few")}><option value="listed">Directory order</option><option value="few">Fewer players</option></Select></div>
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2"><div className="flex items-center gap-2.5 text-[11px] text-text-muted">Free slots<SliderInput ariaLabel="Server minimum free slots" value={minSlots} min={1} max={20} width={110} onChange={setMinSlots} /></div><Segmented ariaLabel="Sort public servers" value={population?"few":"listed"} options={[{ value: "listed", label: "As listed" }, { value: "few", label: "Fewer players" }]} onChange={order=>setPopulation(order==="few")} /></div>
         {error && <ErrorBanner tone="error">{error}</ErrorBanner>}
         {page?.warning && <ErrorBanner tone="warning">{page.warning}</ErrorBanner>}
         {center && <div className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="text-[13.5px] font-semibold leading-tight text-text-primary">{center.city}</p><p className="mt-1 text-[11px] text-text-muted">{center.relay_region ? `${center.relay_region} relay region` : "No matching SwiftTunnel relay region"}</p></div><Button size="sm" variant="secondary" disabled={busy} leadingIcon={<Icon name="refresh" size={13} />} onClick={() => void search(center.id)}>Refresh</Button></div>}
