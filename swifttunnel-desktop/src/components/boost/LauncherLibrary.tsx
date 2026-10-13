@@ -96,7 +96,7 @@ export function GameLibraryPanel() {
   async function addFavourite() {
     const place = parsePlaceInput(input);
     if (!place) { setError("Enter a Roblox game link or a numeric place ID."); return; }
-    await run(async () => { await gamesAddFavourite(place, addClient); setInput(""); setAdding(false); });
+    await run(async () => { await gamesAddFavourite(place, addClient); setInput(""); setAdding(false); setFilter("favourites"); });
   }
   async function launch(entry: RobloxGameEntry, plan: GameLaunchPlan, close: boolean, safe=false) {
     setReview(null);

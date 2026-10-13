@@ -1994,6 +1994,8 @@ fn level_of(quality: i32) -> u32 {
 /// launch, so a change made while it is open does nothing until it restarts.
 fn restart_roblox() -> Result<(), String> {
     let roblox = RobloxOptimizer::new();
+    let client = swifttunnel_core::roblox_native_launch::running_client()?.unwrap_or_default();
+    let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
     roblox
         .close_running_instances()
         .map_err(|e| format!("Could not close Roblox: {e}"))?;
@@ -2010,7 +2012,7 @@ fn restart_roblox() -> Result<(), String> {
     }
 
     roblox
-        .reopen_client()
+        .reopen_client(&player)
         .map_err(|e| format!("Could not relaunch Roblox: {e}"))
 }
 

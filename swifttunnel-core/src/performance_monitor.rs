@@ -225,17 +225,6 @@ impl PerformanceMonitor {
     pub fn is_roblox_running(&mut self) -> bool {
         self.refresh_player(true).is_some()
     }
-
-    /// Get system information
-    pub fn get_system_info(&self) -> SystemInfo {
-        SystemInfo {
-            total_memory: self.system.total_memory() / 1024 / 1024, // MB
-            used_memory: self.system.used_memory() / 1024 / 1024,   // MB
-            cpu_count: self.system.cpus().len(),
-            os_version: System::long_os_version().unwrap_or_else(|| "Unknown".to_string()),
-            system_name: System::name().unwrap_or_else(|| "Unknown".to_string()),
-        }
-    }
 }
 
 fn normalize_process_cpu(raw_cpu: f32) -> f32 {
@@ -308,29 +297,4 @@ mod polling_tests {
         assert_eq!(metrics.ram_usage, 0.0);
         assert_eq!(monitor.full_scans, 0);
     }
-}
-
-/// Get system info without requiring a full PerformanceMonitor instance.
-/// Only refreshes memory and CPU — avoids expensive full process scan.
-pub fn get_system_info_lightweight() -> SystemInfo {
-    let mut system = System::new();
-    system.refresh_memory();
-    system.refresh_cpu_all();
-    SystemInfo {
-        total_memory: system.total_memory() / 1024 / 1024,
-        used_memory: system.used_memory() / 1024 / 1024,
-        cpu_count: system.cpus().len(),
-        os_version: System::long_os_version().unwrap_or_else(|| "Unknown".to_string()),
-        system_name: System::name().unwrap_or_else(|| "Unknown".to_string()),
-    }
-}
-
-/// System information struct
-#[derive(Debug, Clone)]
-pub struct SystemInfo {
-    pub total_memory: u64,
-    pub used_memory: u64,
-    pub cpu_count: usize,
-    pub os_version: String,
-    pub system_name: String,
 }

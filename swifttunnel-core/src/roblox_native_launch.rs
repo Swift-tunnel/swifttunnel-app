@@ -117,6 +117,68 @@ pub fn safe_path(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+fn client_for_image(base: &Path, image: &Path) -> Option<RobloxClient> {
+    let image = image
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase();
+    [RobloxClient::Standard, RobloxClient::Vng]
+        .into_iter()
+        .find(|client| {
+            let root = installation_root(base, *client)
+                .to_string_lossy()
+                .replace('/', "\\")
+                .to_ascii_lowercase();
+            image.starts_with(&format!("{}\\", root.trim_end_matches('\\')))
+        })
+}
+
+pub fn running_client() -> Result<Option<RobloxClient>, String> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var_os("LOCALAPPDATA")
+            .ok_or("Windows could not find the Roblox installation.")?;
+        for process in crate::process_snapshot::list()? {
+            if crate::process_names::is_roblox_player_process_name(&process.name)
+                && let Some(image) = crate::process_snapshot::image_path(process.pid)?
+                && let Some(client) = client_for_image(Path::new(&base), Path::new(&image))
+            {
+                return Ok(Some(client));
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(None)
+    }
+}
+
+fn player_command(player: &Path) -> Result<Command, String> {
+    if player
+        .file_name()
+        .is_none_or(|name| name != "RobloxPlayerBeta.exe")
+    {
+        return Err("Choose the official Roblox player.".into());
+    }
+    safe_path(player)?;
+    let metadata =
+        fs::metadata(player).map_err(|error| format!("Roblox's player is unavailable: {error}"))?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        return Err("Roblox's player is unavailable. Wait for its update, then try again.".into());
+    }
+    let mut command = Command::new(player);
+    command.current_dir(player.parent().ok_or("Invalid Roblox installation.")?);
+    Ok(command)
+}
+
+pub fn open_home(player: &Path) -> Result<u32, String> {
+    player_command(player)?
+        .spawn()
+        .map(|child| child.id())
+        .map_err(|error| format!("Roblox could not start: {error}"))
+}
 pub fn launch(
     player: &Path,
     place: &str,
@@ -124,16 +186,8 @@ pub fn launch(
     client: RobloxClient,
 ) -> Result<u32, String> {
     let uri = join_url(place, job, client)?;
-    if player
-        .file_name()
-        .is_none_or(|n| n != "RobloxPlayerBeta.exe")
-    {
-        return Err("Choose the official Roblox player.".into());
-    }
-    safe_path(player)?;
-    Command::new(player)
+    player_command(player)?
         .arg(uri)
-        .current_dir(player.parent().ok_or("Invalid Roblox installation.")?)
         .spawn()
         .map(|child| child.id())
         .map_err(|e| format!("Roblox could not start: {e}"))
@@ -141,6 +195,36 @@ pub fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restart_resolves_the_client_and_builds_a_native_command_without_a_protocol_handler() {
+        let base =
+            std::env::temp_dir().join(format!("swift-restart-{:032x}", rand::random::<u128>()));
+        let vng = installation_root(&base, RobloxClient::Vng)
+            .join("Versions/version-test/RobloxPlayerBeta.exe");
+        fs::create_dir_all(vng.parent().unwrap()).unwrap();
+        fs::write(&vng, "fixture").unwrap();
+        assert_eq!(client_for_image(&base, &vng), Some(RobloxClient::Vng));
+        let standard = installation_root(&base, RobloxClient::Standard)
+            .join("Versions/version-test/RobloxPlayerBeta.exe");
+        assert_eq!(
+            client_for_image(&base, &standard),
+            Some(RobloxClient::Standard)
+        );
+        assert_eq!(
+            client_for_image(&base, &base.join("RobloxPCVNG-other/RobloxPlayerBeta.exe")),
+            None
+        );
+        let command = player_command(&vng).unwrap();
+        assert_eq!(command.get_program(), vng.as_os_str());
+        assert_eq!(command.get_current_dir(), vng.parent());
+        assert_eq!(command.get_args().count(), 0);
+        assert!(player_command(&base.join("Voidstrap.exe")).is_err());
+        fs::remove_file(&vng).unwrap();
+        fs::remove_dir(vng.parent().unwrap()).unwrap();
+        fs::remove_dir(vng.parent().unwrap().parent().unwrap()).unwrap();
+        fs::remove_dir(installation_root(&base, RobloxClient::Vng)).unwrap();
+        fs::remove_dir(base).unwrap();
+    }
     #[test]
     fn resolver_excludes_studio_and_other_launcher_roots() {
         let root = std::env::temp_dir().join(format!("swift-native-{}", std::process::id()));

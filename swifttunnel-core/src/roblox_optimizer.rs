@@ -1,4 +1,3 @@
-use crate::hidden_command;
 use crate::structs::*;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -1401,35 +1400,11 @@ impl RobloxOptimizer {
         }
     }
 
-    /// Reopen Roblox after applying boosts.
-    pub fn reopen_client(&self) -> Result<()> {
-        if let Some(version_folder) = Self::find_roblox_version_folder() {
-            let exe_path = version_folder.join("RobloxPlayerBeta.exe");
-            if exe_path.exists() {
-                match std::process::Command::new(&exe_path).spawn() {
-                    Ok(_) => {
-                        info!("Relaunched Roblox from {:?}", exe_path);
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        warn!("Failed to relaunch Roblox executable directly: {}", e);
-                    }
-                }
-            }
-        }
-
-        // Fallback: launch via protocol handler.
-        let output = hidden_command("cmd")
-            .args(["/C", "start", "", "roblox://"])
-            .spawn();
-
-        match output {
-            Ok(_) => {
-                info!("Relaunched Roblox via roblox:// protocol");
-                Ok(())
-            }
-            Err(e) => Err(anyhow::anyhow!("Failed to relaunch Roblox: {}", e)),
-        }
+    /// Reopen the resolved official player after applying boosts.
+    pub fn reopen_client(&self, player: &Path) -> Result<()> {
+        crate::roblox_native_launch::open_home(player)
+            .map(|_| ())
+            .map_err(|error| anyhow::anyhow!(error))
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

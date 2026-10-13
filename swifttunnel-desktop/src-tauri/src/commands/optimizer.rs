@@ -485,8 +485,18 @@ pub async fn boost_restart_roblox(state: State<'_, AppState>) -> Result<(), Stri
     #[cfg(windows)]
     {
         let roblox_optimizer = state.roblox_optimizer.clone();
+        let preferred_client = state.games.lock().current.as_ref().map(|game| game.client);
         tauri::async_runtime::spawn_blocking(move || {
             let roblox = roblox_optimizer.lock();
+            let client = match preferred_client {
+                Some(client) => client,
+                None => {
+                    swifttunnel_core::roblox_native_launch::running_client()?.unwrap_or_default()
+                }
+            };
+            // Resolve before closing anything; a missing installation must not
+            // strand the user after terminating a working game.
+            let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
 
             roblox
                 .close_running_instances()
@@ -506,7 +516,7 @@ pub async fn boost_restart_roblox(state: State<'_, AppState>) -> Result<(), Stri
             }
 
             roblox
-                .reopen_client()
+                .reopen_client(&player)
                 .map_err(|e| format!("Failed to relaunch Roblox: {}", e))?;
 
             Ok(())

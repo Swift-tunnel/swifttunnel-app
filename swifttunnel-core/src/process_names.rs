@@ -38,6 +38,8 @@ pub const STRAPPER_PROCESS_NAMES: &[&str] = &[
     "fishstrap.exe",
     "froststrap.exe",
     "bubblestrap.exe",
+    "voidstrap.exe",
+    "voidstrap.desktop.windows.exe",
 ];
 
 fn basename(name: &str) -> &str {
@@ -244,6 +246,23 @@ mod tests {
 
     #[test]
     fn strappers_are_lowercase_and_separate_from_core_roblox_processes() {
+        for process in [
+            "Voidstrap.exe",
+            r"C:\Launchers\Voidstrap.Desktop.Windows.exe",
+        ] {
+            let lower = process.to_ascii_lowercase();
+            let bypass_apps: Vec<_> = STRAPPER_PROCESS_NAMES
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
+            assert!(process_name_matches_any_tunnel_app(&lower, &bypass_apps));
+            assert!(!is_roblox_player_process_name(process));
+            let normal_apps: Vec<_> = ROBLOX_PROCESS_NAMES
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
+            assert!(!process_name_matches_any_tunnel_app(&lower, &normal_apps));
+        }
         for strapper in STRAPPER_PROCESS_NAMES {
             assert_eq!(
                 *strapper,
