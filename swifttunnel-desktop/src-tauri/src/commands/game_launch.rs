@@ -415,7 +415,17 @@ pub async fn games_launch_plan(
                 })
                 .map(|s| s.job_id.clone());
             if job_id.is_none() {
-                return Err("No joinable server was found in this datacenter. Refresh or choose another location.".into());
+                return Err(if search.servers.is_empty() {
+                    format!(
+                        "The server directory returned no listed {} servers for this game. Choose another location or Play normally; the directory may be incomplete.",
+                        center.city
+                    )
+                } else {
+                    format!(
+                        "No joinable {} server was found in this search. Refresh, choose another location or Play normally.",
+                        center.city
+                    )
+                });
             }
         }
         let server = search
