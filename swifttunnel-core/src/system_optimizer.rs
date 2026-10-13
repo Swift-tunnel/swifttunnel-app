@@ -1,11 +1,10 @@
-use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use windows::Win32::Foundation::CloseHandle;
+use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Threading::*;
 
@@ -48,6 +47,69 @@ const SWIFTTUNNEL_POWER_PLAN_DESCRIPTION: &str = "SwiftTunnel optimized gaming p
 const SWIFTTUNNEL_POWER_PLAN_BYTES: &[u8] =
     include_bytes!("../resources/swifttunnel_power_plan.pow");
 
+struct StagedPowerPlan(PathBuf);
+impl Drop for StagedPowerPlan {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.0) {
+            warn!("Could not remove this operation's temporary power plan: {error}");
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProcessIdentity {
+    pid: u32,
+    created: u64,
+}
+
+struct BoostProcess(HANDLE);
+impl Drop for BoostProcess {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+impl BoostProcess {
+    fn open(pid: u32) -> windows::core::Result<Self> {
+        unsafe {
+            OpenProcess(
+                PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
+                false,
+                pid,
+            )
+            .map(Self)
+        }
+    }
+    fn identity(&self, pid: u32) -> windows::core::Result<ProcessIdentity> {
+        let (mut created, mut exited, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        unsafe {
+            GetProcessTimes(self.0, &mut created, &mut exited, &mut kernel, &mut user)?;
+        }
+        Ok(ProcessIdentity {
+            pid,
+            created: ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64,
+        })
+    }
+    fn same_live_process(identity: ProcessIdentity) -> Result<Option<Self>> {
+        let process = match Self::open(identity.pid) {
+            Ok(process) => process,
+            // ERROR_INVALID_PARAMETER is the normal OpenProcess result for an exited PID.
+            Err(error) if error.code().0 as u32 == 0x80070057 => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if process.identity(identity.pid)? != identity {
+            return Ok(None);
+        }
+        Ok(Some(process))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SwiftTunnelPowerPlanCleanup {
     Noop,
@@ -56,7 +118,7 @@ enum SwiftTunnelPowerPlanCleanup {
     UnknownActivePlan,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct MmcssSnapshot {
     scheduling_category: Option<String>,
     sfio_priority: Option<String>,
@@ -91,16 +153,23 @@ impl RegistryDwordSnapshot {
 
 /// On-disk snapshot of persistent system settings SwiftTunnel has changed.
 ///
-/// This is intentionally narrow: process priority, process affinity, and timer
-/// requests are process-local and disappear on exit, but
-/// `GlobalTimerResolutionRequests` is an HKLM value that survives crashes.
+/// Priority and affinity belong to the target process's lifetime. Registry
+/// settings and the active power plan need durable rollback records.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 struct PersistentSystemSnapshot {
-    #[serde(default)]
     global_timer_snapshot: Option<RegistryDwordSnapshot>,
+    game_bar_snapshot: Option<RegistryDwordSnapshot>,
+    fullscreen_optimization_snapshot: Option<RegistryDwordSnapshot>,
+    game_mode_allow_auto_snapshot: Option<RegistryDwordSnapshot>,
+    game_mode_enabled_snapshot: Option<RegistryDwordSnapshot>,
+    mmcss_snapshot: Option<MmcssSnapshot>,
+    original_power_plan_guid: Option<String>,
+    swifttunnel_power_plan_imported: bool,
 }
 
-const SYSTEM_SNAPSHOT_FILE: &str = "system_optimizer_snapshots.json";
+const SYSTEM_SNAPSHOT_FILE: &str = "system_optimizer_recovery_v2.json";
+const LEGACY_SYSTEM_SNAPSHOT_FILE: &str = "system_optimizer_snapshots.json";
 
 fn system_snapshot_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("SwiftTunnel").join(SYSTEM_SNAPSHOT_FILE))
@@ -109,6 +178,8 @@ fn system_snapshot_path() -> Option<PathBuf> {
 pub struct SystemOptimizer {
     original_priority: Option<u32>,
     original_affinity: Option<usize>,
+    priority_identity: Option<ProcessIdentity>,
+    affinity_identity: Option<ProcessIdentity>,
     timer_resolution_active: bool,
     global_timer_snapshot: Option<Option<u32>>,
     original_power_plan_guid: Option<Option<String>>,
@@ -118,6 +189,9 @@ pub struct SystemOptimizer {
     game_mode_enabled_snapshot: Option<Option<u32>>,
     mmcss_snapshot: Option<MmcssSnapshot>,
     swifttunnel_power_plan_imported: bool,
+    snapshot_path: Option<PathBuf>,
+    snapshot_loaded: bool,
+    last_persisted_snapshot: Option<PersistentSystemSnapshot>,
 }
 
 pub struct SystemApplyOutcome {
@@ -142,6 +216,8 @@ impl SystemOptimizer {
         Self {
             original_priority: None,
             original_affinity: None,
+            priority_identity: None,
+            affinity_identity: None,
             timer_resolution_active: false,
             global_timer_snapshot: None,
             original_power_plan_guid: None,
@@ -151,6 +227,9 @@ impl SystemOptimizer {
             game_mode_enabled_snapshot: None,
             mmcss_snapshot: None,
             swifttunnel_power_plan_imported: false,
+            snapshot_path: system_snapshot_path(),
+            snapshot_loaded: false,
+            last_persisted_snapshot: None,
         }
     }
 
@@ -193,142 +272,74 @@ impl SystemOptimizer {
         Ok(mask)
     }
 
-    fn parse_registry_dword(token: &str) -> Option<u32> {
-        let raw = token.trim();
-        if raw.is_empty() {
-            return None;
+    fn registry_root(path: &str) -> Result<(winreg::RegKey, &str)> {
+        use winreg::{
+            RegKey,
+            enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
+        };
+        if let Some(subkey) = path.strip_prefix("HKCU\\") {
+            Ok((RegKey::predef(HKEY_CURRENT_USER), subkey))
+        } else if let Some(subkey) = path.strip_prefix("HKLM\\") {
+            Ok((RegKey::predef(HKEY_LOCAL_MACHINE), subkey))
+        } else {
+            Err(anyhow::anyhow!("Unsupported system registry root: {path}"))
         }
+    }
 
-        if let Some(hex) = raw.strip_prefix("0x") {
-            return u32::from_str_radix(hex, 16).ok();
+    fn optional_registry_read<T>(result: std::io::Result<T>) -> Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
         }
+    }
 
-        raw.parse::<u32>().ok()
+    fn query_registry_checked<T: winreg::types::FromRegValue>(
+        path: &str,
+        name: &str,
+    ) -> Result<Option<T>> {
+        use winreg::enums::{KEY_QUERY_VALUE, KEY_WOW64_64KEY};
+        let (root, subkey) = Self::registry_root(path)?;
+        match Self::optional_registry_read(
+            root.open_subkey_with_flags(subkey, KEY_QUERY_VALUE | KEY_WOW64_64KEY),
+        )? {
+            Some(key) => Self::optional_registry_read(key.get_value(name)),
+            None => Ok(None),
+        }
     }
 
     fn query_registry_dword(key_path: &str, value_name: &str) -> Option<u32> {
-        let output = hidden_command("reg")
-            .args(["query", key_path, "/v", value_name])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        for line in output_str.lines() {
-            if !line.contains(value_name) || !line.contains("REG_DWORD") {
-                continue;
-            }
-
-            let value = line
-                .split_once("REG_DWORD")
-                .map(|(_, tail)| tail.trim())
-                .unwrap_or_default();
-            if let Some(parsed) = Self::parse_registry_dword(value) {
-                return Some(parsed);
-            }
-        }
-
-        None
-    }
-
-    fn query_registry_string(key_path: &str, value_name: &str) -> Option<String> {
-        let output = hidden_command("reg")
-            .args(["query", key_path, "/v", value_name])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        for line in output_str.lines() {
-            if !line.contains(value_name) || !line.contains("REG_SZ") {
-                continue;
-            }
-
-            let value = line
-                .split_once("REG_SZ")
-                .map(|(_, tail)| tail.trim())
-                .unwrap_or_default();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        }
-
-        None
-    }
-
-    fn set_registry_dword(key_path: &str, value_name: &str, value: u32) {
-        if let Err(e) = Self::set_registry_dword_checked(key_path, value_name, value) {
-            warn!("{}", e);
-        }
+        Self::query_registry_checked(key_path, value_name)
+            .ok()
+            .flatten()
     }
 
     fn set_registry_dword_checked(key_path: &str, value_name: &str, value: u32) -> Result<()> {
-        let value_str = value.to_string();
-        let output = hidden_command("reg")
-            .args([
-                "add",
-                key_path,
-                "/v",
-                value_name,
-                "/t",
-                "REG_DWORD",
-                "/d",
-                &value_str,
-                "/f",
-            ])
-            .output()?;
-
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow::anyhow!(
-                "Failed to set {}\\{} to {}: {}",
-                key_path,
-                value_name,
-                value,
-                stderr.trim()
-            ))
+        use winreg::enums::{KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY};
+        let (root, subkey) = Self::registry_root(key_path)?;
+        let (key, _) = root
+            .create_subkey_with_flags(subkey, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY)?;
+        key.set_value(value_name, &value)?;
+        if key.get_value::<u32, _>(value_name)? != value {
+            return Err(anyhow::anyhow!(
+                "Registry value did not match after writing {key_path}\\{value_name}"
+            ));
         }
-    }
-
-    fn set_registry_string(key_path: &str, value_name: &str, value: &str) {
-        if let Err(e) = Self::set_registry_string_checked(key_path, value_name, value) {
-            warn!("{}", e);
-        }
+        Ok(())
     }
 
     fn set_registry_string_checked(key_path: &str, value_name: &str, value: &str) -> Result<()> {
-        let output = hidden_command("reg")
-            .args([
-                "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value, "/f",
-            ])
-            .output()?;
-
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(anyhow::anyhow!(
-                "Failed to set {}\\{} to {}: {}",
-                key_path,
-                value_name,
-                value,
-                stderr.trim()
-            ))
+        use winreg::enums::{KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY};
+        let (root, subkey) = Self::registry_root(key_path)?;
+        let (key, _) = root
+            .create_subkey_with_flags(subkey, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY)?;
+        key.set_value(value_name, &value)?;
+        if key.get_value::<String, _>(value_name)? != value {
+            return Err(anyhow::anyhow!(
+                "Registry value did not match after writing {key_path}\\{value_name}"
+            ));
         }
-    }
-
-    fn restore_registry_dword(key_path: &str, value_name: &str, snapshot: Option<u32>) {
-        if let Err(e) = Self::restore_registry_dword_checked(key_path, value_name, snapshot) {
-            warn!("{}", e);
-        }
+        Ok(())
     }
 
     fn restore_registry_dword_checked(
@@ -342,70 +353,112 @@ impl SystemOptimizer {
         }
     }
 
-    fn restore_registry_string(key_path: &str, value_name: &str, snapshot: Option<String>) {
+    fn restore_registry_string_checked(
+        key_path: &str,
+        value_name: &str,
+        snapshot: Option<&str>,
+    ) -> Result<()> {
         match snapshot {
-            Some(value) => Self::set_registry_string(key_path, value_name, &value),
-            None => {
-                let _ = hidden_command("reg")
-                    .args(["delete", key_path, "/v", value_name, "/f"])
-                    .output();
-            }
+            Some(value) => Self::set_registry_string_checked(key_path, value_name, value),
+            None => Self::delete_registry_value_checked(key_path, value_name),
         }
     }
 
     fn delete_registry_value_checked(key_path: &str, value_name: &str) -> Result<()> {
-        let output = hidden_command("reg")
-            .args(["delete", key_path, "/v", value_name, "/f"])
-            .output()?;
-
-        if output.status.success() {
+        use winreg::enums::{KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY};
+        let (root, subkey) = Self::registry_root(key_path)?;
+        let Some(key) = Self::optional_registry_read(
+            root.open_subkey_with_flags(subkey, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY),
+        )?
+        else {
             return Ok(());
+        };
+        match key.delete_value(value_name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
         }
-
-        let probe = hidden_command("reg")
-            .args(["query", key_path, "/v", value_name])
-            .output()?;
-        if !probe.status.success() {
-            return Ok(());
+        if Self::optional_registry_read(key.get_raw_value(value_name))?.is_some() {
+            return Err(anyhow::anyhow!(
+                "Registry value still exists after removing {key_path}\\{value_name}"
+            ));
         }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(anyhow::anyhow!(
-            "Failed to delete {}\\{}: {}",
-            key_path,
-            value_name,
-            stderr.trim()
-        ))
+        Ok(())
     }
 
-    fn capture_dword_snapshot(slot: &mut Option<Option<u32>>, key_path: &str, value_name: &str) {
+    fn capture_dword_snapshot(
+        slot: &mut Option<Option<u32>>,
+        key_path: &str,
+        value_name: &str,
+    ) -> Result<()> {
         if slot.is_none() {
-            *slot = Some(Self::query_registry_dword(key_path, value_name));
+            *slot = Some(Self::query_registry_checked(key_path, value_name)?);
         }
+        Ok(())
     }
 
-    fn load_persistent_snapshot() -> Option<PersistentSystemSnapshot> {
-        let path = system_snapshot_path()?;
+    fn read_persistent_snapshot(path: &Path) -> Result<Option<PersistentSystemSnapshot>> {
         let content = match crate::utils::read_text_file_bounded(
-            &path,
+            path,
             256 * 1024,
             "System optimizer recovery",
         ) {
             Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(e) => {
-                warn!("Failed to read system optimizer snapshot: {}", e);
-                return None;
-            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
         };
+        serde_json::from_str(&content).map(Some).map_err(Into::into)
+    }
 
-        match serde_json::from_str(&content) {
-            Ok(snapshot) => Some(snapshot),
-            Err(e) => {
-                warn!("Failed to parse system optimizer snapshot: {}", e);
-                None
+    fn ensure_snapshot_loaded(&mut self) -> Result<()> {
+        if self.snapshot_loaded {
+            return Ok(());
+        }
+        let path = self
+            .snapshot_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No system recovery folder is available"))?;
+        let legacy = path.with_file_name(LEGACY_SYSTEM_SNAPSHOT_FILE);
+        let current = Self::read_persistent_snapshot(path)?;
+        let migrating = current.is_none();
+        let saved = if migrating {
+            Self::read_persistent_snapshot(&legacy)?
+        } else {
+            current
+        };
+        if let Some(saved) = saved {
+            self.global_timer_snapshot = saved
+                .global_timer_snapshot
+                .map(RegistryDwordSnapshot::into_snapshot);
+            self.game_bar_snapshot = saved
+                .game_bar_snapshot
+                .map(RegistryDwordSnapshot::into_snapshot);
+            self.fullscreen_optimization_snapshot = saved
+                .fullscreen_optimization_snapshot
+                .map(RegistryDwordSnapshot::into_snapshot);
+            self.game_mode_allow_auto_snapshot = saved
+                .game_mode_allow_auto_snapshot
+                .map(RegistryDwordSnapshot::into_snapshot);
+            self.game_mode_enabled_snapshot = saved
+                .game_mode_enabled_snapshot
+                .map(RegistryDwordSnapshot::into_snapshot);
+            self.mmcss_snapshot = saved.mmcss_snapshot.clone();
+            self.original_power_plan_guid = saved.original_power_plan_guid.clone().map(Some);
+            self.swifttunnel_power_plan_imported = saved.swifttunnel_power_plan_imported;
+            self.last_persisted_snapshot = if migrating { None } else { Some(saved) };
+            if migrating {
+                // Write the expanded record before removing the old timer-only
+                // file, which an older app would otherwise clear unconditionally.
+                self.persist_snapshot()?;
+                if let Err(error) = fs::remove_file(&legacy) {
+                    warn!(
+                        "New system recovery record is saved, but the legacy record could not be removed: {error}"
+                    );
+                }
             }
         }
+        self.snapshot_loaded = true;
+        Ok(())
     }
 
     fn persistent_snapshot(&self) -> PersistentSystemSnapshot {
@@ -413,36 +466,72 @@ impl SystemOptimizer {
             global_timer_snapshot: self
                 .global_timer_snapshot
                 .map(RegistryDwordSnapshot::from_snapshot),
+            game_bar_snapshot: self
+                .game_bar_snapshot
+                .map(RegistryDwordSnapshot::from_snapshot),
+            fullscreen_optimization_snapshot: self
+                .fullscreen_optimization_snapshot
+                .map(RegistryDwordSnapshot::from_snapshot),
+            game_mode_allow_auto_snapshot: self
+                .game_mode_allow_auto_snapshot
+                .map(RegistryDwordSnapshot::from_snapshot),
+            game_mode_enabled_snapshot: self
+                .game_mode_enabled_snapshot
+                .map(RegistryDwordSnapshot::from_snapshot),
+            mmcss_snapshot: self.mmcss_snapshot.clone(),
+            original_power_plan_guid: self.original_power_plan_guid.clone().flatten(),
+            swifttunnel_power_plan_imported: self.swifttunnel_power_plan_imported,
         }
     }
 
-    fn persist_snapshot(&self) {
+    fn write_persistent_snapshot(path: &Path, snapshot: &PersistentSystemSnapshot) -> Result<()> {
+        use std::io::Write;
+        fs::create_dir_all(
+            path.parent()
+                .ok_or_else(|| anyhow::anyhow!("Invalid system recovery path"))?,
+        )?;
+        let bytes = serde_json::to_vec_pretty(snapshot)?;
+        let temp = path.with_extension(format!(
+            "{}.{:032x}.tmp",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp)?;
+        let result = (|| {
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temp, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result.map_err(Into::into)
+    }
+
+    fn persist_snapshot(&mut self) -> Result<()> {
         let snapshot = self.persistent_snapshot();
-        if snapshot.global_timer_snapshot.is_none() {
-            Self::clear_snapshot();
-            return;
+        if self.last_persisted_snapshot.as_ref() == Some(&snapshot) {
+            return Ok(());
         }
-
-        let Some(path) = system_snapshot_path() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        match serde_json::to_string_pretty(&snapshot) {
-            Ok(json) => {
-                if let Err(e) = fs::write(&path, json) {
-                    warn!("Failed to persist system optimizer snapshot: {}", e);
-                }
+        let path = self
+            .snapshot_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No system recovery folder is available"))?;
+        if snapshot == PersistentSystemSnapshot::default() {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(e) => warn!("Failed to serialize system optimizer snapshot: {}", e),
+        } else {
+            Self::write_persistent_snapshot(path, &snapshot)?;
         }
-    }
-
-    fn clear_snapshot() {
-        if let Some(path) = system_snapshot_path() {
-            let _ = fs::remove_file(path);
-        }
+        self.last_persisted_snapshot = Some(snapshot);
+        Ok(())
     }
 
     fn parse_guid_from_output(output: &str) -> Option<String> {
@@ -468,10 +557,12 @@ impl SystemOptimizer {
     }
 
     fn active_power_plan_guid() -> Option<String> {
-        let output = hidden_command("powercfg")
-            .args(["/GETACTIVESCHEME"])
-            .output()
-            .ok()?;
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "powercfg",
+            &["/GETACTIVESCHEME"],
+            std::time::Duration::from_secs(15),
+        )
+        .ok()?;
 
         if !output.status.success() {
             return None;
@@ -482,7 +573,12 @@ impl SystemOptimizer {
     }
 
     fn is_power_plan_installed(guid: &str) -> Option<bool> {
-        let output = hidden_command("powercfg").args(["/list"]).output().ok()?;
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "powercfg",
+            &["/list"],
+            std::time::Duration::from_secs(15),
+        )
+        .ok()?;
 
         if !output.status.success() {
             return None;
@@ -493,9 +589,11 @@ impl SystemOptimizer {
     }
 
     fn set_active_power_plan_guid(guid: &str) -> bool {
-        let output = hidden_command("powercfg")
-            .args(["/setactive", guid])
-            .output();
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "powercfg",
+            &["/setactive", guid],
+            std::time::Duration::from_secs(15),
+        );
 
         match output {
             Ok(result) if result.status.success() => true,
@@ -518,7 +616,11 @@ impl SystemOptimizer {
     }
 
     fn delete_power_plan_guid(guid: &str) -> bool {
-        let output = hidden_command("powercfg").args(["/delete", guid]).output();
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "powercfg",
+            &["/delete", guid],
+            std::time::Duration::from_secs(15),
+        );
 
         match output {
             Ok(result) if result.status.success() => true,
@@ -559,6 +661,9 @@ impl SystemOptimizer {
             SwiftTunnelPowerPlanCleanup::DeleteInactive => {
                 if Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID) {
                     self.swifttunnel_power_plan_imported = false;
+                    if self.snapshot_loaded {
+                        self.persist_snapshot()?;
+                    }
                     Ok(())
                 } else {
                     Err(anyhow::anyhow!(
@@ -575,6 +680,9 @@ impl SystemOptimizer {
 
                 if Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID) {
                     self.swifttunnel_power_plan_imported = false;
+                    if self.snapshot_loaded {
+                        self.persist_snapshot()?;
+                    }
                     Ok(())
                 } else {
                     Err(anyhow::anyhow!(
@@ -588,35 +696,48 @@ impl SystemOptimizer {
         }
     }
 
-    fn write_swifttunnel_power_plan_resource(path: &Path) -> Result<()> {
-        fs::write(path, SWIFTTUNNEL_POWER_PLAN_BYTES)
-            .map_err(|e| anyhow::anyhow!("Failed to stage SwiftTunnel power plan: {}", e))
-    }
-
-    fn staged_swifttunnel_power_plan_path() -> PathBuf {
-        std::env::temp_dir().join("swifttunnel_power_plan.pow")
+    fn stage_swifttunnel_power_plan(dir: &Path) -> Result<StagedPowerPlan> {
+        use std::io::Write;
+        let path = dir.join(format!(
+            "swifttunnel_power_plan-{}-{:032x}.pow",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let staged = StagedPowerPlan(path);
+        file.write_all(SWIFTTUNNEL_POWER_PLAN_BYTES)?;
+        file.sync_all()?;
+        Ok(staged)
     }
 
     fn import_swifttunnel_power_plan(&mut self) -> Result<()> {
-        let staged_path = Self::staged_swifttunnel_power_plan_path();
-        Self::write_swifttunnel_power_plan_resource(&staged_path)?;
+        let staged = Self::stage_swifttunnel_power_plan(&std::env::temp_dir())?;
+        let staged_path = &staged.0;
 
         let path_arg = staged_path.to_string_lossy().to_string();
-        let output = hidden_command("powercfg")
-            .args(["/import", &path_arg, SWIFTTUNNEL_POWER_PLAN_GUID])
-            .output();
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "powercfg",
+            &["/import", &path_arg, SWIFTTUNNEL_POWER_PLAN_GUID],
+            std::time::Duration::from_secs(15),
+        );
 
         let import_result = match output {
             Ok(result) if result.status.success() => {
-                let _ = hidden_command("powercfg")
-                    .args([
+                let _ = crate::utils::run_hidden_command_output_with_timeout(
+                    "powercfg",
+                    &[
                         "/changename",
                         SWIFTTUNNEL_POWER_PLAN_GUID,
                         SWIFTTUNNEL_POWER_PLAN_NAME,
                         SWIFTTUNNEL_POWER_PLAN_DESCRIPTION,
-                    ])
-                    .output();
+                    ],
+                    std::time::Duration::from_secs(15),
+                );
                 self.swifttunnel_power_plan_imported = true;
+                self.persist_snapshot()?;
                 info!("SwiftTunnel power plan imported successfully");
                 Ok(())
             }
@@ -633,6 +754,7 @@ impl SystemOptimizer {
                     .contains("already exists")
                 {
                     self.swifttunnel_power_plan_imported = true;
+                    self.persist_snapshot()?;
                     info!("SwiftTunnel power plan already present; using existing scheme");
                     Ok(())
                 } else {
@@ -647,14 +769,6 @@ impl SystemOptimizer {
                 e
             )),
         };
-
-        if let Err(e) = fs::remove_file(&staged_path) {
-            warn!(
-                "Failed to remove staged SwiftTunnel power plan file {}: {}",
-                staged_path.display(),
-                e
-            );
-        }
 
         import_result
     }
@@ -729,85 +843,104 @@ impl SystemOptimizer {
         warnings.push(format!("{}: {}", label, error));
     }
 
-    fn capture_system_state_snapshots(&mut self, config: &SystemOptimizationConfig) {
+    fn capture_system_state_snapshots(&mut self, config: &SystemOptimizationConfig) -> Result<()> {
+        self.ensure_snapshot_loaded()?;
         if config.disable_game_bar {
-            Self::capture_dword_snapshot(&mut self.game_bar_snapshot, GAME_BAR_KEY, GAME_BAR_VALUE);
+            Self::capture_dword_snapshot(
+                &mut self.game_bar_snapshot,
+                GAME_BAR_KEY,
+                GAME_BAR_VALUE,
+            )?;
         }
-
         if config.disable_fullscreen_optimization {
             Self::capture_dword_snapshot(
                 &mut self.fullscreen_optimization_snapshot,
                 FULLSCREEN_KEY,
                 FULLSCREEN_VALUE,
-            );
+            )?;
         }
-
         if config.game_mode_enabled {
             Self::capture_dword_snapshot(
                 &mut self.game_mode_allow_auto_snapshot,
                 GAME_MODE_KEY,
                 GAME_MODE_ALLOW_AUTO_VALUE,
-            );
+            )?;
             Self::capture_dword_snapshot(
                 &mut self.game_mode_enabled_snapshot,
                 GAME_MODE_KEY,
                 GAME_MODE_ENABLED_VALUE,
-            );
+            )?;
         }
-
         if config.mmcss_gaming_profile && self.mmcss_snapshot.is_none() {
             self.mmcss_snapshot = Some(MmcssSnapshot {
-                scheduling_category: Self::query_registry_string(
+                scheduling_category: Self::query_registry_checked(
                     MMCSS_GAMES_KEY,
                     "Scheduling Category",
-                ),
-                sfio_priority: Self::query_registry_string(MMCSS_GAMES_KEY, "SFIO Priority"),
-                background_only: Self::query_registry_string(MMCSS_GAMES_KEY, "Background Only"),
-                priority: Self::query_registry_dword(MMCSS_GAMES_KEY, "Priority"),
-                clock_rate: Self::query_registry_dword(MMCSS_GAMES_KEY, "Clock Rate"),
-                system_responsiveness: Self::query_registry_dword(
+                )?,
+                sfio_priority: Self::query_registry_checked(MMCSS_GAMES_KEY, "SFIO Priority")?,
+                background_only: Self::query_registry_checked(MMCSS_GAMES_KEY, "Background Only")?,
+                priority: Self::query_registry_checked(MMCSS_GAMES_KEY, "Priority")?,
+                clock_rate: Self::query_registry_checked(MMCSS_GAMES_KEY, "Clock Rate")?,
+                system_responsiveness: Self::query_registry_checked(
                     MMCSS_SYSTEM_PROFILE_KEY,
                     "SystemResponsiveness",
-                ),
+                )?,
             });
         }
+        // Even Balanced changes the active plan. Capture it before any switch.
+        if self.original_power_plan_guid.is_none() {
+            self.original_power_plan_guid =
+                Some(Some(Self::active_power_plan_guid().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Could not read the current power plan; system changes were skipped"
+                    )
+                })?));
+        }
+        self.persist_snapshot()
+    }
 
-        if !matches!(config.power_plan, PowerPlan::Balanced)
-            && self.original_power_plan_guid.is_none()
-        {
-            self.original_power_plan_guid = Some(Self::active_power_plan_guid());
+    fn restore_mmcss_snapshot(snapshot: &MmcssSnapshot) -> Result<()> {
+        let mut failures = Vec::new();
+        for (name, value) in [
+            (
+                "Scheduling Category",
+                snapshot.scheduling_category.as_deref(),
+            ),
+            ("SFIO Priority", snapshot.sfio_priority.as_deref()),
+            ("Background Only", snapshot.background_only.as_deref()),
+        ] {
+            if let Err(error) = Self::restore_registry_string_checked(MMCSS_GAMES_KEY, name, value)
+            {
+                failures.push(error.to_string());
+            }
+        }
+        for (path, name, value) in [
+            (MMCSS_GAMES_KEY, "Priority", snapshot.priority),
+            (MMCSS_GAMES_KEY, "Clock Rate", snapshot.clock_rate),
+            (
+                MMCSS_SYSTEM_PROFILE_KEY,
+                "SystemResponsiveness",
+                snapshot.system_responsiveness,
+            ),
+        ] {
+            if let Err(error) = Self::restore_registry_dword_checked(path, name, value) {
+                failures.push(error.to_string());
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "MMCSS restore failed: {}",
+                failures.join("; ")
+            ))
         }
     }
 
-    fn restore_mmcss_snapshot(snapshot: MmcssSnapshot) {
-        Self::restore_registry_string(
-            MMCSS_GAMES_KEY,
-            "Scheduling Category",
-            snapshot.scheduling_category,
-        );
-        Self::restore_registry_string(MMCSS_GAMES_KEY, "SFIO Priority", snapshot.sfio_priority);
-        Self::restore_registry_string(MMCSS_GAMES_KEY, "Background Only", snapshot.background_only);
-        Self::restore_registry_dword(MMCSS_GAMES_KEY, "Priority", snapshot.priority);
-        Self::restore_registry_dword(MMCSS_GAMES_KEY, "Clock Rate", snapshot.clock_rate);
-        Self::restore_registry_dword(
-            MMCSS_SYSTEM_PROFILE_KEY,
-            "SystemResponsiveness",
-            snapshot.system_responsiveness,
-        );
-    }
-
-    /// Apply all system optimizations.
-    pub fn apply_optimizations(
-        &mut self,
-        config: &SystemOptimizationConfig,
-        process_id: u32,
-    ) -> Result<()> {
-        let outcome = self.apply_optimizations_checked(config, process_id);
-        if !outcome.warnings.is_empty() {
-            warn!(
-                "System optimizations applied with warnings: {}",
-                outcome.warnings.join("; ")
-            );
+    fn restore_dword_slot(slot: &mut Option<Option<u32>>, path: &str, name: &str) -> Result<()> {
+        if let Some(value) = *slot {
+            Self::restore_registry_dword_checked(path, name, value)?;
+            *slot = None;
         }
         Ok(())
     }
@@ -832,7 +965,22 @@ impl SystemOptimizer {
         let mut warnings = Vec::new();
         let fallback_power_plan = Self::fallback_power_plan_config(config);
 
-        self.capture_system_state_snapshots(config);
+        if let Err(error) = self.capture_system_state_snapshots(config) {
+            applied_config.set_high_priority = false;
+            applied_config.set_cpu_affinity = false;
+            applied_config.disable_game_bar = false;
+            applied_config.disable_fullscreen_optimization = false;
+            applied_config.timer_resolution_1ms = false;
+            applied_config.mmcss_gaming_profile = false;
+            applied_config.game_mode_enabled = false;
+            applied_config.power_plan = fallback_power_plan;
+            return SystemApplyOutcome {
+                applied_config,
+                warnings: vec![format!(
+                    "System changes skipped because recovery data could not be prepared: {error}"
+                )],
+            };
+        }
 
         if config.set_high_priority {
             if process_id == 0 {
@@ -965,221 +1113,89 @@ impl SystemOptimizer {
         }
     }
 
-    /// Set Roblox process to high priority
-    fn set_process_priority(&mut self, process_id: u32) -> Result<()> {
-        info!("Setting process priority to high for PID: {}", process_id);
-
-        unsafe {
-            let handle = OpenProcess(
-                PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
-                false,
-                process_id,
-            )?;
-
-            if handle.is_invalid() {
-                return Err(anyhow::anyhow!("Failed to open process"));
-            }
-
-            // Store original priority for restoration
-            let current_priority = GetPriorityClass(handle);
-            if current_priority != 0 {
-                self.original_priority = Some(current_priority);
-            }
-
-            // Set to high priority (but not realtime to avoid system issues)
-            let result = SetPriorityClass(handle, HIGH_PRIORITY_CLASS);
-
-            let _ = CloseHandle(handle);
-
-            if result.is_ok() {
-                info!("Successfully set process priority to HIGH");
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("Failed to set process priority"))
-            }
+    /// Preserve one original per process lifetime, including PID reuse.
+    fn set_process_priority(&mut self, pid: u32) -> Result<()> {
+        let process = BoostProcess::open(pid)?;
+        let identity = process.identity(pid)?;
+        if self.priority_identity != Some(identity) {
+            self.original_priority = None;
+            self.priority_identity = Some(identity);
         }
+        let current = unsafe { GetPriorityClass(process.0) };
+        if current == 0 {
+            return Err(anyhow::anyhow!(
+                "Could not read the process's original priority; priority was left unchanged"
+            ));
+        }
+        if self.original_priority.is_none() {
+            self.original_priority = Some(current);
+        }
+        unsafe {
+            SetPriorityClass(process.0, HIGH_PRIORITY_CLASS)?;
+        }
+        Ok(())
     }
 
-    /// Set CPU affinity for Roblox process. Captures the existing affinity
-    /// mask on first apply so `restore` can undo it cleanly.
-    fn set_cpu_affinity(&mut self, process_id: u32, cores: &[usize]) -> Result<()> {
-        let affinity_mask = Self::validate_cpu_cores(cores)?;
-        info!(
-            "Setting CPU affinity for PID: {} to cores: {:?} (mask 0x{:X})",
-            process_id, cores, affinity_mask
-        );
-
-        unsafe {
-            let handle = OpenProcess(
-                PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
-                false,
-                process_id,
-            )?;
-
-            if handle.is_invalid() {
-                return Err(anyhow::anyhow!("Failed to open process"));
-            }
-
-            // Capture pre-apply mask once per boost cycle so restore returns
-            // the process to its original state, not to "all cores".
-            if self.original_affinity.is_none() {
-                let mut process_mask: usize = 0;
-                let mut system_mask: usize = 0;
-                if GetProcessAffinityMask(handle, &mut process_mask, &mut system_mask).is_ok()
-                    && process_mask != 0
-                {
-                    self.original_affinity = Some(process_mask);
-                } else if system_mask != 0 {
-                    // Fall back to the system-wide mask. Windows rejects any
-                    // SetProcessAffinityMask whose bits extend past the
-                    // system mask, so we must never store usize::MAX — that
-                    // restore call would fail and leave Roblox pinned to
-                    // SwiftTunnel's chosen cores. If even system_mask is
-                    // unreadable we skip capturing entirely (per Greptile).
-                    self.original_affinity = Some(system_mask);
-                    warn!(
-                        "Could not read original affinity for PID {}; restore will use system mask 0x{:X}",
-                        process_id, system_mask
-                    );
-                } else {
-                    warn!(
-                        "Could not read original or system affinity mask for PID {}; affinity restore is skipped",
-                        process_id
-                    );
-                }
-            }
-
-            let result = SetProcessAffinityMask(handle, affinity_mask);
-            let _ = CloseHandle(handle);
-
-            if result.is_ok() {
-                info!("Successfully set CPU affinity");
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("Failed to set CPU affinity"))
+    fn restore_process_priority(&mut self) -> Result<()> {
+        if let Some((identity, value)) = self.priority_identity.zip(self.original_priority)
+            && let Some(process) = BoostProcess::same_live_process(identity)?
+        {
+            unsafe {
+                SetPriorityClass(process.0, PROCESS_CREATION_FLAGS(value))?;
             }
         }
+        self.original_priority = None;
+        self.priority_identity = None;
+        Ok(())
     }
 
-    /// Restore CPU affinity to the snapshot taken on first apply.
-    /// Best-effort: a vanished PID is logged, not an error.
-    fn restore_cpu_affinity(&mut self, process_id: u32) {
-        let Some(mask) = self.original_affinity.take() else {
-            return;
-        };
-
-        if process_id == 0 {
-            info!("Skipping CPU affinity restore: no active game process");
-            return;
+    fn set_cpu_affinity(&mut self, pid: u32, cores: &[usize]) -> Result<()> {
+        let mask = Self::validate_cpu_cores(cores)?;
+        let process = BoostProcess::open(pid)?;
+        let identity = process.identity(pid)?;
+        if self.affinity_identity != Some(identity) {
+            self.original_affinity = None;
+            self.affinity_identity = Some(identity);
         }
-
-        unsafe {
-            let handle = match OpenProcess(
-                PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
-                false,
-                process_id,
-            ) {
-                Ok(h) if !h.is_invalid() => h,
-                Ok(_) => {
-                    info!("CPU affinity restore: PID {} has no handle", process_id);
-                    return;
-                }
-                Err(e) => {
-                    info!(
-                        "CPU affinity restore: PID {} unreachable (likely exited): {}",
-                        process_id, e
-                    );
-                    return;
-                }
-            };
-
-            if let Err(e) = SetProcessAffinityMask(handle, mask) {
-                warn!(
-                    "Failed to restore CPU affinity for PID {} to mask 0x{:X}: {}",
-                    process_id, mask, e
-                );
-            } else {
-                info!(
-                    "Restored CPU affinity for PID {} to mask 0x{:X}",
-                    process_id, mask
-                );
+        if self.original_affinity.is_none() {
+            let (mut original, mut system) = (0, 0);
+            unsafe {
+                GetProcessAffinityMask(process.0, &mut original, &mut system)?;
             }
-            let _ = CloseHandle(handle);
+            if original == 0 {
+                return Err(anyhow::anyhow!(
+                    "Could not read the original CPU affinity; affinity was left unchanged"
+                ));
+            }
+            self.original_affinity = Some(original);
         }
+        unsafe {
+            SetProcessAffinityMask(process.0, mask)?;
+        }
+        Ok(())
+    }
+
+    fn restore_cpu_affinity(&mut self, _current_pid: u32) -> Result<()> {
+        if let Some((identity, value)) = self.affinity_identity.zip(self.original_affinity)
+            && let Some(process) = BoostProcess::same_live_process(identity)?
+        {
+            unsafe {
+                SetProcessAffinityMask(process.0, value)?;
+            }
+        }
+        self.original_affinity = None;
+        self.affinity_identity = None;
+        Ok(())
     }
 
     /// Disable Windows Game Bar
     fn disable_game_bar(&self) -> Result<()> {
-        info!("Disabling Windows Game Bar");
-
-        let output = hidden_command("reg")
-            .args([
-                "add",
-                GAME_BAR_KEY,
-                "/v",
-                GAME_BAR_VALUE,
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "0",
-                "/f",
-            ])
-            .output();
-
-        match output {
-            Ok(result) if result.status.success() => {
-                info!("Game Bar disabled successfully");
-                Ok(())
-            }
-            Ok(result) => {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                Err(anyhow::anyhow!(
-                    "Game Bar disable failed: {}",
-                    stderr.trim()
-                ))
-            }
-            Err(e) => Err(anyhow::anyhow!(
-                "Game Bar disable: reg invoke failed: {}",
-                e
-            )),
-        }
+        Self::set_registry_dword_checked(GAME_BAR_KEY, GAME_BAR_VALUE, 0)
     }
 
     /// Disable fullscreen optimizations for Roblox
     fn disable_fullscreen_optimizations(&self) -> Result<()> {
-        info!("Disabling fullscreen optimizations");
-
-        let output = hidden_command("reg")
-            .args([
-                "add",
-                FULLSCREEN_KEY,
-                "/v",
-                FULLSCREEN_VALUE,
-                "/t",
-                "REG_DWORD",
-                "/d",
-                "2",
-                "/f",
-            ])
-            .output();
-
-        match output {
-            Ok(result) if result.status.success() => {
-                info!("Fullscreen optimizations disabled");
-                Ok(())
-            }
-            Ok(result) => {
-                let stderr = String::from_utf8_lossy(&result.stderr);
-                Err(anyhow::anyhow!(
-                    "Fullscreen optimization disable failed: {}",
-                    stderr.trim()
-                ))
-            }
-            Err(e) => Err(anyhow::anyhow!(
-                "Fullscreen optimization disable: reg invoke failed: {}",
-                e
-            )),
-        }
+        Self::set_registry_dword_checked(FULLSCREEN_KEY, FULLSCREEN_VALUE, 2)
     }
 
     /// Set Windows power plan. Returns Err on import or activation failure
@@ -1199,9 +1215,11 @@ impl SystemOptimizer {
             ));
         }
 
-        let output = hidden_command("powercfg")
-            .args(["/setactive", guid])
-            .output();
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "powercfg",
+            &["/setactive", guid],
+            std::time::Duration::from_secs(15),
+        );
 
         match output {
             Ok(result) if result.status.success() => {
@@ -1306,12 +1324,13 @@ impl SystemOptimizer {
     }
 
     fn enable_global_timer_resolution_override(&mut self) -> Result<()> {
+        self.ensure_snapshot_loaded()?;
         Self::capture_dword_snapshot(
             &mut self.global_timer_snapshot,
             GLOBAL_TIMER_RESOLUTION_KEY,
             GLOBAL_TIMER_RESOLUTION_VALUE,
-        );
-        self.persist_snapshot();
+        )?;
+        self.persist_snapshot()?;
 
         // Skip the write if it's already 1 — avoids an unnecessary reg call
         // and prevents spurious "needs reboot" telemetry on repeat applies.
@@ -1354,28 +1373,25 @@ impl SystemOptimizer {
                 snapshot,
             ) {
                 self.global_timer_snapshot = Some(snapshot);
-                self.persist_snapshot();
+                let _ = self.persist_snapshot();
                 return Err(e);
             }
-            self.persist_snapshot();
+            self.persist_snapshot()?;
         }
         Ok(())
     }
 
     /// Recover persistent system optimizer changes after a forced app exit.
     pub fn recover_from_snapshot(&mut self) {
-        let Some(snapshot) = Self::load_persistent_snapshot() else {
+        if let Err(error) = self.ensure_snapshot_loaded() {
+            warn!("System recovery data could not be read; original file kept: {error}");
             return;
-        };
-
-        if let Some(snapshot) = snapshot.global_timer_snapshot {
-            self.global_timer_snapshot = Some(snapshot.into_snapshot());
-            if let Err(e) = self.restore_global_timer_resolution_override() {
-                warn!(
-                    "Failed to recover GlobalTimerResolutionRequests from snapshot: {}",
-                    e
-                );
-            }
+        }
+        if self.persistent_snapshot() == PersistentSystemSnapshot::default() {
+            return;
+        }
+        if let Err(error) = self.restore(0) {
+            warn!("System recovery has pending changes: {error}");
         }
     }
 
@@ -1436,24 +1452,6 @@ impl SystemOptimizer {
         Ok(())
     }
 
-    /// Restore MMCSS profile to Windows defaults
-    pub fn restore_mmcss_profile(&mut self) -> Result<()> {
-        if let Some(snapshot) = self.mmcss_snapshot.take() {
-            info!("Restoring MMCSS profile from snapshot");
-            Self::restore_mmcss_snapshot(snapshot);
-            return Ok(());
-        }
-
-        info!("Restoring MMCSS profile to defaults");
-        Self::set_registry_string(MMCSS_GAMES_KEY, "Scheduling Category", "Medium");
-        Self::set_registry_string(MMCSS_GAMES_KEY, "SFIO Priority", "Normal");
-        Self::set_registry_string(MMCSS_GAMES_KEY, "Background Only", "True");
-        Self::set_registry_dword(MMCSS_GAMES_KEY, "Priority", 2);
-        Self::set_registry_dword(MMCSS_GAMES_KEY, "Clock Rate", 10000);
-        Self::set_registry_dword(MMCSS_SYSTEM_PROFILE_KEY, "SystemResponsiveness", 20);
-        Ok(())
-    }
-
     /// Enable Windows Game Mode for resource prioritization
     pub fn enable_game_mode(&self) -> Result<()> {
         info!("Enabling Windows Game Mode");
@@ -1473,25 +1471,6 @@ impl SystemOptimizer {
         Ok(())
     }
 
-    /// Disable Windows Game Mode
-    pub fn disable_game_mode(&self) -> Result<()> {
-        info!("Disabling Windows Game Mode");
-
-        let game_mode_keys = [
-            (GAME_MODE_KEY, GAME_MODE_ALLOW_AUTO_VALUE, "0"),
-            (GAME_MODE_KEY, GAME_MODE_ENABLED_VALUE, "0"),
-        ];
-
-        for (key_path, value_name, value_data) in game_mode_keys.iter() {
-            if let Ok(value) = value_data.parse::<u32>() {
-                Self::set_registry_dword_checked(key_path, value_name, value)?;
-            }
-        }
-
-        info!("Windows Game Mode disabled");
-        Ok(())
-    }
-
     // ===== SYSTEM RESTORE POINT =====
 
     /// Create a Windows System Restore Point before applying optimizations
@@ -1500,12 +1479,14 @@ impl SystemOptimizer {
         info!("Creating System Restore Point: {}", description);
 
         // Enable System Restore on C: drive first (in case it's disabled)
-        let enable_output = hidden_command("powershell")
-            .args([
+        let enable_output = crate::utils::run_hidden_command_output_with_timeout(
+            "powershell",
+            &[
                 "-Command",
                 "Enable-ComputerRestore -Drive 'C:\\' -ErrorAction SilentlyContinue",
-            ])
-            .output();
+            ],
+            std::time::Duration::from_secs(30),
+        );
 
         if let Err(e) = enable_output {
             warn!("Failed to enable System Restore: {}", e);
@@ -1579,6 +1560,7 @@ impl SystemOptimizer {
     /// Restore original system settings
     pub fn restore(&mut self, process_id: u32) -> Result<()> {
         info!("Restoring original system settings");
+        self.ensure_snapshot_loaded()?;
         let mut restore_errors = Vec::new();
 
         // Restore timer resolution if active
@@ -1593,48 +1575,57 @@ impl SystemOptimizer {
             restore_errors.push(format!("global timer override: {}", e));
         }
 
-        if let Some(priority) = self.original_priority.take() {
-            unsafe {
-                if let Ok(handle) = OpenProcess(PROCESS_SET_INFORMATION, false, process_id)
-                    && !handle.is_invalid()
-                {
-                    let _ = SetPriorityClass(handle, PROCESS_CREATION_FLAGS(priority));
-                    let _ = CloseHandle(handle);
-                }
+        if let Err(error) = self.restore_process_priority() {
+            restore_errors.push(format!("Process priority: {error}"));
+        }
+        if let Err(error) = self.restore_cpu_affinity(process_id) {
+            restore_errors.push(format!("CPU affinity: {error}"));
+        }
+
+        if let Some(snapshot) = self.mmcss_snapshot.clone() {
+            match Self::restore_mmcss_snapshot(&snapshot) {
+                Ok(()) => self.mmcss_snapshot = None,
+                Err(error) => restore_errors.push(error.to_string()),
+            }
+        }
+        for result in [
+            Self::restore_dword_slot(
+                &mut self.game_mode_enabled_snapshot,
+                GAME_MODE_KEY,
+                GAME_MODE_ENABLED_VALUE,
+            ),
+            Self::restore_dword_slot(
+                &mut self.game_mode_allow_auto_snapshot,
+                GAME_MODE_KEY,
+                GAME_MODE_ALLOW_AUTO_VALUE,
+            ),
+            Self::restore_dword_slot(
+                &mut self.fullscreen_optimization_snapshot,
+                FULLSCREEN_KEY,
+                FULLSCREEN_VALUE,
+            ),
+            Self::restore_dword_slot(&mut self.game_bar_snapshot, GAME_BAR_KEY, GAME_BAR_VALUE),
+        ] {
+            if let Err(error) = result {
+                restore_errors.push(error.to_string());
             }
         }
 
-        // Affinity is restored independently of priority because the boost can
-        // be enabled with affinity-only or priority-only configs.
-        self.restore_cpu_affinity(process_id);
-
-        if let Some(snapshot) = self.mmcss_snapshot.take() {
-            Self::restore_mmcss_snapshot(snapshot);
-        }
-
-        if let Some(snapshot) = self.game_mode_enabled_snapshot.take() {
-            Self::restore_registry_dword(GAME_MODE_KEY, GAME_MODE_ENABLED_VALUE, snapshot);
-        }
-
-        if let Some(snapshot) = self.game_mode_allow_auto_snapshot.take() {
-            Self::restore_registry_dword(GAME_MODE_KEY, GAME_MODE_ALLOW_AUTO_VALUE, snapshot);
-        }
-
-        if let Some(snapshot) = self.fullscreen_optimization_snapshot.take() {
-            Self::restore_registry_dword(FULLSCREEN_KEY, FULLSCREEN_VALUE, snapshot);
-        }
-
-        if let Some(snapshot) = self.game_bar_snapshot.take() {
-            Self::restore_registry_dword(GAME_BAR_KEY, GAME_BAR_VALUE, snapshot);
-        }
-
         let mut original_power_plan_restored = false;
-        if let Some(snapshot) = self.original_power_plan_guid.take()
-            && let Some(guid) = snapshot
-        {
+        if let Some(Some(guid)) = self.original_power_plan_guid.clone() {
             original_power_plan_restored = Self::set_active_power_plan_guid(&guid);
+            if original_power_plan_restored {
+                self.original_power_plan_guid = None;
+            } else {
+                restore_errors.push(format!("Could not restore the original power plan {guid}"));
+            }
         }
 
+        if self.swifttunnel_power_plan_imported
+            && Self::is_power_plan_installed(SWIFTTUNNEL_POWER_PLAN_GUID) == Some(false)
+        {
+            self.swifttunnel_power_plan_imported = false;
+        }
         if self.swifttunnel_power_plan_imported {
             let balanced_fallback_restored = if original_power_plan_restored {
                 false
@@ -1649,16 +1640,25 @@ impl SystemOptimizer {
                 original_power_plan_restored,
                 balanced_fallback_restored,
             ) {
-                if Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID) {
+                if Self::is_power_plan_installed(SWIFTTUNNEL_POWER_PLAN_GUID) == Some(false)
+                    || Self::delete_power_plan_guid(SWIFTTUNNEL_POWER_PLAN_GUID)
+                {
                     self.swifttunnel_power_plan_imported = false;
+                } else {
+                    restore_errors
+                        .push("Could not remove the imported SwiftTunnel power plan".into());
                 }
             } else {
+                restore_errors.push("No safe replacement power plan could be activated".into());
                 warn!(
                     "Skipping SwiftTunnel power plan deletion because no safe replacement plan could be activated"
                 );
             }
         }
 
+        if let Err(error) = self.persist_snapshot() {
+            restore_errors.push(format!("Recovery records could not be updated: {error}"));
+        }
         if restore_errors.is_empty() {
             Ok(())
         } else {
@@ -1687,69 +1687,295 @@ impl Default for SystemOptimizer {
 /// and power plan to Windows defaults. Uses `let _ =` for each operation
 /// so individual failures never short-circuit the rest.
 pub fn cleanup_for_uninstall() {
-    info!("System optimizer: cleaning up for uninstall");
-
-    // 1. Restore MMCSS profile to Windows defaults
     let mut optimizer = SystemOptimizer::new();
-    let _ = optimizer.restore_mmcss_profile();
-
-    // 2. Delete Game Bar override (let Windows use its default)
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\GameDVR",
-            "/v",
-            "AppCaptureEnabled",
-            "/f",
-        ])
-        .output();
-
-    // 3. Delete fullscreen optimization override
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            r"HKCU\System\GameConfigStore",
-            "/v",
-            "GameDVR_FSEBehaviorMode",
-            "/f",
-        ])
-        .output();
-
-    // 4. Delete Game Mode overrides
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            r"HKCU\Software\Microsoft\GameBar",
-            "/v",
-            "AllowAutoGameMode",
-            "/f",
-        ])
-        .output();
-    let _ = hidden_command("reg")
-        .args([
-            "delete",
-            r"HKCU\Software\Microsoft\GameBar",
-            "/v",
-            "AutoGameModeEnabled",
-            "/f",
-        ])
-        .output();
-
-    // 5. Restore Balanced power plan
-    let _ = hidden_command("powercfg")
-        .args(["/setactive", BALANCED_POWER_PLAN_GUID])
-        .output();
-
-    let _ = hidden_command("powercfg")
-        .args(["/delete", SWIFTTUNNEL_POWER_PLAN_GUID])
-        .output();
-
-    info!("System optimizer: uninstall cleanup completed");
+    if let Err(error) = optimizer.ensure_snapshot_loaded() {
+        warn!(
+            "System rollback records could not be read during uninstall; originals were kept: {error}"
+        );
+        return;
+    }
+    if optimizer.persistent_snapshot() != PersistentSystemSnapshot::default() {
+        if let Err(error) = optimizer.restore(0) {
+            warn!("Some system settings could not be restored during uninstall: {error}");
+        }
+    }
+    // Older builds did not save these originals. Do not guess at Windows
+    // defaults and overwrite settings another tool or the player chose.
+    if let Err(error) = optimizer.cleanup_swifttunnel_power_plan_after_ban() {
+        warn!("Could not remove the SwiftTunnel power plan during uninstall: {error}");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn repeated_priority_apply_keeps_the_first_original_priority() {
+        use std::os::windows::process::CommandExt;
+        struct TestChild(std::process::Child);
+        impl Drop for TestChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = TestChild(
+            crate::hidden_command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Sleep -Seconds 20",
+                ])
+                .creation_flags(crate::utils::CREATE_NO_WINDOW | NORMAL_PRIORITY_CLASS.0)
+                .spawn()
+                .unwrap(),
+        );
+        let mut optimizer = SystemOptimizer::new();
+        optimizer.set_process_priority(child.0.id()).unwrap();
+        optimizer.set_process_priority(child.0.id()).unwrap();
+        assert_eq!(optimizer.original_priority, Some(NORMAL_PRIORITY_CLASS.0));
+        optimizer.restore_process_priority().unwrap();
+        let process = BoostProcess::open(child.0.id()).unwrap();
+        assert_eq!(
+            unsafe { GetPriorityClass(process.0) },
+            NORMAL_PRIORITY_CLASS.0
+        );
+        optimizer.set_process_priority(child.0.id()).unwrap();
+        // Simulate a reused PID: an original from a different creation time
+        // must never be applied to the current process.
+        optimizer.priority_identity.as_mut().unwrap().created ^= 1;
+        optimizer.restore_process_priority().unwrap();
+        assert_eq!(
+            unsafe { GetPriorityClass(process.0) },
+            HIGH_PRIORITY_CLASS.0
+        );
+        assert!(optimizer.original_priority.is_none());
+        let (mut mask, mut system_mask) = (0, 0);
+        unsafe { GetProcessAffinityMask(process.0, &mut mask, &mut system_mask).unwrap() };
+        optimizer.affinity_identity = Some(process.identity(child.0.id()).unwrap());
+        optimizer.original_affinity = Some(mask);
+        // Restoration uses the recorded process, not this unrelated PID.
+        optimizer.restore_cpu_affinity(u32::MAX).unwrap();
+        assert!(optimizer.affinity_identity.is_none());
+        optimizer.affinity_identity = Some(ProcessIdentity {
+            created: process.identity(child.0.id()).unwrap().created ^ 1,
+            pid: child.0.id(),
+        });
+        optimizer.original_affinity = Some(0); // Would fail if the wrong process were touched.
+        optimizer.restore_cpu_affinity(child.0.id()).unwrap();
+        assert!(optimizer.original_affinity.is_none());
+        // Only this short-lived child was modified; no Roblox/user process is opened.
+    }
+
+    #[test]
+    fn system_records_cover_every_persistent_setting_and_accept_old_timer_only_files() {
+        let old: PersistentSystemSnapshot =
+            serde_json::from_str(r#"{"global_timer_snapshot":{"state":"absent"}}"#).unwrap();
+        assert_eq!(
+            old.global_timer_snapshot,
+            Some(RegistryDwordSnapshot::Absent)
+        );
+        assert!(old.game_bar_snapshot.is_none());
+        let full = PersistentSystemSnapshot {
+            global_timer_snapshot: Some(RegistryDwordSnapshot::Absent),
+            game_bar_snapshot: Some(RegistryDwordSnapshot::Present(9)),
+            fullscreen_optimization_snapshot: Some(RegistryDwordSnapshot::Absent),
+            game_mode_allow_auto_snapshot: Some(RegistryDwordSnapshot::Present(0)),
+            game_mode_enabled_snapshot: Some(RegistryDwordSnapshot::Present(1)),
+            mmcss_snapshot: Some(MmcssSnapshot {
+                scheduling_category: Some(String::new()),
+                priority: Some(2),
+                ..Default::default()
+            }),
+            original_power_plan_guid: Some(BALANCED_POWER_PLAN_GUID.into()),
+            swifttunnel_power_plan_imported: true,
+        };
+        assert_eq!(
+            serde_json::from_slice::<PersistentSystemSnapshot>(&serde_json::to_vec(&full).unwrap())
+                .unwrap(),
+            full
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_records_preserve_old_files_on_failure_and_skip_unchanged_writes() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "swift-system-audit-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join(SYSTEM_SNAPSHOT_FILE);
+        fs::write(&path, "bad record").unwrap();
+        assert!(SystemOptimizer::read_persistent_snapshot(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "bad record");
+        let before = PersistentSystemSnapshot {
+            game_bar_snapshot: Some(RegistryDwordSnapshot::Present(9)),
+            ..Default::default()
+        };
+        SystemOptimizer::write_persistent_snapshot(&path, &before).unwrap();
+        let original = fs::read(&path).unwrap();
+        let mut optimizer = SystemOptimizer::new();
+        optimizer.snapshot_path = Some(path.clone());
+        optimizer.ensure_snapshot_loaded().unwrap();
+        assert_eq!(optimizer.game_bar_snapshot, Some(Some(9)));
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        // An unchanged record must succeed even while replacement is blocked.
+        optimizer.persist_snapshot().unwrap();
+        optimizer.game_bar_snapshot = Some(Some(10));
+        assert!(optimizer.persist_snapshot().is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        drop(lock);
+        optimizer.persist_snapshot().unwrap();
+        assert_eq!(
+            SystemOptimizer::read_persistent_snapshot(&path)
+                .unwrap()
+                .unwrap()
+                .game_bar_snapshot,
+            Some(RegistryDwordSnapshot::Present(10))
+        );
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn corruption_blocks_preparation_and_does_not_overwrite_recovery_records() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-system-corrupt-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join(SYSTEM_SNAPSHOT_FILE);
+        fs::write(&path, "unfinished recovery data").unwrap();
+        let mut optimizer = SystemOptimizer::new();
+        optimizer.snapshot_path = Some(path.clone());
+        assert!(
+            optimizer
+                .capture_system_state_snapshots(&SystemOptimizationConfig::default())
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "unfinished recovery data"
+        );
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_recovery_is_migrated_before_the_old_file_is_removed() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-system-migrate-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let legacy = dir.join(LEGACY_SYSTEM_SNAPSHOT_FILE);
+        fs::write(
+            &legacy,
+            r#"{"global_timer_snapshot":{"state":"present","value":0}}"#,
+        )
+        .unwrap();
+        let path = dir.join(SYSTEM_SNAPSHOT_FILE);
+        let mut optimizer = SystemOptimizer::new();
+        optimizer.snapshot_path = Some(path.clone());
+        optimizer.ensure_snapshot_loaded().unwrap();
+        assert_eq!(optimizer.global_timer_snapshot, Some(Some(0)));
+        assert_eq!(
+            SystemOptimizer::read_persistent_snapshot(&path)
+                .unwrap()
+                .unwrap()
+                .global_timer_snapshot,
+            Some(RegistryDwordSnapshot::Present(0))
+        );
+        assert!(!legacy.exists());
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn power_plan_staging_is_exclusive_and_cleans_only_its_own_files() {
+        let dir =
+            std::env::temp_dir().join(format!("swift-power-audit-{:032x}", rand::random::<u128>()));
+        fs::create_dir(&dir).unwrap();
+        let unrelated = dir.join("swifttunnel_power_plan.pow");
+        fs::write(&unrelated, "leave this file alone").unwrap();
+        let one = SystemOptimizer::stage_swifttunnel_power_plan(&dir).unwrap();
+        let two = SystemOptimizer::stage_swifttunnel_power_plan(&dir).unwrap();
+        assert_ne!(one.0, two.0);
+        assert_eq!(fs::read(&one.0).unwrap(), SWIFTTUNNEL_POWER_PLAN_BYTES);
+        let first = one.0.clone();
+        drop(one);
+        assert!(!first.exists());
+        assert!(two.0.exists());
+        drop(two);
+        assert_eq!(
+            fs::read_to_string(&unrelated).unwrap(),
+            "leave this file alone"
+        );
+        fs::remove_file(unrelated).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn registry_failures_are_not_absence_and_failed_restores_retain_the_original() {
+        assert_eq!(
+            SystemOptimizer::optional_registry_read::<u32>(
+                Err(std::io::ErrorKind::NotFound.into())
+            )
+            .unwrap(),
+            None
+        );
+        assert!(
+            SystemOptimizer::optional_registry_read::<u32>(Err(
+                std::io::ErrorKind::PermissionDenied.into()
+            ))
+            .is_err()
+        );
+        let mut pending = Some(Some(9));
+        assert!(
+            SystemOptimizer::restore_dword_slot(&mut pending, "INVALID\\Audit", "Original")
+                .is_err()
+        );
+        assert_eq!(pending, Some(Some(9)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_registry_round_trip_preserves_absence_empty_strings_and_rejects_wrong_types() {
+        use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+        let relative = format!(
+            r"Software\SwiftTunnel\OptimizerTests\{:032x}",
+            rand::random::<u128>()
+        );
+        let path = format!("HKCU\\{relative}");
+        let root = RegKey::predef(HKEY_CURRENT_USER);
+        let (key, _) = root.create_subkey(&relative).unwrap();
+        let mut absent = Some(None);
+        SystemOptimizer::set_registry_dword_checked(&path, "Value", 42).unwrap();
+        SystemOptimizer::restore_dword_slot(&mut absent, &path, "Value").unwrap();
+        assert!(key.get_raw_value("Value").is_err());
+        SystemOptimizer::set_registry_string_checked(&path, "Value", "").unwrap();
+        assert_eq!(
+            SystemOptimizer::query_registry_checked::<String>(&path, "Value").unwrap(),
+            Some(String::new())
+        );
+        assert!(SystemOptimizer::query_registry_checked::<u32>(&path, "Value").is_err());
+        let mut present = Some(Some(9));
+        SystemOptimizer::restore_dword_slot(&mut present, &path, "Value").unwrap();
+        assert_eq!(key.get_value::<u32, _>("Value").unwrap(), 9);
+        drop(key);
+        assert!(relative.starts_with(r"Software\SwiftTunnel\OptimizerTests\"));
+        root.delete_subkey_all(relative).unwrap();
+    }
 
     #[test]
     fn power_plan_guid_maps_swifttunnel_to_embedded_plan_guid() {
@@ -1929,6 +2155,7 @@ mod tests {
     fn persistent_system_snapshot_preserves_absent_and_present_timer_values() {
         let absent = PersistentSystemSnapshot {
             global_timer_snapshot: Some(RegistryDwordSnapshot::Absent),
+            ..Default::default()
         };
         let absent_json = serde_json::to_string(&absent).unwrap();
         let absent_roundtrip: PersistentSystemSnapshot =
@@ -1940,6 +2167,7 @@ mod tests {
 
         let present = PersistentSystemSnapshot {
             global_timer_snapshot: Some(RegistryDwordSnapshot::Present(1)),
+            ..Default::default()
         };
         let present_json = serde_json::to_string(&present).unwrap();
         let present_roundtrip: PersistentSystemSnapshot =
@@ -1954,8 +2182,8 @@ mod tests {
     fn restore_cpu_affinity_with_no_snapshot_is_noop() {
         let mut optimizer = SystemOptimizer::new();
         // No state captured — must not panic and must not contact a process.
-        optimizer.restore_cpu_affinity(0);
-        optimizer.restore_cpu_affinity(u32::MAX);
+        optimizer.restore_cpu_affinity(0).unwrap();
+        optimizer.restore_cpu_affinity(u32::MAX).unwrap();
         assert!(optimizer.original_affinity.is_none());
     }
 
@@ -1963,9 +2191,13 @@ mod tests {
     fn restore_cpu_affinity_with_dead_pid_clears_snapshot_without_panic() {
         let mut optimizer = SystemOptimizer::new();
         optimizer.original_affinity = Some(0b1);
+        optimizer.affinity_identity = Some(ProcessIdentity {
+            pid: u32::MAX,
+            created: 0,
+        });
         // u32::MAX is an unreachable PID; OpenProcess should fail and the
         // restore path must classify it as "process gone" without panic.
-        optimizer.restore_cpu_affinity(u32::MAX);
+        optimizer.restore_cpu_affinity(u32::MAX).unwrap();
         assert!(
             optimizer.original_affinity.is_none(),
             "snapshot should be consumed even when restore can't reach the process"

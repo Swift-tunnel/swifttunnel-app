@@ -1,5 +1,4 @@
 use crate::firewall_fixer::FirewallFixer;
-use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
@@ -334,48 +333,6 @@ impl NetworkBooster {
         }
     }
 
-    #[allow(dead_code)]
-    fn parse_first_line(output: &[u8], error_message: &str) -> Result<String> {
-        let value = String::from_utf8_lossy(output)
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or_default()
-            .to_string();
-
-        if value.is_empty() {
-            return Err(anyhow::anyhow!("{}", error_message));
-        }
-
-        Ok(value)
-    }
-
-    /// Get the default-route network interface name.
-    ///
-    /// This avoids selecting an arbitrary "Up" adapter (e.g. virtual NIC) that is not
-    /// actually carrying traffic to the internet.
-    #[allow(dead_code)]
-    pub(crate) fn get_active_network_interface(&self) -> Result<String> {
-        let output = hidden_command("powershell")
-            .args([
-                "-Command",
-                "$ErrorActionPreference = 'Stop'; \
-                 $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' \
-                     | Sort-Object -Property @{Expression = {$_.RouteMetric + $_.InterfaceMetric}; Ascending = $true} \
-                     | Select-Object -First 1; \
-                 if ($null -eq $route) { \
-                     $route = Get-NetRoute -AddressFamily IPv6 -DestinationPrefix '::/0' \
-                         | Sort-Object -Property @{Expression = {$_.RouteMetric + $_.InterfaceMetric}; Ascending = $true} \
-                         | Select-Object -First 1; \
-                 } \
-                 if ($null -eq $route) { throw 'No default route interface found'; } \
-                 Get-NetAdapter -InterfaceIndex $route.ifIndex | Select-Object -First 1 -ExpandProperty Name"
-            ])
-            .output()?;
-
-        Self::parse_first_line(&output.stdout, "No active network interface found")
-    }
-
     pub(crate) fn list_adapter_guids(&self) -> Result<Vec<String>> {
         parse_adapter_guids(crate::run_hidden_command_with_timeout(
             "powershell",
@@ -453,8 +410,9 @@ impl NetworkBooster {
 
     fn set_registry_dword(key_path: &str, value_name: &str, value: u32) -> Result<()> {
         let value_str = value.to_string();
-        let output = hidden_command("reg")
-            .args([
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "reg",
+            &[
                 "add",
                 key_path,
                 "/v",
@@ -464,8 +422,9 @@ impl NetworkBooster {
                 "/d",
                 &value_str,
                 "/f",
-            ])
-            .output();
+            ],
+            std::time::Duration::from_secs(15),
+        );
 
         match output {
             Ok(result) => {
@@ -510,9 +469,11 @@ impl NetworkBooster {
         match value {
             Some(saved) => Self::set_registry_dword(key_path, value_name, saved),
             None => {
-                let _ = hidden_command("reg")
-                    .args(["delete", key_path, "/v", value_name, "/f"])
-                    .output();
+                let _ = crate::utils::run_hidden_command_output_with_timeout(
+                    "reg",
+                    &["delete", key_path, "/v", value_name, "/f"],
+                    std::time::Duration::from_secs(15),
+                );
                 if Self::query_registry_dword_checked(key_path, value_name)?.is_none() {
                     Ok(())
                 } else {
@@ -545,9 +506,11 @@ impl NetworkBooster {
     fn cleanup_removed_qos_policies() {
         for policy_name in REMOVED_QOS_POLICY_NAMES {
             let policy_path = Self::qos_policy_path(policy_name);
-            let _ = hidden_command("reg")
-                .args(["delete", &policy_path, "/f"])
-                .output();
+            let _ = crate::utils::run_hidden_command_output_with_timeout(
+                "reg",
+                &["delete", &policy_path, "/f"],
+                std::time::Duration::from_secs(15),
+            );
         }
 
         if let Err(e) = Self::remove_legacy_roblox_priority_policy() {
@@ -574,18 +537,22 @@ impl NetworkBooster {
         for exe in RELAY_QOS_EXECUTABLES {
             let policy_name = Self::relay_qos_policy_name(exe);
             let policy_path = Self::qos_policy_path(&policy_name);
-            let _ = hidden_command("reg")
-                .args(["delete", &policy_path, "/f"])
-                .output();
+            let _ = crate::utils::run_hidden_command_output_with_timeout(
+                "reg",
+                &["delete", &policy_path, "/f"],
+                std::time::Duration::from_secs(15),
+            );
         }
     }
 
     fn set_registry_string(key_path: &str, value_name: &str, value: &str) -> Result<()> {
-        let output = hidden_command("reg")
-            .args([
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "reg",
+            &[
                 "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value, "/f",
-            ])
-            .output();
+            ],
+            std::time::Duration::from_secs(15),
+        );
 
         match output {
             Ok(result) if result.status.success() => Ok(()),
@@ -676,35 +643,6 @@ impl NetworkBooster {
              Remove-NetQosPolicy -Name {quoted_policy} -Confirm:$false -ErrorAction Stop; \
              Write-Output 'SwiftTunnel:LegacyQoSRemoved'"
         )
-    }
-
-    /// Test network latency to Roblox servers
-    pub fn test_latency(&self) -> Result<u32> {
-        info!("Testing latency to Roblox servers");
-
-        // Ping a common Roblox server
-        let output = hidden_command("ping")
-            .args(["-n", "4", "www.roblox.com"])
-            .output()?;
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-
-        // Parse average ping from output
-        for line in output_str.lines() {
-            if line.contains("Average") || line.contains("平均") {
-                // Extract ping value (example: "Average = 45ms")
-                let parts: Vec<&str> = line.split('=').collect();
-                if parts.len() > 1 {
-                    let ping_str = parts[1].trim().replace("ms", "");
-                    if let Ok(ping) = ping_str.parse::<u32>() {
-                        return Ok(ping);
-                    }
-                }
-            }
-        }
-
-        // If we couldn't parse, return a default value
-        Ok(0)
     }
 
     // ===== TIER 1 (SAFE) NETWORK BOOSTS =====
@@ -1024,46 +962,6 @@ pub fn cleanup_all_system_state() -> Result<()> {
     network_recovery
 }
 
-/// Reset MTU to 1500 on all active network adapters.
-///
-/// The removed MTU optimizer used `store=persistent` which permanently changed
-/// WiFi adapter MTU values, causing Roblox connection timeouts on some drivers.
-#[allow(dead_code)]
-fn reset_mtu_all_adapters() {
-    let adapters: Vec<String> = match hidden_command("powershell")
-        .args([
-            "-Command",
-            "Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | Select-Object -ExpandProperty Name",
-        ])
-        .output()
-    {
-        Ok(output) => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty())
-            .map(ToOwned::to_owned)
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    for iface in &adapters {
-        let _ = hidden_command("netsh")
-            .args([
-                "interface",
-                "ipv4",
-                "set",
-                "subinterface",
-                iface,
-                "mtu=1500",
-                "store=persistent",
-            ])
-            .output();
-    }
-}
-
-pub fn fix_mtu_on_upgrade() {
-    info!("Legacy MTU repair is disabled by default to avoid overwriting user adapter settings");
-}
-
 impl Default for NetworkBooster {
     fn default() -> Self {
         Self::new()
@@ -1246,20 +1144,6 @@ mod tests {
             Some(2)
         );
         assert!(booster.nagle_registry_snapshot.contains_key("new-adapter"));
-    }
-
-    #[test]
-    fn parse_first_line_returns_trimmed_first_value() {
-        let output = b"\n  Ethernet  \nWi-Fi\n";
-        let parsed = NetworkBooster::parse_first_line(output, "missing").unwrap();
-        assert_eq!(parsed, "Ethernet");
-    }
-
-    #[test]
-    fn parse_first_line_errors_when_empty() {
-        let output = b"  \n\t\n";
-        let parsed = NetworkBooster::parse_first_line(output, "missing");
-        assert!(parsed.is_err());
     }
 
     #[test]

@@ -7,7 +7,6 @@
 //! Used by the VPN connection manager to identify the physical adapter.
 
 use super::{VpnError, VpnResult};
-use crate::hidden_command;
 use std::net::Ipv4Addr;
 
 /// Get the local IP address of the internet interface (default gateway interface)
@@ -130,8 +129,7 @@ fn get_internet_interface_ip_native() -> VpnResult<Ipv4Addr> {
 
 /// PowerShell fallback for older Windows versions
 fn get_internet_interface_ip_powershell() -> VpnResult<Ipv4Addr> {
-    let output = hidden_command("powershell")
-        .args([
+    let output = crate::utils::run_hidden_command_output_with_timeout("powershell", &[
             "-NoProfile",
             "-Command",
             r#"
@@ -141,8 +139,7 @@ fn get_internet_interface_ip_powershell() -> VpnResult<Ipv4Addr> {
                 if ($addr) { $addr.IPAddress }
             }
             "#,
-        ])
-        .output()
+        ], std::time::Duration::from_secs(30))
         .map_err(|e| VpnError::Route(format!("Failed to run PowerShell: {}", e)))?;
 
     if !output.status.success() {

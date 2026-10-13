@@ -840,6 +840,41 @@ pub struct BoundedCommandOutput {
     pub stderr: String,
 }
 
+/// Preserve process-output callers while using the shared bounded collector.
+pub(crate) fn run_hidden_command_output_with_timeout<S: AsRef<std::ffi::OsStr>>(
+    program: &str,
+    args: &[S],
+    timeout: Duration,
+) -> std::io::Result<std::process::Output> {
+    let result = run_hidden_command_with_timeout(program, args, timeout);
+    let Some(code) = result.exit_code else {
+        let kind = if result.timed_out {
+            std::io::ErrorKind::TimedOut
+        } else {
+            std::io::ErrorKind::Other
+        };
+        return Err(std::io::Error::new(
+            kind,
+            format!("{program}: {}", result.stderr.trim()),
+        ));
+    };
+    #[cfg(windows)]
+    let status = {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code as u32)
+    };
+    #[cfg(unix)]
+    let status = {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code << 8)
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: result.stdout.into_bytes(),
+        stderr: result.stderr.into_bytes(),
+    })
+}
+
 /// Run a hidden command and give up after `timeout`.
 ///
 /// `Command::output()` blocks until the child exits, with no upper bound. That
@@ -1233,6 +1268,36 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     use std::fs;
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_process_output_preserves_exit_codes_and_captured_output() {
+        let output = run_hidden_command_output_with_timeout(
+            "cmd",
+            &["/C", "echo bounded-output & exit /b 7"],
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("bounded-output"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_process_output_reports_timeout_as_an_error() {
+        let error = run_hidden_command_output_with_timeout(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 2",
+            ],
+            Duration::from_millis(20),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn bounded_local_text_accepts_the_limit_and_refuses_an_oversized_file() {

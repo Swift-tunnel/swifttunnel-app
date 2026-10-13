@@ -1,4 +1,3 @@
-use crate::hidden_command;
 use crate::structs::*;
 use log::{info, warn};
 use std::path::PathBuf;
@@ -47,16 +46,18 @@ impl FirewallFixer {
         for exe_name in cleanup_targets {
             for (suffix, dir) in [("Out", "out"), ("In", "in")] {
                 let rule_name = format!("{} {} {}", FIREWALL_RULE_PREFIX, exe_name, suffix);
-                let _ = hidden_command("netsh")
-                    .args([
+                let _ = crate::utils::run_hidden_command_output_with_timeout(
+                    "netsh",
+                    &[
                         "advfirewall",
                         "firewall",
                         "delete",
                         "rule",
                         &format!("name={}", rule_name),
                         &format!("dir={}", dir),
-                    ])
-                    .output();
+                    ],
+                    std::time::Duration::from_secs(15),
+                );
             }
         }
     }
@@ -81,7 +82,7 @@ impl FirewallFixer {
         let executables = find_roblox_executables();
 
         if executables.is_empty() {
-            warn!("No Roblox executables found in %LOCALAPPDATA%\\Roblox\\Versions\\");
+            warn!("No Roblox Player or Studio installation was found");
         }
 
         let mut rules_added = 0usize;
@@ -92,8 +93,9 @@ impl FirewallFixer {
 
             // Outbound allow rule
             let rule_name_out = format!("{} {} Out", FIREWALL_RULE_PREFIX, exe_name);
-            let output = hidden_command("netsh")
-                .args([
+            let output = crate::utils::run_hidden_command_output_with_timeout(
+                "netsh",
+                &[
                     "advfirewall",
                     "firewall",
                     "add",
@@ -103,8 +105,9 @@ impl FirewallFixer {
                     "action=allow",
                     &format!("program={}", path_str),
                     "enable=yes",
-                ])
-                .output();
+                ],
+                std::time::Duration::from_secs(15),
+            );
 
             match output {
                 Ok(result) if result.status.success() => {
@@ -130,8 +133,9 @@ impl FirewallFixer {
 
             // Inbound allow rule
             let rule_name_in = format!("{} {} In", FIREWALL_RULE_PREFIX, exe_name);
-            let output = hidden_command("netsh")
-                .args([
+            let output = crate::utils::run_hidden_command_output_with_timeout(
+                "netsh",
+                &[
                     "advfirewall",
                     "firewall",
                     "add",
@@ -141,8 +145,9 @@ impl FirewallFixer {
                     "action=allow",
                     &format!("program={}", path_str),
                     "enable=yes",
-                ])
-                .output();
+                ],
+                std::time::Duration::from_secs(15),
+            );
 
             match output {
                 Ok(result) if result.status.success() => {
@@ -235,29 +240,33 @@ impl FirewallFixer {
         for (exe_name, _) in &executables {
             // Remove outbound rule
             let rule_name_out = format!("{} {} Out", FIREWALL_RULE_PREFIX, exe_name);
-            let _ = hidden_command("netsh")
-                .args([
+            let _ = crate::utils::run_hidden_command_output_with_timeout(
+                "netsh",
+                &[
                     "advfirewall",
                     "firewall",
                     "delete",
                     "rule",
                     &format!("name={}", rule_name_out),
                     "dir=out",
-                ])
-                .output();
+                ],
+                std::time::Duration::from_secs(15),
+            );
 
             // Remove inbound rule
             let rule_name_in = format!("{} {} In", FIREWALL_RULE_PREFIX, exe_name);
-            let _ = hidden_command("netsh")
-                .args([
+            let _ = crate::utils::run_hidden_command_output_with_timeout(
+                "netsh",
+                &[
                     "advfirewall",
                     "firewall",
                     "delete",
                     "rule",
                     &format!("name={}", rule_name_in),
                     "dir=in",
-                ])
-                .output();
+                ],
+                std::time::Duration::from_secs(15),
+            );
 
             info!("Removed firewall rules for {}", exe_name);
         }
@@ -276,59 +285,64 @@ impl Default for FirewallFixer {
     }
 }
 
-/// Scan `%LOCALAPPDATA%\Roblox\Versions\` for known Roblox executables.
+/// Scan the global and VNG clients for known Roblox executables.
 ///
 /// Returns `Vec<(exe_name, full_path)>` for each executable found.
 fn find_roblox_executables() -> Vec<(String, PathBuf)> {
-    let local_app_data = match std::env::var("LOCALAPPDATA") {
-        Ok(path) => PathBuf::from(path),
-        Err(_) => {
-            warn!("LOCALAPPDATA environment variable not set");
-            return Vec::new();
-        }
-    };
-
-    let versions_dir = local_app_data.join("Roblox").join("Versions");
-
-    if !versions_dir.exists() {
-        warn!(
-            "Roblox versions directory not found: {}",
-            versions_dir.display()
-        );
-        return Vec::new();
+    match std::env::var_os("LOCALAPPDATA") {
+        Some(root) => find_roblox_executables_in(&PathBuf::from(root)),
+        None => Vec::new(),
     }
+}
 
+fn find_roblox_executables_in(local: &std::path::Path) -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
-
-    let entries = match std::fs::read_dir(&versions_dir) {
-        Ok(entries) => entries,
-        Err(e) => {
-            warn!("Failed to read Roblox versions directory: {}", e);
-            return Vec::new();
-        }
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+    for client in ["Roblox", "RobloxPCVNG"] {
+        let versions = local.join(client).join("Versions");
+        let Ok(entries) = std::fs::read_dir(&versions) else {
             continue;
-        }
-
-        for exe_name in &ROBLOX_EXECUTABLES {
-            let exe_path = path.join(exe_name);
-            if exe_path.exists() {
-                found.push((exe_name.to_string(), exe_path));
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            for name in ROBLOX_EXECUTABLES {
+                let executable = path.join(name);
+                if executable.is_file() {
+                    found.push((name.into(), executable));
+                }
             }
         }
     }
-
-    info!("Found {} Roblox executables", found.len());
     found
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_supports_vng_alone_and_both_clients_without_store_hosts() {
+        let root = std::env::temp_dir().join(format!(
+            "swift-firewall-audit-{:032x}",
+            rand::random::<u128>()
+        ));
+        let vng = root
+            .join("RobloxPCVNG")
+            .join("Versions")
+            .join("version-test");
+        std::fs::create_dir_all(&vng).unwrap();
+        std::fs::write(vng.join("RobloxPlayerBeta.exe"), "fixture").unwrap();
+        std::fs::write(vng.join("Windows10Universal.exe"), "fixture").unwrap();
+        assert_eq!(find_roblox_executables_in(&root).len(), 1);
+        let main = root.join("Roblox").join("Versions").join("version-test");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("RobloxPlayerBeta.exe"), "fixture").unwrap();
+        assert_eq!(find_roblox_executables_in(&root).len(), 2);
+        assert!(root.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn firewall_fixer_default_not_applied() {
@@ -341,11 +355,15 @@ mod tests {
         // Should not panic even if Roblox is not installed
         let exes = find_roblox_executables();
         // On non-Windows or without Roblox, this will be empty
-        assert!(exes.len() <= 100); // Sanity bound
+        assert!(
+            exes.iter()
+                .all(|(name, path)| ROBLOX_EXECUTABLES.contains(&name.as_str()) && path.is_file())
+        );
     }
 
     #[test]
-    fn restore_noop_when_not_applied() {
+    #[ignore = "Mutates Windows firewall rules; requires an isolated testbench"]
+    fn restore_removes_real_rules_on_an_isolated_machine() {
         let mut fixer = FirewallFixer::new();
         let result = fixer.restore();
         assert!(result.is_ok());
