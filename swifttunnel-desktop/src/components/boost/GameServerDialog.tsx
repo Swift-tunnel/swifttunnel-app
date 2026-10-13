@@ -41,7 +41,7 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
   const rows = totalRows.filter(s=>s.capacity==null||s.playing==null?minSlots===1:s.capacity-s.playing>=minSlots).sort((a,b)=>population?(a.playing??Infinity)-(b.playing??Infinity):0);
   return <Dialog flush open={!!entry} onClose={onClose} maxWidth={820} title={`Find a server · ${entry?.name ?? "Roblox"}`} description="Pick a location, then a server.">
     <div className="grid h-[min(360px,calc(100vh-13rem))] grid-cols-[200px_minmax(0,1fr)] max-[700px]:h-auto max-[700px]:grid-cols-1">
-      <div className="overflow-y-auto border-r border-border-subtle p-2 max-[700px]:max-h-[150px] max-[700px]:border-b max-[700px]:border-r-0">
+      <div className="overflow-y-auto border-r border-border-subtle p-2.5 max-[700px]:max-h-[150px] max-[700px]:border-b max-[700px]:border-r-0">
         <p className="eyebrow px-2.5 pb-2 pt-1.5">Datacenter</p>
         {centers.map(c => <button key={c.id} type="button" disabled={busy} aria-current={selected === c.id ? "true" : undefined} onClick={() => void search(c.id)}
           className={`flex w-full items-center gap-2.5 rounded-[7px] px-2.5 py-[7px] text-left text-[12px] transition-colors disabled:cursor-not-allowed ${selected === c.id ? "bg-bg-active font-medium text-text-primary" : "text-text-secondary hover:bg-bg-hover"}`}>

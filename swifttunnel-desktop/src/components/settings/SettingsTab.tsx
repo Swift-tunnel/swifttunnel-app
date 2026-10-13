@@ -152,7 +152,7 @@ export function SettingsTab() {
           }}
         />
 
-        <div className="relative z-[1] flex items-center gap-4 px-6 pb-5 pt-6">
+        <div className="relative z-[1] flex items-center gap-4 px-4 pb-5 pt-5">
           <div
             className="icon-orb neon-edge flex h-12 w-12 shrink-0 items-center justify-center text-[17px] font-semibold"
             style={{
@@ -194,7 +194,7 @@ export function SettingsTab() {
         >
           <HeroStat label="Version" value={`v${__APP_VERSION__}`} divider />
           <HeroStat label="Channel" value={settings.update_channel} divider />
-          <div className="flex flex-col gap-1.5 px-6 py-3.5">
+          <div className="flex flex-col gap-1.5 px-4 py-3.5">
             <span className="text-[10px] font-medium uppercase tracking-[0.1em] text-text-dimmed">
               Updates
             </span>
@@ -736,7 +736,7 @@ function HeroStat({
 }) {
   return (
     <div
-      className="flex flex-col gap-1 px-6 py-3.5"
+      className="flex flex-col gap-1 px-4 py-3.5"
       style={{
         borderRight: divider
           ? "1px solid var(--color-border-subtle)"

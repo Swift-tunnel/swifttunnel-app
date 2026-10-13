@@ -371,7 +371,7 @@ export function ConnectTab() {
             once the tunnel is actually carrying traffic. */}
         <div className={`aurora ${isConnected ? "aurora-live" : ""}`} aria-hidden />
 
-        <div className="relative flex items-center gap-5 px-6 pb-5 pt-6">
+        <div className="relative flex items-center gap-5 px-4 pb-5 pt-5">
           <StatusRing state={vpnState} />
 
           <div className="min-w-0 flex-1">
@@ -426,7 +426,7 @@ export function ConnectTab() {
         {(connectStatus.kind !== "text" ||
           vpnState === "error" ||
           driverSetupState !== "idle") && (
-          <div className="relative px-6 pb-4">
+          <div className="relative px-4 pb-4">
             <ConnectStatusBanner
               status={connectStatus}
               busy={isConnectBusy}
@@ -456,7 +456,7 @@ export function ConnectTab() {
 
         {/* Stats strip */}
         {isConnected && (
-          <div className="relative px-6 pb-4 text-[12px] text-text-muted" aria-live="polite">
+          <div className="relative px-4 pb-4 text-[12px] text-text-muted" aria-live="polite">
             <span className="text-text-primary">
               Game server: {gameRoute?.game_location ?? "Waiting for a game"}
             </span>
@@ -766,7 +766,7 @@ function HeroStat({
 }) {
   return (
     <div
-      className="flex flex-col gap-1.5 px-6 py-4"
+      className="flex flex-col gap-1.5 px-4 py-4"
       style={{
         borderRight: divider
           ? "1px solid var(--color-border-subtle)"
@@ -1190,7 +1190,7 @@ function WhitelistPanel({
   onChange: (next: string[]) => void;
 }) {
   return (
-    <div className="mt-3 rounded-[var(--radius-card)] surface-card p-3.5">
+    <div className="mt-3 rounded-[var(--radius-card)] surface-card p-4">
       <div className="text-[10.5px] font-semibold uppercase tracking-[0.12em] text-text-muted">
         Regions to skip
       </div>

@@ -262,7 +262,7 @@ export function RepairTab() {
       <section
         data-search-anchor="repair_run"
         className="corner-frame relative isolate overflow-clip rounded-[var(--radius-card)] surface-card"
-        style={{ padding: "20px 22px" }}
+        style={{ padding: "20px 16px" }}
       >
         <Watermark icon="repair" at="bottom-right" size={170} rotate={-18} />
         <div className="aurora" aria-hidden />
@@ -361,7 +361,7 @@ export function RepairTab() {
       {/* ── Result ── */}
       <section
         className="instrument overflow-hidden"
-        style={{ padding: "16px 18px" }}
+        style={{ padding: "16px" }}
       >
         <button
           type="button"
@@ -437,7 +437,7 @@ export function RepairTab() {
       <section
         data-search-anchor="driver_reinstall"
         className="instrument overflow-hidden"
-        style={{ padding: "16px 18px" }}
+        style={{ padding: "16px" }}
       >
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">

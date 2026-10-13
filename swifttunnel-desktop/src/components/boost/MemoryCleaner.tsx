@@ -81,7 +81,7 @@ export function MemoryCleaner() {
   return (
     <section data-search-anchor="clean_ram" className="flex flex-col gap-3">
       {/* ── Hero ── */}
-      <div className="corner-frame relative isolate overflow-hidden rounded-[var(--radius-card)] surface-card px-5 pt-4 pb-3">
+      <div className="corner-frame relative isolate overflow-hidden rounded-[var(--radius-card)] surface-card px-4 pt-4 pb-3">
         <Watermark icon="memory" at="bottom-right" size={150} rotate={-10} />
         <div className="flex items-start justify-between gap-6">
           <div className="min-w-0 flex-1">

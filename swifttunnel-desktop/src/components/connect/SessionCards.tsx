@@ -39,7 +39,7 @@ function CardTitle({
   onAction?: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 px-0.5">
+    <div className="flex items-center justify-between gap-3">
       <h3 className="text-[15px] font-bold text-text-primary">{title}</h3>
       {action && (
         <button
@@ -97,7 +97,7 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
   const jit = stats ? jitter(stats) : null;
 
   return (
-    <div className="relative isolate flex flex-1 flex-col gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card p-5">
+    <div className="relative isolate flex flex-1 flex-col gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card p-4">
       <Watermark icon="pulse" at="right" size={150} rotate={-8} fade />
       <div className="flex items-center justify-between gap-3">
         <span className="flex min-w-0 items-center gap-2.5">
@@ -165,7 +165,7 @@ function RobloxCard() {
   const profile = useSettingsStore((s) => s.settings.config.profile);
 
   return (
-    <div className="relative isolate flex flex-1 flex-col gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card p-5">
+    <div className="relative isolate flex flex-1 flex-col gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card p-4">
       {/* Big faded Roblox mark in the corner, like the game cards in ExitLag. */}
       <Watermark icon="roblox" size={168} opacity={0.045} />
       <div className="flex items-center gap-2.5">

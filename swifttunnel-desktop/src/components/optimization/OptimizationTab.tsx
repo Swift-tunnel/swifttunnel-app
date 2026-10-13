@@ -177,7 +177,7 @@ function CardShell({
   return (
     <div
       data-search-anchor={anchor}
-      className="surface-card relative flex min-h-[148px] flex-col gap-1.5 overflow-hidden rounded-[var(--radius-card)] px-3 pb-2.5 pt-3 transition-transform duration-150 hover:-translate-y-0.5"
+      className="surface-card relative flex min-h-[148px] flex-col gap-1.5 overflow-hidden rounded-[var(--radius-card)] px-4 pb-3 pt-3.5 transition-transform duration-150 hover:-translate-y-0.5"
       style={{
         border: `1px solid ${
           active
@@ -853,7 +853,7 @@ function OptimizeAllHeader({ view }: { view: "boost" | "speedup" }) {
   return (
     <section
       className="corner-frame relative isolate flex items-center justify-between gap-4 overflow-hidden rounded-[var(--radius-card)] surface-card"
-      style={{ padding: "16px 20px" }}
+      style={{ padding: "16px" }}
     >
       <Watermark icon="optimize" at="bottom-right" size={150} rotate={14} opacity={0.07} />
       <div

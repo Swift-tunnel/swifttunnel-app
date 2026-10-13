@@ -10,7 +10,7 @@ import type { GamePreferences, RobloxDatacenter, RobloxGameEntry, RobloxSettings
 const COLUMN = 240;
 
 function Group({ title, children }: { title: string; children: ReactNode }) {
-  return <section><p className="eyebrow mb-1.5 px-0.5">{title}</p><div className="divide-y divide-border-subtle rounded-[10px] bg-bg-base">{children}</div></section>;
+  return <section><p className="eyebrow mb-1.5">{title}</p><div className="divide-y divide-border-subtle rounded-[10px] bg-bg-base">{children}</div></section>;
 }
 /** One setting: its name on the left, its control on the right, and room underneath for a slider or a set of choices. */
 function Setting({ label, desc, children, below }: { label: string; desc?: string; children?: ReactNode; below?: ReactNode }) {

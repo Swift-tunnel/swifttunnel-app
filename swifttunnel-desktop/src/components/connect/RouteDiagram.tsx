@@ -39,7 +39,7 @@ export function RouteDiagram({
   return (
     /* Full width on purpose: the deck footer's stat strip spans the whole
        panel, so a capped diagram reads as misaligned against it. */
-    <div className="relative px-6 pb-5">
+    <div className="relative px-4 pb-5">
       {/* No estimated-ping box here: the leg chip and the LATENCY stat in the
           deck footer already show this number. Three copies of one value is
           what left an orphaned box floating mid-panel. */}
