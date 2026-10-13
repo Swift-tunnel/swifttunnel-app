@@ -211,6 +211,7 @@ fn watch_logs(
     let mut last_file_check = std::time::Instant::now();
     let mut tracker = JoinTracker::default();
     let started = std::time::SystemTime::now();
+    let mut directories: Vec<_> = directories.into_iter().map(LogDirectory::new).collect();
 
     loop {
         if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
@@ -221,8 +222,8 @@ fn watch_logs(
         // Check for new/updated log file every 2 seconds
         if last_file_check.elapsed() > Duration::from_secs(2) {
             if let Some(newest) = directories
-                .iter()
-                .filter_map(|dir| find_newest_log_file(dir))
+                .iter_mut()
+                .filter_map(|dir| dir.newest(std::time::Instant::now()))
                 .max_by_key(|path| fs::metadata(path).ok().and_then(|m| m.modified().ok()))
             {
                 let should_switch = current_file
@@ -302,6 +303,50 @@ fn watch_logs(
         }
 
         thread::sleep(Duration::from_millis(1000)); // 1 second is sufficient for log file changes
+    }
+}
+
+/// Watch directory entry changes instead of restatting every old log every
+/// two seconds. New files still appear at the usual two-second check. A periodic
+/// rescan also covers a reused file or a filesystem with unreliable timestamps.
+struct LogDirectory {
+    path: PathBuf,
+    changed: Option<std::time::SystemTime>,
+    scanned: Option<std::time::Instant>,
+    newest: Option<PathBuf>,
+    #[cfg(test)]
+    scans: usize,
+}
+impl LogDirectory {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            changed: None,
+            scanned: None,
+            newest: None,
+            #[cfg(test)]
+            scans: 0,
+        }
+    }
+    fn newest(&mut self, now: std::time::Instant) -> Option<PathBuf> {
+        let changed = fs::metadata(&self.path)
+            .ok()
+            .and_then(|meta| meta.modified().ok());
+        if self
+            .scanned
+            .is_none_or(|at| now.duration_since(at) >= Duration::from_secs(30))
+            || changed != self.changed
+            || self.newest.as_ref().is_some_and(|path| !path.is_file())
+        {
+            self.newest = find_newest_log_file(&self.path);
+            self.changed = changed;
+            self.scanned = Some(now);
+            #[cfg(test)]
+            {
+                self.scans += 1;
+            }
+        }
+        self.newest.clone()
     }
 }
 
@@ -756,5 +801,45 @@ mod tests {
         assert!(find_newest_log_file(&dir).is_none());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn log_directory_cache_keeps_polling_cheap_and_discovers_new_files() {
+        let dir =
+            std::env::temp_dir().join(format!("roblox_directory_cache_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let at = std::time::Instant::now();
+        let mut cache = LogDirectory::new(dir.clone());
+        assert_eq!(cache.newest(at), None);
+        fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("first_Player.log");
+        fs::write(&first, "first").unwrap();
+        assert_eq!(
+            cache.newest(at + Duration::from_secs(2)),
+            Some(first.clone())
+        );
+        let scans = cache.scans;
+        for seconds in 3..20 {
+            assert_eq!(
+                cache.newest(at + Duration::from_secs(seconds)),
+                Some(first.clone())
+            );
+        }
+        assert_eq!(cache.scans, scans);
+        std::thread::sleep(Duration::from_millis(50));
+        let second = dir.join("second_Player.log");
+        fs::write(&second, "second").unwrap();
+        assert_eq!(
+            cache.newest(at + Duration::from_secs(21)),
+            Some(second.clone())
+        );
+        fs::remove_file(&second).unwrap();
+        assert_eq!(
+            cache.newest(at + Duration::from_secs(22)),
+            Some(first.clone())
+        );
+        assert_eq!(cache.newest(at + Duration::from_secs(53)), Some(first));
+        assert!(cache.scans >= scans + 3);
+        let _ = fs::remove_dir_all(dir);
     }
 }

@@ -11,7 +11,7 @@ vi.mock("../../stores/gameLibraryStore", async () => {
   return { useGameLibraryStore: Object.assign(() => actual.useGameLibraryStore.getState(), actual.useGameLibraryStore) };
 });
 
-vi.mock("../../lib/commands", () => ({ gamesGetLibrary: vi.fn(), gamesAddFavourite: vi.fn(), gamesForget: vi.fn(), gamesJoin: vi.fn(), gamesSetFavourite: vi.fn(), gamesSetNotifications: vi.fn() }));
+vi.mock("../../lib/commands", () => ({ gamesGetLibrary: vi.fn(), gamesAddFavourite: vi.fn(), gamesForget: vi.fn(), gamesSetFavourite: vi.fn(), gamesSetNotifications: vi.fn() }));
 afterEach(() => { useGameLibraryStore.setState({ library: null, error: null, loading: false }); useVpnStore.setState({ gameRoute: null }); });
 describe("game library panel", () => {
   it("offers rejoin and copy-link actions for both installed Roblox clients", () => {

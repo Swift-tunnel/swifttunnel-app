@@ -300,35 +300,66 @@ pub async fn servers(
     location: u32,
     cursor: Option<u32>,
 ) -> Result<ServerPage, String> {
-    if !valid_place_id(place) {
-        return Err("Choose a valid Roblox game.".into());
+    ServerLookup::new(place)?.servers(location, cursor).await
+}
+
+/// One public roster per on-demand search, shared across candidate locations.
+/// It is discarded when the search ends. Final join checks still fetch fresh
+/// availability, so a cross-search cache cannot keep full servers selectable.
+pub struct ServerLookup {
+    place: String,
+    roster: Option<Result<(HashMap<String, PublicServer>, bool), String>>,
+}
+impl ServerLookup {
+    pub fn new(place: &str) -> Result<Self, String> {
+        if !valid_place_id(place) {
+            return Err("Choose a valid Roblox game.".into());
+        }
+        Ok(Self {
+            place: place.into(),
+            roster: None,
+        })
     }
-    static SEARCH: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
-    let _slot = SEARCH
-        .try_acquire()
-        .map_err(|_| "Another server search is still running. Try again shortly.".to_string())?;
-    let center = datacenters()
-        .await?
-        .into_iter()
-        .find(|row| row.id == location)
-        .ok_or("This datacenter is no longer available. Refresh the location list.")?;
-    let mut url = reqwest::Url::parse("https://apis.rovalra.com/v1/servers/region").unwrap();
-    url.query_pairs_mut()
-        .append_pair("place_id", place)
-        .append_pair("limit", "50")
-        .append_pair("city", &center.city)
-        .append_pair("country", &center.country);
-    if let Some(cursor) = cursor {
+
+    pub async fn servers(
+        &mut self,
+        location: u32,
+        cursor: Option<u32>,
+    ) -> Result<ServerPage, String> {
+        let place = self.place.as_str();
+        static SEARCH: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+        let _slot = SEARCH.try_acquire().map_err(|_| {
+            "Another server search is still running. Try again shortly.".to_string()
+        })?;
+        let center = datacenters()
+            .await?
+            .into_iter()
+            .find(|row| row.id == location)
+            .ok_or("This datacenter is no longer available. Refresh the location list.")?;
+        let mut url = reqwest::Url::parse("https://apis.rovalra.com/v1/servers/region").unwrap();
         url.query_pairs_mut()
-            .append_pair("cursor", &cursor.to_string());
+            .append_pair("place_id", place)
+            .append_pair("limit", "50")
+            .append_pair("city", &center.city)
+            .append_pair("country", &center.country);
+        if let Some(cursor) = cursor {
+            url.query_pairs_mut()
+                .append_pair("cursor", &cursor.to_string());
+        }
+        let directory = if self.roster.is_none() {
+            let (directory, roster) = tokio::join!(json(url), public_roster(place));
+            self.roster = Some(roster);
+            directory
+        } else {
+            json(url).await
+        };
+        let mut page = parse_servers(directory?, place, &center)?;
+        match self.roster.as_ref() {
+        Some(Ok((roster, complete))) => apply_availability(&mut page.servers, roster, *complete),
+        _ => page.warning = Some("Roblox could not verify current server availability. A listed server may be full or closed.".into()),
     }
-    let (directory, roster) = tokio::join!(json(url), public_roster(place));
-    let mut page = parse_servers(directory?, place, &center)?;
-    match roster {
-        Ok((roster, complete)) => apply_availability(&mut page.servers, &roster, complete),
-        Err(_) => page.warning = Some("Roblox could not verify current server availability. A listed server may be full or closed.".into()),
+        Ok(page)
     }
-    Ok(page)
 }
 pub async fn availability(place: &str, job: &str) -> Result<Availability, String> {
     if !valid_place_id(place) || !valid_job_id(job) {

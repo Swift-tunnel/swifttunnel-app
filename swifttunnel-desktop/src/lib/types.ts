@@ -657,14 +657,6 @@ export interface RobloxImportPreview {
   fps_cap: number | null;
   graphics_quality: RobloxSettingsConfig["graphics_quality"] | null;
 }
-export type RobloxCleanupKind = "logs" | "assets";
-export interface RobloxCleanupReport {
-  files: number;
-  bytes: number;
-  skipped: number;
-  partial: boolean;
-}
-
 export type TabId =
   | "connect"
   | "optimization"

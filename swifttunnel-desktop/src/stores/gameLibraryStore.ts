@@ -3,7 +3,8 @@ import { gamesGetLibrary, gamesSetFavourite } from "../lib/commands";
 import { formatErrorMessage } from "../lib/errors";
 import type { RobloxClient, RobloxLibrarySnapshot } from "../lib/types";
 
-let request = 0;
+let refreshTask: Promise<void> | null = null;
+let refreshRequested = false;
 let favouriteRevision = 0;
 const favouriteRevisions = new Map<string, number>();
 interface FavouriteWrite {
@@ -26,27 +27,41 @@ interface GameLibraryStore {
 export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
   pendingAction:null,requestAction:pendingAction=>set({pendingAction}),
   library: null, error: null, loading: false,
-  refresh: async () => {
-    const generation = ++request;
-    const observedFavourites = favouriteRevision;
+  refresh: () => {
+    refreshRequested = true;
+    if (refreshTask) return refreshTask;
+    let observedFavourites = favouriteRevision;
     set(state => ({ loading: state.library === null }));
-    try {
-      const library = await gamesGetLibrary();
-      if (generation === request) set({
-        library: { ...library, entries: library.entries.map(entry => {
-          const write = favourites.get(favouriteKey(entry.place_id, entry.client));
-          if (write) return { ...entry, favourite: write.desired };
-          if ((favouriteRevisions.get(favouriteKey(entry.place_id, entry.client)) ?? 0) > observedFavourites) {
-            const latest = get().library?.entries.find(e => e.place_id === entry.place_id && e.client === entry.client);
-            if (latest) return { ...entry, favourite: latest.favourite };
+    // Events arriving during a read request one follow-up snapshot. Never run
+    // overlapping IPC reads, and never lose a game-close event to coalescing.
+    refreshTask = Promise.resolve().then(async () => {
+      try {
+        do {
+          refreshRequested = false;
+          try {
+            const library = await gamesGetLibrary();
+            set({
+              library: { ...library, entries: library.entries.map(entry => {
+                const write = favourites.get(favouriteKey(entry.place_id, entry.client));
+                if (write) return { ...entry, favourite: write.desired };
+                if ((favouriteRevisions.get(favouriteKey(entry.place_id, entry.client)) ?? 0) > observedFavourites) {
+                  const latest = get().library?.entries.find(e => e.place_id === entry.place_id && e.client === entry.client);
+                  if (latest) return { ...entry, favourite: latest.favourite };
+                }
+                return entry;
+              }) },
+              loading: false, error: null,
+            });
+          } catch (error) {
+            set({ loading: false, error: formatErrorMessage(error) });
           }
-          return entry;
-        }) },
-        loading: false, error: null,
-      });
-    } catch (error) {
-      if (generation === request) set({ loading: false, error: formatErrorMessage(error) });
-    }
+          observedFavourites = favouriteRevision;
+        } while (refreshRequested);
+      } finally {
+        refreshTask = null;
+      }
+    });
+    return refreshTask;
   },
   setFavourite: (placeId, client, favourite) => {
     const entry = get().library?.entries.find(e => e.place_id === placeId && e.client === client);

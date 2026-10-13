@@ -58,6 +58,9 @@ export function useAutoRamClean() {
     }).then((u) => {
       if (disposed) u();
       else unlisten = u;
+    }).catch(() => {
+      // Notification/IPC teardown is best-effort; do not leave a rejected
+      // listener registration as an unhandled promise in the main window.
     });
 
     return () => {

@@ -117,6 +117,8 @@ pub struct PerformanceMonitor {
     system: System,
     last_full_scan: Option<std::time::Instant>,
     last_metrics: PerformanceMetrics,
+    #[cfg(test)]
+    full_scans: usize,
 }
 
 impl PerformanceMonitor {
@@ -128,6 +130,8 @@ impl PerformanceMonitor {
             system: System::new(),
             last_full_scan: None,
             last_metrics: PerformanceMetrics::default(),
+            #[cfg(test)]
+            full_scans: 0,
         }
     }
 
@@ -139,44 +143,17 @@ impl PerformanceMonitor {
         // like "Roblox not running" and cleared the FPS target.
         *metrics = self.last_metrics.clone();
 
-        // If we know the PID from last scan, only refresh that one process
-        if let Some(pid) = metrics.process_id {
-            let pid = sysinfo::Pid::from_u32(pid);
-            self.system
-                .refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-
-            // Check if process is still alive
-            if let Some(process) = self.system.process(pid) {
-                metrics.cpu_usage = normalize_process_cpu(process.cpu_usage());
-                metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
-            } else {
-                // Process exited, clear state and do full scan next time
-                metrics.roblox_running = false;
-                metrics.process_id = None;
-                metrics.cpu_usage = 0.0;
-                metrics.ram_usage = 0.0;
-            }
+        metrics.process_id = self.refresh_player(false);
+        metrics.roblox_running = metrics.process_id.is_some();
+        if let Some(process) = metrics
+            .process_id
+            .and_then(|pid| self.system.process(sysinfo::Pid::from_u32(pid)))
+        {
+            metrics.cpu_usage = normalize_process_cpu(process.cpu_usage());
+            metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
         } else {
-            // No known PID — full process scan to find Roblox, throttled so
-            // 1s metric polling doesn't whole-system-scan every tick.
-            let scan_due = self
-                .last_full_scan
-                .is_none_or(|at| at.elapsed() >= FULL_SCAN_MIN_INTERVAL);
-            if scan_due {
-                self.last_full_scan = Some(std::time::Instant::now());
-                self.system.refresh_processes(ProcessesToUpdate::All, true);
-            }
-            if scan_due && let Some((pid, process)) = self.find_roblox_process() {
-                metrics.roblox_running = true;
-                metrics.process_id = Some(pid);
-                metrics.cpu_usage = normalize_process_cpu(process.cpu_usage());
-                metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
-            } else {
-                metrics.roblox_running = false;
-                metrics.process_id = None;
-                metrics.cpu_usage = 0.0;
-                metrics.ram_usage = 0.0;
-            }
+            metrics.cpu_usage = 0.0;
+            metrics.ram_usage = 0.0;
         }
 
         // Get total system RAM
@@ -199,16 +176,54 @@ impl PerformanceMonitor {
         None
     }
 
-    /// Get Roblox process ID if running
-    pub fn get_roblox_pid(&mut self) -> Option<u32> {
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
-        self.find_roblox_process().map(|(pid, _)| pid)
+    /// Refresh a known player only. Idle polling shares one discovery scan
+    /// across metrics, the overlay and launch tracking, rather than each caller
+    /// scanning every process. Destructive operations request fresh discovery.
+    fn refresh_player(&mut self, force_discovery: bool) -> Option<u32> {
+        if let Some(pid) = self.last_metrics.process_id {
+            let process_pid = sysinfo::Pid::from_u32(pid);
+            self.system
+                .refresh_processes(ProcessesToUpdate::Some(&[process_pid]), true);
+            if self.system.process(process_pid).is_some_and(|process| {
+                is_roblox_player_process_name(&process.name().to_string_lossy())
+            }) {
+                return Some(pid);
+            }
+        }
+        let scan_due = force_discovery
+            || self
+                .last_full_scan
+                .is_none_or(|at| at.elapsed() >= FULL_SCAN_MIN_INTERVAL);
+        let pid = if scan_due {
+            self.last_full_scan = Some(std::time::Instant::now());
+            self.system.refresh_processes(ProcessesToUpdate::All, true);
+            #[cfg(test)]
+            {
+                self.full_scans += 1;
+            }
+            self.find_roblox_process().map(|(pid, _)| pid)
+        } else {
+            None
+        };
+        self.last_metrics.process_id = pid;
+        self.last_metrics.roblox_running = pid.is_some();
+        pid
     }
 
-    /// Check if Roblox is currently running
+    /// Polling may take up to four seconds to discover a newly started player;
+    /// an already discovered player's exit is checked on every call.
+    pub fn poll_roblox_pid(&mut self) -> Option<u32> {
+        self.refresh_player(false)
+    }
+
+    /// Fresh discovery for applying/restoring optimizations and launch safety.
+    pub fn get_roblox_pid(&mut self) -> Option<u32> {
+        self.refresh_player(true)
+    }
+
+    /// Fresh check for cleanup/launch safety. Do not use this for routine polls.
     pub fn is_roblox_running(&mut self) -> bool {
-        self.system.refresh_processes(ProcessesToUpdate::All, true);
-        self.find_roblox_process().is_some()
+        self.refresh_player(true).is_some()
     }
 
     /// Get system information
@@ -246,6 +261,64 @@ fn normalize_process_cpu(raw_cpu: f32) -> f32 {
 impl Default for PerformanceMonitor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod polling_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "manual host-dependent process polling benchmark"]
+    fn compare_repeated_full_scans_with_shared_polling() {
+        let mut old = System::new();
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            old.refresh_processes(ProcessesToUpdate::All, true);
+        }
+        let repeated = started.elapsed();
+        let mut monitor = PerformanceMonitor::new();
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            monitor.poll_roblox_pid();
+        }
+        println!(
+            "20 full scans: {repeated:?}; 20 shared polls: {:?}; full scans performed: {}",
+            started.elapsed(),
+            monitor.full_scans
+        );
+    }
+
+    #[test]
+    fn idle_consumers_share_discovery_and_safety_checks_still_force_a_scan() {
+        let mut monitor = PerformanceMonitor::new();
+        monitor.last_full_scan = Some(std::time::Instant::now());
+        for _ in 0..20 {
+            assert!(monitor.poll_roblox_pid().is_none());
+            monitor.update_metrics(&mut PerformanceMetrics::default());
+        }
+        assert_eq!(monitor.full_scans, 0);
+        monitor.is_roblox_running();
+        assert_eq!(monitor.full_scans, 1);
+        monitor.last_metrics.process_id = None;
+        monitor.last_full_scan = Some(std::time::Instant::now() - FULL_SCAN_MIN_INTERVAL);
+        monitor.poll_roblox_pid();
+        assert_eq!(monitor.full_scans, 2);
+    }
+
+    #[test]
+    fn reused_pid_is_not_mistaken_for_a_player() {
+        let mut monitor = PerformanceMonitor::new();
+        monitor.last_full_scan = Some(std::time::Instant::now());
+        monitor.last_metrics.process_id = Some(std::process::id());
+        monitor.last_metrics.roblox_running = true;
+        let mut metrics = PerformanceMetrics::default();
+        monitor.update_metrics(&mut metrics);
+        assert!(!metrics.roblox_running);
+        assert_eq!(metrics.process_id, None);
+        assert_eq!(metrics.cpu_usage, 0.0);
+        assert_eq!(metrics.ram_usage, 0.0);
+        assert_eq!(monitor.full_scans, 0);
     }
 }
 

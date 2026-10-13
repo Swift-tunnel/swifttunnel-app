@@ -686,7 +686,7 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                 let state = app.state::<AppState>();
                 let has_game = state.games.lock().current.is_some();
                 let check_process = { let games = state.games.lock(); has_game || games.launch_started.is_some() || (swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending()) };
-                let running = check_process && state.performance_monitor.lock().is_roblox_running();
+                let running = check_process && state.performance_monitor.lock().poll_roblox_pid().is_some();
                 let updating = !running && state.games.lock().launch_started.is_some_and(|at|at.elapsed()<std::time::Duration::from_secs(600)) && swifttunnel_core::roblox_native_launch::updater_running();
                 if running { swifttunnel_core::vpn::game_destination::refresh(); }
                 let gone_settled={let mut games=state.games.lock();if !running && has_game {games.process_gone_since.get_or_insert(std::time::Instant::now());}else{games.process_gone_since=None;}games.process_gone_since.is_some_and(|at|at.elapsed()>=std::time::Duration::from_secs(3))};
@@ -777,12 +777,10 @@ pub fn run() {
             commands::launcher::games_startup_target,
             commands::launcher::games_save_launcher_config,
             commands::games::games_scan_imports,
-            commands::games::games_cleanup,
             commands::games::games_set_notifications,
             commands::games::games_set_favourite,
             commands::games::games_add_favourite,
             commands::games::games_forget,
-            commands::games::games_join,
             // Auth
             commands::auth::auth_get_state,
             commands::auth::auth_login,

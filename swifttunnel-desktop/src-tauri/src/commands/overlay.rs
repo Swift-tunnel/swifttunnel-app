@@ -63,8 +63,9 @@ fn shortcut(_: tauri::AppHandle) -> Result<(), String> {
 pub async fn overlay_game_monitor(
     state: State<'_, AppState>,
 ) -> Result<Option<swifttunnel_core::roblox_window::GameMonitor>, String> {
-    let pid = state.performance_monitor.lock().get_roblox_pid();
+    let monitor = state.performance_monitor.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let pid = monitor.lock().poll_roblox_pid();
         pid.and_then(swifttunnel_core::roblox_window::monitor_for_player)
     })
     .await

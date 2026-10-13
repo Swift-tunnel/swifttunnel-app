@@ -47,7 +47,7 @@ export function useGameLibrary() {
       const route = useVpnStore.getState().gameRoute;
       const latest = useGameLibraryStore.getState().library?.current;
       if ((!route || route.game_server_ip !== current.ip) && !latest?.location && ++attempts < 5) {
-        timer = setTimeout(() => void show(), 2000);
+        timer = setTimeout(send, 2000);
         return;
       }
       const library = useGameLibraryStore.getState().library;
@@ -55,7 +55,8 @@ export function useGameLibrary() {
       const entry = library.entries.find(e => e.place_id === current.place_id && e.client === current.client);
       await notify(entry?.name ?? "Roblox game joined", gameSessionDescription(latest ?? current, route));
     };
-    timer = setTimeout(() => void show(), 2000);
+    const send = () => { void show().catch(error => reportError("Could not show game notification", error, { dedupeKey: "game-join-notification" })); };
+    timer = setTimeout(send, 2000);
     return () => { disposed = true; clearTimeout(timer); };
   }, [current?.place_id, current?.job_id, current?.client, current?.ip, current?.fresh_join, current?.observed_at]);
 }

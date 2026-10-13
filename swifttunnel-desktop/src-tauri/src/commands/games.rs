@@ -5,6 +5,17 @@ use tauri::{Emitter, State};
 
 pub const LIBRARY_CHANGED: &str = "roblox-library-changed";
 
+/// Library writes hold the state lock through the atomic save. Both acquiring
+/// that lock and file I/O belong off the UI and async executor threads.
+pub(crate) async fn library_task<T: Send + 'static>(
+    games: std::sync::Arc<parking_lot::Mutex<GamesState>>,
+    work: impl FnOnce(&mut GamesState) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(move || work(&mut games.lock()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn games_nvidia_profile()
 -> Result<swifttunnel_core::nvidia_profile::DriverProfile, String> {
@@ -139,23 +150,6 @@ pub async fn games_scan_imports(
     })
     .await
     .map_err(|e| format!("Could not scan launcher settings: {e}"))?
-}
-
-#[tauri::command]
-pub async fn games_cleanup(
-    state: State<'_, AppState>,
-    kind: swifttunnel_core::roblox_cleanup::CleanupKind,
-    delete: bool,
-) -> Result<swifttunnel_core::roblox_cleanup::CleanupReport, String> {
-    let monitor = state.performance_monitor.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        if delete && monitor.lock().is_roblox_running() {
-            return Err("Close Roblox before cleaning its files, then try again.".into());
-        }
-        swifttunnel_core::roblox_cleanup::inspect(kind, delete)
-    })
-    .await
-    .map_err(|e| format!("Could not complete cleanup: {e}"))?
 }
 
 #[derive(Clone, Serialize)]
@@ -308,72 +302,76 @@ impl GamesState {
 }
 
 #[tauri::command]
-pub fn games_get_library(state: State<'_, AppState>) -> Result<LibrarySnapshot, String> {
-    let mut games = state.games.lock();
-    let library = games.library()?.clone();
-    Ok(LibrarySnapshot {
-        entries: library.entries,
-        notify_joins: library.notify_joins,
-        current: games.current.clone(),
-        warning: games.warning.clone(),
-        status: games.status.clone(),
-        launch_pending: games.launch_pending(),
-        recovery: games.recovery.clone(),
+pub async fn games_get_library(state: State<'_, AppState>) -> Result<LibrarySnapshot, String> {
+    library_task(state.games.clone(), |games| {
+        let library = games.library()?.clone();
+        Ok(LibrarySnapshot {
+            entries: library.entries,
+            notify_joins: library.notify_joins,
+            current: games.current.clone(),
+            warning: games.warning.clone(),
+            status: games.status.clone(),
+            launch_pending: games.launch_pending(),
+            recovery: games.recovery.clone(),
+        })
     })
+    .await
 }
 #[tauri::command]
-pub fn games_dismiss_recovery(state: State<'_, AppState>) -> Result<(), String> {
-    state.games.lock().recovery = None;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn games_set_notifications(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
-    state.games.lock().mutate(|lib| {
-        lib.notify_joins = enabled;
+pub async fn games_dismiss_recovery(state: State<'_, AppState>) -> Result<(), String> {
+    library_task(state.games.clone(), |games| {
+        games.recovery = None;
         Ok(())
     })
+    .await
 }
 
 #[tauri::command]
-pub fn games_set_favourite(
+pub async fn games_set_notifications(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    library_task(state.games.clone(), move |games| {
+        games.mutate(|lib| {
+            lib.notify_joins = enabled;
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn games_set_favourite(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     place_id: String,
     client: RobloxClient,
     favourite: bool,
 ) -> Result<(), String> {
-    {
-        let mut games = state.games.lock();
+    library_task(state.games.clone(), move |games| {
         let warning = games.warning.clone();
         games.mutate(|lib| lib.set_favourite(&place_id, client, favourite))?;
         games.warning = warning;
-    }
+        Ok(())
+    })
+    .await?;
     let _ = app.emit(LIBRARY_CHANGED, ());
     Ok(())
 }
 
 #[tauri::command]
-pub fn games_forget(
+pub async fn games_forget(
     state: State<'_, AppState>,
     place_id: String,
     client: RobloxClient,
 ) -> Result<(), String> {
-    state.games.lock().mutate(|lib| {
-        lib.forget(&place_id, client);
-        Ok(())
+    library_task(state.games.clone(), move |games| {
+        games.mutate(|lib| {
+            lib.forget(&place_id, client);
+            Ok(())
+        })
     })
-}
-
-#[tauri::command]
-pub fn games_join(
-    place_id: String,
-    job_id: Option<String>,
-    client: RobloxClient,
-) -> Result<(), String> {
-    let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
-    swifttunnel_core::roblox_native_launch::launch(&player, &place_id, job_id.as_deref(), client)
-        .map(|_| ())
+    .await
 }
 
 /// Resolve a display name through public Roblox endpoints. Failure leaves the
@@ -439,13 +437,18 @@ pub async fn refresh_name(
         let data: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         data.get("data")?.get(0)?.get("imageUrl")?.as_str().map(str::to_string)
     }.await;
-    state.games.lock().mutate(|lib| {
-        lib.set_name(place_id, client, name);
-        if let Some(icon) = icon {
-            lib.set_icon(place_id, client, &icon);
-        }
-        Ok(())
-    })?;
+    let place_id = place_id.to_owned();
+    let name = name.to_owned();
+    library_task(state.games.clone(), move |games| {
+        games.mutate(|lib| {
+            lib.set_name(&place_id, client, &name);
+            if let Some(icon) = icon {
+                lib.set_icon(&place_id, client, &icon);
+            }
+            Ok(())
+        })
+    })
+    .await?;
     Ok(true)
 }
 
@@ -456,10 +459,11 @@ pub async fn games_add_favourite(
     client: Option<RobloxClient>,
 ) -> Result<(), String> {
     let client = client.unwrap_or_default();
-    state
-        .games
-        .lock()
-        .mutate(|lib| lib.set_favourite(&place_id, client, true))?;
+    let saved_place = place_id.clone();
+    library_task(state.games.clone(), move |games| {
+        games.mutate(|lib| lib.set_favourite(&saved_place, client, true))
+    })
+    .await?;
     // The favourite is safely saved even when Roblox's metadata is unavailable.
     let _ = refresh_name(&state, &place_id, client).await;
     Ok(())

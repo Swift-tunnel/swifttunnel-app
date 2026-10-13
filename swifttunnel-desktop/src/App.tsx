@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
 import {
   availableMonitors,
@@ -11,12 +11,7 @@ import { StartupScreen } from "./components/shell/StartupScreen";
 import { LoginScreen } from "./components/auth/LoginScreen";
 import { BannedScreen } from "./components/auth/BannedScreen";
 import { ConnectTab } from "./components/connect/ConnectTab";
-import { OptimizationTab } from "./components/optimization/OptimizationTab";
-import { GamesTab } from "./components/boost/GamesTab";
-import { OverlayTab } from "./components/ingame/OverlayTab";
-import { NetworkTab } from "./components/network/NetworkTab";
-import { RepairTab } from "./components/repair/RepairTab";
-import { SettingsTab } from "./components/settings/SettingsTab";
+import { Spinner } from "./components/ui";
 import { WhatsNewDialog } from "./components/updater/WhatsNewDialog";
 import { UpdateRequiredScreen } from "./components/updater/UpdateRequiredScreen";
 import { useAuthStore } from "./stores/authStore";
@@ -45,6 +40,15 @@ import {
   normalizeWindowState,
 } from "./lib/windowState";
 import type { TabId } from "./lib/types";
+
+// Connect is the startup screen. Optional pages are loaded on first use so
+// Games, FastFlags and driver editors do not all parse during every launch.
+const OptimizationTab = lazy(() => import("./components/optimization/OptimizationTab").then(m => ({ default: m.OptimizationTab })));
+const GamesTab = lazy(() => import("./components/boost/GamesTab").then(m => ({ default: m.GamesTab })));
+const OverlayTab = lazy(() => import("./components/ingame/OverlayTab").then(m => ({ default: m.OverlayTab })));
+const NetworkTab = lazy(() => import("./components/network/NetworkTab").then(m => ({ default: m.NetworkTab })));
+const RepairTab = lazy(() => import("./components/repair/RepairTab").then(m => ({ default: m.RepairTab })));
+const SettingsTab = lazy(() => import("./components/settings/SettingsTab").then(m => ({ default: m.SettingsTab })));
 
 function tabComponent(tab: TabId) {
   switch (tab) {
@@ -629,7 +633,7 @@ function App() {
 
   return (
     <>
-      <AppShell>{(tab) => tabComponent(tab as TabId)}</AppShell>
+      <AppShell>{(tab) => <Suspense fallback={<div role="status" className="flex items-center justify-center gap-2 py-12 text-[12px] text-text-muted"><Spinner size={14} />Loading...</div>}>{tabComponent(tab as TabId)}</Suspense>}</AppShell>
       <WhatsNewDialog />
     </>
   );

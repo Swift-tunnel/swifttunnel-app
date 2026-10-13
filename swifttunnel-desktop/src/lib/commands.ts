@@ -36,8 +36,6 @@ import type {
   RobloxClient,
   RobloxLibrarySnapshot,
   RobloxImportPreview,
-  RobloxCleanupKind,
-  RobloxCleanupReport,
   RobloxDatacenter,
   RobloxServerPage,
   GamePreferences,
@@ -61,11 +59,8 @@ export const gamesSetFavourite = (placeId: string, client: RobloxClient, favouri
   invoke<void>("games_set_favourite", { placeId, client, favourite });
 export const gamesAddFavourite = (placeId: string, client: RobloxClient = "standard") => invoke<void>("games_add_favourite", { placeId, client });
 export const gamesForget = (placeId: string, client: RobloxClient) => invoke<void>("games_forget", { placeId, client });
-export const gamesJoin = (placeId: string, client: RobloxClient, jobId: string | null = null) =>
-  invoke<void>("games_join", { placeId, client, jobId });
 export const gamesSetNotifications = (enabled: boolean) => invoke<void>("games_set_notifications", { enabled });
 export const gamesScanImports = () => invoke<RobloxImportPreview>("games_scan_imports");
-export const gamesCleanup = (kind: RobloxCleanupKind, remove = false) => invoke<RobloxCleanupReport>("games_cleanup", { kind, delete: remove });
 export const gamesDatacenters = () => invoke<RobloxDatacenter[]>("games_datacenters");
 export const gamesSearchServers = (placeId: string, datacenterId: number, cursor: number | null = null) => invoke<RobloxServerPage>("games_search_servers", { placeId, datacenterId, cursor });
 export const gamesSetPreferences = (placeId: string, client: RobloxClient, preferences: GamePreferences) => invoke<void>("games_set_preferences", { placeId, client, preferences });

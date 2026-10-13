@@ -14,10 +14,14 @@ pub async fn games_create_shortcut(place_id: String, name: String) -> Result<Str
         .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub fn games_launcher_config() -> Result<LauncherConfig, String> {
-    LauncherConfig::load()
+pub async fn games_launcher_config() -> Result<LauncherConfig, String> {
+    tauri::async_runtime::spawn_blocking(LauncherConfig::load)
+        .await
+        .map_err(|e| e.to_string())?
 }
 #[tauri::command]
-pub fn games_save_launcher_config(config: LauncherConfig) -> Result<(), String> {
-    config.save()
+pub async fn games_save_launcher_config(config: LauncherConfig) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || config.save())
+        .await
+        .map_err(|e| e.to_string())?
 }

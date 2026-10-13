@@ -171,10 +171,100 @@ pub async fn games_set_preferences(
     {
         return Err("This datacenter is no longer listed. Choose another location.".into());
     }
-    state
-        .games
-        .lock()
-        .mutate(|lib| lib.set_preferences(&place_id, client, preferences))
+    games::library_task(state.games.clone(), move |games| {
+        games.mutate(|lib| lib.set_preferences(&place_id, client, preferences))
+    })
+    .await
+}
+
+/// Deduplicate reference hosts and cap blocking ICMP workers at four. Timed-out
+/// Windows calls finish within their own two-second limit; no new work starts
+/// after the search deadline.
+async fn measure_direct_paths(
+    targets: Vec<String>,
+    deadline: tokio::time::Instant,
+    probe: impl Fn(&str) -> Option<u32> + Send + Sync + 'static,
+) -> std::collections::HashMap<String, u32> {
+    let probe = std::sync::Arc::new(probe);
+    let mut targets = targets
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter();
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut readings = std::collections::HashMap::new();
+    loop {
+        while tasks.len() < 4 && tokio::time::Instant::now() < deadline {
+            let Some(target) = targets.next() else {
+                break;
+            };
+            let probe = probe.clone();
+            tasks.spawn_blocking(move || {
+                let reading = probe(&target);
+                (target, reading)
+            });
+        }
+        if tasks.is_empty() {
+            break;
+        }
+        match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+            Ok(Some(Ok((target, Some(reading))))) => {
+                readings.insert(target, reading);
+            }
+            Ok(Some(_)) => {}
+            _ => break,
+        }
+    }
+    readings
+}
+
+#[cfg(test)]
+mod direct_probe_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn repeated_relay_targets_only_start_four_workers_and_probe_each_host_once() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (in_use, maximum, started) = (active.clone(), peak.clone(), calls.clone());
+        let targets = (0..12)
+            .flat_map(|i| vec![format!("128.116.{i}.3"); 5])
+            .collect();
+        let results = measure_direct_paths(
+            targets,
+            tokio::time::Instant::now() + Duration::from_secs(2),
+            move |_| {
+                let count = in_use.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(count, Ordering::SeqCst);
+                started.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(5));
+                in_use.fetch_sub(1, Ordering::SeqCst);
+                Some(12)
+            },
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), 12);
+        assert_eq!(results.len(), 12);
+        assert!(peak.load(Ordering::SeqCst) <= 4);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_expired_search_does_not_launch_any_probes() {
+        let results = measure_direct_paths(
+            vec!["128.116.47.3".into()],
+            tokio::time::Instant::now(),
+            |_| {
+                panic!("an expired search must not start a blocking worker");
+            },
+        )
+        .await;
+        assert!(results.is_empty());
+    }
 }
 
 async fn matchmake(
@@ -184,7 +274,10 @@ async fn matchmake(
     tunnel: bool,
 ) -> Result<(u32, String), String> {
     use swifttunnel_core::roblox_launcher::{MatchMode, qualifies};
-    let catalog = roblox_directory::datacenters().await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let catalog = tokio::time::timeout_at(deadline, roblox_directory::datacenters())
+        .await
+        .map_err(|_| "The server search took too long. Try again.".to_string())??;
     let previews = state
         .games
         .lock()
@@ -194,6 +287,27 @@ async fn matchmake(
         .cloned()
         .collect::<Vec<_>>();
     let mut measured = Vec::new();
+    let direct = if tunnel {
+        std::collections::HashMap::new()
+    } else {
+        measure_direct_paths(
+            catalog
+                .iter()
+                .filter(|center| !config.blocked_datacenters.contains(&center.id))
+                .filter_map(|center| {
+                    center
+                        .relay_region
+                        .as_deref()
+                        .and_then(swifttunnel_core::vpn::route_preview::reference_location)
+                })
+                .filter_map(|location| previews.iter().find(|p| p.location == location))
+                .map(|p| p.target.to_string())
+                .collect(),
+            deadline.min(tokio::time::Instant::now() + Duration::from_secs(8)),
+            swifttunnel_core::vpn::servers::measure_latency_icmp,
+        )
+        .await
+    };
     // Direct launches compare measured PC-to-reference paths. Tunnel launches
     // use both measured legs. Never replace a missing sample with distance.
     for center in catalog
@@ -211,13 +325,7 @@ async fn matchmake(
         let score = if tunnel {
             matches.iter().map(|p| p.estimate.estimated_game_ms).min()
         } else if let Some(row) = matches.first() {
-            let target = row.target.to_string();
-            tokio::task::spawn_blocking(move || {
-                swifttunnel_core::vpn::servers::measure_latency_icmp(&target)
-            })
-            .await
-            .ok()
-            .flatten()
+            direct.get(&row.target.to_string()).copied()
         } else {
             None
         };
@@ -233,7 +341,7 @@ async fn matchmake(
     if measured.is_empty() {
         return Err("Matchmaker has no ping readings yet. Wait a moment, pick a preferred location, or Play normally.".into());
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut lookup = roblox_directory::ServerLookup::new(place)?;
     let mut remaining = config.search_limit as usize;
     let mut best: Option<(
         u32,
@@ -246,12 +354,7 @@ async fn matchmake(
         if remaining == 0 || tokio::time::Instant::now() >= deadline {
             break;
         }
-        let page = match tokio::time::timeout_at(
-            deadline,
-            roblox_directory::servers(place, center.id, None),
-        )
-        .await
-        {
+        let page = match tokio::time::timeout_at(deadline, lookup.servers(center.id, None)).await {
             Ok(Ok(p)) => p,
             _ => continue,
         };

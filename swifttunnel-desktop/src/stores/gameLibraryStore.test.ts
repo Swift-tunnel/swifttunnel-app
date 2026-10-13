@@ -84,4 +84,28 @@ describe("game favourites", () => {
     expect(favourite()).toBe(true);
     expect(useGameLibraryStore.getState().loading).toBe(false);
   });
+  it("coalesces an event burst without losing the final game-close snapshot", async () => {
+    const first = deferred<RobloxLibrarySnapshot>();
+    const last = deferred<RobloxLibrarySnapshot>();
+    vi.mocked(gamesGetLibrary).mockReturnValueOnce(first.promise).mockReturnValueOnce(last.promise);
+    const task = useGameLibraryStore.getState().refresh();
+    await Promise.resolve();
+    const burst = Array.from({ length: 20 }, () => useGameLibraryStore.getState().refresh());
+    expect(gamesGetLibrary).toHaveBeenCalledTimes(1);
+    first.resolve({ ...snapshot(), launch_pending: true, status: "Roblox is opening." });
+    await Promise.resolve();
+    expect(gamesGetLibrary).toHaveBeenCalledTimes(2);
+    last.resolve({ ...snapshot(), launch_pending: false, status: null });
+    await Promise.all([task, ...burst]);
+    expect(useGameLibraryStore.getState().library!.launch_pending).toBe(false);
+    expect(useGameLibraryStore.getState().library!.status).toBeNull();
+    expect(gamesGetLibrary).toHaveBeenCalledTimes(2);
+  });
+  it("allows a new refresh after a failed read", async () => {
+    vi.mocked(gamesGetLibrary).mockRejectedValueOnce(new Error("Read failed")).mockResolvedValueOnce(snapshot());
+    await useGameLibraryStore.getState().refresh();
+    expect(useGameLibraryStore.getState().error).toBe("Read failed");
+    await useGameLibraryStore.getState().refresh();
+    expect(useGameLibraryStore.getState().error).toBeNull();
+  });
 });
