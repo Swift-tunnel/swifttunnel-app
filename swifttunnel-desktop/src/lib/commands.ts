@@ -45,9 +45,22 @@ import type {
   FlagCleanupReport,
   NvidiaDriverProfile,
   NvidiaDriverSetting,
+  LauncherConfig,
+  GameSessionReport,
+  GameDisplay,
 } from "./types";
 
 export const gamesGetLibrary = () => invoke<RobloxLibrarySnapshot>("games_get_library");
+export const gamesLauncherConfig = () => invoke<LauncherConfig>("games_launcher_config");
+export const gamesSaveLauncherConfig = (config: LauncherConfig) => invoke<void>("games_save_launcher_config", { config });
+export const gamesSessionReports = () => invoke<GameSessionReport[]>("games_session_reports");
+export const gamesClearSessionReports = () => invoke<void>("games_clear_session_reports");
+export const gamesLaunchDiagnostics = () => invoke<string[]>("games_launch_diagnostics");
+export const gamesDisplays = () => invoke<GameDisplay[]>("games_displays");
+export const gamesCreateShortcut = (placeId: string, name: string) => invoke<string>("games_create_shortcut", { placeId, name });
+export const gamesStartupTarget = () => invoke<string | null>("games_startup_target");
+export const gamesDismissRecovery = () => invoke<void>("games_dismiss_recovery");
+export const gamesSuggestServer = () => invoke<GameLaunchPlan | null>("games_suggest_server");
 export const gamesSetFavourite = (placeId: string, client: RobloxClient, favourite: boolean) =>
   invoke<void>("games_set_favourite", { placeId, client, favourite });
 export const gamesAddFavourite = (placeId: string) => invoke<void>("games_add_favourite", { placeId });
@@ -61,7 +74,7 @@ export const gamesDatacenters = () => invoke<RobloxDatacenter[]>("games_datacent
 export const gamesSearchServers = (placeId: string, datacenterId: number, cursor: number | null = null) => invoke<RobloxServerPage>("games_search_servers", { placeId, datacenterId, cursor });
 export const gamesSetPreferences = (placeId: string, client: RobloxClient, preferences: GamePreferences) => invoke<void>("games_set_preferences", { placeId, client, preferences });
 export const gamesLaunchPlan = (placeId: string, client: RobloxClient, jobId: string | null = null, datacenterId: number | null = null, usePreferredRegion = true) => invoke<GameLaunchPlan>("games_launch_plan", { placeId, client, jobId, datacenterId, usePreferredRegion });
-export const gamesLaunch = (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, connectionStarted: boolean) => invoke<void>("games_launch", { placeId, client, jobId, datacenterId, allowUnverified, connectionStarted });
+export const gamesLaunch = (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, connectionStarted: boolean, safeLaunch = false) => invoke<void>("games_launch", { placeId, client, jobId, datacenterId, allowUnverified, connectionStarted, safeLaunch });
 export const gamesFlags = (action: "preview" | "clean" | "undo") => invoke<FlagCleanupReport>("games_flags", { action });
 export const gamesSaveFlags = (enabled: boolean, json: string, expected: { custom_fflags_json: string; custom_fflags_enabled: boolean; ultraboost: boolean }) => invoke<BoostUpdateResult>("games_save_flags", { enabled, json, expectedJson: expected.custom_fflags_json, expectedEnabled: expected.custom_fflags_enabled, expectedUltraboost: expected.ultraboost });
 export const gamesNvidiaProfile = () => invoke<NvidiaDriverProfile>("games_nvidia_profile");

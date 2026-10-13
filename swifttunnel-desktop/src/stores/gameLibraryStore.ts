@@ -5,12 +5,15 @@ import type { RobloxLibrarySnapshot } from "../lib/types";
 
 let request = 0;
 interface GameLibraryStore {
+  pendingAction: string | null;
+  requestAction: (action: string | null) => void;
   library: RobloxLibrarySnapshot | null;
   error: string | null;
   loading: boolean;
   refresh: () => Promise<void>;
 }
 export const useGameLibraryStore = create<GameLibraryStore>((set) => ({
+  pendingAction:null,requestAction:pendingAction=>set({pendingAction}),
   library: null, error: null, loading: false,
   refresh: async () => {
     const generation = ++request;

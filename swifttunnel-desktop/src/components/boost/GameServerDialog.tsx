@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Dialog, ErrorBanner, Icon, Spinner } from "../ui";
+import { Button, Dialog, ErrorBanner, Icon, Spinner, Select, fieldClass } from "../ui";
 import { Flag } from "../ui/Flag";
 import { gamesDatacenters, gamesSearchServers, systemOpenUrl } from "../../lib/commands";
 import { defaultGamePreferences } from "../../lib/gameLaunchFlow";
@@ -12,6 +12,8 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
   const [page, setPage] = useState<RobloxServerPage | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [minSlots,setMinSlots]=useState(1);
+  const [population,setPopulation]=useState(false);
   const generation = useRef(0);
   useEffect(() => {
     const current = ++generation.current;
@@ -35,7 +37,8 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
     finally { if (current === generation.current) setBusy(false); }
   }
   const center = centers.find(c => c.id === selected);
-  const rows = page?.servers ?? [];
+  const totalRows=page?.servers??[];
+  const rows = totalRows.filter(s=>s.capacity==null||s.playing==null?minSlots===1:s.capacity-s.playing>=minSlots).sort((a,b)=>population?(a.playing??Infinity)-(b.playing??Infinity):0);
   return <Dialog flush open={!!entry} onClose={onClose} maxWidth={820} title={`Find a server · ${entry?.name ?? "Roblox"}`} description="Choose a Roblox datacenter. A listed server can become full or close before you join.">
     <div className="grid h-[min(360px,calc(100vh-13rem))] grid-cols-[200px_minmax(0,1fr)] max-[700px]:h-auto max-[700px]:grid-cols-1">
       <div className="overflow-y-auto border-r border-border-subtle p-2 max-[700px]:max-h-[150px] max-[700px]:border-b max-[700px]:border-r-0">
@@ -46,6 +49,7 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
         </button>)}
       </div>
       <div className="flex min-h-0 flex-col gap-3 overflow-y-auto p-4">
+        <div className="flex flex-wrap items-center gap-2"><label className="text-[11px] text-text-muted">Free slots <input aria-label="Server minimum free slots" type="number" min={1} max={20} value={minSlots} onChange={e=>setMinSlots(Math.max(1,Math.min(20,Number(e.target.value))))} className={`${fieldClass} w-16`}/></label><Select aria-label="Sort public servers" value={population?"few":"listed"} onChange={e=>setPopulation(e.target.value==="few")}><option value="listed">Directory order</option><option value="few">Fewer players</option></Select></div>
         {error && <ErrorBanner tone="error">{error}</ErrorBanner>}
         {page?.warning && <ErrorBanner tone="warning">{page.warning}</ErrorBanner>}
         {center && <div className="flex items-center justify-between gap-3"><div className="min-w-0"><p className="text-[13.5px] font-semibold leading-tight text-text-primary">{center.city}</p><p className="mt-1 text-[11px] text-text-muted">{center.relay_region ? `${center.relay_region} relay region` : "No matching SwiftTunnel relay region"}</p></div><Button size="sm" variant="secondary" disabled={busy} leadingIcon={<Icon name="refresh" size={13} />} onClick={() => void search(center.id)}>Refresh</Button></div>}
@@ -56,7 +60,7 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
           <div className="min-w-0"><p className="font-mono text-[12px] font-medium text-text-primary">Server {server.job_id.slice(0,8)}</p><p className="mt-1 text-[11px] text-text-muted">{server.playing != null && server.capacity != null ? `${server.playing}/${server.capacity} players · ` : ""}{server.availability === "available" ? "Listed as available" : server.availability === "full" ? "Full" : server.availability === "unavailable" ? "No longer listed" : "Availability unverified"}</p></div>
           <Button size="sm" variant="secondary" disabled={busy || server.availability === "full" || server.availability === "unavailable"} onClick={() => { if (entry && center) onJoin(entry, server, center); }}>Join</Button>
         </div>)}</div>}
-        {page?.next_cursor != null && rows.length < 200 && <Button size="sm" variant="ghost" className="self-start" disabled={busy} onClick={() => { if (selected) void search(selected, true); }}>Load more</Button>}
+        {page?.next_cursor != null && totalRows.length < 200 && <Button size="sm" variant="ghost" className="self-start" disabled={busy} onClick={() => { if (selected) void search(selected, true); }}>Load more</Button>}
       </div>
     </div>
     <footer className="flex items-center justify-between gap-3 border-t border-border-subtle px-5 py-3 text-[11px] text-text-muted"><span>Server locations by <button type="button" className="text-text-secondary underline decoration-border-strong underline-offset-2 hover:text-text-primary" onClick={() => void systemOpenUrl("https://www.rovalra.com")}>RoValra</button>. Availability by Roblox.</span><Button size="sm" variant="secondary" onClick={onClose}>Done</Button></footer>

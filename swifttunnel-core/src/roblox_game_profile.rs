@@ -260,8 +260,21 @@ fn stopped() -> bool {
         .values()
         .any(|p| crate::process_names::is_roblox_player_process_name(&p.name().to_string_lossy()))
 }
+pub fn player_stopped() -> bool {
+    stopped()
+}
 
 pub fn apply(client: RobloxClient, preferences: &GamePreferences) -> Result<bool, String> {
+    apply_inner(client, preferences, false)
+}
+pub fn apply_native(client: RobloxClient, preferences: &GamePreferences) -> Result<bool, String> {
+    apply_inner(client, preferences, true)
+}
+fn apply_inner(
+    client: RobloxClient,
+    preferences: &GamePreferences,
+    native: bool,
+) -> Result<bool, String> {
     preferences.validate()?;
     if preferences.fps_cap.is_none() && preferences.graphics_quality.is_none() {
         return Ok(false);
@@ -300,7 +313,11 @@ pub fn apply(client: RobloxClient, preferences: &GamePreferences) -> Result<bool
             }
         }
     }
-    let flags = flag_plan(preferences.graphics_quality.as_ref().map(|g| g.to_level()))?;
+    let flags = if native {
+        Vec::new()
+    } else {
+        flag_plan(preferences.graphics_quality.as_ref().map(|g| g.to_level()))?
+    };
     if fields.is_empty() && flags.is_empty() {
         return Ok(false);
     }

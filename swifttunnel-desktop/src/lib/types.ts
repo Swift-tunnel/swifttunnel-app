@@ -609,7 +609,15 @@ export interface GamePreferences {
   fps_cap: number | null;
   graphics_quality: RobloxSettingsConfig["graphics_quality"] | null;
   use_tunnel: boolean;
+  flag_profile?: string | null;
+  skip_matchmaker?: boolean;
+  borderless?: boolean;
+  monitor?: string | null;
 }
+export interface MatchmakerConfig { enabled: boolean; mode: "closest" | "fewer_players"; blocked_datacenters: number[]; preferred_datacenter: number | null; skipped_games: string[]; minimum_free_slots: number; search_limit: number; prepare_tunnel: boolean; offer_better_server: boolean; }
+export interface NamedGameProfile { name: string; settings: RobloxSettingsConfig; }
+export interface LauncherConfig { matchmaker: MatchmakerConfig; profiles: NamedGameProfile[]; offer_recovery: boolean; }
+export interface GameSessionReport { place_id: string; game_name: string; started_at: number; duration_seconds: number; location: string | null; samples: number; average_fps: number | null; low_fps: number | null; average_network_ms: number | null; network_variation_ms: number | null; frame_spikes: number; peak_frame_ms: number | null; ended_without_leave: boolean; relay_probe_loss_pct?: number | null; relay_probe_variation_ms?: number | null; }
 export interface RobloxDatacenter { id: number; city: string; country: string; datacenter_ids: number[]; relay_region: string | null; }
 export type ServerAvailability = "available" | "full" | "unavailable" | "unknown";
 export interface RobloxDirectoryServer { job_id: string; datacenter_id: number; ip: string | null; first_seen: string; playing: number | null; capacity: number | null; availability: ServerAvailability; }
@@ -627,12 +635,15 @@ export interface RobloxGameSession {
   location_source?: "rovalra" | "ip_location" | null;
 }
 export interface RobloxLibrarySnapshot {
+  recovery?: RobloxGameSession | null;
   entries: RobloxGameEntry[];
   current: RobloxGameSession | null;
   warning: string | null;
+  status?: string | null;
   notify_joins: boolean;
   launch_pending?: boolean;
 }
+export interface GameDisplay { id: string; primary: boolean; left: number; top: number; width: number; height: number; }
 export interface LauncherFlagImport {
   source: string;
   json: string;

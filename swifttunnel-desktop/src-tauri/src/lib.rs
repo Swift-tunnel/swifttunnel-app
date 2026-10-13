@@ -1,6 +1,7 @@
 mod autostart;
 mod commands;
 mod events;
+mod game_shortcut;
 mod harness;
 mod logging;
 mod single_client;
@@ -407,7 +408,9 @@ fn reapply_saved_network_boosts(_state: &AppState) {}
 
 #[cfg(windows)]
 fn reapply_saved_roblox_fflags(state: &AppState) {
-    if swifttunnel_core::roblox_game_profile::pending() {
+    if swifttunnel_core::roblox_game_profile::pending()
+        || swifttunnel_core::roblox_launch_flags::pending()
+    {
         return;
     }
     let roblox_config = {
@@ -530,7 +533,9 @@ fn spawn_roblox_version_watcher(app: tauri::AppHandle) {
                 if current == last_seen {
                     continue;
                 }
-                if swifttunnel_core::roblox_game_profile::pending() {
+                if swifttunnel_core::roblox_game_profile::pending()
+                    || swifttunnel_core::roblox_launch_flags::pending()
+                {
                     continue;
                 }
                 last_seen = current;
@@ -613,6 +618,9 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                                 games.left_confirmed = true;
                                 if games.current.as_ref().is_some_and(|current| job_id.as_ref().is_none_or(|id| *id == current.job_id)) {
                                     games.current = None;
+                                    if let Some(recorder)=games.recorder.take() {
+                                        if let Err(error)=swifttunnel_core::roblox_launcher::save_report(recorder.finish(chrono::Utc::now().timestamp().max(0) as u64,false)) {log::warn!("Session report: {error}");}
+                                    }
                                     games.launch_started = None;
                                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                                 }
@@ -667,28 +675,59 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                 }
                 let state = app.state::<AppState>();
                 let has_game = state.games.lock().current.is_some();
-                let check_process = { let games = state.games.lock(); has_game || games.owned_connection.is_some() || games.launch_started.is_some() || swifttunnel_core::roblox_game_profile::pending() };
+                let check_process = { let games = state.games.lock(); has_game || games.owned_connection.is_some() || games.launch_started.is_some() || (swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending()) };
                 let running = check_process && state.performance_monitor.lock().is_roblox_running();
+                let updating = !running && state.games.lock().launch_started.is_some_and(|at|at.elapsed()<std::time::Duration::from_secs(600)) && swifttunnel_core::roblox_native_launch::updater_running();
                 if running { swifttunnel_core::vpn::game_destination::refresh(); }
-                if has_game && !running {
-                    state.games.lock().current = None;
+                let gone_settled={let mut games=state.games.lock();if !running && has_game {games.process_gone_since.get_or_insert(std::time::Instant::now());}else{games.process_gone_since=None;}games.process_gone_since.is_some_and(|at|at.elapsed()>=std::time::Duration::from_secs(3))};
+                if has_game && !running && gone_settled {
+                    let mut games=state.games.lock();
+                    let previous=games.current.take();
+                    let unexpected=!games.left_confirmed;
+                    if let Some(recorder)=games.recorder.take() {
+                        if let Err(error)=swifttunnel_core::roblox_launcher::save_report(recorder.finish(chrono::Utc::now().timestamp().max(0) as u64,unexpected)) {log::warn!("Session report: {error}");}
+                    }
+                    games.recovery_shown.retain(|at|at.elapsed()<std::time::Duration::from_secs(600));
+                    if unexpected && games.recovery_shown.len()<3 && games.recovery_shown.last().is_none_or(|at|at.elapsed()>std::time::Duration::from_secs(30))
+                        && swifttunnel_core::roblox_launcher::LauncherConfig::load().is_ok_and(|c|c.offer_recovery) {
+                        games.recovery=previous;games.recovery_shown.push(std::time::Instant::now());
+                    }
                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                 }
                 let traffic = state.vpn_connection.try_lock().ok().and_then(|vpn| vpn.auto_router().cloned()).is_some_and(|router| router.has_recent_game_traffic());
+                let route=state.vpn_connection.try_lock().ok().and_then(|vpn|vpn.auto_router().and_then(|r|r.game_route_status()));
+                let probes=state.vpn_connection.try_lock().ok().and_then(|vpn|vpn.get_relay_ping_snapshot());
+                let fps=state.fps_monitor.current_fps();
+                let (spikes,peak)=state.fps_monitor.take_frame_gaps();
                 let mut games = state.games.lock();
+                let estimate=route.filter(|route|games.current.as_ref().is_some_and(|g|g.ip.parse::<std::net::Ipv4Addr>().ok()==route.game_server_ip)).and_then(|r|r.estimated_path_ms);
+                if let Some(recorder)=&mut games.recorder {
+                    recorder.sample_relay(probes.as_ref());
+                    recorder.sample(fps,estimate);recorder.report.frame_spikes=recorder.report.frame_spikes.saturating_add(spikes);
+                    if let Some(peak)=peak {recorder.report.peak_frame_ms=Some(recorder.report.peak_frame_ms.unwrap_or(0).max(peak));}
+                }
                 let expired = games.launch_started.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(60));
                 if traffic { games.game_traffic_seen = true; if games.launch_started.is_some_and(|at| at.elapsed() > std::time::Duration::from_secs(5)) { games.launch_started = None; let _ = app.emit(commands::games::LIBRARY_CHANGED, ()); } }
-                if expired && !traffic && games.current.is_none() {
+                if expired && !traffic && games.current.is_none() && !running && !updating {
                     games.launch_started = None;
+                    games.status = None;
                     if !games.game_traffic_seen { games.left_confirmed = true; }
                     games.warning = Some("A running game was not detected within a minute. Retry Play after Roblox finishes updating, or check its logs.".into());
                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                 }
+                if updating && games.status.is_none() {games.status=Some("Roblox is updating. The game will open when its updater finishes.".into());let _=app.emit(commands::games::LIBRARY_CHANGED,());}
+                if expired && running && games.current.is_none() {
+                    games.launch_started = None;
+                    games.warning = None;
+                    games.status = Some("Roblox is running. Server details have not been detected yet.".into());
+                    let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
+                }
+                if !running && !updating && games.launch_started.is_none() && games.status.take().is_some() {let _=app.emit(commands::games::LIBRARY_CHANGED,());}
                 let idle = games.current.is_none() && games.launch_started.is_none() && !traffic
-                    && (!running || games.left_confirmed || expired && !games.game_traffic_seen);
+                    && (!running || games.left_confirmed);
                 if idle { games.idle_since.get_or_insert(std::time::Instant::now()); } else { games.idle_since = None; }
                 let settled = games.idle_since.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(5));
-                let needs_cleanup = games.owned_connection.is_some() || swifttunnel_core::roblox_game_profile::pending();
+                let needs_cleanup = games.owned_connection.is_some() || (swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending());
                 if idle && settled && needs_cleanup && !games.cleanup_scheduled && games.last_cleanup.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(10)) {
                     games.cleanup_scheduled = true;
                     games.last_cleanup = Some(std::time::Instant::now());
@@ -713,9 +752,8 @@ pub fn run() {
     // Lite have separate bundle identifiers, so Tauri's own single-instance
     // guard does not span them, and two clients each installing the packet
     // filter driver and rewriting routes is not a state worth reaching.
-    if !single_client::acquire() {
-        return;
-    }
+    // The cross-client lock is acquired in setup, after Tauri can forward a
+    // second desktop instance's game request to the existing window.
 
     apply_webview2_resource_tuning();
     let launched_from_startup = autostart::launched_from_startup_flag();
@@ -725,7 +763,8 @@ pub fn run() {
     ctx.set_tray_icon(Some(APP_ICON.clone()));
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if let Some(place)=game_shortcut::startup_target(&args) {game_shortcut::queue(place.clone());let _=app.emit("games-open",format!("play:{place}"));}
             // Focus existing window when second instance launches
             if let Some(window) = app.get_webview_window("main") {
                 restore_main_window(&window);
@@ -735,6 +774,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::games::games_get_library,
+            commands::games::games_dismiss_recovery,
             commands::games::games_flags,
             commands::games::games_save_flags,
             commands::games::games_nvidia_profile,
@@ -745,6 +785,15 @@ pub fn run() {
             commands::game_launch::games_set_preferences,
             commands::game_launch::games_launch_plan,
             commands::game_launch::games_launch,
+            commands::game_launch::games_suggest_server,
+            commands::launcher::games_launcher_config,
+            commands::launcher::games_displays,
+            commands::launcher::games_create_shortcut,
+            commands::launcher::games_startup_target,
+            commands::launcher::games_save_launcher_config,
+            commands::launcher::games_session_reports,
+            commands::launcher::games_clear_session_reports,
+            commands::launcher::games_launch_diagnostics,
             commands::games::games_scan_imports,
             commands::games::games_cleanup,
             commands::games::games_set_notifications,
@@ -830,6 +879,11 @@ pub fn run() {
             commands::i18n::i18n_translate,
         ])
         .setup(move |app| {
+            if !single_client::acquire() {
+                // Do not run exit network recovery against the active Lite
+                // client. No application/network state has been created yet.
+                std::process::exit(0);
+            }
             info!("SwiftTunnel desktop app starting up");
             sync_runtime_assets(app);
 

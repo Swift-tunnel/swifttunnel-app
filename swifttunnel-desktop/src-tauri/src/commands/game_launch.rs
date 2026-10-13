@@ -12,7 +12,7 @@ use swifttunnel_core::{
         game_destination::{self, ObservedGame},
     },
 };
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 #[derive(Serialize)]
 pub struct LaunchPlan {
@@ -27,6 +27,72 @@ pub struct LaunchPlan {
 struct LaunchGuard<'a> {
     state: &'a AppState,
     complete: bool,
+}
+#[tauri::command]
+pub async fn games_suggest_server(
+    state: State<'_, AppState>,
+) -> Result<Option<LaunchPlan>, String> {
+    let config = swifttunnel_core::roblox_launcher::LauncherConfig::load()?;
+    let current = state.games.lock().current.clone();
+    let Some(current) = current
+        .filter(|g| g.client == RobloxClient::Standard && g.fresh_join && g.location.is_some())
+    else {
+        return Ok(None);
+    };
+    if !config.matchmaker.offer_better_server || !config.matchmaker.applies(&current.place_id) {
+        return Ok(None);
+    }
+    let preferences = state
+        .games
+        .lock()
+        .library()?
+        .entries
+        .iter()
+        .find(|e| e.place_id == current.place_id && e.client == current.client)
+        .map(|e| e.preferences.clone())
+        .unwrap_or_default();
+    if preferences.skip_matchmaker || preferences.datacenter_id.is_some() {
+        return Ok(None);
+    }
+    let choice = matchmake(
+        &state,
+        &current.place_id,
+        &config.matchmaker,
+        preferences.use_tunnel || config.matchmaker.prepare_tunnel,
+    )
+    .await?;
+    let center = state
+        .games
+        .lock()
+        .search
+        .as_ref()
+        .filter(|s| s.center.id == choice.0)
+        .map(|s| s.center.clone());
+    if center
+        .as_ref()
+        .is_none_or(|c| Some(&c.city) == current.location.as_ref())
+    {
+        return Ok(None);
+    }
+    if state
+        .games
+        .lock()
+        .current
+        .as_ref()
+        .is_none_or(|g| g.job_id != current.job_id)
+    {
+        return Ok(None);
+    }
+    games_launch_plan(
+        state,
+        current.place_id,
+        current.client,
+        Some(choice.1),
+        Some(choice.0),
+        false,
+    )
+    .await
+    .map(Some)
 }
 impl Drop for LaunchGuard<'_> {
     fn drop(&mut self) {
@@ -113,6 +179,126 @@ pub async fn games_set_preferences(
         .mutate(|lib| lib.set_preferences(&place_id, client, preferences))
 }
 
+async fn matchmake(
+    state: &AppState,
+    place: &str,
+    config: &swifttunnel_core::roblox_launcher::Matchmaker,
+    tunnel: bool,
+) -> Result<(u32, String), String> {
+    use swifttunnel_core::roblox_launcher::{MatchMode, qualifies};
+    let catalog = roblox_directory::datacenters().await?;
+    let previews = state
+        .games
+        .lock()
+        .previews
+        .iter()
+        .filter(|p| p.is_fresh())
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut measured = Vec::new();
+    // Direct launches compare measured PC-to-reference paths. Tunnel launches
+    // use both measured legs. Never replace a missing sample with distance.
+    for center in catalog
+        .into_iter()
+        .filter(|c| !config.blocked_datacenters.contains(&c.id))
+    {
+        let reference = center
+            .relay_region
+            .as_deref()
+            .and_then(swifttunnel_core::vpn::route_preview::reference_location);
+        let matches = previews
+            .iter()
+            .filter(|p| reference == Some(p.location.as_str()))
+            .collect::<Vec<_>>();
+        let score = if tunnel {
+            matches.iter().map(|p| p.estimate.estimated_game_ms).min()
+        } else if let Some(row) = matches.first() {
+            let target = row.target.to_string();
+            tokio::task::spawn_blocking(move || {
+                swifttunnel_core::vpn::servers::measure_latency_icmp(&target)
+            })
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+        if score.is_some() || config.preferred_datacenter == Some(center.id) {
+            measured.push((
+                config.preferred_datacenter != Some(center.id),
+                score.unwrap_or(u32::MAX),
+                center,
+            ));
+        }
+    }
+    measured.sort_by_key(|(not_preferred, score, _)| (*not_preferred, *score));
+    if measured.is_empty() {
+        return Err("Matchmaker has no fresh path measurements for the allowed datacenters. Wait for the region pings, choose a preferred datacenter, or Play normally.".into());
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut remaining = config.search_limit as usize;
+    let mut best: Option<(
+        u32,
+        u32,
+        Datacenter,
+        Vec<roblox_directory::GameServer>,
+        String,
+    )> = None;
+    for (_, score, center) in measured.into_iter().take(4) {
+        if remaining == 0 || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let page = match tokio::time::timeout_at(
+            deadline,
+            roblox_directory::servers(place, center.id, None),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            _ => continue,
+        };
+        let rows = page
+            .servers
+            .into_iter()
+            .take(remaining.min(50))
+            .collect::<Vec<_>>();
+        remaining = remaining.saturating_sub(rows.len().max(1));
+        let candidate = rows
+            .iter()
+            .filter(|s| qualifies(s, config.minimum_free_slots))
+            .min_by_key(|s| s.playing.unwrap_or(u32::MAX));
+        if let Some(candidate) = candidate {
+            let population = candidate.playing.unwrap_or(u32::MAX);
+            let job = candidate.job_id.clone();
+            let better =
+                best.as_ref()
+                    .is_none_or(|(old_score, old_population, ..)| match config.mode {
+                        MatchMode::Closest => score < *old_score,
+                        MatchMode::FewerPlayers => {
+                            (population, score) < (*old_population, *old_score)
+                        }
+                    });
+            if better {
+                best = Some((score, population, center, rows, job));
+            }
+            if config.mode == MatchMode::Closest {
+                break;
+            }
+        }
+    }
+    let Some((_, _, center, servers, job)) = best else {
+        return Err("No verified public server met your Matchmaker filters within the search limit. Choose another location or Play normally.".into());
+    };
+    let id = center.id;
+    state.games.lock().search = Some(ServerSearch {
+        place_id: place.into(),
+        center,
+        servers,
+        fetched: Instant::now(),
+    });
+    Ok((id, job))
+}
+
 #[tauri::command]
 pub async fn games_launch_plan(
     state: State<'_, AppState>,
@@ -125,7 +311,7 @@ pub async fn games_launch_plan(
     if !valid_place_id(&place_id) || job_id.as_deref().is_some_and(|j| !valid_job_id(j)) {
         return Err("Choose a valid game and server.".into());
     }
-    let preferences = state
+    let mut preferences = state
         .games
         .lock()
         .library()?
@@ -134,17 +320,61 @@ pub async fn games_launch_plan(
         .find(|e| e.place_id == place_id && e.client == client)
         .map(|e| e.preferences.clone())
         .unwrap_or_default();
-    let target = datacenter_id.or(if use_preferred_region {
+    let launcher = swifttunnel_core::roblox_launcher::LauncherConfig::load()?;
+    preferences.use_tunnel |= launcher.matchmaker.prepare_tunnel
+        && launcher.matchmaker.applies(&place_id)
+        && !preferences.skip_matchmaker
+        && client == RobloxClient::Standard;
+    let mut global = state.settings.lock().config.roblox_settings.clone();
+    if let Some(name) = &preferences.flag_profile {
+        global = launcher
+            .profiles
+            .iter()
+            .find(|p| p.name == *name)
+            .ok_or("This game's named profile no longer exists. Choose another profile in Game settings.")?
+            .settings
+            .clone();
+    }
+    preferences.fps_cap = preferences.fps_cap.or(Some(if global.unlock_fps {
+        global.target_fps
+    } else {
+        60
+    }));
+    preferences.graphics_quality = preferences
+        .graphics_quality
+        .or(Some(global.graphics_quality));
+    let mut target = datacenter_id.or(if use_preferred_region {
         preferences.datacenter_id
     } else {
         None
     });
+    let mut automatic_job = None;
+    if target.is_none()
+        && job_id.is_none()
+        && use_preferred_region
+        && client == RobloxClient::Standard
+        && !preferences.skip_matchmaker
+        && launcher.matchmaker.applies(&place_id)
+    {
+        if state.games.lock().previews.iter().all(|p| !p.is_fresh()) {
+            crate::commands::vpn::server_get_latencies(state.clone()).await?;
+        }
+        let choice = matchmake(
+            &state,
+            &place_id,
+            &launcher.matchmaker,
+            preferences.use_tunnel,
+        )
+        .await?;
+        target = Some(choice.0);
+        automatic_job = Some(choice.1);
+    }
     let center = if let Some(id) = target {
         Some(roblox_directory::datacenters().await?.into_iter().find(|c| c.id == id).ok_or("Your preferred datacenter is no longer listed. Choose another location or Play normally.".to_string())?)
     } else {
         None
     };
-    let mut job_id = job_id;
+    let mut job_id = job_id.or(automatic_job);
     let mut availability = Availability::Unknown;
     if let Some(center) = &center {
         if client == RobloxClient::Vng {
@@ -239,6 +469,7 @@ pub async fn games_launch(
     datacenter_id: Option<u32>,
     allow_unverified: bool,
     connection_started: bool,
+    safe_launch: Option<bool>,
 ) -> Result<(), String> {
     let plan = games_launch_plan(
         state.clone(),
@@ -296,6 +527,9 @@ pub async fn games_launch(
             return Err("A Roblox launch is already in progress.".into());
         }
         games.launch_started = Some(Instant::now());
+        games.warning = None;
+        games.status = None;
+        games.recovery = None;
         games.idle_since = None;
         games.left_confirmed = false;
         games.game_traffic_seen = false;
@@ -305,12 +539,51 @@ pub async fn games_launch(
         complete: false,
     };
     let profile = plan.preferences.clone();
+    let player = if client == RobloxClient::Standard {
+        Some(swifttunnel_core::roblox_native_launch::official_player()?)
+    } else {
+        None
+    };
+    let mut global = state.settings.lock().config.roblox_settings.clone();
+    if let Some(name) = &plan.preferences.flag_profile {
+        global = swifttunnel_core::roblox_launcher::LauncherConfig::load()?
+            .profiles
+            .into_iter()
+            .find(|p| p.name == *name)
+            .ok_or("This game's named profile no longer exists.")?
+            .settings;
+    }
+    let mut flags = if safe_launch.unwrap_or(false) {
+        std::collections::HashMap::new()
+    } else {
+        swifttunnel_core::roblox_optimizer::RobloxOptimizer::native_launch_flags(&global)
+            .map_err(|e| e.to_string())?
+    };
+    let explicit_graphics = state
+        .games
+        .lock()
+        .library()?
+        .entries
+        .iter()
+        .find(|e| e.place_id == place_id && e.client == client)
+        .is_some_and(|e| e.preferences.graphics_quality.is_some());
+    if explicit_graphics {
+        flags.remove("DFIntDebugFRMQualityLevelOverride");
+    }
+    let profile_player = player.clone();
     let optimizer = state.roblox_optimizer.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = optimizer.lock();
-        match swifttunnel_core::roblox_game_profile::apply(client, &profile) {
+        match (|| {
+            let applied = swifttunnel_core::roblox_game_profile::apply_native(client, &profile)?;
+            if let Some(player) = profile_player {
+                swifttunnel_core::roblox_launch_flags::prepare(&player, flags)?;
+            }
+            Ok::<_, String>(applied)
+        })() {
             Ok(applied) => Ok(applied),
             Err(error) => {
+                swifttunnel_core::roblox_launch_flags::restore()?;
                 if let Err(restore_error) = swifttunnel_core::roblox_game_profile::restore() {
                     return Err(format!(
                         "{error} The previous settings could not be restored: {restore_error}"
@@ -345,9 +618,16 @@ pub async fn games_launch(
     }
     let url =
         swifttunnel_core::roblox_library::join_url(&place_id, plan.job_id.as_deref(), client)?;
-    if let Err(error) = games::launch_url(&url) {
+    let launched = if let Some(player) = player {
+        swifttunnel_core::roblox_native_launch::launch(&player, &place_id, plan.job_id.as_deref())
+            .map(|_| ())
+    } else {
+        games::launch_url(&url)
+    };
+    if let Err(error) = launched {
         let _guard = state.roblox_optimizer.lock();
         let restored = swifttunnel_core::roblox_game_profile::restore();
+        swifttunnel_core::roblox_launch_flags::restore()?;
         game_destination::clear();
         if let Err(restore_error) = restored {
             return Err(format!(
@@ -362,7 +642,11 @@ pub async fn games_launch(
             _ => None,
         }
     } else {
-        None
+        let previous = state.games.lock().owned_connection;
+        match &*state.vpn_state_handle.borrow() {
+            ConnectionState::Connected { since, .. } if previous == Some(*since) => previous,
+            _ => None,
+        }
     };
     let mut games = state.games.lock();
     games.launch_started = if games
@@ -377,6 +661,33 @@ pub async fn games_launch(
     games.owned_connection = owned_connection;
     launch_guard.complete = true;
     drop(games);
+    if plan.preferences.borderless || plan.preferences.monitor.is_some() {
+        let monitor = state.performance_monitor.clone();
+        let preferences = plan.preferences.clone();
+        let window_app = app.clone();
+        state.runtime.spawn(async move {
+            for _ in 0..45 {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                let pid = monitor.lock().get_roblox_pid();
+                if let Some(pid) = pid {
+                    match swifttunnel_core::roblox_window::place(
+                        pid,
+                        preferences.borderless,
+                        preferences.monitor.as_deref(),
+                    ) {
+                        Ok(true) => break,
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("Roblox window placement: {error}");
+                            window_app.state::<AppState>().games.lock().warning = Some(error);
+                            let _ = window_app.emit(games::LIBRARY_CHANGED, ());
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
     let _ = app.emit(games::LIBRARY_CHANGED, ());
     Ok(())
 }
@@ -420,6 +731,9 @@ pub fn update_session_location(
     };
     current.location = Some(location.clone());
     current.location_source = Some(source.into());
+    if let Some(recorder) = &mut games.recorder {
+        recorder.report.location = Some(location.clone());
+    }
     game_destination::register(ObservedGame {
         ip,
         job_id: job.into(),
@@ -470,6 +784,7 @@ pub async fn finish_game_connection(state: &AppState) {
     let restored = tauri::async_runtime::spawn_blocking(move || {
         let _guard = optimizer.lock();
         swifttunnel_core::roblox_game_profile::restore()
+            .and_then(|restored| swifttunnel_core::roblox_launch_flags::restore().map(|_| restored))
     })
     .await
     .map_err(|error| error.to_string())

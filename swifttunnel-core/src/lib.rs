@@ -29,10 +29,15 @@ pub mod roblox_cleanup;
 pub mod roblox_directory;
 pub mod roblox_flag_cleanup;
 pub mod roblox_game_profile;
+pub mod roblox_launch_flags;
+pub mod roblox_launcher;
 pub mod roblox_library;
+pub mod roblox_native_launch;
 pub mod roblox_optimizer;
 pub mod roblox_proxy;
 pub mod roblox_watcher;
+#[cfg(windows)]
+pub mod roblox_window;
 pub mod rolling_log;
 pub mod settings;
 pub mod structs;

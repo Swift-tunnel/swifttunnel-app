@@ -4,17 +4,19 @@ import { GameLibraryPanel } from "./LauncherLibrary";
 import { GameToolsPanel } from "./GameToolsPanel";
 import { BoostTab } from "./BoostTab";
 import { FastFlagsPanel } from "./FastFlagsPanel";
+import { MatchmakerPanel } from "./MatchmakerPanel";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
 import type { RobloxSettingsConfig } from "../../lib/types";
 
 const SECTIONS = [
   { id: "library", label: "Library", icon: "games" },
+  { id: "matchmaker", label: "Matchmaker", icon: "globe" },
   { id: "settings", label: "Roblox settings", icon: "roblox" },
   { id: "flags", label: "FastFlags", icon: "settings" },
 ] as const;
 
 export function GamesTab() {
-  const [view, setView] = useState<"library" | "settings" | "flags">("library");
+  const [view, setView] = useState<"library" | "matchmaker" | "settings" | "flags">("library");
   const [flagsVisited, setFlagsVisited] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [imported, setImported] = useState<Partial<RobloxSettingsConfig> | null>(null);
@@ -22,6 +24,7 @@ export function GamesTab() {
   useEffect(() => {
     if (!anchor) return;
     if (anchor === "custom_fflags" || anchor === "flags_advanced" || anchor.startsWith("flag_") || anchor.startsWith("nvidia_")) { setView("flags"); setFlagsVisited(true); }
+    else if (anchor === "matchmaker") setView("matchmaker");
     else if (anchor.startsWith("games_") || anchor === "join_notifications") setView("library");
     else { setView("settings"); if (anchor === "roblox_maintenance") setToolsOpen(true); }
   }, [anchor]);
@@ -53,6 +56,7 @@ export function GamesTab() {
     </nav>
 
     {view === "library" && <GameLibraryPanel />}
+    {view === "matchmaker" && <MatchmakerPanel />}
     {view === "settings" && <div className="flex flex-col gap-4">
       <BoostTab importPatch={imported} onImportConsumed={() => setImported(null)} />
       {/* Collapsed like Repair's "Last repair", so occasional maintenance stays out of the way. */}

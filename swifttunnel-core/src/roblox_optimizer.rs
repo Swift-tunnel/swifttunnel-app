@@ -1767,6 +1767,17 @@ impl RobloxOptimizer {
         report
     }
 
+    /// The complete flags owned by SwiftTunnel for a direct player launch.
+    pub fn native_launch_flags(config: &RobloxSettingsConfig) -> Result<HashMap<String, String>> {
+        if config.ultraboost {
+            return Ok(Self::ULTRABOOST_FFLAGS
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect());
+        }
+        Self::parse_custom_fflags(config)
+    }
+
     fn parse_custom_fflags(config: &RobloxSettingsConfig) -> Result<HashMap<String, String>> {
         if !config.custom_fflags_enabled {
             return Ok(HashMap::new());

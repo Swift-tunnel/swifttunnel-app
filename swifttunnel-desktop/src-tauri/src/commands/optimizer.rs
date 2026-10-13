@@ -524,6 +524,7 @@ pub async fn boost_restart_roblox(state: State<'_, AppState>) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn boost_close_roblox(state: State<'_, AppState>) -> Result<(), String> {
+    state.games.lock().left_confirmed = true;
     #[cfg(windows)]
     {
         let roblox_optimizer = state.roblox_optimizer.clone();

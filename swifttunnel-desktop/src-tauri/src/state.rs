@@ -121,7 +121,9 @@ impl AppState {
     /// reads Roblox's settings file, which is too slow for the setup path.
     pub fn sync_roblox_window_settings(&self) {
         // A temporary game profile is not the player's global default.
-        if swifttunnel_core::roblox_game_profile::pending() {
+        if swifttunnel_core::roblox_game_profile::pending()
+            || swifttunnel_core::roblox_launch_flags::pending()
+        {
             return;
         }
         let optimizer = self.roblox_optimizer.lock();

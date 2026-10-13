@@ -99,7 +99,9 @@ fn parse_join(line: &str) -> Option<(String, String, Ipv4Addr)> {
     let job = captures.get(1)?.as_str();
     let place = captures.get(2)?.as_str();
     let ip = captures.get(3)?.as_str().parse().ok()?;
-    if !valid_job_id(job) || !valid_place_id(place) || is_private_ip(ip) {
+    // Roblox now logs its private RCC address here. Keep the identifiers,
+    // but only publish a session after the public transport is confirmed.
+    if !valid_job_id(job) || !valid_place_id(place) {
         return None;
     }
     Some((place.into(), job.to_ascii_lowercase(), ip))
@@ -130,20 +132,20 @@ impl JoinTracker {
             } else if let Some((place, job, ip)) = parse_join(line) {
                 self.pending = Some((place, job, ip, fresh));
             } else if line.contains("[FLog::Network] serverId:")
-                && let Some((place_id, job_id, mut ip, join_fresh)) = self.pending.take()
+                && let Some((place_id, job_id, _, join_fresh)) = self.pending.take()
             {
                 static SERVER: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
                 let pattern =
                     SERVER.get_or_init(|| Regex::new(r"serverId:\s*(\d+\.\d+\.\d+\.\d+)").unwrap());
-                if let Some(actual) = pattern
+                let Some(ip) = pattern
                     .captures(line)
                     .and_then(|c| c.get(1))
                     .and_then(|value| value.as_str().parse::<Ipv4Addr>().ok())
                     .filter(|ip| !is_private_ip(*ip))
-                {
-                    ip = actual;
-                }
-                if self.last.as_ref() != Some(&job_id) {
+                else {
+                    continue;
+                };
+                if !is_private_ip(ip) && self.last.as_ref() != Some(&job_id) {
                     self.last = Some(job_id.clone());
                     events.push(RobloxEvent::GameJoined {
                         ip,
@@ -307,7 +309,7 @@ fn find_newest_log_file(dir: &Path) -> Option<PathBuf> {
         .filter_map(|e| e.ok())
         .filter(|e| {
             let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-            name.ends_with(".log") && name.contains("player")
+            name.ends_with(".log") && name.contains("player") && !name.contains("crashhandler")
         })
         .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
         .map(|e| e.path())
@@ -428,6 +430,38 @@ impl TailedFile {
 mod tests {
     use super::*;
     #[test]
+    fn private_rcc_address_is_confirmed_only_by_public_transport() {
+        let mut tracker = JoinTracker::default();
+        let join =
+            "! Joining game '43967833-027f-4d08-8220-92f7d326b130' place 10449761463 at 10.35.4.27";
+        assert!(
+            tracker
+                .feed(&[join.into()], true, RobloxClient::Standard)
+                .is_empty()
+        );
+        let events = tracker.feed(
+            &["[FLog::Network] serverId: 128.116.47.33|59611".into()],
+            true,
+            RobloxClient::Standard,
+        );
+        assert!(
+            matches!(&events[0], RobloxEvent::GameJoined { ip, place_id, .. } if *ip == Ipv4Addr::new(128,116,47,33) && place_id == "10449761463")
+        );
+        let mut tracker = JoinTracker::default();
+        assert!(
+            tracker
+                .feed(
+                    &[
+                        join.into(),
+                        "[FLog::Network] serverId: 10.35.4.27|59611".into()
+                    ],
+                    true,
+                    RobloxClient::Standard
+                )
+                .is_empty()
+        );
+    }
+    #[test]
     fn notifications_require_a_confirmed_connection_not_a_failed_join_attempt() {
         let mut tracker = JoinTracker::default();
         let join = "[FLog::Output] ! Joining game '550e8400-e29b-41d4-a716-446655440000' place 1818 at 34.1.2.3".to_string();
@@ -472,8 +506,7 @@ mod tests {
         assert_eq!(place, "1818");
         assert!(valid_job_id(&job));
         assert_eq!(ip.to_string(), "34.1.2.3");
-        assert!(parse_join(&join.replace("34.1.2.3", "169.254.169.254")).is_none());
-        assert!(parse_join(&join.replace("34.1.2.3", "10.0.0.1")).is_none());
+        assert!(parse_join(&join.replace("34.1.2.3", "10.35.4.27")).is_some());
         assert!(parse_join(&join.replace("1818", "0")).is_none());
         assert!(
             parse_join(&join.replace("550e8400-e29b-41d4-a716-446655440000", "abc-def")).is_none()
@@ -486,6 +519,7 @@ mod tests {
         fs::write(dir.join("roblox_Player.log"), "player").unwrap();
         fs::write(dir.join("roblox_Studio.log"), "studio").unwrap();
         fs::write(dir.join("roblox_Installer.log"), "installer").unwrap();
+        fs::write(dir.join("roblox_Player_CrashHandler_last.log"), "crash").unwrap();
         assert_eq!(
             find_newest_log_file(&dir).unwrap(),
             dir.join("roblox_Player.log")

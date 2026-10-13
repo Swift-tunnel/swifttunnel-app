@@ -770,6 +770,8 @@ const SPEEDUP: SearchEntry[] = SPEEDUP_OPTIMIZATIONS.map((def) => ({
 }));
 
 const ALL_ENTRIES: SearchEntry[] = [
+  { id: "games-matchmaker", tab: "games", anchor: "matchmaker", label: "Matchmaker and named game profiles", section: "Games", keywords: "matchmaker datacenter allowed blocked skip free slots closest players profiles import export recovery", icon: gamesIcon },
+  { id: "games-session-reports", tab: "games", anchor: "games_library", label: "Session reports and launch diagnostics", section: "Games", keywords: "session report diagnostics frame gaps fps network variation launcher conflict vpn", icon: gamesIcon },
   ...TABS,
   ...ACTIONS,
   ...TOOLS,

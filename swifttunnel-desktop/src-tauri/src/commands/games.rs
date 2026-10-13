@@ -49,7 +49,7 @@ pub async fn games_save_flags(
     let settings = state.settings.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let optimizer = optimizer.lock();
-        if swifttunnel_core::roblox_game_profile::pending() {
+        if swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending() {
             return Err("Close Roblox and let its temporary game settings restore before applying FastFlags.".into());
         }
         let mut settings = settings.lock();
@@ -91,7 +91,8 @@ pub async fn games_flags(
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = optimizer.lock();
         if !matches!(action, FlagAction::Preview)
-            && swifttunnel_core::roblox_game_profile::pending()
+            && (swifttunnel_core::roblox_game_profile::pending()
+                || swifttunnel_core::roblox_launch_flags::pending())
         {
             return Err(
                 "Close Roblox and let its game settings restore before changing flag files.".into(),
@@ -175,9 +176,15 @@ pub struct CurrentGame {
 
 #[derive(Default)]
 pub struct GamesState {
+    pub previews: Vec<swifttunnel_core::vpn::route_preview::ReferenceEstimate>,
+    pub recorder: Option<swifttunnel_core::roblox_launcher::SessionRecorder>,
+    pub recovery: Option<CurrentGame>,
+    pub recovery_shown: Vec<std::time::Instant>,
+    pub process_gone_since: Option<std::time::Instant>,
     pub library: Option<GameLibrary>,
     pub current: Option<CurrentGame>,
     pub warning: Option<String>,
+    pub status: Option<String>,
     pub search: Option<ServerSearch>,
     pub launch_started: Option<std::time::Instant>,
     pub owned_connection: Option<std::time::Instant>,
@@ -197,9 +204,11 @@ pub struct ServerSearch {
 
 #[derive(Serialize)]
 pub struct LibrarySnapshot {
+    pub recovery: Option<CurrentGame>,
     pub entries: Vec<GameEntry>,
     pub current: Option<CurrentGame>,
     pub warning: Option<String>,
+    pub status: Option<String>,
     pub notify_joins: bool,
     pub launch_pending: bool,
 }
@@ -225,6 +234,36 @@ impl GamesState {
     }
 
     pub fn record_join(&mut self, current: CurrentGame) {
+        self.status = None;
+        if self
+            .current
+            .as_ref()
+            .is_none_or(|old| old.job_id != current.job_id)
+        {
+            if let Some(recorder) = self.recorder.take() {
+                let _ = swifttunnel_core::roblox_launcher::save_report(
+                    recorder.finish(chrono::Utc::now().timestamp().max(0) as u64, false),
+                );
+            }
+            self.recorder = Some(swifttunnel_core::roblox_launcher::SessionRecorder {
+                report: swifttunnel_core::roblox_launcher::SessionReport {
+                    place_id: current.place_id.clone(),
+                    game_name: self
+                        .library()
+                        .ok()
+                        .and_then(|lib| {
+                            lib.entries
+                                .iter()
+                                .find(|e| e.place_id == current.place_id)
+                                .map(|e| e.name.clone())
+                        })
+                        .unwrap_or_else(|| format!("Place {}", current.place_id)),
+                    started_at: chrono::Utc::now().timestamp().max(0) as u64,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
         let at = chrono::Utc::now().timestamp().max(0) as u64;
         if let Err(error) = self
             .mutate(|lib| lib.record_join(&current.place_id, &current.job_id, current.client, at))
@@ -245,8 +284,15 @@ pub fn games_get_library(state: State<'_, AppState>) -> Result<LibrarySnapshot, 
         notify_joins: library.notify_joins,
         current: games.current.clone(),
         warning: games.warning.clone(),
+        status: games.status.clone(),
         launch_pending: games.launch_started.is_some(),
+        recovery: games.recovery.clone(),
     })
+}
+#[tauri::command]
+pub fn games_dismiss_recovery(state: State<'_, AppState>) -> Result<(), String> {
+    state.games.lock().recovery = None;
+    Ok(())
 }
 
 #[tauri::command]

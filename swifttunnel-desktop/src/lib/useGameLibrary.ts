@@ -5,8 +5,19 @@ import { useVpnStore } from "../stores/vpnStore";
 import { gameSessionDescription } from "./robloxGames";
 import { notify } from "./notifications";
 import { reportError } from "./errors";
+import { gamesStartupTarget } from "./commands";
+import { useDeepLinkStore } from "../stores/deepLinkStore";
+let startupRequestSent=false;
+let startupTargetPromise:Promise<string|null>|null=null;
 
 export function useGameLibrary() {
+  useEffect(()=>{
+    let disposed=false;let stop:(()=>void)|undefined;
+    const open=(action:string)=>{if(disposed)return;useGameLibraryStore.getState().requestAction(action);useDeepLinkStore.getState().navigateTo({tab:"games",anchor:"games_library"});};
+    void listen<string>("games-open",event=>{if(event.payload.startsWith("play:")){void gamesStartupTarget().then(place=>open(place?`play:${place}`:event.payload)).catch(()=>open(event.payload));}else{open(event.payload);}}).then(fn=>{if(disposed)fn();else stop=fn;}).catch(e=>reportError("Game tray controls",e));
+    void (startupTargetPromise??=gamesStartupTarget()).then(place=>{if(!disposed&&place&&!startupRequestSent){startupRequestSent=true;open(`play:${place}`);}}).catch(()=>{});
+    return()=>{disposed=true;stop?.();};
+  },[]);
   const current = useGameLibraryStore(s => s.library?.current);
   const notified = useRef<string | null>(null);
   useEffect(() => {

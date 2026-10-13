@@ -1,6 +1,7 @@
 // Development-only fixture service. Never calls the native backend, changes
 // files, connects a tunnel, or launches a real game.
-import type { GamePreferences, RobloxDatacenter, RobloxLibrarySnapshot } from "./types";
+import type { GamePreferences, RobloxDatacenter, RobloxLibrarySnapshot, LauncherConfig } from "./types";
+let launcher:LauncherConfig={matchmaker:{enabled:false,mode:"closest",blocked_datacenters:[],preferred_datacenter:null,skipped_games:[],minimum_free_slots:1,search_limit:40,prepare_tunnel:true,offer_better_server:false},profiles:[],offer_recovery:false};
 const preferences: GamePreferences = { datacenter_id: null, fps_cap: null, graphics_quality: null, use_tunnel: false };
 const job = "550e8400-e29b-41d4-a716-446655440000";
 const library: RobloxLibrarySnapshot = { current: null, warning: null, notify_joins: true, launch_pending: false, entries: [
@@ -25,6 +26,15 @@ export async function previewInvoke<T>(command: string, args: Record<string, unk
   const entry = library.entries.find(e => e.place_id === args.placeId && e.client === args.client);
   switch (command) {
     case "games_get_library": result = structuredClone(library); break;
+    case "games_launcher_config": result=launcher;break;
+    case "games_save_launcher_config":launcher=args.config as LauncherConfig;break;
+    case "games_displays":result=[{id:"preview-primary",primary:true,left:0,top:0,width:1920,height:1080},{id:"preview-secondary",primary:false,left:1920,top:0,width:2560,height:1440}];break;
+    case "games_session_reports":result=[{place_id:"10449761463",game_name:"The Strongest Battlegrounds (preview)",started_at:1791806400,duration_seconds:1200,location:"Mumbai",samples:800,average_fps:240,low_fps:180,average_network_ms:26,network_variation_ms:2,frame_spikes:4,peak_frame_ms:65,ended_without_leave:false}];break;
+    case "games_clear_session_reports":break;
+    case "games_launch_diagnostics":result=["Design preview. No real system diagnostics were run."];break;
+    case "games_startup_target":case "games_suggest_server":result=null;break;
+    case "games_dismiss_recovery":library.recovery=null;break;
+    case "games_create_shortcut":result="Design preview: no shortcut was created.";break;
     case "games_refresh_metadata": break;
     case "games_datacenters": result = centers; break;
     case "games_set_favourite": if (entry) entry.favourite = Boolean(args.favourite); break;

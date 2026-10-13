@@ -4,7 +4,7 @@ import { useGameLibraryStore } from "../../stores/gameLibraryStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
-import { boostCloseRoblox, boostGetMetrics, gamesAddFavourite, gamesForget, gamesLaunch, gamesLaunchPlan, gamesRefreshMetadata, gamesSetFavourite, gamesSetNotifications } from "../../lib/commands";
+import { boostCloseRoblox, boostGetMetrics, gamesAddFavourite, gamesForget, gamesLaunch, gamesLaunchPlan, gamesRefreshMetadata, gamesSetFavourite, gamesSetNotifications, gamesDismissRecovery, gamesCreateShortcut, gamesSuggestServer } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
 import { gameSessionDescription, gameShareUrl, parsePlaceInput } from "../../lib/robloxGames";
 import { defaultGamePreferences, executeGameLaunch } from "../../lib/gameLaunchFlow";
@@ -13,6 +13,7 @@ import type { GameLaunchPlan, RobloxGameEntry } from "../../lib/types";
 import { GamePreferencesDialog } from "./GamePreferencesDialog";
 import { GameServerDialog } from "./GameServerDialog";
 import { Notice, iconButtonClass } from "./Notice";
+import { SessionReportsPanel } from "./SessionReportsPanel";
 
 function Artwork({ entry }: { entry: RobloxGameEntry }) {
   const [failed, setFailed] = useState(false);
@@ -45,10 +46,21 @@ function ActionMenu({ label, children }: { label: string; children: ReactNode })
     <div className="surface-elevated absolute right-0 top-[34px] z-20 w-40 rounded-[10px] p-1" onClick={() => { if (menu.current) menu.current.open = false; }}>{children}</div>
   </details>;
 }
-interface Review { entry: RobloxGameEntry; plan: GameLaunchPlan; running: boolean; blocked: boolean; }
+interface Review { entry: RobloxGameEntry; plan: GameLaunchPlan; running: boolean; blocked: boolean; safe: boolean; }
 
 export function GameLibraryPanel() {
   const { library, error: loadError, loading, refresh } = useGameLibraryStore();
+  const pendingAction=useGameLibraryStore(s=>s.pendingAction);
+  const [reportsOpen,setReportsOpen]=useState(false);
+  const [suggestion,setSuggestion]=useState<GameLaunchPlan|null>(null);
+  const suggestedJoin=useRef<string|null>(null);
+  useEffect(()=>{
+    const current=library?.current;
+    if(!current?.fresh_join || !current.location || suggestedJoin.current===current.job_id)return;
+    let disposed=false;let expire:ReturnType<typeof setTimeout>|undefined;
+    const timer=setTimeout(()=>{suggestedJoin.current=current.job_id;void gamesSuggestServer().then(plan=>{if(!disposed&&plan){setSuggestion(plan);expire=setTimeout(()=>setSuggestion(null),20000);}}).catch(()=>{});},5000);
+    return()=>{disposed=true;clearTimeout(timer);clearTimeout(expire);setSuggestion(null);};
+  },[library?.current?.job_id,library?.current?.location]);
   const route = useVpnStore(s => s.gameRoute);
   const tunnelState = useVpnStore(s => s.state);
   const [query, setQuery] = useState("");
@@ -65,6 +77,16 @@ export function GameLibraryPanel() {
   const [remove, setRemove] = useState<RobloxGameEntry | null>(null);
   const [failedEntry, setFailedEntry] = useState<RobloxGameEntry | null>(null);
   useEffect(() => { void refresh().then(() => { void gamesRefreshMetadata().catch(() => {}); }); }, [refresh]);
+  useEffect(()=>{
+    if(!pendingAction||!library)return;
+    useGameLibraryStore.getState().requestAction(null);
+    if(pendingAction==="favourites"){setFilter("favourites");return;}
+    if(pendingAction==="copy"){const current=library.current;if(current)void run(()=>navigator.clipboard.writeText(gameShareUrl(current.place_id,current.job_id)),"Join link copied.");return;}
+    const last=library.entries.filter(e=>e.client==="standard"&&e.last_played&&e.job_id).sort((a,b)=>(b.last_played??0)-(a.last_played??0))[0];
+    const place=pendingAction.startsWith("play:")?parsePlaceInput(pendingAction.slice(5)):null;
+    const entry=place?(library.entries.find(e=>e.place_id===place&&e.client==="standard")??{place_id:place,name:`Place ${place}`,client:"standard" as const,job_id:null,last_played:null,favourite:false}):pendingAction==="rejoin"?last:null;
+    if(entry)void prepare(entry,pendingAction==="rejoin"?entry.job_id:null,null,pendingAction!=="rejoin");
+  },[pendingAction,library]);
 
   async function run(action: () => Promise<unknown>, after?: string) {
     setBusy(true); setError(null); setNotice(null);
@@ -77,7 +99,7 @@ export function GameLibraryPanel() {
     if (!place) { setError("Enter a Roblox game link or a numeric place ID."); return; }
     await run(async () => { await gamesAddFavourite(place); setInput(""); setAdding(false); });
   }
-  async function launch(entry: RobloxGameEntry, plan: GameLaunchPlan, close: boolean) {
+  async function launch(entry: RobloxGameEntry, plan: GameLaunchPlan, close: boolean, safe=false) {
     setReview(null);
     await run(async () => {
       if (close) {
@@ -94,7 +116,8 @@ export function GameLibraryPanel() {
           setProgress("Preparing your SwiftTunnel connection...");
           if (existing) await vpn.disconnect();
           const settings = useSettingsStore.getState().settings;
-          await useVpnStore.getState().connect(requested ?? settings.selected_region, settings.selected_game_presets, requested !== null);
+          const presets=settings.selected_game_presets.includes("roblox")?settings.selected_game_presets:[...settings.selected_game_presets,"roblox"];
+          await useVpnStore.getState().connect(requested ?? settings.selected_region, presets, requested !== null);
           const connected = useVpnStore.getState();
           if (connected.state !== "connected") throw new Error(connected.error ?? "Finish connecting in Connect, then try Play again.");
           if (requested && findRegionForVpnRegion(useServerStore.getState().regions, connected.region)?.id !== requested) throw new Error("The connection did not reach the requested relay region. Check Connect before joining.");
@@ -102,20 +125,20 @@ export function GameLibraryPanel() {
         },
         launch: async owned => {
           setProgress("Opening Roblox...");
-          await gamesLaunch(entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, true, owned);
+          await gamesLaunch(entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, true, owned, safe);
         },
         cleanup: async token => { if (token !== null && useVpnStore.getState().connectedAt === token) await useVpnStore.getState().disconnect(); },
       });
     }, entry.client === "vng" ? "Opened the official VNG game page." : "Join request sent to Roblox. Its server information will appear when the game is detected.");
   }
-  async function prepare(entry: RobloxGameEntry, job: string | null = null, center: number | null = null, preferred = true) {
+  async function prepare(entry: RobloxGameEntry, job: string | null = null, center: number | null = null, preferred = true, safe=false) {
     setFailedEntry(null);
     setBusy(true); setError(null); setNotice(null); setProgress("Checking the game and server...");
     try {
       const [plan, metrics] = await Promise.all([gamesLaunchPlan(entry.place_id, entry.client, job, center, preferred), boostGetMetrics()]);
       const blocked = plan.availability === "full" || plan.availability === "unavailable";
-      if (blocked || plan.job_id && plan.availability === "unknown" || metrics.roblox_running) setReview({ entry, plan, running: metrics.roblox_running, blocked });
-      else await launch(entry, plan, false);
+      if (blocked || plan.job_id && plan.availability === "unknown" || metrics.roblox_running) setReview({ entry, plan, running: metrics.roblox_running, blocked, safe });
+      else await launch(entry, plan, false, safe);
     } catch (error) { setError(formatErrorMessage(error)); setFailedEntry(entry); }
     finally { setBusy(false); setProgress(null); }
   }
@@ -129,6 +152,7 @@ export function GameLibraryPanel() {
     {(error || loadError || library?.warning) && <ErrorBanner tone="error">{error || loadError || library?.warning}</ErrorBanner>}
     {failedEntry && <Button size="sm" variant="secondary" className="self-start" disabled={busy} onClick={() => void prepare(failedEntry, null, null, false)}>Play normally without a preferred server</Button>}
     {(notice || progress) && <Notice busy={!!progress}>{progress ?? notice}</Notice>}
+    {library?.status && <Notice>{library.status}</Notice>}
     {current && <section className="instrument relative isolate flex items-center gap-3.5 px-4 py-3.5"><Watermark icon="games" at="right" size={124} rotate={-14} opacity={.05} />
       {active && <Artwork entry={active} />}
       <div className="min-w-0 flex-1"><p className="eyebrow">Game session</p><h2 className="mt-1.5 truncate text-[15px] font-semibold leading-tight text-text-primary">{active?.name ?? `Place ${current.place_id}`}</h2><p className="mt-1 text-[11.5px] leading-snug text-text-muted">{gameSessionDescription(current, tunnelState === "connected" ? route : null)}</p></div>
@@ -153,6 +177,7 @@ export function GameLibraryPanel() {
           <span className="flex-1" />
           <button type="button" title="Game settings" aria-label={`Settings for ${entry.name}`} disabled={locked} className={iconButtonClass} onClick={() => setProfile(entry)}><Icon name="settings" size={15} /></button>
           <ActionMenu label={`More actions for ${entry.name}`}>
+            {entry.client === "standard" && <><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void prepare(entry,null,null,false,true)}>Safe launch (no FastFlags)</button><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void run(async()=>{const path=await gamesCreateShortcut(entry.place_id,entry.name);setNotice(`Game shortcut saved: ${path}`);})}>Create game shortcut</button></>}
             {entry.client === "standard" && <><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary hover:text-text-primary`} onClick={() => setServers(entry)}>Find server</button><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary hover:text-text-primary`} onClick={() => void run(() => navigator.clipboard.writeText(gameShareUrl(entry.place_id, entry.job_id)), "Join link copied.")}>Copy link</button></>}
             <button type="button" disabled={locked || !!loadError} className={`${menuItemClass} text-status-error`} onClick={() => setRemove(entry)}>Forget game</button>
           </ActionMenu>
@@ -161,6 +186,9 @@ export function GameLibraryPanel() {
     })}</div>}
     {library && <section className="instrument"><Row anchorId="join_notifications" label="Join notifications" desc="Show the detected server and its verified estimate once per join."><Toggle enabled={library.notify_joins} disabled={locked || !!loadError} ariaLabel="Server information notification" onChange={enabled => void run(() => gamesSetNotifications(enabled))} /></Row></section>}
     <GamePreferencesDialog entry={profile} onClose={() => setProfile(null)} onSaved={() => void refresh()} />
+    <Dialog open={!!suggestion} onClose={()=>setSuggestion(null)} title="Matchmaker found another datacenter" description="This location matches your Matchmaker preferences. Moving will leave this game. If you do nothing for 20 seconds, you stay here."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>setSuggestion(null)}>Stay here</Button><Button size="sm" onClick={()=>{if(suggestion&&active){const chosen=suggestion;setSuggestion(null);void prepare(active,chosen.job_id,chosen.datacenter?.id??null,false);}}}>Review {suggestion?.datacenter?.city}</Button></div></Dialog>
+    <section className="instrument"><button type="button" className="flex w-full items-center justify-between px-3.5 py-3 text-left" aria-expanded={reportsOpen} onClick={()=>setReportsOpen(v=>!v)}><span className="eyebrow">Session reports & diagnostics</span><Icon name="chevron-right" size={12} className={reportsOpen?"rotate-90":""}/></button>{reportsOpen&&<div className="border-t border-border-subtle p-3"><SessionReportsPanel/></div>}</section>
+    <Dialog open={!!library?.recovery} onClose={()=>void run(()=>gamesDismissRecovery())} title="Roblox closed unexpectedly" description="SwiftTunnel saw the player exit without a game-leave event. This can also happen after Force close. Rejoin is optional; server availability is checked again."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>void run(()=>gamesDismissRecovery())}>Stay closed</Button><Button size="sm" disabled={busy} onClick={()=>{const previous=library?.recovery;const entry=entries.find(e=>e.place_id===previous?.place_id&&e.client===previous.client);if(entry&&previous){void gamesDismissRecovery().then(()=>prepare(entry,previous.job_id,null,false));}}}>Review rejoin</Button></div></Dialog>
     <GameServerDialog entry={servers} onClose={() => setServers(null)} onJoin={(entry, server, center) => { setServers(null); void prepare(entry, server.job_id, center.id, false); }} />
     <Dialog open={adding} onClose={() => { if (!busy) setAdding(false); }} title="Add a game" description="Paste its official Roblox game link or place ID. No Roblox sign-in is needed here.">
       <form onSubmit={e => { e.preventDefault(); void addFavourite(); }} className="flex flex-col gap-4">{error && <ErrorBanner tone="error">{error}</ErrorBanner>}<input autoFocus aria-label="Roblox game link or place ID" value={input} onChange={e => setInput(e.target.value)} maxLength={2048} placeholder="https://www.roblox.com/games/..." disabled={busy} className={fieldClass} /><div className="flex justify-end gap-2"><Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => setAdding(false)}>Cancel</Button><Button type="submit" size="sm" loading={busy} disabled={!input.trim()}>Add favourite</Button></div></form>
@@ -169,7 +197,7 @@ export function GameLibraryPanel() {
       description={review?.blocked ? "It is full or no longer listed. You can join the game normally instead." : review?.running ? review.plan.needs_close ? "Your current Roblox client will close so its settings and route can be prepared safely." : "This may leave your current game." : "Current availability could not be verified. Roblox may report that it is full or closed."}>
       <div className="flex flex-col gap-4"><div className="rounded-[10px] bg-bg-base px-3.5 py-3"><p className="text-[12.5px] font-semibold text-text-primary">{review?.entry.name}</p>{review?.plan.datacenter && <p className="mt-1 text-[11px] text-text-muted">{review.plan.datacenter.city}, {review.plan.datacenter.country}</p>}</div>{error && <ErrorBanner tone="error">{error}</ErrorBanner>}<div className="flex flex-wrap justify-end gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => setReview(null)}>Cancel</Button>
         <Button size="sm" variant={review?.blocked ? "primary" : "secondary"} disabled={busy} onClick={() => { if (review) { const entry = review.entry; setReview(null); void prepare(entry, null, null, false); } }}>Play normally</Button>
-        {!review?.blocked && <Button size="sm" loading={busy} onClick={() => { if (review) void launch(review.entry, review.plan, review.running && review.plan.needs_close); }}>{review?.running && review.plan.needs_close ? "Close Roblox & play" : "Join server"}</Button>}</div></div>
+        {!review?.blocked && <Button size="sm" loading={busy} onClick={() => { if (review) void launch(review.entry, review.plan, review.running && review.plan.needs_close, review.safe); }}>{review?.running && review.plan.needs_close ? "Close Roblox & play" : "Join server"}</Button>}</div></div>
     </Dialog>
     <Dialog open={!!remove} onClose={() => { if (!busy) setRemove(null); }} title="Forget this game?" description="Removes its local history, profile and favourite. Your Roblox account is unchanged."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => setRemove(null)}>Cancel</Button><Button size="sm" variant="destructive" loading={busy} onClick={() => { if (remove) void run(async () => { await gamesForget(remove.place_id, remove.client); setRemove(null); }); }}>Forget</Button></div></Dialog>
   </div>;

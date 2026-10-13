@@ -39,10 +39,22 @@ pub struct GamePreferences {
     pub fps_cap: Option<u32>,
     pub graphics_quality: Option<crate::structs::GraphicsQuality>,
     pub use_tunnel: bool,
+    pub flag_profile: Option<String>,
+    pub skip_matchmaker: bool,
+    pub borderless: bool,
+    pub monitor: Option<String>,
 }
 impl GamePreferences {
     pub fn validate(&self) -> Result<(), String> {
-        if self.datacenter_id == Some(0)
+        if self
+            .flag_profile
+            .as_deref()
+            .is_some_and(|name| !crate::roblox_launcher::valid_profile_name(name))
+            || self
+                .monitor
+                .as_ref()
+                .is_some_and(|name| name.len() > 128 || name.chars().any(char::is_control))
+            || self.datacenter_id == Some(0)
             || self.fps_cap.is_some_and(|fps| !(30..=99999).contains(&fps))
         {
             return Err("Choose a valid datacenter and a frame-rate cap from 30 to 99999.".into());
@@ -312,7 +324,7 @@ pub fn join_url(
             Ok(format!("https://robloxapp.vnggames.com/games/{place_id}"))
         };
     }
-    let mut url = format!("roblox://placeId={place_id}");
+    let mut url = format!("roblox://experiences/start?placeId={place_id}");
     if let Some(job) = job_id {
         url.push_str(&format!("&gameInstanceId={job}"));
     }
@@ -380,7 +392,7 @@ mod tests {
         assert!(join_url("1818", Some("x&userId=1"), RobloxClient::Standard).is_err());
         assert_eq!(
             join_url("1818", Some(JOB), RobloxClient::Standard).unwrap(),
-            format!("roblox://placeId=1818&gameInstanceId={JOB}")
+            format!("roblox://experiences/start?placeId=1818&gameInstanceId={JOB}")
         );
         assert!(join_url("1818", Some(JOB), RobloxClient::Vng).is_err());
     }

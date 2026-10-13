@@ -1130,6 +1130,7 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
 
     let previews =
         swifttunnel_core::vpn::route_preview::estimates(&available_servers, &samples, &regions);
+    state.games.lock().previews = previews.clone();
     for entry in &mut entries {
         entry.preview = previews
             .iter()
