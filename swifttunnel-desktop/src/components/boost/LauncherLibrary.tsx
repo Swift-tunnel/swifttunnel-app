@@ -120,7 +120,7 @@ export function GameLibraryPanel() {
           await useVpnStore.getState().connect(requested ?? settings.selected_region, presets, requested !== null);
           const connected = useVpnStore.getState();
           if (connected.state !== "connected") throw new Error(connected.error ?? "Finish connecting in Connect, then try Play again.");
-          if (requested && findRegionForVpnRegion(useServerStore.getState().regions, connected.region)?.id !== requested) throw new Error("The connection did not reach the requested relay region. Check Connect before joining.");
+          if (requested && findRegionForVpnRegion(useServerStore.getState().regions, connected.region)?.id !== requested) throw new Error("Couldn't connect to the relay for this location. Check Connect, then try again.");
           return { owned: !existing, token: connected.connectedAt };
         },
         launch: async owned => {
@@ -129,7 +129,7 @@ export function GameLibraryPanel() {
         },
         cleanup: async token => { if (token !== null && useVpnStore.getState().connectedAt === token) await useVpnStore.getState().disconnect(); },
       });
-    }, entry.client === "vng" ? "Opened the official VNG game page." : "Join request sent to Roblox. Its server information will appear when the game is detected.");
+    }, entry.client === "vng" ? "Opened the official VNG game page." : "Roblox is opening.");
   }
   async function prepare(entry: RobloxGameEntry, job: string | null = null, center: number | null = null, preferred = true, safe=false) {
     setFailedEntry(null);
@@ -165,7 +165,7 @@ export function GameLibraryPanel() {
       <button type="button" title="Refresh games" aria-label="Refresh games" disabled={locked || loading} className={iconButtonClass} onClick={() => void run(() => gamesRefreshMetadata())}><Icon name="refresh" size={14} /></button>
     </div>
     {!library && loading && <div className="grid grid-cols-2 gap-3" aria-label="Loading games">{[1,2,3,4].map(i => <div key={i} className="h-[122px] animate-pulse rounded-[var(--radius-card)] bg-bg-card" />)}</div>}
-    {library && !entries.length && <EmptyState icon={<Icon name="games" size={18} strokeWidth={1.8} style={{ color: "var(--color-text-muted)" }} />} title="Your next game starts here." description="Join a game with SwiftTunnel open, or add a favourite above. Keep a small library of the games you actually play." />}
+    {library && !entries.length && <EmptyState icon={<Icon name="games" size={18} strokeWidth={1.8} style={{ color: "var(--color-text-muted)" }} />} title="Your next game starts here." description="Join a game with SwiftTunnel open, or add one above." />}
     {library && !!entries.length && !shown.length && <p className="py-10 text-center text-[12px] text-text-muted">No games match this view.</p>}
     {!!shown.length && <div data-search-anchor="games_cards" className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">{shown.map(entry => {
       const preferences = defaultGamePreferences(entry);
@@ -184,21 +184,21 @@ export function GameLibraryPanel() {
         </div>
       </article>;
     })}</div>}
-    {library && <section className="instrument"><Row anchorId="join_notifications" label="Join notifications" desc="Show the detected server and its verified estimate once per join."><Toggle enabled={library.notify_joins} disabled={locked || !!loadError} ariaLabel="Server information notification" onChange={enabled => void run(() => gamesSetNotifications(enabled))} /></Row></section>}
+    {library && <section className="instrument"><Row anchorId="join_notifications" label="Join notifications" desc="Shows the server's location and ping when you join."><Toggle enabled={library.notify_joins} disabled={locked || !!loadError} ariaLabel="Server information notification" onChange={enabled => void run(() => gamesSetNotifications(enabled))} /></Row></section>}
     <GamePreferencesDialog entry={profile} onClose={() => setProfile(null)} onSaved={() => void refresh()} />
     <Dialog open={!!suggestion} onClose={()=>setSuggestion(null)} title="Matchmaker found a better server" description="Moving leaves your current game. Do nothing and you stay here."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>setSuggestion(null)}>Stay here</Button><Button size="sm" onClick={()=>{if(suggestion&&active){const chosen=suggestion;setSuggestion(null);void prepare(active,chosen.job_id,chosen.datacenter?.id??null,false);}}}>Review {suggestion?.datacenter?.city}</Button></div></Dialog>
     <section className="instrument"><button type="button" className="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left" aria-expanded={reportsOpen} onClick={()=>setReportsOpen(v=>!v)}><span className="flex items-center gap-2"><Icon name="chevron-right" size={12} strokeWidth={2.2} style={{ color: "var(--color-text-muted)", transform: reportsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} /><span className="eyebrow">Session reports & diagnostics</span></span><span className="font-mono text-[10.5px] text-text-dimmed">FPS · ping · stutters</span></button>{reportsOpen&&<div className="border-t border-border-subtle p-3.5"><SessionReportsPanel/></div>}</section>
     <Dialog open={!!library?.recovery} onClose={()=>void run(()=>gamesDismissRecovery())} title="Roblox closed unexpectedly" description="Want to rejoin the server you were in?"><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>void run(()=>gamesDismissRecovery())}>Stay closed</Button><Button size="sm" disabled={busy} onClick={()=>{const previous=library?.recovery;const entry=entries.find(e=>e.place_id===previous?.place_id&&e.client===previous.client);if(entry&&previous){void gamesDismissRecovery().then(()=>prepare(entry,previous.job_id,null,false));}}}>Rejoin</Button></div></Dialog>
     <GameServerDialog entry={servers} onClose={() => setServers(null)} onJoin={(entry, server, center) => { setServers(null); void prepare(entry, server.job_id, center.id, false); }} />
-    <Dialog open={adding} onClose={() => { if (!busy) setAdding(false); }} title="Add a game" description="Paste its official Roblox game link or place ID. No Roblox sign-in is needed here.">
+    <Dialog open={adding} onClose={() => { if (!busy) setAdding(false); }} title="Add a game" description="Paste its Roblox link or place ID.">
       <form onSubmit={e => { e.preventDefault(); void addFavourite(); }} className="flex flex-col gap-4">{error && <ErrorBanner tone="error">{error}</ErrorBanner>}<input autoFocus aria-label="Roblox game link or place ID" value={input} onChange={e => setInput(e.target.value)} maxLength={2048} placeholder="https://www.roblox.com/games/..." disabled={busy} className={fieldClass} /><div className="flex justify-end gap-2"><Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => setAdding(false)}>Cancel</Button><Button type="submit" size="sm" loading={busy} disabled={!input.trim()}>Add favourite</Button></div></form>
     </Dialog>
     <Dialog open={!!review} onClose={() => { if (!busy) setReview(null); }} title={review?.blocked ? "That server is unavailable" : review?.running ? "Ready to change games?" : "Join this server?"}
-      description={review?.blocked ? "It is full or no longer listed. You can join the game normally instead." : review?.running ? review.plan.needs_close ? "Your current Roblox client will close so its settings and route can be prepared safely." : "This may leave your current game." : "Current availability could not be verified. Roblox may report that it is full or closed."}>
+      description={review?.blocked ? "It's full or gone. You can still join the game normally." : review?.running ? review.plan.needs_close ? "Roblox will close first so this game's settings can be applied." : "This may leave your current game." : "Couldn't check whether this server still has room. Roblox may say it's full."}>
       <div className="flex flex-col gap-4"><div className="rounded-[10px] bg-bg-base px-3.5 py-3"><p className="text-[12.5px] font-semibold text-text-primary">{review?.entry.name}</p>{review?.plan.datacenter && <p className="mt-1 text-[11px] text-text-muted">{review.plan.datacenter.city}, {review.plan.datacenter.country}</p>}</div>{error && <ErrorBanner tone="error">{error}</ErrorBanner>}<div className="flex flex-wrap justify-end gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => setReview(null)}>Cancel</Button>
         <Button size="sm" variant={review?.blocked ? "primary" : "secondary"} disabled={busy} onClick={() => { if (review) { const entry = review.entry; setReview(null); void prepare(entry, null, null, false); } }}>Play normally</Button>
         {!review?.blocked && <Button size="sm" loading={busy} onClick={() => { if (review) void launch(review.entry, review.plan, review.running && review.plan.needs_close, review.safe); }}>{review?.running && review.plan.needs_close ? "Close Roblox & play" : "Join server"}</Button>}</div></div>
     </Dialog>
-    <Dialog open={!!remove} onClose={() => { if (!busy) setRemove(null); }} title="Forget this game?" description="Removes its local history, profile and favourite. Your Roblox account is unchanged."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => setRemove(null)}>Cancel</Button><Button size="sm" variant="destructive" loading={busy} onClick={() => { if (remove) void run(async () => { await gamesForget(remove.place_id, remove.client); setRemove(null); }); }}>Forget</Button></div></Dialog>
+    <Dialog open={!!remove} onClose={() => { if (!busy) setRemove(null); }} title="Forget this game?" description="Removes it from your library, along with its settings."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => setRemove(null)}>Cancel</Button><Button size="sm" variant="destructive" loading={busy} onClick={() => { if (remove) void run(async () => { await gamesForget(remove.place_id, remove.client); setRemove(null); }); }}>Forget</Button></div></Dialog>
   </div>;
 }
