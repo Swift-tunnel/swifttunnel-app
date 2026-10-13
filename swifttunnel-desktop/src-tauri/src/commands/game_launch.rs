@@ -429,8 +429,6 @@ pub async fn games_launch_plan(
         && launcher.matchmaker.applies(&place_id)
         && !preferences.skip_matchmaker;
     let global = state.settings.lock().config.roblox_settings.clone();
-    // Keep old library files readable, but removed named profiles no longer apply.
-    preferences.flag_profile = None;
     preferences.fps_cap = preferences.fps_cap.or(Some(if global.unlock_fps {
         global.target_fps
     } else {

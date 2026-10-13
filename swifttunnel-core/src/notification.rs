@@ -138,23 +138,28 @@ fn show_notification_with_icon(title: &str, message: &str, icon: NotificationIco
     // Run on a background thread to avoid blocking the GUI thread
     let title = title.to_string();
     let message = message.to_string();
-    std::thread::spawn(move || {
-        let aumid = get_aumid();
-        let mut toast = Toast::new(aumid)
-            .title(&title)
-            .text1(&message)
-            .sound(Some(Sound::Default))
-            .duration(Duration::Short);
+    let result = std::thread::Builder::new()
+        .name("windows-toast".into())
+        .spawn(move || {
+            let aumid = get_aumid();
+            let mut toast = Toast::new(aumid)
+                .title(&title)
+                .text1(&message)
+                .sound(Some(Sound::Default))
+                .duration(Duration::Short);
 
-        if let Some(icon_path) = get_icon_path(icon) {
-            toast = toast.icon(&icon_path, IconCrop::Square, "SwiftTunnel");
-        }
+            if let Some(icon_path) = get_icon_path(icon) {
+                toast = toast.icon(&icon_path, IconCrop::Square, "SwiftTunnel");
+            }
 
-        match toast.show() {
-            Ok(_) => log::debug!("Notification shown: {} - {}", title, message),
-            Err(e) => log::warn!("Failed to show notification: {}", e),
-        }
-    });
+            match toast.show() {
+                Ok(_) => log::debug!("Notification shown: {} - {}", title, message),
+                Err(e) => log::warn!("Failed to show notification: {}", e),
+            }
+        });
+    if let Err(error) = result {
+        log::warn!("Notification worker could not start: {error}");
+    }
 }
 
 /// Show a Windows toast notification

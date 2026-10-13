@@ -20,7 +20,6 @@ describe("boost config helpers", () => {
     expect(result.network_settings.enable_network_boost).toBe(true);
     expect(result.network_settings.disable_nagle).toBe(true);
     expect(result.network_settings.disable_network_throttling).toBe(true);
-    expect(result.auto_start_with_roblox).toBe(false);
   });
 
   it("never lowers the frame cap when a preset is chosen", () => {

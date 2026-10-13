@@ -14,6 +14,28 @@ function sampleSettings(): AppSettings {
 }
 
 describe("presets", () => {
+  it("drops retired settings from older presets while retaining FPS and overlay", () => {
+    const legacy = JSON.parse(encodePreset(buildPreset("Old settings", sampleSettings(), [])));
+    legacy.config.auto_start_with_roblox = true;
+    legacy.config.show_overlay = false;
+    legacy.config.system_optimization.clear_standby_memory = true;
+    legacy.config.overlay.monitor_fps_chart = true;
+    legacy.config.overlay.show_max_fps_message = true;
+    legacy.config.overlay.enabled = true;
+    legacy.config.roblox_settings.target_fps = 240;
+    const decoded = decodePreset(JSON.stringify(legacy));
+    const merged = mergePresetIntoConfig(sampleSettings().config, decoded);
+    expect(merged.overlay.enabled).toBe(true);
+    expect(merged.roblox_settings.target_fps).toBe(240);
+    for (const key of ["auto_start_with_roblox", "show_overlay"]) {
+      expect(decoded.config).not.toHaveProperty(key);
+      expect(merged).not.toHaveProperty(key);
+    }
+    expect(merged.system_optimization).not.toHaveProperty("clear_standby_memory");
+    expect(merged.overlay).not.toHaveProperty("monitor_fps_chart");
+    expect(merged.overlay).not.toHaveProperty("show_max_fps_message");
+  });
+
   it("ignores Auto RAM Clean from older presets while preserving other settings", () => {
     const legacy = JSON.parse(encodePreset(buildPreset("Old preset", sampleSettings(), [])));
     legacy.config.system_optimization.auto_ram_clean = true;

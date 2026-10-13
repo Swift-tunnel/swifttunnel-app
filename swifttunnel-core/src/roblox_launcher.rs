@@ -1,5 +1,5 @@
-//! Bounded local launcher preferences and legacy profile data.
-use crate::{roblox_library::valid_place_id, structs::RobloxSettingsConfig};
+//! Bounded local launcher preferences.
+use crate::roblox_library::valid_place_id;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -62,37 +62,15 @@ impl Matchmaker {
         self.enabled && !self.skipped_games.iter().any(|id| id == place)
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NamedProfile {
-    pub name: String,
-    pub settings: RobloxSettingsConfig,
-}
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LauncherConfig {
     pub matchmaker: Matchmaker,
-    pub profiles: Vec<NamedProfile>,
     pub offer_recovery: bool,
 }
 impl LauncherConfig {
     pub fn validate(&self) -> Result<(), String> {
         self.matchmaker.validate()?;
-        if self.profiles.len() > 20 {
-            return Err("Keep up to 20 named profiles.".into());
-        }
-        for (i, p) in self.profiles.iter().enumerate() {
-            if !valid_profile_name(&p.name)
-                || self.profiles[..i]
-                    .iter()
-                    .any(|old| old.name.eq_ignore_ascii_case(&p.name))
-                || !(30..=99999).contains(&p.settings.target_fps)
-                || p.settings.custom_fflags_json.len() > 8192
-            {
-                return Err("Profiles need unique names and valid frame-rate caps.".into());
-            }
-            crate::roblox_optimizer::RobloxOptimizer::native_launch_flags(&p.settings)
-                .map_err(|e| e.to_string())?;
-        }
         Ok(())
     }
     pub fn load() -> Result<Self, String> {
@@ -104,12 +82,6 @@ impl LauncherConfig {
         self.validate()?;
         save("launcher.json", self)
     }
-}
-pub fn valid_profile_name(name: &str) -> bool {
-    !name.trim().is_empty()
-        && name == name.trim()
-        && name.len() <= 48
-        && !name.chars().any(char::is_control)
 }
 fn path(name: &str) -> Result<PathBuf, String> {
     if name != "launcher.json" {
@@ -174,6 +146,28 @@ pub fn qualifies(server: &crate::roblox_directory::GameServer, minimum_free_slot
 mod tests {
     use super::*;
     #[test]
+    fn removed_profiles_cannot_block_current_launcher_settings() {
+        let config: LauncherConfig = serde_json::from_str(
+            r#"{
+            "matchmaker":{"enabled":true},
+            "profiles":[{"name":"Old", "settings":{"custom_fflags_enabled":true,
+                "custom_fflags_json":"{\"FFlagDoesNotExist\":true}"}}]
+        }"#,
+        )
+        .unwrap();
+        assert!(config.matchmaker.enabled);
+        assert!(config.validate().is_ok());
+        assert!(
+            serde_json::to_value(config)
+                .unwrap()
+                .get("profiles")
+                .is_none()
+        );
+        let malformed: LauncherConfig =
+            serde_json::from_str(r#"{"profiles":"retired data"}"#).unwrap();
+        assert!(malformed.validate().is_ok());
+    }
+    #[test]
     fn matcher_never_uses_full_unknown_or_insufficient_servers() {
         use crate::roblox_directory::{Availability, GameServer};
         let mut s = GameServer {
@@ -199,22 +193,5 @@ mod tests {
         c.blocked_datacenters.clear();
         c.search_limit = 10000;
         assert!(c.validate().is_err());
-    }
-    #[test]
-    fn old_config_loads_disabled_and_profiles_reject_ignored_flags() {
-        let config: LauncherConfig = serde_json::from_str("{}").unwrap();
-        assert!(!config.matchmaker.enabled);
-        assert!(!config.offer_recovery);
-        let mut invalid = LauncherConfig::default();
-        let settings = RobloxSettingsConfig {
-            custom_fflags_enabled: true,
-            custom_fflags_json: r#"{"FFlagDoesNotExist":true}"#.into(),
-            ..Default::default()
-        };
-        invalid.profiles.push(NamedProfile {
-            name: "Test".into(),
-            settings,
-        });
-        assert!(invalid.validate().is_err());
     }
 }

@@ -39,7 +39,6 @@ pub struct GamePreferences {
     pub fps_cap: Option<u32>,
     pub graphics_quality: Option<crate::structs::GraphicsQuality>,
     pub use_tunnel: bool,
-    pub flag_profile: Option<String>,
     pub skip_matchmaker: bool,
     pub borderless: bool,
     pub monitor: Option<String>,
@@ -47,19 +46,34 @@ pub struct GamePreferences {
 impl GamePreferences {
     pub fn validate(&self) -> Result<(), String> {
         if self
-            .flag_profile
-            .as_deref()
-            .is_some_and(|name| !crate::roblox_launcher::valid_profile_name(name))
-            || self
-                .monitor
-                .as_ref()
-                .is_some_and(|name| name.len() > 128 || name.chars().any(char::is_control))
+            .monitor
+            .as_ref()
+            .is_some_and(|name| name.len() > 128 || name.chars().any(char::is_control))
             || self.datacenter_id == Some(0)
             || self.fps_cap.is_some_and(|fps| !(30..=99999).contains(&fps))
         {
             return Err("Choose a valid datacenter and a frame-rate cap from 30 to 99999.".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod retired_preference_tests {
+    use super::*;
+    #[test]
+    fn an_obsolete_profile_name_cannot_block_saving_current_preferences() {
+        let preferences: GamePreferences =
+            serde_json::from_str(r#"{"flag_profile":"invalid\nold profile","fps_cap":240}"#)
+                .unwrap();
+        assert!(preferences.validate().is_ok());
+        assert_eq!(preferences.fps_cap, Some(240));
+        assert!(
+            serde_json::to_value(preferences)
+                .unwrap()
+                .get("flag_profile")
+                .is_none()
+        );
     }
 }
 

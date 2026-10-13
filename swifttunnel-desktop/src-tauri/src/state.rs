@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
@@ -45,9 +44,6 @@ pub struct AppState {
     /// used to make the graph read zero on some machines).
     pub throughput_stats: Arc<RwLock<Option<ThroughputStats>>>,
     pub server_list: Arc<Mutex<DynamicServerList>>,
-    /// Map of region_id -> (server_name, latency_ms)
-    #[allow(dead_code)]
-    pub region_latencies: Arc<Mutex<HashMap<String, (String, u32)>>>,
     pub settings: Arc<Mutex<AppSettings>>,
     pub performance_monitor: Arc<Mutex<PerformanceMonitor>>,
     /// Anti-cheat-safe in-game FPS via ETW DXGI present counting. Long-lived;
@@ -101,7 +97,6 @@ impl AppState {
             split_tunnel_handle: Arc::new(RwLock::new(None)),
             throughput_stats: Arc::new(RwLock::new(None)),
             server_list: Arc::new(Mutex::new(DynamicServerList::new_empty())),
-            region_latencies: Arc::new(Mutex::new(HashMap::new())),
             settings: Arc::new(Mutex::new(settings)),
             performance_monitor: Arc::new(Mutex::new(PerformanceMonitor::new())),
             fps_monitor,

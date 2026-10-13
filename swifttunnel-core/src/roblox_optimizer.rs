@@ -242,7 +242,11 @@ impl RobloxOptimizer {
             return Err(anyhow::anyhow!("Roblox settings file not found"));
         }
 
-        let content = fs::read_to_string(&settings_path)?;
+        let content = crate::utils::read_text_file_bounded(
+            &settings_path,
+            4 * 1024 * 1024,
+            "Roblox settings",
+        )?;
 
         // Parse FPS cap
         let fps_cap = Self::extract_int_value(&content, "FramerateCap").unwrap_or(60);
@@ -472,7 +476,11 @@ impl RobloxOptimizer {
             Self::remove_readonly_path(&settings_path)?;
         }
 
-        let content = fs::read_to_string(&settings_path)?;
+        let content = crate::utils::read_text_file_bounded(
+            &settings_path,
+            4 * 1024 * 1024,
+            "Roblox settings",
+        )?;
         let (width, height) =
             Self::sanitize_window_dimensions(config.window_width, config.window_height);
 
@@ -688,7 +696,11 @@ impl RobloxOptimizer {
         let Some(path) = gpu_preference_snapshot_path() else {
             return GpuPreferenceSnapshot::default();
         };
-        let content = match fs::read_to_string(&path) {
+        let content = match crate::utils::read_text_file_bounded(
+            &path,
+            256 * 1024,
+            "GPU preference recovery",
+        ) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return GpuPreferenceSnapshot::default();
@@ -913,7 +925,11 @@ impl RobloxOptimizer {
         self.backup_settings_for(settings_path)?;
 
         // Read current content
-        let mut content = fs::read_to_string(settings_path)?;
+        let mut content = crate::utils::read_text_file_bounded(
+            settings_path,
+            4 * 1024 * 1024,
+            "Roblox settings",
+        )?;
 
         // Apply the FPS cap exactly as configured, in both directions.
         //
@@ -1346,7 +1362,11 @@ impl RobloxOptimizer {
             return false;
         }
 
-        let Ok(content) = fs::read_to_string(&settings_path) else {
+        let Ok(content) = crate::utils::read_text_file_bounded(
+            &settings_path,
+            4 * 1024 * 1024,
+            "Roblox settings",
+        ) else {
             return false;
         };
         let content = Self::reset_forced_xml_values(&content, self);
@@ -2635,7 +2655,11 @@ impl RobloxOptimizer {
             return Ok(HashMap::new());
         }
 
-        let content = fs::read_to_string(settings_path)?;
+        let content = crate::utils::read_text_file_bounded(
+            settings_path,
+            4 * 1024 * 1024,
+            "Roblox settings",
+        )?;
         serde_json::from_str(&content).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to parse ClientAppSettings.json at {}: {}",

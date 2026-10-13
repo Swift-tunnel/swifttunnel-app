@@ -453,7 +453,7 @@ pub fn load_settings() -> AppSettings {
         return sanitize_settings(AppSettings::default());
     }
 
-    match fs::read_to_string(&path) {
+    match crate::utils::read_text_file_bounded(&path, MAX_SETTINGS_BYTES, "SwiftTunnel settings") {
         Ok(content) => match serde_json::from_str(&content) {
             Ok(settings) => {
                 info!("Loaded settings from {:?}", path);
@@ -469,6 +469,11 @@ pub fn load_settings() -> AppSettings {
         },
         Err(e) => {
             error!("Failed to read settings file: {}", e);
+            if e.kind() == std::io::ErrorKind::InvalidData
+                && let Some(backup) = backup_corrupt_settings(&path)
+            {
+                error!("Kept unreadable or oversized settings at {:?}", backup);
+            }
             sanitize_settings(AppSettings::default())
         }
     }
@@ -515,41 +520,88 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
         Err(e) => return Err(format!("Failed to serialize settings: {}", e)),
     };
 
-    // Write-then-rename so a crash/power loss mid-write can never leave a
-    // half-written settings.json (which would reset every setting on the next
-    // launch). Rename within the same directory is atomic on NTFS.
-    let tmp_path = dir.join(format!("{}.tmp", SETTINGS_FILE));
-    if let Err(e) = fs::write(&tmp_path, &json) {
-        return Err(format!("Failed to write settings file: {}", e));
+    if json.len() > MAX_SETTINGS_BYTES {
+        return Err("Settings are too large to save safely.".into());
     }
-    match fs::rename(&tmp_path, &path) {
-        Ok(_) => {
-            info!("Saved settings to {:?}", path);
-            Ok(())
-        }
-        Err(rename_err) => {
-            // Rename can fail if another process holds the destination open
-            // (AV scanners, backup tools). Fall back to a direct write so the
-            // save still lands, and clean up the temp file.
-            let fallback = fs::write(&path, &json);
-            let _ = fs::remove_file(&tmp_path);
-            match fallback {
-                Ok(_) => {
-                    info!("Saved settings to {:?} (direct write fallback)", path);
-                    Ok(())
-                }
-                Err(e) => Err(format!(
-                    "Failed to write settings file: {} (rename failed first: {})",
-                    e, rename_err
-                )),
+    replace_settings_file(&path, json.as_bytes())
+}
+
+const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
+
+/// Never truncate the live settings as a fallback. If Windows/antivirus holds
+/// it open, keep its contents and let the caller retry the failed save.
+fn replace_settings_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .ok_or("Invalid settings filename")?
+        .to_string_lossy();
+    let mut created = None;
+    for _ in 0..8 {
+        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let temp = path.with_file_name(format!("{name}.{}.{sequence}.tmp", std::process::id()));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+        {
+            Ok(file) => {
+                created = Some((temp, file));
+                break;
             }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not prepare settings save: {error}")),
         }
     }
+    let (temp, mut file) = created.ok_or("Could not prepare a unique settings save file")?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, path)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temp);
+        return Err(format!(
+            "Could not replace settings. Previous settings were kept; retry Save: {error}"
+        ));
+    }
+    info!("Saved settings to {:?}", path);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_replacement_cannot_fall_back_to_truncating_the_live_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "swifttunnel_atomic_settings_{}",
+            rand::random::<u64>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.json");
+        fs::write(&path, "original settings").unwrap();
+        // Allow reads/writes but deny deletion, modelling a scanner which
+        // prevents rename. The old direct-write fallback would succeed here.
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        assert!(replace_settings_file(&path, b"replacement").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original settings");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        drop(locked);
+        replace_settings_file(&path, b"replacement").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn test_default_settings() {

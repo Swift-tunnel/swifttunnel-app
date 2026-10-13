@@ -7,7 +7,7 @@ use std::time::Instant;
 pub(super) const DISCORD_BRAND_IMAGE_KEY: &str = "swifttunnel";
 
 /// Current state for Discord Rich Presence display
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum DiscordState {
     /// App is open but VPN is disconnected
     #[default]

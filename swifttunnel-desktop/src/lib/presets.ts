@@ -25,7 +25,6 @@ export type PortableSystem = Pick<
   Config["system_optimization"],
   | "set_high_priority"
   | "disable_fullscreen_optimization"
-  | "clear_standby_memory"
   | "disable_game_bar"
   | "power_plan"
   | "timer_resolution_1ms"
@@ -39,8 +38,6 @@ export interface PresetConfig {
   network_settings: Config["network_settings"];
   system_optimization: PortableSystem;
   profile: Config["profile"];
-  auto_start_with_roblox: boolean;
-  show_overlay: boolean;
 }
 
 export interface SwiftTunnelPreset {
@@ -58,7 +55,6 @@ function portableSystem(so: Config["system_optimization"]): PortableSystem {
   return {
     set_high_priority: so.set_high_priority,
     disable_fullscreen_optimization: so.disable_fullscreen_optimization,
-    clear_standby_memory: so.clear_standby_memory,
     disable_game_bar: so.disable_game_bar,
     power_plan: so.power_plan,
     timer_resolution_1ms: so.timer_resolution_1ms,
@@ -84,8 +80,6 @@ export function buildPreset(
       network_settings: c.network_settings,
       system_optimization: portableSystem(c.system_optimization),
       profile: c.profile,
-      auto_start_with_roblox: c.auto_start_with_roblox,
-      show_overlay: c.show_overlay,
     },
     optimizations: [...new Set(activeOptimizationIds)].sort(),
     game_presets: [...settings.selected_game_presets],
@@ -275,14 +269,6 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
             : null,
         hotkey: asStr(o.hotkey, 40, D.overlay.hotkey),
         locked: asBool(o.locked, true),
-        monitor_fps_chart: asBool(
-          o.monitor_fps_chart,
-          D.overlay.monitor_fps_chart,
-        ),
-        show_max_fps_message: asBool(
-          o.show_max_fps_message,
-          D.overlay.show_max_fps_message,
-        ),
       },
       network_settings: {
         enable_network_boost: asBool(
@@ -308,10 +294,6 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
           so.disable_fullscreen_optimization,
           D.system_optimization.disable_fullscreen_optimization,
         ),
-        clear_standby_memory: asBool(
-          so.clear_standby_memory,
-          D.system_optimization.clear_standby_memory,
-        ),
         disable_game_bar: asBool(
           so.disable_game_bar,
           D.system_optimization.disable_game_bar,
@@ -335,11 +317,6 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
         ),
       },
       profile: asEnum(c.profile, PROFILES, D.profile),
-      auto_start_with_roblox: asBool(
-        c.auto_start_with_roblox,
-        D.auto_start_with_roblox,
-      ),
-      show_overlay: asBool(c.show_overlay, D.show_overlay),
     },
     optimizations: asStrArray(p.optimizations, 200),
     game_presets: asStrArray(p.game_presets, 100),
@@ -404,8 +381,6 @@ export function mergePresetIntoConfig(
       ...current.network_settings,
       ...preset.config.network_settings,
     },
-    auto_start_with_roblox: preset.config.auto_start_with_roblox,
-    show_overlay: preset.config.show_overlay,
     system_optimization: {
       ...current.system_optimization,
       ...preset.config.system_optimization,

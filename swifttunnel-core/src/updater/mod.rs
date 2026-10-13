@@ -5,9 +5,4 @@
 
 pub mod types;
 
-pub use types::{UpdateChannel, UpdateSettings, UpdateState};
-
-/// Clean up old update files (kept for API compatibility; currently a no-op).
-pub async fn cleanup_updates() -> Result<(), String> {
-    Ok(())
-}
+pub use types::{UpdateChannel, UpdateSettings};

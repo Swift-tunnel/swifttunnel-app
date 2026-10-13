@@ -1,7 +1,7 @@
 // Development-only fixture service. Never calls the native backend, changes
 // files, connects a tunnel, or launches a real game.
 import type { GamePreferences, RobloxDatacenter, RobloxLibrarySnapshot, LauncherConfig } from "./types";
-let launcher:LauncherConfig={matchmaker:{enabled:false,mode:"closest",blocked_datacenters:[],preferred_datacenter:null,skipped_games:[],minimum_free_slots:1,search_limit:40,prepare_tunnel:true,offer_better_server:false},profiles:[],offer_recovery:false};
+let launcher:LauncherConfig={matchmaker:{enabled:false,mode:"closest",blocked_datacenters:[],preferred_datacenter:null,skipped_games:[],minimum_free_slots:1,search_limit:40,prepare_tunnel:true,offer_better_server:false},offer_recovery:false};
 const preferences: GamePreferences = { datacenter_id: null, fps_cap: null, graphics_quality: null, use_tunnel: false };
 const job = "550e8400-e29b-41d4-a716-446655440000";
 const library: RobloxLibrarySnapshot = { current: null, warning: null, notify_joins: true, launch_pending: false, entries: [

@@ -34,7 +34,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
   useEffect(() => {
     if (!entry) return;
     let disposed = false;
-    setPreferences({ ...defaultGamePreferences(entry), flag_profile: null }); setError(null); setCenters([]); setCatalogError(false);
+    setPreferences(defaultGamePreferences(entry)); setError(null); setCenters([]); setCatalogError(false);
     void gamesDatacenters().then(rows => { if (!disposed) setCenters(rows); }).catch(() => { if (!disposed) setCatalogError(true); });
     void gamesDisplays().then(rows=>{if(!disposed)setDisplays(rows);}).catch(()=>{});
     return () => { disposed = true; };

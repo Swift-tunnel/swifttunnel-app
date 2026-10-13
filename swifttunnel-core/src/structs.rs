@@ -1,10 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::AtomicBool;
-
-/// Flag indicating the boost/performance tab is currently visible in the GUI.
-/// When false and no optimizations are applied, the background performance
-/// monitor sleeps longer to reduce CPU usage.
-pub static PERF_MONITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Optimization profile presets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,8 +17,6 @@ pub struct Config {
     pub system_optimization: SystemOptimizationConfig,
     pub roblox_settings: RobloxSettingsConfig,
     pub network_settings: NetworkConfig,
-    pub auto_start_with_roblox: bool,
-    pub show_overlay: bool,
     #[serde(default)]
     pub overlay: OverlayConfig,
 }
@@ -36,8 +28,6 @@ impl Default for Config {
             system_optimization: SystemOptimizationConfig::default(),
             roblox_settings: RobloxSettingsConfig::default(),
             network_settings: NetworkConfig::default(),
-            auto_start_with_roblox: false,
-            show_overlay: true,
             overlay: OverlayConfig::default(),
         }
     }
@@ -73,10 +63,6 @@ pub struct OverlayConfig {
     pub locked: bool,
     /// Global toggle hotkey, e.g. "Ctrl+Shift+O".
     pub hotkey: String,
-    /// When a game starts: keep an FPS chart for the session.
-    pub monitor_fps_chart: bool,
-    /// After a game: show a desktop message with the session's max FPS.
-    pub show_max_fps_message: bool,
 }
 
 fn overlay_position_locked() -> bool {
@@ -104,8 +90,6 @@ impl Default for OverlayConfig {
             custom_y: None,
             locked: true,
             hotkey: "Ctrl+Shift+O".into(),
-            monitor_fps_chart: false,
-            show_max_fps_message: false,
         }
     }
 }
@@ -117,6 +101,9 @@ pub struct SystemOptimizationConfig {
     pub set_cpu_affinity: bool,
     pub cpu_cores: Vec<usize>,
     pub disable_fullscreen_optimization: bool,
+    /// Serialization compatibility for older Lite clients sharing this file.
+    /// This retired setting has no runtime behavior.
+    #[serde(default)]
     pub clear_standby_memory: bool,
     pub disable_game_bar: bool,
     pub power_plan: PowerPlan,
@@ -599,8 +586,6 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert_eq!(config.profile, OptimizationProfile::Balanced);
-        assert!(!config.auto_start_with_roblox);
-        assert!(config.show_overlay);
         assert!(config.overlay.locked);
     }
 
@@ -630,6 +615,34 @@ mod tests {
         assert!(!cfg.timer_resolution_1ms);
         assert!(!cfg.mmcss_gaming_profile);
         assert!(!cfg.game_mode_enabled);
+    }
+
+    #[test]
+    fn retired_booster_and_overlay_fields_are_ignored_without_losing_active_settings() {
+        let config: Config = serde_json::from_str(r#"{
+            "auto_start_with_roblox":true,"show_overlay":false,
+            "overlay":{"enabled":true,"metrics":["cpu"],"monitor_fps_chart":true,"show_max_fps_message":true}
+        }"#).unwrap();
+        assert!(config.overlay.enabled);
+        assert_eq!(config.overlay.metrics, vec!["cpu"]);
+        let saved = serde_json::to_value(config).unwrap();
+        assert!(saved.get("auto_start_with_roblox").is_none());
+        assert!(saved.get("show_overlay").is_none());
+        assert!(saved["overlay"].get("monitor_fps_chart").is_none());
+        assert!(saved["overlay"].get("show_max_fps_message").is_none());
+        let mut compatibility = serde_json::to_value(SystemOptimizationConfig::default()).unwrap();
+        compatibility
+            .as_object_mut()
+            .unwrap()
+            .remove("clear_standby_memory");
+        let loaded: SystemOptimizationConfig = serde_json::from_value(compatibility).unwrap();
+        assert!(!loaded.clear_standby_memory);
+        assert!(
+            serde_json::to_value(loaded)
+                .unwrap()
+                .get("clear_standby_memory")
+                .is_some()
+        );
     }
 
     #[test]

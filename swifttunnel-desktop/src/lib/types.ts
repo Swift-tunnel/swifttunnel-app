@@ -264,7 +264,6 @@ export interface SystemOptimizationConfig {
   set_cpu_affinity: boolean;
   cpu_cores: number[];
   disable_fullscreen_optimization: boolean;
-  clear_standby_memory: boolean;
   disable_game_bar: boolean;
   power_plan: PowerPlan;
   previous_power_plan: PowerPlan | null;
@@ -332,8 +331,6 @@ export interface OverlayConfig {
   custom_y: number | null;
   locked?: boolean;
   hotkey: string;
-  monitor_fps_chart: boolean;
-  show_max_fps_message: boolean;
 }
 
 export interface Config {
@@ -341,8 +338,6 @@ export interface Config {
   system_optimization: SystemOptimizationConfig;
   roblox_settings: RobloxSettingsConfig;
   network_settings: NetworkConfig;
-  auto_start_with_roblox: boolean;
-  show_overlay: boolean;
   overlay: OverlayConfig;
 }
 
@@ -610,14 +605,12 @@ export interface GamePreferences {
   fps_cap: number | null;
   graphics_quality: RobloxSettingsConfig["graphics_quality"] | null;
   use_tunnel: boolean;
-  flag_profile?: string | null;
   skip_matchmaker?: boolean;
   borderless?: boolean;
   monitor?: string | null;
 }
+export interface LauncherConfig { matchmaker: MatchmakerConfig; offer_recovery: boolean; }
 export interface MatchmakerConfig { enabled: boolean; mode: "closest" | "fewer_players"; blocked_datacenters: number[]; preferred_datacenter: number | null; skipped_games: string[]; minimum_free_slots: number; search_limit: number; prepare_tunnel: boolean; offer_better_server: boolean; }
-export interface NamedGameProfile { name: string; settings: RobloxSettingsConfig; }
-export interface LauncherConfig { matchmaker: MatchmakerConfig; profiles: NamedGameProfile[]; offer_recovery: boolean; }
 export interface RobloxDatacenter { id: number; city: string; country: string; datacenter_ids: number[]; relay_region: string | null; }
 export type ServerAvailability = "available" | "full" | "unavailable" | "unknown";
 export interface RobloxDirectoryServer { job_id: string; datacenter_id: number; ip: string | null; first_seen: string; playing: number | null; capacity: number | null; availability: ServerAvailability; }

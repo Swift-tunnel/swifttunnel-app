@@ -5,6 +5,33 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+/// Bound old local-text readers as well as HTTP responses. Metadata catches
+/// already oversized files; Take also protects against growth during reading.
+pub fn read_text_file_bounded(
+    path: &std::path::Path,
+    max_bytes: usize,
+    context: &str,
+) -> std::io::Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let too_large = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{context} exceeds its {max_bytes}-byte limit"),
+        )
+    };
+    if file.metadata()?.len() > max_bytes as u64 {
+        return Err(too_large());
+    }
+    let mut text = String::new();
+    file.take(max_bytes.saturating_add(1) as u64)
+        .read_to_string(&mut text)?;
+    if text.len() > max_bytes {
+        return Err(too_large());
+    }
+    Ok(text)
+}
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -1189,6 +1216,24 @@ mod tests {
     use super::*;
     #[cfg(windows)]
     use std::fs;
+
+    #[test]
+    fn bounded_local_text_accepts_the_limit_and_refuses_an_oversized_file() {
+        let path = std::env::temp_dir().join(format!(
+            "swifttunnel_bounded_text_{}",
+            rand::random::<u64>()
+        ));
+        std::fs::write(&path, "12345678").unwrap();
+        assert_eq!(
+            read_text_file_bounded(&path, 8, "Test").unwrap(),
+            "12345678"
+        );
+        assert_eq!(
+            read_text_file_bounded(&path, 7, "Test").unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn test_hidden_command() {

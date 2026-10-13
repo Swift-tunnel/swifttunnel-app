@@ -236,18 +236,6 @@ impl PerformanceMonitor {
             system_name: System::name().unwrap_or_else(|| "Unknown".to_string()),
         }
     }
-
-    /// Monitor process continuously (for background monitoring)
-    pub async fn monitor_continuously(
-        mut self,
-        mut metrics: PerformanceMetrics,
-        interval: Duration,
-    ) -> PerformanceMetrics {
-        loop {
-            self.update_metrics(&mut metrics);
-            tokio::time::sleep(interval).await;
-        }
-    }
 }
 
 fn normalize_process_cpu(raw_cpu: f32) -> f32 {
