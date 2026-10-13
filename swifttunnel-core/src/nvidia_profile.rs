@@ -106,7 +106,9 @@ mod platform {
             // downloaded DLL. No new driver/runtime dependency is bundled.
             let library = unsafe { LoadLibraryExW(name.as_ptr(), std::ptr::null_mut(), 0x800) };
             if library.is_null() {
-                return Err("A compatible NVIDIA driver was not found. These controls are unavailable on AMD, Intel and unsupported Windows ARM systems.".into());
+                return Err(
+                    "No NVIDIA driver found. These controls only work with NVIDIA graphics.".into(),
+                );
             }
             let function = unsafe {
                 GetProcAddress(library as isize, c"nvapi_QueryInterface".as_ptr().cast())
@@ -115,7 +117,9 @@ mod platform {
                 unsafe {
                     FreeLibrary(library);
                 }
-                return Err("The installed NVIDIA driver does not expose NVAPI.".into());
+                return Err(
+                    "This NVIDIA driver could not be read. Update it and try again.".into(),
+                );
             }
             let query: Query = unsafe { std::mem::transmute(function) };
             let mut result = Self {
@@ -241,7 +245,7 @@ mod platform {
             -137 => Err("Windows denied this driver profile change. Open SwiftTunnel as administrator, then retry.".into()),
             -6 => Err("No NVIDIA GPU was found.".into()),
             -9 => Err("The NVIDIA driver uses an unsupported profile format. Update its driver or use NVIDIA Control Panel.".into()),
-            _ => Err(format!("NVIDIA could not complete the Roblox profile operation (code {code}). No profile save was completed.")),
+            _ => Err(format!("NVIDIA could not save the profile (code {code}). Nothing was changed.")),
         }
     }
     fn buffer(bytes: usize) -> Vec<u32> {
@@ -260,7 +264,7 @@ mod platform {
             .map(|p| session.writable(p))
             .transpose()?
             .unwrap_or(true);
-        Ok(DriverProfile { available:true, writable, reason:(!writable).then(||"NVIDIA shares this profile with other executables. SwiftTunnel keeps it read-only so another game or Studio is not changed.".into()), settings: session.read(profile)? })
+        Ok(DriverProfile { available:true, writable, reason:(!writable).then(||"This NVIDIA profile is shared with other programs, so it cannot be changed here.".into()), settings: session.read(profile)? })
     }
     pub fn read() -> Result<DriverProfile, String> {
         let _gate = GATE.lock();

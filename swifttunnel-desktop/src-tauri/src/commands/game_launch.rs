@@ -233,7 +233,7 @@ async fn matchmake(
     }
     measured.sort_by_key(|(not_preferred, score, _)| (*not_preferred, *score));
     if measured.is_empty() {
-        return Err("Matchmaker has no fresh path measurements for the allowed datacenters. Wait for the region pings, choose a preferred datacenter, or Play normally.".into());
+        return Err("Matchmaker has no ping readings yet. Wait a moment, pick a preferred location, or Play normally.".into());
     }
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut remaining = config.search_limit as usize;
@@ -287,7 +287,10 @@ async fn matchmake(
         }
     }
     let Some((_, _, center, servers, job)) = best else {
-        return Err("No verified public server met your Matchmaker filters within the search limit. Choose another location or Play normally.".into());
+        return Err(
+            "No server matched your Matchmaker settings. Try another location or Play normally."
+                .into(),
+        );
     };
     let id = center.id;
     state.games.lock().search = Some(ServerSearch {
@@ -331,7 +334,7 @@ pub async fn games_launch_plan(
             .profiles
             .iter()
             .find(|p| p.name == *name)
-            .ok_or("This game's named profile no longer exists. Choose another profile in Game settings.")?
+            .ok_or("This game's settings profile was deleted. Pick another in its settings.")?
             .settings
             .clone();
     }
@@ -417,7 +420,7 @@ pub async fn games_launch_plan(
             if job_id.is_none() {
                 return Err(if search.servers.is_empty() {
                     format!(
-                        "The server directory returned no listed {} servers for this game. Choose another location or Play normally; the directory may be incomplete.",
+                        "No {} servers are listed for this game. Try another location or Play normally.",
                         center.city
                     )
                 } else {
@@ -444,7 +447,7 @@ pub async fn games_launch_plan(
         .and_then(|c| c.relay_region.clone())
         .filter(|_| preferences.use_tunnel);
     if preferences.use_tunnel && center.is_some() && relay_region.is_none() {
-        return Err("SwiftTunnel has no matching relay region for this datacenter. Turn off automatic connection for this game to join with your current route.".into());
+        return Err("SwiftTunnel has no relay for this location. Turn off 'Connect SwiftTunnel before playing' for this game to join anyway.".into());
     }
     if let Some(region) = &relay_region
         && !state
@@ -504,9 +507,7 @@ pub async fn games_launch(
         );
     }
     if plan.needs_close && state.performance_monitor.lock().is_roblox_running() {
-        return Err(
-            "Close Roblox before starting this game's connection or settings profile.".into(),
-        );
+        return Err("Close Roblox first so this game's settings can be applied.".into());
     }
     if plan.preferences.use_tunnel {
         let connection = state.vpn_state_handle.borrow().clone();

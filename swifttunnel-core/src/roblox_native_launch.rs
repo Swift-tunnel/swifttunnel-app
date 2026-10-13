@@ -43,7 +43,11 @@ fn find_player(versions: &Path) -> Result<PathBuf, String> {
         }
     }
     players.sort_by(|a, b| b.cmp(a));
-    players.into_iter().next().map(|(_,p)| p).ok_or_else(|| "Install the official Roblox player from roblox.com first. SwiftTunnel Play uses Roblox directly; Roblox handles its own updates.".into())
+    players
+        .into_iter()
+        .next()
+        .map(|(_, p)| p)
+        .ok_or_else(|| "Install Roblox from roblox.com first.".into())
 }
 pub fn safe_path(path: &Path) -> Result<(), String> {
     for ancestor in path.ancestors() {

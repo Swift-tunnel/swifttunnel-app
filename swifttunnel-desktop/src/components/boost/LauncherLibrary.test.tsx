@@ -15,7 +15,7 @@ describe("native launch library", () => {
     expect(html).toContain('role="status"');
     expect(html).toContain("Roblox is running.");
     expect(html).not.toContain('role="alert"');
-    expect(html).not.toContain("A running game was not detected within a minute");
+    expect(html).not.toContain("Roblox did not open a game within a minute");
   });
   it("offers native safe launch and shortcuts without claiming to manage Roblox updates", () => {
     useGameLibraryStore.setState({ library: { entries: [{ place_id:"1818",name:"Crossroads",job_id:null,last_played:null,favourite:true,client:"standard" }],current:null,warning:null,notify_joins:false } });

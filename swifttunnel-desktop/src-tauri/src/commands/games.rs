@@ -50,7 +50,7 @@ pub async fn games_save_flags(
     tauri::async_runtime::spawn_blocking(move || {
         let optimizer = optimizer.lock();
         if swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending() {
-            return Err("Close Roblox and let its temporary game settings restore before applying FastFlags.".into());
+            return Err("Close Roblox first, then apply FastFlags.".into());
         }
         let mut settings = settings.lock();
         let previous = &settings.config.roblox_settings;
@@ -94,9 +94,7 @@ pub async fn games_flags(
             && (swifttunnel_core::roblox_game_profile::pending()
                 || swifttunnel_core::roblox_launch_flags::pending())
         {
-            return Err(
-                "Close Roblox and let its game settings restore before changing flag files.".into(),
-            );
+            return Err("Close Roblox first, then try again.".into());
         }
         match action {
             FlagAction::Preview => swifttunnel_core::roblox_flag_cleanup::preview(),

@@ -712,10 +712,10 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                     games.launch_started = None;
                     games.status = None;
                     if !games.game_traffic_seen { games.left_confirmed = true; }
-                    games.warning = Some("A running game was not detected within a minute. Retry Play after Roblox finishes updating, or check its logs.".into());
+                    games.warning = Some("Roblox did not open a game within a minute. Try Play again.".into());
                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                 }
-                if updating && games.status.is_none() {games.status=Some("Roblox is updating. The game will open when its updater finishes.".into());let _=app.emit(commands::games::LIBRARY_CHANGED,());}
+                if updating && games.status.is_none() {games.status=Some("Roblox is updating. The game opens when it is done.".into());let _=app.emit(commands::games::LIBRARY_CHANGED,());}
                 if expired && running && games.current.is_none() {
                     games.launch_started = None;
                     games.warning = None;

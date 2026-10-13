@@ -173,7 +173,7 @@ pub fn diagnostic() -> Result<Option<String>, String> {
             .as_deref()
             .is_none_or(|raw| hash(raw) != entry.applied)
         {
-            return Ok(Some("Roblox's flags file changed after this launch. SwiftTunnel will preserve that edit when restoring; check whether another launcher is applying settings.".into()));
+            return Ok(Some("Something else changed Roblox's flags during this launch. Check whether another launcher is running.".into()));
         }
     }
     if !journal.flags.is_empty()
@@ -183,7 +183,9 @@ pub fn diagnostic() -> Result<Option<String>, String> {
             .iter()
             .all(|entry| player.parent() != entry.path.parent().and_then(Path::parent))
     {
-        return Ok(Some("Roblox installed a newer player during this launch. Restart from SwiftTunnel Games to load your saved FastFlags in the new version.".into()));
+        return Ok(Some(
+            "Roblox updated during this launch. Press Play again to load your FastFlags.".into(),
+        ));
     }
     Ok(None)
 }
