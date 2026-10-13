@@ -24,7 +24,6 @@ import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
 import { runAppBootstrap } from "./lib/appBootstrap";
 import { resolveValidRegion } from "./lib/regionMatch";
-import { useAutoRamClean } from "./lib/useAutoRamClean";
 import { useOverlayDriver } from "./lib/useOverlayDriver";
 import { useGameLibrary } from "./lib/useGameLibrary";
 import { reportError } from "./lib/errors";
@@ -138,8 +137,7 @@ function App() {
     reconcileSelectedRegion();
   }, [isSettingsLoaded, serverRegions, reconcileSelectedRegion]);
 
-  // Auto-clean RAM on game launch + show the in-game overlay (opt-in).
-  useAutoRamClean();
+  // Drive the opt-in stats overlay while Roblox is in front.
   // Drive the in-game stats overlay window when enabled.
   useOverlayDriver();
   useGameLibrary();

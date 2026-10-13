@@ -9,7 +9,6 @@ import {
   ErrorBanner,
 } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
-import { useBoostStore } from "../../stores/boostStore";
 import {
   OVERLAY_HOTKEY,
   useOverlayRuntimeStore,
@@ -50,8 +49,6 @@ export function OverlayTab() {
   const config = useSettingsStore((s) => s.settings.config);
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
-  const updateConfig = useBoostStore((s) => s.updateConfig);
-  const [ramBusy, setRamBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const runtime = useOverlayRuntimeStore();
   const ov = config.overlay;
@@ -67,34 +64,6 @@ export function OverlayTab() {
     updateSettings({ config: next });
     setError(null);
     void saveSettings(true).catch((e) => setError(formatErrorMessage(e)));
-  }
-
-  // Auto-RAM-clean lives in system_optimization, which the backend applies -
-  // persist it through boost_update_config (same pattern as the Optimize tab)
-  // so a later config sync can't revert the toggle.
-  async function toggleAutoRamClean(next: boolean) {
-    const nextConfig: Config = {
-      ...config,
-      system_optimization: {
-        ...config.system_optimization,
-        auto_ram_clean: next,
-      },
-    };
-    setRamBusy(true);
-    try {
-      const applied = await updateConfig(JSON.stringify(nextConfig));
-      updateSettings({
-        config: {
-          ...applied,
-          overlay: useSettingsStore.getState().settings.config.overlay,
-        },
-      });
-      await saveSettings(true);
-    } catch (e) {
-      setError(formatErrorMessage(e));
-    } finally {
-      setRamBusy(false);
-    }
   }
 
   function toggleMetric(id: OverlayMetric) {
@@ -462,25 +431,6 @@ export function OverlayTab() {
           />
         </Panel>
       </div>
-
-      {/* When my game starts - independent of the overlay master toggle:
-          auto-RAM-clean (and its toast) works without the stats HUD. */}
-      <Panel
-        flush
-        className="overflow-hidden"
-        anchorId="auto_ram_clean"
-        eyebrow="When my game starts"
-      >
-        <div className="divide-y divide-[color:var(--color-border-subtle)] border-t border-[color:var(--color-border-subtle)]">
-          <ToggleRow
-            label="Auto-clean RAM on game launch"
-            desc="Frees memory when you join a game and shows a 'RAM freed' overlay."
-            enabled={config.system_optimization.auto_ram_clean}
-            disabled={ramBusy}
-            onChange={(v) => void toggleAutoRamClean(v)}
-          />
-        </div>
-      </Panel>
     </div>
   );
 }

@@ -52,6 +52,7 @@ let currentLang = "en";
 let observer: MutationObserver | null = null;
 let debounceId: number | null = null;
 let running = false;
+let rerunRequested = false;
 /** Bumped on every language switch to invalidate in-flight translate passes. */
 let epoch = 0;
 
@@ -149,8 +150,9 @@ function collectTextNodes(): Text[] {
   return out;
 }
 
-async function translatePerItem(chunk: string[], lang: string, cache: Map<string, string>) {
+async function translatePerItem(chunk: string[], lang: string, cache: Map<string, string>, passEpoch: number) {
   for (const orig of chunk) {
+    if (epoch !== passEpoch) return;
     if (cache.has(orig)) continue;
     try {
       const t = await invoke<string>("i18n_translate", { text: orig, targetLang: lang });
@@ -163,6 +165,7 @@ async function translatePerItem(chunk: string[], lang: string, cache: Map<string
 }
 
 async function fetchTranslations(strings: string[], lang: string) {
+  const passEpoch = epoch;
   const cache = langCache(lang);
   const need = [...new Set(strings)].filter(
     (s) => s && !cache.has(s) && !failedStrings.has(`${lang}\u0000${s}`),
@@ -174,6 +177,7 @@ async function fetchTranslations(strings: string[], lang: string) {
   const multiLine = need.filter((s) => s.includes("\n"));
 
   for (let i = 0; i < oneLine.length; i += BATCH_SIZE) {
+    if (epoch !== passEpoch) return;
     const chunk = oneLine.slice(i, i + BATCH_SIZE);
     try {
       const res = await invoke<string>("i18n_translate", {
@@ -185,14 +189,18 @@ async function fetchTranslations(strings: string[], lang: string) {
         chunk.forEach((orig, idx) => cache.set(orig, lines[idx].trim() || orig));
       } else {
         // Segment count drifted, fall back to per-item for guaranteed alignment.
-        await translatePerItem(chunk, lang, cache);
+        await translatePerItem(chunk, lang, cache, passEpoch);
       }
     } catch {
-      await translatePerItem(chunk, lang, cache).catch(() => {});
+      // An unavailable/rate-limited service cannot be fixed by retrying every
+      // individual label. Keep English this session; reset/restart retries.
+      need.forEach(orig => failedStrings.add(`${lang}\u0000${orig}`));
+      persistCache(lang);
+      return;
     }
   }
 
-  await translatePerItem(multiLine, lang, cache).catch(() => {});
+  await translatePerItem(multiLine, lang, cache, passEpoch).catch(() => {});
   persistCache(lang);
 }
 
@@ -229,26 +237,36 @@ function applyCached(lang: string): string[] {
 }
 
 async function retranslate() {
-  if (currentLang === "en" || running) return;
+  if (currentLang === "en") return;
+  if (running) { rerunRequested = true; return; }
+  rerunRequested = false;
   running = true;
   observer?.disconnect();
   const myEpoch = epoch;
   try {
     const lang = currentLang;
     const missing = applyCached(lang); // instant, cache hits paint immediately
+    // Observe React while the network request runs. Disconnect only around
+    // our synchronous DOM writes, otherwise newly mounted pages are missed.
+    ensureObserver();
     if (missing.length) {
       await fetchTranslations(missing, lang);
       // The user may have switched language (or back to English) while the
       // fetch was in flight, applying the stale result would overwrite the
       // newer state with the old language.
-      if (epoch === myEpoch) applyCached(lang);
+      if (epoch === myEpoch) {
+        observer?.disconnect();
+        const remaining = applyCached(lang);
+        const cache = langCache(lang);
+        if (remaining.some(s => !cache.has(s) && !failedStrings.has(`${lang}\u0000${s}`))) rerunRequested = true;
+      }
     }
   } finally {
     running = false;
     if (currentLang !== "en") {
       ensureObserver();
       // A language change happened mid-run; redo the pass for the new one.
-      if (epoch !== myEpoch) void retranslate();
+      if (epoch !== myEpoch || rerunRequested) { rerunRequested = false; scheduleRetranslate(); }
     }
   }
 }
@@ -263,7 +281,14 @@ function scheduleRetranslate() {
 
 function ensureObserver() {
   if (!observer) {
-    observer = new MutationObserver(() => scheduleRetranslate());
+    observer = new MutationObserver(records => {
+      // Counters change several times a second. They are data, not new UI
+      // copy, so avoid rescanning the whole page after every ping/FPS update.
+      const needsPass = records.some(record => record.type === "characterData"
+        ? translatable(record.target.nodeValue ?? "")
+        : record.type === "childList" && Array.from(record.addedNodes).some(node => translatable(node.textContent ?? node.nodeValue ?? "")));
+      if (needsPass) scheduleRetranslate();
+    });
   }
   observer.observe(document.body, {
     childList: true,
@@ -273,6 +298,7 @@ function ensureObserver() {
 }
 
 function restoreEnglish() {
+  rerunRequested = false;
   observer?.disconnect();
   if (debounceId != null) {
     window.clearTimeout(debounceId);

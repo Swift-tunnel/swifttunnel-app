@@ -31,7 +31,6 @@ export type PortableSystem = Pick<
   | "timer_resolution_1ms"
   | "mmcss_gaming_profile"
   | "game_mode_enabled"
-  | "auto_ram_clean"
 >;
 
 export interface PresetConfig {
@@ -65,7 +64,6 @@ function portableSystem(so: Config["system_optimization"]): PortableSystem {
     timer_resolution_1ms: so.timer_resolution_1ms,
     mmcss_gaming_profile: so.mmcss_gaming_profile,
     game_mode_enabled: so.game_mode_enabled,
-    auto_ram_clean: so.auto_ram_clean,
   };
 }
 
@@ -334,10 +332,6 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
         game_mode_enabled: asBool(
           so.game_mode_enabled,
           D.system_optimization.game_mode_enabled,
-        ),
-        auto_ram_clean: asBool(
-          so.auto_ram_clean,
-          D.system_optimization.auto_ram_clean,
         ),
       },
       profile: asEnum(c.profile, PROFILES, D.profile),

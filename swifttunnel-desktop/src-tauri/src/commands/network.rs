@@ -4,6 +4,15 @@ use tauri::State;
 
 use crate::state::AppState;
 
+// Frontend buttons already serialize tests in their own view. The backend
+// must also prevent Repair or another caller from starting competing load.
+static NETWORK_TEST_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+fn network_test_permit() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
+    NETWORK_TEST_GATE
+        .try_acquire()
+        .map_err(|_| "Another network test is running. Wait for it to finish.".into())
+}
+
 #[derive(Serialize)]
 pub struct PingSampleResponse {
     pub elapsed_secs: f32,
@@ -43,11 +52,13 @@ pub async fn network_start_stability_test(
     state: State<'_, AppState>,
     duration_secs: u32,
 ) -> Result<StabilityResultResponse, String> {
+    let permit = network_test_permit()?;
     let (tx, rx) = mpsc::channel();
 
     let result = state
         .runtime
         .spawn(async move {
+            let _permit = permit;
             swifttunnel_core::network_analyzer::run_stability_test(duration_secs, tx).await
         })
         .await
@@ -81,11 +92,15 @@ pub async fn network_start_stability_test(
 pub async fn network_start_speed_test(
     state: State<'_, AppState>,
 ) -> Result<SpeedResultResponse, String> {
+    let permit = network_test_permit()?;
     let (tx, rx) = mpsc::channel();
 
     let result = state
         .runtime
-        .spawn(async move { swifttunnel_core::network_analyzer::run_speed_test(tx).await })
+        .spawn(async move {
+            let _permit = permit;
+            swifttunnel_core::network_analyzer::run_speed_test(tx).await
+        })
         .await
         .map_err(|e| format!("Task join error: {}", e))?
         .map_err(|e| e.to_string())?;
@@ -104,12 +119,16 @@ pub async fn network_start_speed_test(
 pub async fn network_start_bufferbloat_test(
     state: State<'_, AppState>,
 ) -> Result<BufferbloatResultResponse, String> {
+    let permit = network_test_permit()?;
     // Core API expects a channel for symmetry with other tests; UI doesn't stream yet.
     let (tx, rx) = mpsc::channel();
 
     let result = state
         .runtime
-        .spawn(async move { swifttunnel_core::network_analyzer::run_bufferbloat_test(tx).await })
+        .spawn(async move {
+            let _permit = permit;
+            swifttunnel_core::network_analyzer::run_bufferbloat_test(tx).await
+        })
         .await
         .map_err(|e| format!("Task join error: {}", e))?
         .map_err(|e| e.to_string())?;
@@ -122,4 +141,16 @@ pub async fn network_start_bufferbloat_test(
         bufferbloat_ms: result.bufferbloat_ms,
         grade: result.grade.label().to_string(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_test_gate_refuses_overlapping_work_and_recovers_after_release() {
+        let running = network_test_permit().unwrap();
+        assert!(network_test_permit().is_err());
+        drop(running);
+        assert!(network_test_permit().is_ok());
+    }
 }

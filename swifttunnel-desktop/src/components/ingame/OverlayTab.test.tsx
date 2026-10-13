@@ -12,5 +12,6 @@ describe("Overlay settings", () => {
     expect(html).not.toContain("session chart");
     expect(html).not.toContain("anti-cheat safe");
     expect(html).not.toContain("CPU Temp");
+    expect(html).not.toContain("Auto-clean RAM");
   });
 });

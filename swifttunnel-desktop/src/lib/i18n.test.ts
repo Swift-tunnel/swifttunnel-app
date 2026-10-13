@@ -15,10 +15,15 @@ function text(value: string) {
 
 let nodes: ReturnType<typeof text>[];
 let storage: Map<string, string>;
+let observeChanges: (records: unknown[]) => void;
+let walks: number;
 
 beforeEach(() => {
   vi.resetModules();
   nodes = [];
+  walks = 0;
+  vi.useFakeTimers();
+  vi.stubGlobal("window", { setTimeout, clearTimeout });
   storage = new Map();
   vi.stubGlobal("localStorage", {
     getItem: (key: string) => storage.get(key) ?? null,
@@ -28,18 +33,72 @@ beforeEach(() => {
   vi.stubGlobal("document", {
     body: {},
     createTreeWalker: (_root: unknown, _mask: number, filter?: { acceptNode(node: Node): number }) => {
+      walks++;
       const visible = nodes.filter((node) => !filter || filter.acceptNode(node as unknown as Node) === 1);
       let index = 0;
       return { nextNode: () => visible[index++] ?? null };
     },
   });
-  vi.stubGlobal("MutationObserver", class { observe() {} disconnect() {} });
+  vi.stubGlobal("MutationObserver", class { constructor(callback: (records: unknown[]) => void) { observeChanges = callback; } observe() {} disconnect() {} });
   invoke.mockImplementation(async (_cmd, args: { text: string }) =>
     args.text.split("\n").map((line) => `FR:${line}`).join("\n"));
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("runtime translation lifecycle", () => {
+  it("does not turn an offline batch into forty individual requests", async () => {
+    nodes.push(...Array.from({ length: 40 }, (_, i) => text(`Setting number ${i}`)));
+    invoke.mockRejectedValue(new Error("Network unavailable"));
+    const i18n = await import("./i18n");
+    await i18n.applyLanguage("fr");
+    await i18n.applyLanguage("fr");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(nodes[0].nodeValue).toBe("Setting number 0");
+  });
+
+  it("stops the per-item fallback when a language request becomes obsolete", async () => {
+    nodes.push(text("Connected"), text("Play normally"));
+    let finish!: (value: string) => void;
+    invoke.mockReturnValueOnce(new Promise<string>(resolve => { finish = resolve; }));
+    const i18n = await import("./i18n");
+    const pending = i18n.applyLanguage("fr");
+    await i18n.applyLanguage("en");
+    finish("Wrong number of segments");
+    await pending;
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(nodes[0].nodeValue).toBe("Connected");
+  });
+  it("does not rescan the document for changing live counters", async () => {
+    nodes.push(text("Connected"));
+    const i18n = await import("./i18n");
+    await i18n.applyLanguage("fr");
+    const initialWalks = walks;
+    for (const value of ["22 ms", "120 FPS", "2h 59m", "14.2 MB/s"]) {
+      observeChanges([{ type: "characterData", target: text(value) }]);
+      observeChanges([{ type: "childList", addedNodes: [text(value)] }]);
+    }
+    await vi.advanceTimersByTimeAsync(500);
+    expect(walks).toBe(initialWalks);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("translates new controls mounted during an outstanding request", async () => {
+    nodes.push(text("Connected"));
+    let finish!: (value: string) => void;
+    invoke.mockReturnValueOnce(new Promise<string>(resolve => { finish = resolve; }));
+    const i18n = await import("./i18n");
+    const pending = i18n.applyLanguage("fr");
+    const added = text("Play normally");
+    nodes.push(added);
+    observeChanges([{ type: "childList", addedNodes: [added] }]);
+    await vi.advanceTimersByTimeAsync(300);
+    finish("FR:Connected");
+    await pending;
+    await vi.advanceTimersByTimeAsync(300);
+    expect(added.nodeValue).toBe("FR:Play normally");
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
   it("does not request or persist translations for changing live measurements", async () => {
     const node = text("1.0 MB/s");
     nodes.push(node);

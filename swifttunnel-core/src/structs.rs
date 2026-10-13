@@ -129,9 +129,6 @@ pub struct SystemOptimizationConfig {
     pub mmcss_gaming_profile: bool,
     #[serde(default)]
     pub game_mode_enabled: bool,
-    /// Automatically clean RAM once a game launches.
-    #[serde(default)]
-    pub auto_ram_clean: bool,
 }
 
 fn default_roblox_window_width() -> u32 {
@@ -161,7 +158,6 @@ impl Default for SystemOptimizationConfig {
             timer_resolution_1ms: false,
             mmcss_gaming_profile: false,
             game_mode_enabled: false,
-            auto_ram_clean: false,
         }
     }
 }
@@ -634,6 +630,21 @@ mod tests {
         assert!(!cfg.timer_resolution_1ms);
         assert!(!cfg.mmcss_gaming_profile);
         assert!(!cfg.game_mode_enabled);
+    }
+
+    #[test]
+    fn legacy_auto_ram_clean_is_ignored_and_dropped_on_save() {
+        let mut saved = serde_json::to_value(SystemOptimizationConfig::default()).unwrap();
+        saved["auto_ram_clean"] = serde_json::Value::Bool(true);
+        saved["set_high_priority"] = serde_json::Value::Bool(true);
+        let config: SystemOptimizationConfig = serde_json::from_value(saved).unwrap();
+        assert!(config.set_high_priority);
+        assert!(
+            serde_json::to_value(config)
+                .unwrap()
+                .get("auto_ram_clean")
+                .is_none()
+        );
     }
 
     #[test]

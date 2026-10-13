@@ -33,6 +33,11 @@ pub async fn run_stability_test(
     duration_secs: u32,
     progress_tx: Sender<StabilityTestProgress>,
 ) -> Result<StabilityTestResults, String> {
+    // Validate before allocating samples. A malformed IPC/preset value must
+    // not request gigabytes of capacity or keep diagnostics running for days.
+    if !(1..=300).contains(&duration_secs) {
+        return Err("Choose a stability test lasting between 1 and 300 seconds.".into());
+    }
     info!("Starting stability test for {} seconds", duration_secs);
 
     let total_pings = (duration_secs as u64 * 1000) / PING_INTERVAL_MS;
@@ -41,12 +46,23 @@ pub async fn run_stability_test(
     let mut total_attempts: u32 = 0;
     let mut packet_loss_count: u32 = 0;
     let test_start = Instant::now();
+    let deadline = test_start + Duration::from_secs(u64::from(duration_secs));
 
     for i in 0..total_pings {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        if remaining.is_zero() {
+            break;
+        }
         total_attempts += 1;
 
         // Perform single ping
-        let ping_result = ping_once(PING_TARGET).await;
+        let timeout_ms = remaining
+            .as_millis()
+            .min(u128::from(PING_TIMEOUT_MS))
+            .max(1) as u32;
+        let ping_result = ping_once(PING_TARGET, timeout_ms).await;
         let elapsed_secs = test_start.elapsed().as_secs_f32();
 
         // Record sample with timestamp
@@ -71,12 +87,16 @@ pub async fn run_stability_test(
         }
 
         // Send progress update
-        let progress = (i + 1) as f32 / total_pings as f32;
+        let progress = (elapsed_secs / duration_secs as f32).min(1.0);
         let _ = progress_tx.send(StabilityTestProgress::Progress(progress));
 
         // Wait for next ping interval
         if i + 1 < total_pings {
-            tokio::time::sleep(Duration::from_millis(PING_INTERVAL_MS)).await;
+            // Schedule against the test's clock, not after the reply. A
+            // two-second timeout must not turn a five-minute test into 25min.
+            let next =
+                (test_start + Duration::from_millis((i + 1) * PING_INTERVAL_MS)).min(deadline);
+            tokio::time::sleep_until(tokio::time::Instant::from_std(next)).await;
         }
     }
 
@@ -106,8 +126,8 @@ pub async fn run_stability_test(
 
 /// Perform a single ping and return latency in milliseconds.
 /// Uses raw ICMP (not `ping.exe`) so it works on any Windows display language.
-async fn ping_once(target: &str) -> Option<u32> {
-    icmp::ping_ms(target, PING_TIMEOUT_MS as u32).await
+async fn ping_once(target: &str, timeout_ms: u32) -> Option<u32> {
+    icmp::ping_ms(target, timeout_ms).await
 }
 
 /// Calculate statistics from ping samples
@@ -164,6 +184,15 @@ fn calculate_statistics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn invalid_duration_is_rejected_before_sampling_or_allocating() {
+        for duration in [0, 301, u32::MAX] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            assert!(run_stability_test(duration, tx).await.is_err());
+            assert!(rx.try_recv().is_err());
+        }
+    }
 
     #[test]
     fn test_calculate_statistics_normal() {

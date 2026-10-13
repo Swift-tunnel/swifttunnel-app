@@ -479,7 +479,7 @@ HardwareMediaKeyHandling,MediaSessionService,msEdgeBackgroundProcessing";
 #[cfg(not(windows))]
 fn apply_webview2_resource_tuning() {}
 
-/// Tail the Roblox log for game-server joins and emit `roblox-game-joined` to
+/// Tail the Roblox log for game-server joins and update the library for
 /// the frontend. The watcher (see `swifttunnel_core::roblox_watcher`) handles
 /// new sessions by switching to the newest log file, so it fires whether Roblox
 /// was already running or launched fresh.
@@ -659,10 +659,6 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                                 games.left_confirmed = false;
                                 drop(games);
                                 let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
-                                if fresh_join { let _ = app.emit(
-                                    events::ROBLOX_GAME_JOINED,
-                                    events::RobloxGameJoinedEvent { ip: ip.to_string() },
-                                ); }
                                 let metadata_app = app.clone();
                                 state.runtime.spawn(async move {
                                     let state = metadata_app.state::<AppState>();
@@ -933,9 +929,8 @@ pub fn run() {
                 let _ = window.set_icon(APP_ICON.clone());
             }
 
-            // The overlay windows are no longer built during startup: each one
-            // costs its own ~60MB WebView2 renderer, and neither is visible
-            // until something asks for it (the in-game bar is off by default).
+            // The stats overlay is created on demand. Its WebView renderer is
+            // not needed during startup, and the bar is off by default.
             // `commands::system::ensure_overlay_window` creates them on first
             // use and applies WS_EX_NOACTIVATE there, which is what stops a
             // topmost window activating on click and knocking Roblox out of
@@ -1005,8 +1000,7 @@ pub fn run() {
                 }
             });
 
-            // Background: tail Roblox logs for game joins (drives the optional
-            // auto RAM clean + in-game overlay). Lightweight; app-lifetime.
+            // Background: tail Roblox logs for Games and the current server display.
             spawn_roblox_game_join_watcher(app.handle().clone());
 
             // Background: put the configured Roblox launch window size back

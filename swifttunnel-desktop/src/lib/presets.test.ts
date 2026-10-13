@@ -14,6 +14,14 @@ function sampleSettings(): AppSettings {
 }
 
 describe("presets", () => {
+  it("ignores Auto RAM Clean from older presets while preserving other settings", () => {
+    const legacy = JSON.parse(encodePreset(buildPreset("Old preset", sampleSettings(), [])));
+    legacy.config.system_optimization.auto_ram_clean = true;
+    legacy.config.system_optimization.set_high_priority = true;
+    const decoded = decodePreset(JSON.stringify(legacy));
+    expect(decoded.config.system_optimization.set_high_priority).toBe(true);
+    expect(decoded.config.system_optimization).not.toHaveProperty("auto_ram_clean");
+  });
   it("round-trips build → encode → decode without loss", () => {
     const settings = sampleSettings();
     settings.config.roblox_settings.unlock_fps = true;

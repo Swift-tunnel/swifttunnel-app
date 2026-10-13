@@ -269,7 +269,7 @@ impl GamesState {
         false
     }
 
-    pub(super) fn library(&mut self) -> Result<&GameLibrary, String> {
+    pub(crate) fn library(&mut self) -> Result<&GameLibrary, String> {
         if self.library.is_none() {
             self.library = Some(GameLibrary::load(&library_path()?)?);
         }
@@ -362,6 +362,7 @@ pub async fn games_set_favourite(
 #[tauri::command]
 pub async fn games_forget(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     place_id: String,
     client: RobloxClient,
 ) -> Result<(), String> {
@@ -371,7 +372,9 @@ pub async fn games_forget(
             Ok(())
         })
     })
-    .await
+    .await?;
+    let _ = app.emit(LIBRARY_CHANGED, ());
+    Ok(())
 }
 
 /// Resolve a display name through public Roblox endpoints. Failure leaves the
@@ -455,6 +458,7 @@ pub async fn refresh_name(
 #[tauri::command]
 pub async fn games_add_favourite(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     place_id: String,
     client: Option<RobloxClient>,
 ) -> Result<(), String> {
@@ -464,8 +468,16 @@ pub async fn games_add_favourite(
         games.mutate(|lib| lib.set_favourite(&saved_place, client, true))
     })
     .await?;
-    // The favourite is safely saved even when Roblox's metadata is unavailable.
-    let _ = refresh_name(&state, &place_id, client).await;
+    let _ = app.emit(LIBRARY_CHANGED, ());
+    // Saving a game must not wait for up to three metadata requests. Its
+    // numeric label is usable immediately; name and icon arrive in background.
+    state.runtime.spawn(async move {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        if refresh_name(&state, &place_id, client).await == Ok(true) {
+            let _ = app.emit(LIBRARY_CHANGED, ());
+        }
+    });
     Ok(())
 }
 

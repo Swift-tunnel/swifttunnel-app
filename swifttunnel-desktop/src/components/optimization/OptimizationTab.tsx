@@ -1,10 +1,9 @@
 import { bulkEnableTargets, type BulkItem } from "./bulkSelection";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
-import { SectionHeader, Row, Toggle, Tooltip, InfoIcon, Spinner, Chip, Icon, Watermark } from "../ui";
+import { SectionHeader, Toggle, Tooltip, InfoIcon, Spinner, Chip, Icon, Watermark } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
 import { PresetsPanel, PresetsDialog, type PresetMode } from "./PresetsCard";
-import { showRamOverlay } from "../overlay/RamOverlay";
 import { useOptimizationStore } from "../../stores/optimizationStore";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -526,93 +525,6 @@ function tierCards(tier: OptTier): TierCard[] {
   return cards;
 }
 
-/** Auto-clean RAM when a game launches; result shows in the in-game overlay. */
-function AutoRamCleanRow() {
-  const config = useSettingsStore((s) => s.settings.config);
-  const updateSettings = useSettingsStore((s) => s.update);
-  const saveSettings = useSettingsStore((s) => s.save);
-  const updateConfig = useBoostStore((s) => s.updateConfig);
-  const addToast = useToastStore((s) => s.addToast);
-  const [busy, setBusy] = useState(false);
-
-  const enabled = config.system_optimization.auto_ram_clean;
-
-  async function preview() {
-    try {
-      await showRamOverlay(4096);
-      addToast({
-        type: "info",
-        message: "Test overlay sent, check the top-right of your screen.",
-      });
-    } catch (e) {
-      addToast({
-        type: "error",
-        message: e instanceof Error ? e.message : "Could not show the overlay.",
-      });
-    }
-  }
-
-  async function toggle(next: boolean) {
-    const nextConfig: Config = {
-      ...config,
-      system_optimization: {
-        ...config.system_optimization,
-        auto_ram_clean: next,
-      },
-    };
-    setBusy(true);
-    try {
-      const applied = await updateConfig(JSON.stringify(nextConfig));
-      updateSettings({ config: applied });
-      await saveSettings(true);
-    } catch (error) {
-      addToast({ type: "error", message: `Could not finish saving Auto-clean RAM: ${formatErrorMessage(error)}. Review the setting and retry.` });
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="instrument overflow-hidden">
-      <Row
-        label="Auto-clean RAM on game launch"
-        desc="Frees standby memory automatically when a game starts, with an in-game overlay."
-        tooltip={
-          <span className="flex items-center gap-1.5">
-            <CategoryChip category="System" />
-            <Tooltip content="When a game launches, SwiftTunnel trims standby/working-set memory (excluding the game) and shows a 'RAM freed' overlay in the corner of your screen.">
-              <span className="inline-flex">
-                <InfoIcon />
-              </span>
-            </Tooltip>
-          </span>
-        }
-      >
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void preview()}
-            className="rounded-[6px] px-2 py-1 text-[10.5px] font-medium text-text-muted transition-colors hover:text-text-primary"
-            style={{
-              border: "1px solid var(--color-border-subtle)",
-              backgroundColor: "var(--color-bg-elevated)",
-            }}
-          >
-            Preview
-          </button>
-          {busy && <Spinner size={11} color="var(--color-accent-primary)" />}
-          <Toggle
-            enabled={enabled}
-            disabled={busy}
-            ariaLabel="Auto-clean RAM on game launch"
-            onChange={(next) => void toggle(next)}
-          />
-        </div>
-      </Row>
-    </div>
-  );
-}
-
 export function OptimizationTab() {
   const loaded = useOptimizationStore((s) => s.loaded);
   const loading = useOptimizationStore((s) => s.loading);
@@ -702,7 +614,6 @@ export function OptimizationTab() {
 
       {view === "boost" ? (
         <>
-          <AutoRamCleanRow />
           {TIER_ORDER.map((tier) => {
             const cards = tierCards(tier);
             if (cards.length === 0) return null;
@@ -805,7 +716,7 @@ function RestoreDefaultsButton() {
       type="button"
       onClick={() => void restore()}
       disabled={busy || active.length === 0}
-      title="Restore saved values for catalog tweaks. Power Plan and Auto-clean RAM are separate."
+      title="Restore saved values for catalog tweaks. Power Plan is separate."
       data-search-anchor="revert_tweaks"
       className="flex shrink-0 items-center gap-1.5 rounded-[8px] px-3 py-1.5 text-[11.5px] font-medium transition-colors hover:bg-bg-hover disabled:opacity-45"
       style={{ color: "var(--color-text-muted)" }}

@@ -531,12 +531,6 @@ const OVERLAY: SearchEntry[] = (
       label: "Overlay preview",
       keywords: "preview what it looks like sample example overlay look",
     },
-    {
-      anchor: "auto_ram_clean",
-      label: "Auto-clean RAM on game launch",
-      keywords:
-        "ram clean memory free clear boost on launch automatic auto clean standby",
-    },
   ] as const
 ).map((s, i) => ({
   id: `ov-${s.anchor}-${i}`,
