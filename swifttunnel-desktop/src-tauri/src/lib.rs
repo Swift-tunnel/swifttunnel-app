@@ -1083,6 +1083,11 @@ pub fn run() {
                 //    powercfg - cheap for the runtime, too slow for setup).
                 state.sync_roblox_window_settings();
                 state.system_optimizer.lock().recover_from_snapshot();
+                match tokio::task::spawn_blocking(swifttunnel_core::vpn::process_performance::recover_gpu_preferences).await {
+                    Ok(Ok(_)) => {},
+                    Ok(Err(error)) => log::warn!("Runtime GPU recovery has pending originals: {error}"),
+                    Err(error) => log::warn!("Runtime GPU recovery task failed: {error}"),
+                }
 
                 // 3. Refresh the profile (bounded) so boost recovery knows
                 //    whether the stored account is banned.

@@ -96,6 +96,8 @@ pub struct GameProcessPerformanceManager {
     active_processes: HashMap<u32, AppliedProcessState>,
     gpu_preferences: HashMap<String, GpuPreferenceSnapshot>,
     failed_attempts: HashMap<u32, (String, std::time::Instant)>,
+    #[cfg(windows)]
+    gpu_journal: Option<crate::gpu_recovery::Journal>,
 }
 
 impl GameProcessPerformanceManager {
@@ -105,6 +107,8 @@ impl GameProcessPerformanceManager {
             active_processes: HashMap::new(),
             gpu_preferences: HashMap::new(),
             failed_attempts: HashMap::new(),
+            #[cfg(windows)]
+            gpu_journal: None,
         }
     }
 
@@ -165,6 +169,15 @@ impl GameProcessPerformanceManager {
         let tracked: Vec<u32> = self.active_processes.keys().copied().collect();
         for pid in tracked {
             self.revert_for_process(pid, reason);
+        }
+
+        #[cfg(windows)]
+        if let Some(journal) = &self.gpu_journal {
+            // Includes originals saved before a write that failed verification
+            // and never made it into the in-memory applied-process map.
+            if let Err(error) = journal.cleanup(restore_gpu_change) {
+                log::warn!("Runtime GPU originals remain on disk for recovery: {error}");
+            }
         }
 
         #[cfg(windows)]
@@ -560,17 +573,47 @@ impl GameProcessPerformanceManager {
         let applied_value = crate::roblox_optimizer::RobloxOptimizer::high_performance_gpu_value(
             previous_value.as_deref(),
         );
-        if previous_value.as_deref() == Some(applied_value.as_str()) {
+        if previous_value.as_deref() == Some(applied_value.as_str()) && self.gpu_journal.is_none() {
             return;
         }
-        match write_gpu_preference_value(&value_name, &applied_value) {
+        if self.gpu_journal.is_none() {
+            match crate::gpu_recovery::Journal::new() {
+                Ok(journal) => self.gpu_journal = Some(journal),
+                Err(error) => {
+                    log::warn!(
+                        "GPU recovery could not be prepared; GPU setting was left unchanged: {error}"
+                    );
+                    return;
+                }
+            }
+        }
+        let Some(journal) = &self.gpu_journal else {
+            return;
+        };
+        let saved = match journal.prepare(
+            crate::gpu_recovery::Change {
+                name: value_name.clone(),
+                original: previous_value,
+                applied: applied_value,
+            },
+            restore_gpu_change,
+        ) {
+            Ok(saved) => saved,
+            Err(error) => {
+                log::warn!(
+                    "GPU original could not be saved; GPU setting was left unchanged: {error}"
+                );
+                return;
+            }
+        };
+        match write_gpu_preference_value(&saved.name, &saved.applied) {
             Ok(()) => {
                 self.gpu_preferences.insert(
                     map_key.clone(),
                     GpuPreferenceSnapshot {
                         value_name: value_name.clone(),
-                        previous_value,
-                        applied_value,
+                        previous_value: saved.original,
+                        applied_value: saved.applied,
                         ref_count: 1,
                     },
                 );
@@ -601,22 +644,32 @@ impl GameProcessPerformanceManager {
         _pid: u32,
         _reason: &str,
     ) -> bool {
-        self.release_gpu_reference_with(gpu_key, |snapshot| {
-            restore_gpu_preference(
-                &snapshot.value_name,
-                &snapshot.previous_value,
-                &snapshot.applied_value,
-            )
-        })
+        let journal = self.gpu_journal.as_ref();
+        let restore = |snapshot: &GpuPreferenceSnapshot| {
+            let action = || {
+                restore_gpu_preference(
+                    &snapshot.value_name,
+                    &snapshot.previous_value,
+                    &snapshot.applied_value,
+                )
+            };
+            if let Some(journal) = journal {
+                journal.release(&snapshot.value_name, action)
+            } else {
+                action()
+            }
+        };
+        // Separate the mutable map borrow from the journal reference.
+        Self::release_gpu_reference_from(&mut self.gpu_preferences, gpu_key, restore)
     }
 
     #[cfg(windows)]
-    fn release_gpu_reference_with(
-        &mut self,
+    fn release_gpu_reference_from(
+        preferences: &mut HashMap<String, GpuPreferenceSnapshot>,
         key: &str,
         restore: impl FnOnce(&GpuPreferenceSnapshot) -> Result<(), String>,
     ) -> bool {
-        let Some(snapshot) = self.gpu_preferences.get_mut(key) else {
+        let Some(snapshot) = preferences.get_mut(key) else {
             return true;
         };
         if snapshot.ref_count > 1 {
@@ -625,7 +678,7 @@ impl GameProcessPerformanceManager {
         }
         match restore(snapshot) {
             Ok(()) => {
-                self.gpu_preferences.remove(key);
+                preferences.remove(key);
                 true
             }
             Err(error) => {
@@ -633,6 +686,33 @@ impl GameProcessPerformanceManager {
                 false
             }
         }
+    }
+
+    #[cfg(all(windows, test))]
+    fn release_gpu_reference_with(
+        &mut self,
+        key: &str,
+        restore: impl FnOnce(&GpuPreferenceSnapshot) -> Result<(), String>,
+    ) -> bool {
+        Self::release_gpu_reference_from(&mut self.gpu_preferences, key, restore)
+    }
+}
+
+#[cfg(windows)]
+fn restore_gpu_change(change: &crate::gpu_recovery::Change) -> Result<(), String> {
+    restore_gpu_preference(&change.name, &change.original, &change.applied)
+}
+
+/// Recover only a dead owner's runtime GPU changes. A running Desktop or Lite
+/// client owns its own lease and must not be reset by another client's startup.
+pub fn recover_gpu_preferences() -> Result<usize, String> {
+    #[cfg(windows)]
+    {
+        crate::gpu_recovery::recover(restore_gpu_change)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(0)
     }
 }
 

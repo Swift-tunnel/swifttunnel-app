@@ -11,6 +11,8 @@ mod etw_lifecycle;
 pub mod firewall_fixer;
 pub mod fps_monitor;
 pub mod geolocation;
+#[cfg(windows)]
+mod gpu_recovery;
 pub mod http_body;
 pub mod installed_clients;
 pub mod lite_update;

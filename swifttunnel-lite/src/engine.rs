@@ -237,6 +237,11 @@ impl Engine {
         {
             let shared = shared.clone();
             std::thread::spawn(move || {
+                if let Err(error) =
+                    swifttunnel_core::vpn::process_performance::recover_gpu_preferences()
+                {
+                    log::warn!("Runtime GPU recovery has pending originals: {error}");
+                }
                 let rows = list_adapters();
                 shared.edit(|s| s.adapters = rows);
                 shared.notify();

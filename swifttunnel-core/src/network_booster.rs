@@ -887,6 +887,9 @@ impl NetworkBooster {
 /// SwiftTunnel artifacts and removes them. Used by `--cleanup` (NSIS
 /// uninstaller) and the `system_cleanup` Tauri command.
 pub fn cleanup_all_system_state() -> Result<()> {
+    if let Err(error) = crate::vpn::process_performance::recover_gpu_preferences() {
+        warn!("Cleanup: runtime GPU originals remain for recovery: {error}");
+    }
     info!("Running full stateless system cleanup");
 
     let mut booster = NetworkBooster::new();
