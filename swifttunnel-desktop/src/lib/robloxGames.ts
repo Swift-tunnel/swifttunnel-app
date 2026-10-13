@@ -3,6 +3,9 @@ import type { GameRouteStatus, RobloxClient, RobloxGameSession, RobloxGameEntry 
 export const gameEntryKey = (entry: RobloxGameEntry): string =>
   `${entry.client}:${entry.universe_id ? `universe:${entry.universe_id}` : `place:${entry.place_id}`}`;
 
+export const gamePlayPlace = (entry: RobloxGameEntry, specificServer = false): string =>
+  specificServer ? entry.place_id : entry.root_place_id ?? entry.place_id;
+
 /** One card per experience, keeping the latest place and job for Rejoin. */
 export function gameLibraryEntries(entries: RobloxGameEntry[], view: "all" | "favourites", query: string): RobloxGameEntry[] {
   const groups = new Map<string, RobloxGameEntry>();

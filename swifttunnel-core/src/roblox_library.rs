@@ -22,6 +22,8 @@ pub struct GameEntry {
     pub place_id: String,
     #[serde(default)]
     pub universe_id: Option<String>,
+    #[serde(default)]
+    pub root_place_id: Option<String>,
     pub name: String,
     pub job_id: Option<String>,
     pub last_played: Option<u64>,
@@ -141,6 +143,10 @@ impl GameLibrary {
             || library.entries.iter().any(|entry| {
                 !valid_place_id(&entry.place_id)
                     || entry
+                        .root_place_id
+                        .as_deref()
+                        .is_some_and(|id| !valid_place_id(id))
+                    || entry
                         .universe_id
                         .as_deref()
                         .is_some_and(|id| !valid_place_id(id))
@@ -220,6 +226,13 @@ impl GameLibrary {
         {
             return Ok(i);
         }
+        let template = self
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.client == client && entry.root_place_id.as_deref() == Some(place_id)
+            })
+            .cloned();
         if self.entries.len() >= MAX_ENTRIES {
             let oldest = self
                 .entries
@@ -231,9 +244,10 @@ impl GameLibrary {
                 .ok_or("Your game library is full.")?;
             self.entries.remove(oldest);
         }
-        self.entries.push(GameEntry {
+        let mut entry = template.unwrap_or_else(|| GameEntry {
             place_id: place_id.into(),
             universe_id: None,
+            root_place_id: None,
             name: format!("Place {place_id}"),
             job_id: None,
             last_played: None,
@@ -244,6 +258,10 @@ impl GameLibrary {
             preferences: GamePreferences::default(),
             icon_url: None,
         });
+        entry.place_id = place_id.to_owned();
+        entry.job_id = None;
+        entry.last_played = None;
+        self.entries.push(entry);
         Ok(self.entries.len() - 1)
     }
 
@@ -256,9 +274,8 @@ impl GameLibrary {
         if favourite
             && self.favourite_count() >= MAX_FAVOURITES
             && !self
-                .entries
-                .iter()
-                .any(|e| e.place_id == place_id && e.client == client && e.favourite)
+                .entry_for(place_id, client)
+                .is_some_and(|entry| entry.favourite)
         {
             return Err("You can save up to 20 favourites. Remove one first.".into());
         }
@@ -301,6 +318,51 @@ impl GameLibrary {
             .count()
     }
 
+    pub fn entry_for(&self, place_id: &str, client: RobloxClient) -> Option<&GameEntry> {
+        self.entries
+            .iter()
+            .find(|entry| entry.place_id == place_id && entry.client == client)
+            .or_else(|| {
+                self.entries.iter().find(|entry| {
+                    entry.root_place_id.as_deref() == Some(place_id) && entry.client == client
+                })
+            })
+    }
+
+    pub fn launch_place(
+        &self,
+        place_id: &str,
+        client: RobloxClient,
+        specific_server: bool,
+    ) -> String {
+        if !specific_server
+            && let Some(root) = self
+                .entry_for(place_id, client)
+                .and_then(|entry| entry.root_place_id.as_ref())
+        {
+            root.clone()
+        } else {
+            place_id.to_owned()
+        }
+    }
+
+    pub fn set_root_place(&mut self, place_id: &str, client: RobloxClient, root: &str) {
+        if !valid_place_id(root) {
+            return;
+        }
+        let universe = self
+            .entry_for(place_id, client)
+            .and_then(|entry| entry.universe_id.clone());
+        for entry in &mut self.entries {
+            if entry.client == client
+                && (entry.place_id == place_id
+                    || universe.is_some() && entry.universe_id == universe)
+            {
+                entry.root_place_id = Some(root.to_owned());
+            }
+        }
+    }
+
     /// Places within an experience share preferences and a favourite, but keep
     /// their own server IDs so Rejoin targets the most recently played place.
     pub fn set_universe(&mut self, place_id: &str, client: RobloxClient, universe: &str) {
@@ -322,6 +384,7 @@ impl GameLibrary {
                 entry.client == client && entry.universe_id.as_deref() == Some(universe)
             })
             .collect();
+        let known_root = members.iter().find_map(|entry| entry.root_place_id.clone());
         // Preserve legacy favourites/custom settings, unless a newer explicit
         // edit (including unstar or reset) exists while metadata was loading.
         let favourite_revision = members
@@ -364,6 +427,9 @@ impl GameLibrary {
                 entry.preferences = preferences.clone();
                 entry.favourite_revision = favourite_revision;
                 entry.preferences_revision = preferences_revision;
+                if known_root.is_some() {
+                    entry.root_place_id = known_root.clone();
+                }
             }
         }
     }
@@ -495,6 +561,47 @@ mod tests {
         assert!(valid_icon_url("https://tr.rbxcdn.com/image.png"));
     }
     const JOB: &str = "550e8400-e29b-41d4-a716-446655440000";
+    #[test]
+    fn normal_play_uses_the_start_place_without_losing_per_game_settings_or_rejoin() {
+        let mut lib = GameLibrary::default();
+        lib.record_join("6839171747", JOB, RobloxClient::Standard, 20)
+            .unwrap();
+        lib.set_universe("6839171747", RobloxClient::Standard, "2440500124");
+        lib.set_root_place("6839171747", RobloxClient::Standard, "6516141723");
+        let preferences = GamePreferences {
+            fps_cap: Some(240),
+            ..Default::default()
+        };
+        lib.set_preferences("6839171747", RobloxClient::Standard, preferences.clone())
+            .unwrap();
+        lib.set_favourite("6839171747", RobloxClient::Standard, true)
+            .unwrap();
+        assert_eq!(
+            lib.launch_place("6839171747", RobloxClient::Standard, false),
+            "6516141723"
+        );
+        assert_eq!(
+            lib.launch_place("6839171747", RobloxClient::Standard, true),
+            "6839171747"
+        );
+        assert_eq!(
+            lib.entry_for("6516141723", RobloxClient::Standard)
+                .unwrap()
+                .preferences,
+            preferences
+        );
+        assert_eq!(
+            lib.launch_place("6839171747", RobloxClient::Vng, false),
+            "6839171747"
+        );
+        lib.record_join("6516141723", JOB, RobloxClient::Standard, 30)
+            .unwrap();
+        let root = &lib.entries[0];
+        assert_eq!(root.universe_id.as_deref(), Some("2440500124"));
+        assert!(root.favourite);
+        assert_eq!(root.preferences, preferences);
+        assert_eq!(root.root_place_id.as_deref(), Some("6516141723"));
+    }
     #[test]
     fn experience_places_share_favourites_and_settings_without_losing_rejoin_targets() {
         let mut lib = GameLibrary::default();

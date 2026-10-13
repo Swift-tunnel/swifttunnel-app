@@ -123,7 +123,7 @@ export function GameLibraryPanel() {
         },
         launch: async () => {
           setProgress("Opening Roblox...");
-          await gamesLaunch(entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, true, safe);
+          await gamesLaunch(plan.place_id ?? entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, true, safe);
         },
       });
     });

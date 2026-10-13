@@ -130,7 +130,7 @@ pub async fn games_refresh_metadata(
         .library()?
         .entries
         .iter()
-        .filter(|e| e.icon_url.is_none() || e.universe_id.is_none())
+        .filter(|e| e.icon_url.is_none() || e.universe_id.is_none() || e.root_place_id.is_none())
         .map(|e| (e.place_id.clone(), e.client))
         .collect();
     for (place, client) in targets {
@@ -397,7 +397,8 @@ pub async fn refresh_name(
             && e.client == client
             && (e.name == format!("Place {place_id}")
                 || e.icon_url.is_none()
-                || e.universe_id.is_none())
+                || e.universe_id.is_none()
+                || e.root_place_id.is_none())
     });
     if !needs_name {
         return Ok(false);
@@ -433,6 +434,12 @@ pub async fn refresh_name(
         .map_err(|e| e.to_string())?;
     let bytes = swifttunnel_core::http_body::read_bounded(response, 64 * 1024, "game name").await?;
     let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let root_place = data
+        .get("data")
+        .and_then(|data| data.get(0))
+        .and_then(|data| data.get("rootPlaceId"))
+        .and_then(|id| id.as_u64())
+        .map(|id| id.to_string());
     let name = data
         .get("data")
         .and_then(|d| d.get(0))
@@ -451,6 +458,9 @@ pub async fn refresh_name(
     library_task(state.games.clone(), move |games| {
         games.mutate(|lib| {
             lib.set_universe(&place_id, client, &universe.to_string());
+            if let Some(root) = root_place {
+                lib.set_root_place(&place_id, client, &root);
+            }
             lib.set_name(&place_id, client, &name);
             if let Some(icon) = icon {
                 lib.set_icon(&place_id, client, &icon);

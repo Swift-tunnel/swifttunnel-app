@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { gameLibraryEntries, gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "./robloxGames";
+import { gamePlayPlace, gameLibraryEntries, gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "./robloxGames";
 import type { GameRouteStatus, RobloxGameSession, RobloxGameEntry } from "./types";
 
 const session: RobloxGameSession = { place_id: "1818", job_id: "550e8400-e29b-41d4-a716-446655440000", ip: "128.116.47.33", client: "standard", fresh_join: true, observed_at: 1 };
 const route: GameRouteStatus = { game_location: "Mumbai", game_server_ip: session.ip, relay: "mumbai-01", estimated_path_ms: 26, bypassed: false };
 describe("game library", () => {
+  it("uses the start place for normal Play and server browsing while preserving the last place for Rejoin", () => {
+    const entry: RobloxGameEntry = { place_id: "6839171747", root_place_id: "6516141723", client: "standard", name: "DOORS", favourite: true, last_played: 20, job_id: session.job_id };
+    expect(gamePlayPlace(entry)).toBe("6516141723");
+    expect(gamePlayPlace(entry, true)).toBe("6839171747");
+    expect(gamePlayPlace({ ...entry, root_place_id: null })).toBe("6839171747");
+  });
   it("groups lobby and gameplay places, retains favourites, and limits recents to four experiences", () => {
     const entries: RobloxGameEntry[] = Array.from({ length: 6 }, (_, i) => ({
       place_id: `${100 + i}`, universe_id: `${200 + i}`, client: "standard",

@@ -5,6 +5,7 @@ import { Flag } from "../ui/Flag";
 import { gamesDatacenters, gamesSearchServers } from "../../lib/commands";
 import { defaultGamePreferences } from "../../lib/gameLaunchFlow";
 import { formatErrorMessage } from "../../lib/errors";
+import { gamePlayPlace } from "../../lib/robloxGames";
 import type { RobloxDatacenter, RobloxDirectoryServer, RobloxGameEntry, RobloxServerPage } from "../../lib/types";
 
 export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGameEntry | null; onClose: () => void; onJoin: (entry: RobloxGameEntry, server: RobloxDirectoryServer, center: RobloxDatacenter) => void }) {
@@ -31,7 +32,7 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
     const current = ++generation.current; setBusy(true); setError(null); setSelected(id);
     if (!more) setPage(null);
     try {
-      const next = await gamesSearchServers(entry.place_id, id, more ? page?.next_cursor ?? null : null);
+      const next = await gamesSearchServers(gamePlayPlace(entry), id, more ? page?.next_cursor ?? null : null);
       if (current !== generation.current) return;
       setPage(prev => ({ ...next, servers: more && prev ? [...prev.servers, ...next.servers.filter(row => !prev.servers.some(old => old.job_id === row.job_id))].slice(0, 200) : next.servers }));
     } catch (error) { if (current === generation.current) setError(formatErrorMessage(error)); }
@@ -59,7 +60,7 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
         {!busy && page && !rows.length && <p className="flex flex-1 items-center justify-center py-8 text-center text-[12px] text-text-muted">No servers found here. Refresh or try another location.</p>}
         {!!rows.length && <div className="divide-y divide-border-subtle rounded-[10px] bg-bg-base">{rows.map(server => <div key={server.job_id} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
           <div className="min-w-0"><p className="font-mono text-[12px] font-medium text-text-primary">Server {server.job_id.slice(0,8)}</p><p className="mt-1 text-[11px] text-text-muted">{server.playing != null && server.capacity != null ? `${server.playing}/${server.capacity} players · ` : ""}{server.availability === "available" ? "Listed as available" : server.availability === "full" ? "Full" : server.availability === "unavailable" ? "No longer listed" : "Availability unverified"}</p></div>
-          <Button size="sm" variant="secondary" disabled={busy || server.availability === "full" || server.availability === "unavailable"} onClick={() => { if (entry && center) onJoin(entry, server, center); }}>Join</Button>
+          <Button size="sm" variant="secondary" disabled={busy || server.availability === "full" || server.availability === "unavailable"} onClick={() => { if (entry && center) onJoin({ ...entry, place_id: gamePlayPlace(entry) }, server, center); }}>Join</Button>
         </div>)}</div>}
         {page?.next_cursor != null && totalRows.length < 200 && <Button size="sm" variant="ghost" className="self-start" disabled={busy} onClick={() => { if (selected) void search(selected, true); }}>Load more</Button>}
       </div>

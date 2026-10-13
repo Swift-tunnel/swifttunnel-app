@@ -16,6 +16,7 @@ use tauri::{Emitter, Manager, State};
 
 #[derive(Serialize)]
 pub struct LaunchPlan {
+    pub place_id: String,
     pub job_id: Option<String>,
     pub datacenter: Option<Datacenter>,
     pub preferences: GamePreferences,
@@ -415,13 +416,16 @@ pub async fn games_launch_plan(
     if !valid_place_id(&place_id) || job_id.as_deref().is_some_and(|j| !valid_job_id(j)) {
         return Err("Choose a valid game and server.".into());
     }
+    let place_id = state
+        .games
+        .lock()
+        .library()?
+        .launch_place(&place_id, client, job_id.is_some());
     let mut preferences = state
         .games
         .lock()
         .library()?
-        .entries
-        .iter()
-        .find(|e| e.place_id == place_id && e.client == client)
+        .entry_for(&place_id, client)
         .map(|e| e.preferences.clone())
         .unwrap_or_default();
     let launcher = swifttunnel_core::roblox_launcher::LauncherConfig::load()?;
@@ -547,6 +551,7 @@ pub async fn games_launch_plan(
         || preferences.graphics_quality.is_some()
         || preferences.use_tunnel;
     Ok(LaunchPlan {
+        place_id,
         job_id,
         datacenter: center,
         preferences,
@@ -576,6 +581,7 @@ pub async fn games_launch(
         false,
     )
     .await?;
+    let place_id = plan.place_id.clone();
     if matches!(
         plan.availability,
         Availability::Full | Availability::Unavailable
@@ -655,9 +661,7 @@ pub async fn games_launch(
         .games
         .lock()
         .library()?
-        .entries
-        .iter()
-        .find(|e| e.place_id == place_id && e.client == client)
+        .entry_for(&place_id, client)
         .is_some_and(|e| e.preferences.graphics_quality.is_some());
     if explicit_graphics {
         flags.remove("DFIntDebugFRMQualityLevelOverride");
