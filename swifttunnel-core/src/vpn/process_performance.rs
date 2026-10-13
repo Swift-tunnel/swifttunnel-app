@@ -64,9 +64,11 @@ struct GpuPreferenceSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CpuSetDescriptor {
     pub id: u32,
+    pub group: u16,
     pub logical_processor_index: u8,
     pub efficiency_class: u8,
     pub parked: bool,
+    pub allocated_to_other_process: bool,
 }
 
 pub struct GameProcessPerformanceManager {
@@ -373,8 +375,18 @@ impl GameProcessPerformanceManager {
     ) -> Result<(), String> {
         let api =
             cpu_set_api().ok_or_else(|| "CPU Sets API not exported by kernel32".to_string())?;
+        self.try_apply_cpu_sets_policy_with_api(api, pid, process, state)
+    }
 
-        let cpu_sets = query_system_cpu_sets(api)?;
+    #[cfg(windows)]
+    fn try_apply_cpu_sets_policy_with_api(
+        &self,
+        api: CpuSetApi,
+        pid: u32,
+        process: windows::Win32::Foundation::HANDLE,
+        state: &mut AppliedProcessState,
+    ) -> Result<(), String> {
+        let cpu_sets = query_system_cpu_sets(api, process)?;
         if cpu_sets.is_empty() {
             return Err("No system CPU sets were reported".to_string());
         }
@@ -389,22 +401,13 @@ impl GameProcessPerformanceManager {
             return Err("No eligible CPU set IDs after policy filters".to_string());
         }
 
-        let original = match get_process_default_cpu_sets(api, process) {
-            Ok(ids) => Some(ids),
-            Err(e) => {
-                log::warn!(
-                    "Process tuning: unable to snapshot original CPU sets for '{}' (PID {}): {}",
-                    state.process_name,
-                    pid,
-                    e
-                );
-                None
-            }
-        };
+        let original = get_process_default_cpu_sets(api, process).map_err(|error| {
+            format!("Original CPU sets could not be read; selection was left unchanged: {error}")
+        })?;
 
         set_process_default_cpu_sets(api, process, &selected)?;
 
-        state.cpu_sets_original = original;
+        state.cpu_sets_original = Some(original);
         state.cpu_sets_applied = true;
 
         log::info!(
@@ -529,7 +532,7 @@ impl GameProcessPerformanceManager {
                     value_name,
                     e
                 );
-                None
+                return;
             }
         };
 
@@ -620,31 +623,24 @@ pub(crate) fn select_cpu_set_ids(
     prefer_performance_cores: bool,
     unbind_cpu0: bool,
 ) -> Vec<u32> {
+    let eligible: Vec<_> = cpu_sets
+        .iter()
+        .filter(|set| {
+            !set.allocated_to_other_process
+                && !(unbind_cpu0 && set.group == 0 && set.logical_processor_index == 0)
+        })
+        .collect();
     let mut candidates: Vec<&CpuSetDescriptor> =
-        cpu_sets.iter().filter(|set| !set.parked).collect();
+        eligible.iter().copied().filter(|set| !set.parked).collect();
     if candidates.is_empty() {
-        candidates = cpu_sets.iter().collect();
+        candidates = eligible;
     }
 
     if prefer_performance_cores
-        && let Some(best_efficiency) = candidates.iter().map(|set| set.efficiency_class).min()
+        // Windows documents higher EfficiencyClass values as faster cores.
+        && let Some(best_efficiency) = candidates.iter().map(|set| set.efficiency_class).max()
     {
         candidates.retain(|set| set.efficiency_class == best_efficiency);
-    }
-
-    if unbind_cpu0 {
-        candidates.retain(|set| set.logical_processor_index != 0);
-    }
-
-    // If strict filters emptied the list, relax performance-core preference but still honor CPU0 exclusion.
-    if candidates.is_empty() && unbind_cpu0 {
-        let mut fallback: Vec<&CpuSetDescriptor> =
-            cpu_sets.iter().filter(|set| !set.parked).collect();
-        if fallback.is_empty() {
-            fallback = cpu_sets.iter().collect();
-        }
-        fallback.retain(|set| set.logical_processor_index != 0);
-        candidates = fallback;
     }
 
     let mut ids: Vec<u32> = candidates.into_iter().map(|set| set.id).collect();
@@ -846,22 +842,17 @@ fn kernel32_proc_address(symbol: &'static [u8]) -> Option<*const std::ffi::c_voi
 }
 
 #[cfg(windows)]
-fn query_system_cpu_sets(api: CpuSetApi) -> Result<Vec<CpuSetDescriptor>, String> {
-    use windows::Win32::Foundation::HANDLE;
-
+fn query_system_cpu_sets(
+    api: CpuSetApi,
+    process: windows::Win32::Foundation::HANDLE,
+) -> Result<Vec<CpuSetDescriptor>, String> {
     let mut needed_len: u32 = 0;
     unsafe {
-        (api.get_system_cpu_set_information)(
-            std::ptr::null_mut(),
-            0,
-            &mut needed_len,
-            HANDLE::default(),
-            0,
-        );
+        (api.get_system_cpu_set_information)(std::ptr::null_mut(), 0, &mut needed_len, process, 0);
     }
 
-    if needed_len == 0 {
-        return Err("CPU Sets API returned an empty buffer length".to_string());
+    if needed_len == 0 || needed_len > 1024 * 1024 {
+        return Err("CPU Sets API returned an invalid buffer length".to_string());
     }
 
     let mut buffer = vec![0u8; needed_len as usize];
@@ -870,7 +861,7 @@ fn query_system_cpu_sets(api: CpuSetApi) -> Result<Vec<CpuSetDescriptor>, String
             buffer.as_mut_ptr() as *mut std::ffi::c_void,
             needed_len,
             &mut needed_len,
-            HANDLE::default(),
+            process,
             0,
         )
     };
@@ -882,6 +873,9 @@ fn query_system_cpu_sets(api: CpuSetApi) -> Result<Vec<CpuSetDescriptor>, String
         ));
     }
 
+    if needed_len as usize > buffer.len() {
+        return Err("CPU Sets API returned more data than its buffer".into());
+    }
     buffer.truncate(needed_len as usize);
     Ok(parse_cpu_set_buffer(&buffer))
 }
@@ -917,9 +911,11 @@ fn parse_cpu_set_buffer(buffer: &[u8]) -> Vec<CpuSetDescriptor> {
 
             output.push(CpuSetDescriptor {
                 id,
+                group: u16::from_le_bytes([buffer[offset + 12], buffer[offset + 13]]),
                 logical_processor_index,
                 efficiency_class,
                 parked,
+                allocated_to_other_process: all_flags & 0x02 != 0 && all_flags & 0x04 == 0,
             });
         }
 
@@ -949,7 +945,7 @@ fn get_process_default_cpu_sets(
         return Ok(Vec::new());
     }
 
-    if required_count == 0 {
+    if required_count == 0 || required_count > 65536 {
         return Err(format!(
             "GetProcessDefaultCpuSets sizing call failed: {}",
             std::io::Error::last_os_error()
@@ -973,6 +969,9 @@ fn get_process_default_cpu_sets(
         ));
     }
 
+    if required_count as usize > ids.len() {
+        return Err("CPU Sets API returned more IDs than its buffer".into());
+    }
     ids.truncate(required_count as usize);
     Ok(ids)
 }
@@ -1007,9 +1006,11 @@ mod tests {
     fn cpu_set(id: u32, logical_index: u8, efficiency_class: u8) -> CpuSetDescriptor {
         CpuSetDescriptor {
             id,
+            group: 0,
             logical_processor_index: logical_index,
             efficiency_class,
             parked: false,
+            allocated_to_other_process: false,
         }
     }
 
@@ -1023,7 +1024,169 @@ mod tests {
         ];
 
         let selected = select_cpu_set_ids(&sets, true, false);
-        assert_eq!(selected, vec![10, 11]);
+        assert_eq!(selected, vec![20, 21]);
+    }
+
+    #[test]
+    fn cpu_selection_respects_allocations_groups_and_available_cores() {
+        let mut reserved = cpu_set(1, 1, 10);
+        reserved.allocated_to_other_process = true;
+        let mut other_group_zero = cpu_set(2, 0, 8);
+        other_group_zero.group = 1;
+        let mut parked = cpu_set(3, 2, 12);
+        parked.parked = true;
+        let sets = [
+            cpu_set(4, 0, 8),
+            other_group_zero,
+            reserved,
+            parked,
+            cpu_set(5, 1, 0),
+        ];
+        assert_eq!(select_cpu_set_ids(&sets, true, true), vec![2]);
+        assert_eq!(
+            select_cpu_set_ids(&[reserved, parked], false, false),
+            vec![3]
+        );
+        assert!(select_cpu_set_ids(&[reserved], false, false).is_empty());
+        // If CPU0 is the only fast core, use eligible slower cores rather than
+        // silently including CPU0 or a core reserved for another application.
+        assert_eq!(
+            select_cpu_set_ids(&[cpu_set(4, 0, 8), cpu_set(5, 1, 0)], true, true),
+            vec![5]
+        );
+    }
+
+    #[cfg(windows)]
+    fn cpu_record(id: u32, group: u16, index: u8, class: u8, flags: u8) -> [u8; 32] {
+        let mut record = [0; 32];
+        record[0..4].copy_from_slice(&32u32.to_le_bytes());
+        record[8..12].copy_from_slice(&id.to_le_bytes());
+        record[12..14].copy_from_slice(&group.to_le_bytes());
+        record[14] = index;
+        record[18] = class;
+        record[19] = flags;
+        record
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cpu_records_keep_allocation_and_group_metadata_and_reject_partial_records() {
+        let buffer = [
+            cpu_record(10, 0, 1, 8, 0x02),
+            cpu_record(20, 1, 0, 10, 0x06),
+        ]
+        .concat();
+        let records = parse_cpu_set_buffer(&buffer);
+        assert!(records[0].allocated_to_other_process);
+        assert!(!records[1].allocated_to_other_process);
+        assert_eq!(records[1].group, 1);
+        assert_eq!(select_cpu_set_ids(&records, true, true), vec![20]);
+        for length in 0..32 {
+            assert!(parse_cpu_set_buffer(&buffer[..length]).is_empty());
+        }
+        let mut corrupt = cpu_record(30, 0, 0, 0, 0);
+        corrupt[0..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_cpu_set_buffer(&corrupt).is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unreadable_original_cpu_sets_cannot_apply_and_api_lengths_are_bounded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use windows::Win32::Foundation::HANDLE;
+        static SET_CALLS: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "system" fn topology(
+            out: *mut std::ffi::c_void,
+            length: u32,
+            needed: *mut u32,
+            _process: HANDLE,
+            _flags: u32,
+        ) -> i32 {
+            let record = cpu_record(20, 0, 1, 8, 0);
+            unsafe {
+                *needed = record.len() as u32;
+                if out.is_null() || length < record.len() as u32 {
+                    return 0;
+                }
+                std::ptr::copy_nonoverlapping(record.as_ptr(), out.cast::<u8>(), record.len());
+            }
+            1
+        }
+        unsafe extern "system" fn failed_original(
+            _process: HANDLE,
+            _ids: *mut u32,
+            _count: u32,
+            needed: *mut u32,
+        ) -> i32 {
+            unsafe {
+                *needed = 0;
+            }
+            0
+        }
+        unsafe extern "system" fn set(_process: HANDLE, _ids: *const u32, _count: u32) -> i32 {
+            SET_CALLS.fetch_add(1, Ordering::SeqCst);
+            1
+        }
+        unsafe extern "system" fn huge_topology(
+            _out: *mut std::ffi::c_void,
+            _length: u32,
+            needed: *mut u32,
+            _process: HANDLE,
+            _flags: u32,
+        ) -> i32 {
+            unsafe {
+                *needed = u32::MAX;
+            }
+            0
+        }
+        unsafe extern "system" fn huge_original(
+            _process: HANDLE,
+            _ids: *mut u32,
+            _count: u32,
+            needed: *mut u32,
+        ) -> i32 {
+            unsafe {
+                *needed = u32::MAX;
+            }
+            0
+        }
+        let api = CpuSetApi {
+            get_system_cpu_set_information: topology,
+            get_process_default_cpu_sets: failed_original,
+            set_process_default_cpu_sets: set,
+        };
+        let manager = GameProcessPerformanceManager::new(GameProcessPerformancePolicy {
+            prefer_performance_cores: true,
+            ..Default::default()
+        });
+        let mut state = AppliedProcessState::new("fixture.exe".into());
+        assert!(
+            manager
+                .try_apply_cpu_sets_policy_with_api(api, 1, HANDLE::default(), &mut state)
+                .is_err()
+        );
+        assert_eq!(SET_CALLS.load(Ordering::SeqCst), 0);
+        assert!(!state.cpu_sets_applied);
+        assert!(
+            query_system_cpu_sets(
+                CpuSetApi {
+                    get_system_cpu_set_information: huge_topology,
+                    ..api
+                },
+                HANDLE::default()
+            )
+            .is_err()
+        );
+        assert!(
+            get_process_default_cpu_sets(
+                CpuSetApi {
+                    get_process_default_cpu_sets: huge_original,
+                    ..api
+                },
+                HANDLE::default()
+            )
+            .is_err()
+        );
     }
 
     #[test]
