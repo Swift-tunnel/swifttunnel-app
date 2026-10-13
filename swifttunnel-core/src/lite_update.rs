@@ -216,7 +216,7 @@ pub async fn download_verified(
 
     let installer = swifttunnel_installer_cache::InstallerCache::open()
         .and_then(|cache| cache.stage(&update.file, &bytes))
-        .map_err(|e| format!("Could not prepare the protected installer cache: {e}. Check disk space and run SwiftTunnel as administrator."))?;
+        .map_err(|e| format!("Could not prepare the protected installer cache: {e}. If Retry fails, use the signed MSI from the official release or contact support@swifttunnel.net."))?;
 
     log::info!(
         "verified {} ({} bytes) and staged it at {}",

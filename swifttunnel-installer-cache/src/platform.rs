@@ -34,6 +34,7 @@ use windows::{
 const DIR_SD: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)";
 const FILE_SD: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)";
 const CACHE_DIR: &str = "SwiftTunnelInstallerCache";
+const RECOVERY_CACHE_DIR: &str = "SwiftTunnelInstallerCache-Recovered";
 
 /// Resolve the OS installer without consulting PATH or inherited environment.
 pub fn windows_installer_path() -> io::Result<PathBuf> {
@@ -222,7 +223,18 @@ impl InstallerCache {
         unsafe {
             CoTaskMemFree(Some(raw.0.cast()));
         }
-        Self::open_under(&path, CACHE_DIR)
+        match Self::open_under(&path, CACHE_DIR) {
+            Ok(cache) => Ok(cache),
+            Err(error) if recoverable_policy_error(&error) => {
+                // Never repair an untrusted ACL in place: already-open write
+                // handles would survive that change. Use a separate protected
+                // directory and preserve the old registered MSI sources.
+                Self::open_under(&path, RECOVERY_CACHE_DIR).map_err(|recovery| {
+                    denied(&format!("The original installer cache has unsafe permissions, and a separate protected cache could not be opened: {recovery}. No folder permissions were weakened. Install the signed MSI from the official release or contact support."))
+                })
+            }
+            Err(error) => Err(error),
+        }
     }
     fn open_under(base: &Path, name: &str) -> io::Result<Self> {
         if !base.has_root()
@@ -365,6 +377,16 @@ impl InstallerCache {
         Ok(content)
     }
 }
+fn recoverable_policy_error(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied
+        && matches!(
+            error.to_string().as_str(),
+            "Installer cache is not administrator-owned"
+                | "Installer cache DACL is not protected"
+                | "Installer cache has no restrictive DACL"
+                | "Installer cache permissions do not match the protected policy"
+        )
+}
 
 fn verify_contents(file: &mut File, bytes: &[u8]) -> io::Result<()> {
     if file.metadata()?.len() != bytes.len() as u64 {
@@ -383,6 +405,19 @@ fn verify_contents(file: &mut File, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fallback_is_only_for_cache_policy_failures() {
+        assert!(recoverable_policy_error(&denied(
+            "Installer cache is not administrator-owned"
+        )));
+        assert!(recoverable_policy_error(&denied(
+            "Installer cache permissions do not match the protected policy"
+        )));
+        assert!(!recoverable_policy_error(&denied(
+            "Installer cache contains a reparse point, hard link, or wrong object type"
+        )));
+        assert!(!recoverable_policy_error(&io::Error::from_raw_os_error(5)));
+    }
     #[test]
     fn security_descriptors_parse_with_protected_dacls() {
         for text in [DIR_SD, FILE_SD] {

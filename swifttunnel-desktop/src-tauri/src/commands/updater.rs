@@ -566,7 +566,7 @@ fn stage_installer(
 ) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
     swifttunnel_installer_cache::InstallerCache::open()
         .and_then(|cache| cache.stage(&format!("SwiftTunnel-{version}.msi"), package))
-        .map_err(|error| format!("Could not prepare the protected installer cache: {error}. Check disk space and run SwiftTunnel as administrator."))
+        .map_err(|error| format!("Could not prepare the protected installer cache: {error}. If Retry fails, use the signed MSI from the official GitHub release or contact support@swifttunnel.net."))
 }
 /// Run msiexec against a staged installer.
 ///
