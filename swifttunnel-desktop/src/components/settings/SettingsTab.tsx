@@ -24,6 +24,7 @@ import {
   systemUninstall,
 } from "../../lib/commands";
 import { SupportToolsSection } from "../support/SupportToolsSection";
+import { LauncherImportPanel } from "./LauncherImportPanel";
 import type { AppSettings, UpdateChannel } from "../../lib/types";
 
 declare const __APP_VERSION__: string;
@@ -582,6 +583,7 @@ export function SettingsTab() {
         </Section>
       )}
 
+      <LauncherImportPanel />
       <SupportToolsSection />
 
       {/* About */}

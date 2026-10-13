@@ -13,6 +13,11 @@ function allSourceText(): string {
 }
 
 describe("search index", () => {
+  it("keeps launcher imports in Settings and removes the retired Games sections", () => {
+    const entry = SEARCH_ENTRIES.find(e => e.label === "Import launcher settings");
+    expect(entry).toMatchObject({ tab: "settings", anchor: "launcher_import" });
+    expect(SEARCH_ENTRIES.some(e => /session reports|named game profiles|clean old Roblox logs|clean cached Roblox assets/i.test(e.label))).toBe(false);
+  });
   it("has no duplicate ids", () => {
     const ids = SEARCH_ENTRIES.map((e) => e.id);
     expect(new Set(ids).size).toBe(ids.length);

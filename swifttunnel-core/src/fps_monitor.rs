@@ -29,8 +29,8 @@ use windows::Win32::System::Diagnostics::Etw::{
     CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
     EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
     EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2, OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD,
-    PROCESS_TRACE_MODE_RAW_TIMESTAMP, PROCESS_TRACE_MODE_REAL_TIME, ProcessTrace, StartTraceW,
-    TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
+    PROCESS_TRACE_MODE_REAL_TIME, ProcessTrace, StartTraceW, TRACE_LEVEL_VERBOSE,
+    WNODE_FLAG_TRACED_GUID,
 };
 use windows::core::{GUID, PCWSTR, PWSTR};
 
@@ -59,7 +59,6 @@ const MAX_REPORTABLE_FPS: u32 = 2000;
 
 /// State shared between the ETW callback, the sampler, and the public API.
 struct FpsShared {
-    frames: FrameTiming,
     /// PID whose presents we count (0 = none / no game in focus).
     target_pid: AtomicU32,
     /// Monotonic count of presents seen for `target_pid`.
@@ -69,22 +68,6 @@ struct FpsShared {
     stop_flag: AtomicBool,
     /// ETW session this monitor owns.
     session_name: &'static str,
-}
-#[derive(Default)]
-struct FrameTiming {
-    last: AtomicU64,
-    peak_us: AtomicU64,
-    spikes: AtomicU64,
-}
-fn qpc_frequency() -> u64 {
-    static FREQUENCY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *FREQUENCY.get_or_init(|| {
-        let mut value = 0;
-        unsafe {
-            let _ = windows::Win32::System::Performance::QueryPerformanceFrequency(&mut value);
-        }
-        value.max(1) as u64
-    })
 }
 
 /// The live ETW session + sampler threads for one enabled stretch.
@@ -167,7 +150,6 @@ impl FpsMonitor {
             target_pid: AtomicU32::new(self.target_pid.load(Ordering::Acquire)),
             present_count: AtomicU64::new(0),
             current_fps: AtomicU32::new(0),
-            frames: FrameTiming::default(),
             stop_flag: AtomicBool::new(false),
             session_name: self.session_name,
         });
@@ -210,9 +192,6 @@ impl FpsMonitor {
         if prev != pid {
             active.shared.present_count.store(0, Ordering::Release);
             active.shared.current_fps.store(0, Ordering::Release);
-            active.shared.frames.last.store(0, Ordering::Release);
-            active.shared.frames.peak_us.store(0, Ordering::Release);
-            active.shared.frames.spikes.store(0, Ordering::Release);
         }
     }
 
@@ -226,20 +205,6 @@ impl FpsMonitor {
             .as_ref()
             .map(|active| active.shared.current_fps.load(Ordering::Acquire))
             .unwrap_or(0)
-    }
-    /// Present-start gaps from ETW, not GPU execution or displayed-frame time.
-    pub fn take_frame_gaps(&self) -> (u64, Option<u32>) {
-        let Ok(runtime) = self.runtime.lock() else {
-            return (0, None);
-        };
-        let Some(active) = runtime.as_ref() else {
-            return (0, None);
-        };
-        let peak = active.shared.frames.peak_us.swap(0, Ordering::AcqRel);
-        (
-            active.shared.frames.spikes.swap(0, Ordering::AcqRel),
-            (peak > 0).then_some((peak / 1000) as u32),
-        )
     }
 
     /// A metrics poll may update its target and read FPS, but must not change
@@ -423,9 +388,8 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
         // only one that compiles here.
         let mut logfile = EVENT_TRACE_LOGFILEW::default();
         logfile.LoggerName = PWSTR(session_name_wide.as_ptr() as *mut u16);
-        logfile.Anonymous1.ProcessTraceMode = PROCESS_TRACE_MODE_REAL_TIME
-            | PROCESS_TRACE_MODE_EVENT_RECORD
-            | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
+        logfile.Anonymous1.ProcessTraceMode =
+            PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD;
         logfile.Anonymous2.EventRecordCallback = Some(present_event_callback);
         logfile.Context = context_ptr as *mut c_void;
 
@@ -524,17 +488,6 @@ unsafe extern "system" fn present_event_callback(event_record: *mut EVENT_RECORD
             return;
         }
         shared.present_count.fetch_add(1, Ordering::Release);
-        let now = record.EventHeader.TimeStamp.max(0) as u64;
-        let old = shared.frames.last.fetch_max(now, Ordering::AcqRel);
-        if old > 0 && now > old {
-            let micros = (now - old).saturating_mul(1_000_000) / qpc_frequency();
-            if micros <= 2_000_000 {
-                shared.frames.peak_us.fetch_max(micros, Ordering::Relaxed);
-                if micros > 50_000 {
-                    shared.frames.spikes.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-        }
     }
 }
 
@@ -549,7 +502,6 @@ impl FpsMonitor {
                     target_pid: AtomicU32::new(0),
                     present_count: AtomicU64::new(0),
                     current_fps: AtomicU32::new(0),
-                    frames: FrameTiming::default(),
                     stop_flag: AtomicBool::new(true),
                     session_name: OVERLAY_SESSION_NAME,
                 }),
@@ -636,32 +588,6 @@ mod tests {
         let other = FpsMonitor::named("SwiftTunnelFpsTest");
         assert_ne!(FpsMonitor::new().session_name, other.session_name);
         assert_eq!(other.session_name, "SwiftTunnelFpsTest");
-    }
-    #[test]
-    fn present_gaps_use_raw_clock_ticks_and_ignore_reordered_events() {
-        let monitor = FpsMonitor::inert_active();
-        monitor.set_target_pid(1234);
-        let mut shared = monitor.test_shared();
-        shared.stop_flag.store(false, Ordering::Release);
-        let frequency = qpc_frequency();
-        let mut record = EVENT_RECORD::default();
-        record.UserContext = (&mut shared as *mut Arc<FpsShared>).cast();
-        record.EventHeader.ProviderId = DXGI_PROVIDER_GUID;
-        record.EventHeader.ProcessId = 1234;
-        record.EventHeader.EventDescriptor.Task = DXGI_PRESENT_TASKS[0];
-        record.EventHeader.EventDescriptor.Opcode = ETW_OPCODE_START;
-        for millis in [1000, 1016, 1076, 1001, 1092] {
-            record.EventHeader.TimeStamp = (frequency * millis / 1000) as i64;
-            unsafe {
-                present_event_callback(&mut record);
-            }
-        }
-        let (spikes, peak) = monitor.take_frame_gaps();
-        assert_eq!(spikes, 1);
-        assert_eq!(peak, Some(60));
-        assert_eq!(monitor.take_frame_gaps(), (0, None));
-        monitor.set_target_pid(4321);
-        assert_eq!(shared.frames.last.load(Ordering::Acquire), 0);
     }
 
     #[test]

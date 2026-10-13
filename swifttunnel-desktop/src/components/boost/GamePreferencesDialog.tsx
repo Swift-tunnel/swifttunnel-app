@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Button, Dialog, ErrorBanner, Segmented, Select, SliderInput, Toggle } from "../ui";
-import { gamesDatacenters, gamesSetPreferences, gamesLauncherConfig, gamesDisplays } from "../../lib/commands";
+import { gamesDatacenters, gamesSetPreferences, gamesDisplays } from "../../lib/commands";
 import { defaultGamePreferences } from "../../lib/gameLaunchFlow";
 import { formatErrorMessage } from "../../lib/errors";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -26,15 +26,13 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState(false);
-  const [profiles,setProfiles]=useState<string[]>([]);
   const [displays,setDisplays]=useState<GameDisplay[]>([]);
   const globalFps = useSettingsStore(s => s.settings.config.roblox_settings.target_fps);
   useEffect(() => {
     if (!entry) return;
     let disposed = false;
-    setPreferences(defaultGamePreferences(entry)); setError(null); setCenters([]); setCatalogError(false);
+    setPreferences({ ...defaultGamePreferences(entry), flag_profile: null }); setError(null); setCenters([]); setCatalogError(false);
     void gamesDatacenters().then(rows => { if (!disposed) setCenters(rows); }).catch(() => { if (!disposed) setCatalogError(true); });
-    void gamesLauncherConfig().then(c=>{if(!disposed)setProfiles(c.profiles.map(p=>p.name));}).catch(()=>{});
     void gamesDisplays().then(rows=>{if(!disposed)setDisplays(rows);}).catch(()=>{});
     return () => { disposed = true; };
   }, [entry]);
@@ -47,8 +45,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
   }
   const patch = (value: Partial<GamePreferences>) => setPreferences(prev => ({ ...prev, ...value }));
 
-  // "Global" follows the app-wide Roblox settings, or the chosen profile when the game has one.
-  const inherit = preferences.flag_profile ? "Profile" : "Global";
+  const inherit = "Global";
   const fps = preferences.fps_cap;
   const fpsMode = fps == null ? "inherit" : fps >= 9999 ? "uncapped" : "custom";
   const quality = preferences.graphics_quality;
@@ -81,9 +78,6 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
         </Setting>
       </Group>
       <Group title="Performance">
-        {(profiles.length > 0 || preferences.flag_profile) && <Setting label="Settings profile">
-          <Select width={210} value={preferences.flag_profile??""} aria-label="Named game profile" disabled={busy} onChange={e=>patch({flag_profile:e.target.value||null})}><option value="">Global settings</option>{preferences.flag_profile&&!profiles.includes(preferences.flag_profile)&&<option value={preferences.flag_profile}>Missing: {preferences.flag_profile}</option>}{profiles.map(p=><option key={p} value={p}>{p}</option>)}</Select>
-        </Setting>}
         <Setting label="Frame-rate cap" below={fpsMode === "custom" && <div className="flex justify-end"><SliderInput ariaLabel="Game frame-rate cap" value={fps ?? 144} min={30} max={1000} step={10} unit="FPS" width={230} disabled={busy} onChange={fps_cap => patch({ fps_cap })} /></div>}>
           <Segmented ariaLabel="Frame-rate cap" disabled={busy} value={fpsMode} options={[{ value: "inherit", label: inherit }, { value: "custom", label: "Custom" }, { value: "uncapped", label: "Uncapped" }]}
             onChange={mode => patch({ fps_cap: mode === "inherit" ? null : mode === "uncapped" ? 99999 : Math.max(30, Math.min(1000, globalFps < 9999 ? globalFps : 144)) })} />

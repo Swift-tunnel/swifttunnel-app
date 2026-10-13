@@ -388,42 +388,6 @@ const NVIDIA: SearchEntry[] = (
   keywords: s.keywords,
 }));
 
-// ── Games → Roblox settings → Maintenance ──
-// One collapsed section holds all of these, so they share its anchor and
-// selecting any of them opens it.
-const MAINTENANCE: SearchEntry[] = (
-  [
-    {
-      label: "Import launcher settings",
-      keywords:
-        "import launcher settings bring bloxstrap fishstrap froststrap voidstrap strap bootstrapper migrate move switch from existing fps graphics flags",
-    },
-    {
-      label: "Clean old Roblox logs",
-      keywords:
-        "clean logs old player logs storage disk space free up delete cleanup",
-    },
-    {
-      label: "Clean cached Roblox assets",
-      keywords:
-        "clean cache cached assets storage disk space free up delete cleanup temp",
-    },
-    {
-      label: "Clean unsupported flags",
-      keywords:
-        "unsupported invalid flags cleanup remove review undo backup restore last flag cleanup",
-    },
-  ] as const
-).map((s, i) => ({
-  id: `maint-${i}`,
-  tab: "games" as const,
-  anchor: "roblox_maintenance",
-  label: s.label,
-  section: "Games · Roblox settings · Maintenance",
-  icon: gamesIcon,
-  keywords: s.keywords,
-}));
-
 // Extra plain-English aliases for Optimize cards whose shorthand isn't in the
 // name/description. Everything else matches on name + description already.
 const OPT_ALIASES: Record<string, string> = {
@@ -770,8 +734,8 @@ const SPEEDUP: SearchEntry[] = SPEEDUP_OPTIMIZATIONS.map((def) => ({
 }));
 
 const ALL_ENTRIES: SearchEntry[] = [
-  { id: "games-matchmaker", tab: "games", anchor: "matchmaker", label: "Matchmaker and named game profiles", section: "Games", keywords: "matchmaker datacenter allowed blocked skip free slots closest players profiles import export recovery", icon: gamesIcon },
-  { id: "games-session-reports", tab: "games", anchor: "games_library", label: "Session reports and launch diagnostics", section: "Games", keywords: "session report diagnostics frame gaps fps network variation launcher conflict vpn", icon: gamesIcon },
+  { id: "launcher-import", tab: "settings", anchor: "launcher_import", label: "Import launcher settings", section: "Settings", keywords: "import bloxstrap fishstrap froststrap voidstrap bubblestrap launcher settings fps graphics flags", icon: gamesIcon },
+  { id: "games-matchmaker", tab: "games", anchor: "matchmaker", label: "Matchmaker", section: "Games", keywords: "matchmaker datacenter allowed blocked skip free slots closest players recovery", icon: gamesIcon },
   ...TABS,
   ...ACTIONS,
   ...TOOLS,
@@ -782,7 +746,6 @@ const ALL_ENTRIES: SearchEntry[] = [
   ...FLAGS,
   ...NVIDIA,
   ...BOOST,
-  ...MAINTENANCE,
   ...OPTS,
   ...SPEEDUP,
 ];

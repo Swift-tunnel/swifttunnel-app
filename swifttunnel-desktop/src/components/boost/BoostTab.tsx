@@ -83,7 +83,7 @@ function configValidationError(config: Config): string | null {
   );
 }
 
-export function BoostTab({ importPatch, onImportConsumed }: { importPatch?: Partial<RobloxSettingsConfig> | null; onImportConsumed?: () => void } = {}) {
+export function BoostTab() {
   const settings = useSettingsStore((s) => s.settings);
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
@@ -99,11 +99,6 @@ export function BoostTab({ importPatch, onImportConsumed }: { importPatch?: Part
   useEffect(() => {
     setDraft(savedConfig);
   }, [savedConfig]);
-  useEffect(() => {
-    if (!importPatch) return;
-    setDraft(prev => ({ ...prev, profile: "Custom", roblox_settings: { ...prev.roblox_settings, ...importPatch } }));
-    onImportConsumed?.();
-  }, [importPatch]);
 
   const savedGPP = settings.game_process_performance;
   const [draftGPP, setDraftGPP] =

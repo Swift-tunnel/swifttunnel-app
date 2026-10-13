@@ -29,9 +29,6 @@ export async function previewInvoke<T>(command: string, args: Record<string, unk
     case "games_launcher_config": result=launcher;break;
     case "games_save_launcher_config":launcher=args.config as LauncherConfig;break;
     case "games_displays":result=[{id:"preview-primary",primary:true,left:0,top:0,width:1920,height:1080},{id:"preview-secondary",primary:false,left:1920,top:0,width:2560,height:1440}];break;
-    case "games_session_reports":result=[{place_id:"10449761463",game_name:"The Strongest Battlegrounds (preview)",started_at:1791806400,duration_seconds:1200,location:"Mumbai",samples:800,average_fps:240,low_fps:180,average_network_ms:26,network_variation_ms:2,frame_spikes:4,peak_frame_ms:65,ended_without_leave:false}];break;
-    case "games_clear_session_reports":break;
-    case "games_launch_diagnostics":result=["Design preview. No real system diagnostics were run."];break;
     case "games_startup_target":case "games_suggest_server":result=null;break;
     case "games_dismiss_recovery":library.recovery=null;break;
     case "games_create_shortcut":result="Design preview: no shortcut was created.";break;
@@ -59,6 +56,7 @@ export async function previewInvoke<T>(command: string, args: Record<string, unk
     case "boost_get_metrics": result = { roblox_running: running, roblox_foreground: false, fps: 0, cpu_usage: 0, ram_usage: 0, ram_total: 0, ping: 0, process_id: null }; break;
     case "boost_close_roblox": running = false; library.current = null; break;
     case "games_scan_imports": result = { sources: [{ source: "Fishstrap", accepted: 2, json: '{"FFlagDebugGraphicsPreferD3D11":"True","DFIntTextureQualityOverride":"0"}', skipped: ["FFlagOldUnsupportedFlag: unsupported or ignored by Roblox"], error: null }], fps_cap: 240, graphics_quality: "Level5" }; break;
+    case "settings_save": break;
     case "games_cleanup": result = { files: 28, bytes: 24 * 1024 * 1024, skipped: 0, partial: false }; break;
     case "games_flags": result = { files_changed: 2, flags_removed: 7, skipped: [], can_undo: true }; break;
     case "games_save_flags": {

@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import {
   Button,
-  Dialog,
   ErrorBanner,
   Icon,
   Panel,
@@ -22,12 +21,7 @@ import {
 import { formatErrorMessage } from "../../lib/errors";
 import { parsePlaceInput } from "../../lib/robloxGames";
 import { useGameLibraryStore } from "../../stores/gameLibraryStore";
-import { useSettingsStore } from "../../stores/settingsStore";
-import type {
-  LauncherConfig,
-  NamedGameProfile,
-  RobloxDatacenter,
-} from "../../lib/types";
+import type { LauncherConfig, RobloxDatacenter } from "../../lib/types";
 import { Notice } from "./Notice";
 
 export function MatchmakerPanel() {
@@ -40,9 +34,6 @@ export function MatchmakerPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [profileName, setProfileName] = useState("");
-  const [importing, setImporting] = useState(false);
-  const [raw, setRaw] = useState("");
   const games = useGameLibraryStore((s) => s.library?.entries);
   useEffect(() => {
     let alive = true;
@@ -88,60 +79,6 @@ export function MatchmakerPanel() {
     setConfig((c) =>
       c ? { ...c, matchmaker: { ...c.matchmaker, ...change } } : c,
     );
-  async function saveProfiles(profiles: NamedGameProfile[], message: string) {
-    if (!config) return false;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const persisted = await gamesLauncherConfig();
-      await gamesSaveLauncherConfig({ ...persisted, profiles });
-      setConfig({ ...config, profiles });
-      setSaved((s) => (s ? { ...s, profiles } : s));
-      setNotice(message);
-      return true;
-    } catch (e) {
-      setError(formatErrorMessage(e));
-      return false;
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function addProfile() {
-    if (!config) return;
-    const settings = {
-      ...useSettingsStore.getState().settings.config.roblox_settings,
-    };
-    if (
-      await saveProfiles(
-        [...config.profiles, { name: profileName.trim(), settings }],
-        "Profile saved. Pick it in a game's settings to use it.",
-      )
-    )
-      setProfileName("");
-  }
-  async function importProfile() {
-    if (!config) return;
-    try {
-      if (raw.length > 16384) throw new Error("Keep the profile under 16 KB.");
-      const profile = JSON.parse(raw) as NamedGameProfile;
-      if (!profile || typeof profile.name !== "string" || !profile.settings)
-        throw new Error(
-          "Paste an exported SwiftTunnel profile with a name and settings.",
-        );
-      if (
-        await saveProfiles(
-          [...config.profiles, profile],
-          "Profile imported. Pick it in a game's settings to use it.",
-        )
-      ) {
-        setImporting(false);
-        setRaw("");
-      }
-    } catch (e) {
-      setError(formatErrorMessage(e));
-    }
-  }
   if (!config)
     return (
       <>
@@ -174,7 +111,13 @@ export function MatchmakerPanel() {
       {notice && <Notice>{notice}</Notice>}
       <Panel
         flush
-        watermark={{ icon: "globe", at: "right", size: 124, rotate: -14, opacity: 0.05 }}
+        watermark={{
+          icon: "globe",
+          at: "right",
+          size: 124,
+          rotate: -14,
+          opacity: 0.05,
+        }}
       >
         <Row
           label="Matchmaker"
@@ -431,77 +374,7 @@ export function MatchmakerPanel() {
           />
         </Row>
       </Panel>
-      <Panel
-        eyebrow="Settings profiles"
-        desc="Save your current FPS, graphics and FastFlags under a name, then pick it in a game's settings."
-      >
-        <div className="flex gap-2">
-          <input
-            aria-label="Profile name"
-            placeholder="Profile name"
-            maxLength={48}
-            className={`${compactFieldClass} flex-1`}
-            value={profileName}
-            onChange={(e) => setProfileName(e.target.value)}
-          />
-          <Button
-            size="sm"
-            disabled={busy || !profileName.trim()}
-            onClick={() => void addProfile()}
-          >
-            Save current
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            disabled={busy}
-            onClick={() => setImporting(true)}
-          >
-            Import
-          </Button>
-        </div>
-        {config.profiles.length > 0 && (
-          <div className="mt-3 divide-y divide-border-subtle rounded-[10px] bg-bg-base">
-            {config.profiles.map((p) => (
-              <Row
-                key={p.name}
-                label={p.name}
-                desc={`${p.settings.unlock_fps ? p.settings.target_fps : 60} FPS · ${p.settings.graphics_quality} · ${p.settings.custom_fflags_enabled ? "Custom flags" : p.settings.ultraboost ? "Ultraboost" : "Default flags"}`}
-              >
-                <div className="flex gap-1">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() =>
-                      void navigator.clipboard
-                        .writeText(JSON.stringify(p, null, 2))
-                        .then(
-                          () => setNotice("Profile copied. Paste it to share."),
-                          (e) => setError(formatErrorMessage(e)),
-                        )
-                    }
-                  >
-                    Export
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    disabled={busy}
-                    onClick={() =>
-                      void saveProfiles(
-                        config.profiles.filter((old) => old.name !== p.name),
-                        "Profile removed. Games using it will ask you to choose another.",
-                      )
-                    }
-                  >
-                    Remove
-                  </Button>
-                </div>
-              </Row>
-            ))}
-          </div>
-        )}
-      </Panel>
+
       <p className="px-1 text-[11px] text-text-muted">
         Server locations by{" "}
         <button
@@ -524,9 +397,7 @@ export function MatchmakerPanel() {
               variant="secondary"
               size="sm"
               disabled={busy}
-              onClick={() =>
-                saved && setConfig({ ...saved, profiles: config.profiles })
-              }
+              onClick={() => saved && setConfig(saved)}
             >
               Discard
             </Button>
@@ -536,43 +407,6 @@ export function MatchmakerPanel() {
           </div>
         </div>
       )}
-      <Dialog
-        open={importing}
-        onClose={() => setImporting(false)}
-        title="Import a profile"
-        description="Paste a profile exported from SwiftTunnel. It is added to your list, not applied."
-      >
-        <div className="flex flex-col gap-4">
-          <textarea
-            aria-label="Profile JSON"
-            rows={10}
-            maxLength={16384}
-            spellCheck={false}
-            className="block w-full resize-y rounded-[10px] border border-border-subtle bg-bg-base p-3 font-mono text-[11px] leading-relaxed text-text-primary outline-none transition-colors focus-visible:border-border-focus"
-            value={raw}
-            onChange={(e) => setRaw(e.target.value)}
-          />
-          {error && <ErrorBanner tone="error">{error}</ErrorBanner>}
-          <div className="flex justify-end gap-2">
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={busy}
-              onClick={() => setImporting(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              loading={busy}
-              disabled={!raw.trim()}
-              onClick={() => void importProfile()}
-            >
-              Add profile
-            </Button>
-          </div>
-        </div>
-      </Dialog>
     </div>
   );
 }

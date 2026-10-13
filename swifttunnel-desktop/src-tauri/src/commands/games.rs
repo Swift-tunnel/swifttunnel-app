@@ -175,7 +175,6 @@ pub struct CurrentGame {
 #[derive(Default)]
 pub struct GamesState {
     pub previews: Vec<swifttunnel_core::vpn::route_preview::ReferenceEstimate>,
-    pub recorder: Option<swifttunnel_core::roblox_launcher::SessionRecorder>,
     pub recovery: Option<CurrentGame>,
     pub recovery_shown: Vec<std::time::Instant>,
     pub process_gone_since: Option<std::time::Instant>,
@@ -299,35 +298,6 @@ impl GamesState {
 
     pub fn record_join(&mut self, current: CurrentGame) {
         self.status = None;
-        if self
-            .current
-            .as_ref()
-            .is_none_or(|old| old.job_id != current.job_id)
-        {
-            if let Some(recorder) = self.recorder.take() {
-                let _ = swifttunnel_core::roblox_launcher::save_report(
-                    recorder.finish(chrono::Utc::now().timestamp().max(0) as u64, false),
-                );
-            }
-            self.recorder = Some(swifttunnel_core::roblox_launcher::SessionRecorder {
-                report: swifttunnel_core::roblox_launcher::SessionReport {
-                    place_id: current.place_id.clone(),
-                    game_name: self
-                        .library()
-                        .ok()
-                        .and_then(|lib| {
-                            lib.entries
-                                .iter()
-                                .find(|e| e.place_id == current.place_id)
-                                .map(|e| e.name.clone())
-                        })
-                        .unwrap_or_else(|| format!("Place {}", current.place_id)),
-                    started_at: chrono::Utc::now().timestamp().max(0) as u64,
-                    ..Default::default()
-                },
-                ..Default::default()
-            });
-        }
         let at = chrono::Utc::now().timestamp().max(0) as u64;
         if let Err(error) = self
             .mutate(|lib| lib.record_join(&current.place_id, &current.job_id, current.client, at))

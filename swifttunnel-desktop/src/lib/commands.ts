@@ -46,16 +46,12 @@ import type {
   NvidiaDriverProfile,
   NvidiaDriverSetting,
   LauncherConfig,
-  GameSessionReport,
   GameDisplay,
 } from "./types";
 
 export const gamesGetLibrary = () => invoke<RobloxLibrarySnapshot>("games_get_library");
 export const gamesLauncherConfig = () => invoke<LauncherConfig>("games_launcher_config");
 export const gamesSaveLauncherConfig = (config: LauncherConfig) => invoke<void>("games_save_launcher_config", { config });
-export const gamesSessionReports = () => invoke<GameSessionReport[]>("games_session_reports");
-export const gamesClearSessionReports = () => invoke<void>("games_clear_session_reports");
-export const gamesLaunchDiagnostics = () => invoke<string[]>("games_launch_diagnostics");
 export const gamesDisplays = () => invoke<GameDisplay[]>("games_displays");
 export const gamesCreateShortcut = (placeId: string, name: string) => invoke<string>("games_create_shortcut", { placeId, name });
 export const gamesStartupTarget = () => invoke<string | null>("games_startup_target");

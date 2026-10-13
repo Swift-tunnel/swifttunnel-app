@@ -13,7 +13,6 @@ import type { GameLaunchPlan, RobloxGameEntry } from "../../lib/types";
 import { GamePreferencesDialog } from "./GamePreferencesDialog";
 import { GameServerDialog } from "./GameServerDialog";
 import { Notice, iconButtonClass } from "./Notice";
-import { SessionReportsPanel } from "./SessionReportsPanel";
 
 function Artwork({ entry }: { entry: RobloxGameEntry }) {
   const [failed, setFailed] = useState(false);
@@ -51,7 +50,6 @@ interface Review { entry: RobloxGameEntry; plan: GameLaunchPlan; running: boolea
 export function GameLibraryPanel() {
   const { library, error: loadError, loading, refresh } = useGameLibraryStore();
   const pendingAction=useGameLibraryStore(s=>s.pendingAction);
-  const [reportsOpen,setReportsOpen]=useState(false);
   const [suggestion,setSuggestion]=useState<GameLaunchPlan|null>(null);
   const suggestedJoin=useRef<string|null>(null);
   useEffect(()=>{
@@ -185,7 +183,6 @@ export function GameLibraryPanel() {
     {library && <section className="instrument"><Row anchorId="join_notifications" label="Join notifications" desc="Shows the server's location and ping when you join."><Toggle enabled={library.notify_joins} disabled={locked || !!loadError} ariaLabel="Server information notification" onChange={enabled => void run(() => gamesSetNotifications(enabled))} /></Row></section>}
     <GamePreferencesDialog entry={profile} onClose={() => setProfile(null)} onSaved={() => void refresh()} />
     <Dialog open={!!suggestion} onClose={()=>setSuggestion(null)} title="Matchmaker found a better server" description="Moving leaves your current game. Do nothing and you stay here."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>setSuggestion(null)}>Stay here</Button><Button size="sm" onClick={()=>{if(suggestion&&active){const chosen=suggestion;setSuggestion(null);void prepare(active,chosen.job_id,chosen.datacenter?.id??null,false);}}}>Review {suggestion?.datacenter?.city}</Button></div></Dialog>
-    <section className="instrument"><button type="button" className="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left" aria-expanded={reportsOpen} onClick={()=>setReportsOpen(v=>!v)}><span className="flex items-center gap-2"><Icon name="chevron-right" size={12} strokeWidth={2.2} style={{ color: "var(--color-text-muted)", transform: reportsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} /><span className="eyebrow">Session reports & diagnostics</span></span><span className="font-mono text-[10.5px] text-text-dimmed">FPS · ping · stutters</span></button>{reportsOpen&&<div className="border-t border-border-subtle p-3.5"><SessionReportsPanel/></div>}</section>
     <Dialog open={!!library?.recovery} onClose={()=>void run(()=>gamesDismissRecovery())} title="Roblox closed unexpectedly" description="Want to rejoin the server you were in?"><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>void run(()=>gamesDismissRecovery())}>Stay closed</Button><Button size="sm" disabled={busy} onClick={()=>{const previous=library?.recovery;const entry=entries.find(e=>e.place_id===previous?.place_id&&e.client===previous.client);if(entry&&previous){void gamesDismissRecovery().then(()=>prepare(entry,previous.job_id,null,false));}}}>Rejoin</Button></div></Dialog>
     <GameServerDialog entry={servers} onClose={() => setServers(null)} onJoin={(entry, server, center) => { setServers(null); void prepare(entry, server.job_id, center.id, false); }} />
     <Dialog open={adding} onClose={() => { if (!busy) setAdding(false); }} title="Add a game" description="Paste its Roblox link or place ID.">

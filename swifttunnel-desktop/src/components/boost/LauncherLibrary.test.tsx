@@ -31,6 +31,8 @@ describe("native launch library", () => {
     const html=renderToStaticMarkup(<GameLibraryPanel />);
     expect(html).toContain("Safe launch (no FastFlags)");
     expect(html).toContain("Create game shortcut");
+    expect(html).not.toContain("Session reports");
+    expect(html).not.toContain("SESSION REPORTS");
     expect(html).not.toContain("Install Roblox update");
   });
 });

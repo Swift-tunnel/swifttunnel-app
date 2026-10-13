@@ -624,9 +624,6 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                                 if games.current.as_ref().is_some_and(|current| job_id.as_ref().is_none_or(|id| *id == current.job_id)) {
                                     games.left_confirmed = true;
                                     games.current = None;
-                                    if let Some(recorder)=games.recorder.take() {
-                                        if let Err(error)=swifttunnel_core::roblox_launcher::save_report(recorder.finish(chrono::Utc::now().timestamp().max(0) as u64,false)) {log::warn!("Session report: {error}");}
-                                    }
                                     games.clear_launch();
                                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                                 } else if games.current.is_none() && games.launch_player_seen
@@ -697,9 +694,6 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                     let mut games=state.games.lock();
                     let previous=games.current.take();
                     let unexpected=!games.left_confirmed;
-                    if let Some(recorder)=games.recorder.take() {
-                        if let Err(error)=swifttunnel_core::roblox_launcher::save_report(recorder.finish(chrono::Utc::now().timestamp().max(0) as u64,unexpected)) {log::warn!("Session report: {error}");}
-                    }
                     games.recovery_shown.retain(|at|at.elapsed()<std::time::Duration::from_secs(600));
                     if unexpected && games.recovery_shown.len()<3 && games.recovery_shown.last().is_none_or(|at|at.elapsed()>std::time::Duration::from_secs(30))
                         && swifttunnel_core::roblox_launcher::LauncherConfig::load().is_ok_and(|c|c.offer_recovery) {
@@ -708,17 +702,7 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                 }
                 let traffic = state.vpn_connection.try_lock().ok().and_then(|vpn| vpn.auto_router().cloned()).is_some_and(|router| router.has_recent_game_traffic());
-                let route=state.vpn_connection.try_lock().ok().and_then(|vpn|vpn.auto_router().and_then(|r|r.game_route_status()));
-                let probes=state.vpn_connection.try_lock().ok().and_then(|vpn|vpn.get_relay_ping_snapshot());
-                let fps=state.fps_monitor.current_fps();
-                let (spikes,peak)=state.fps_monitor.take_frame_gaps();
                 let mut games = state.games.lock();
-                let estimate=route.filter(|route|games.current.as_ref().is_some_and(|g|g.ip.parse::<std::net::Ipv4Addr>().ok()==route.game_server_ip)).and_then(|r|r.estimated_path_ms);
-                if let Some(recorder)=&mut games.recorder {
-                    recorder.sample_relay(probes.as_ref());
-                    recorder.sample(fps,estimate);recorder.report.frame_spikes=recorder.report.frame_spikes.saturating_add(spikes);
-                    if let Some(peak)=peak {recorder.report.peak_frame_ms=Some(recorder.report.peak_frame_ms.unwrap_or(0).max(peak));}
-                }
                 if traffic { games.game_traffic_seen = true; }
                 if games.track_launch(std::time::Instant::now(), running || traffic, updating) {
                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
@@ -792,9 +776,6 @@ pub fn run() {
             commands::launcher::games_create_shortcut,
             commands::launcher::games_startup_target,
             commands::launcher::games_save_launcher_config,
-            commands::launcher::games_session_reports,
-            commands::launcher::games_clear_session_reports,
-            commands::launcher::games_launch_diagnostics,
             commands::games::games_scan_imports,
             commands::games::games_cleanup,
             commands::games::games_set_notifications,

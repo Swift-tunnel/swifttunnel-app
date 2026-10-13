@@ -328,16 +328,9 @@ pub async fn games_launch_plan(
         && launcher.matchmaker.applies(&place_id)
         && !preferences.skip_matchmaker
         && client == RobloxClient::Standard;
-    let mut global = state.settings.lock().config.roblox_settings.clone();
-    if let Some(name) = &preferences.flag_profile {
-        global = launcher
-            .profiles
-            .iter()
-            .find(|p| p.name == *name)
-            .ok_or("This game's settings profile was deleted. Pick another in its settings.")?
-            .settings
-            .clone();
-    }
+    let global = state.settings.lock().config.roblox_settings.clone();
+    // Keep old library files readable, but removed named profiles no longer apply.
+    preferences.flag_profile = None;
     preferences.fps_cap = preferences.fps_cap.or(Some(if global.unlock_fps {
         global.target_fps
     } else {
@@ -558,15 +551,7 @@ pub async fn games_launch(
     } else {
         None
     };
-    let mut global = state.settings.lock().config.roblox_settings.clone();
-    if let Some(name) = &plan.preferences.flag_profile {
-        global = swifttunnel_core::roblox_launcher::LauncherConfig::load()?
-            .profiles
-            .into_iter()
-            .find(|p| p.name == *name)
-            .ok_or("This game's named profile no longer exists.")?
-            .settings;
-    }
+    let global = state.settings.lock().config.roblox_settings.clone();
     let mut flags = if safe_launch.unwrap_or(false) {
         std::collections::HashMap::new()
     } else {
@@ -723,9 +708,6 @@ pub fn update_session_location(
     };
     current.location = Some(location.clone());
     current.location_source = Some(source.into());
-    if let Some(recorder) = &mut games.recorder {
-        recorder.report.location = Some(location.clone());
-    }
     game_destination::register(ObservedGame {
         ip,
         job_id: job.into(),

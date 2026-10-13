@@ -1,12 +1,10 @@
 import { useEffect, useState } from "react";
 import { Icon } from "../ui";
 import { GameLibraryPanel } from "./LauncherLibrary";
-import { GameToolsPanel } from "./GameToolsPanel";
 import { BoostTab } from "./BoostTab";
 import { FastFlagsPanel } from "./FastFlagsPanel";
 import { MatchmakerPanel } from "./MatchmakerPanel";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
-import type { RobloxSettingsConfig } from "../../lib/types";
 
 const SECTIONS = [
   { id: "library", label: "Library", icon: "games" },
@@ -18,15 +16,13 @@ const SECTIONS = [
 export function GamesTab() {
   const [view, setView] = useState<"library" | "matchmaker" | "settings" | "flags">("library");
   const [flagsVisited, setFlagsVisited] = useState(false);
-  const [toolsOpen, setToolsOpen] = useState(false);
-  const [imported, setImported] = useState<Partial<RobloxSettingsConfig> | null>(null);
   const anchor = useDeepLinkStore(s => s.anchor);
   useEffect(() => {
     if (!anchor) return;
     if (anchor === "custom_fflags" || anchor === "flags_advanced" || anchor.startsWith("flag_") || anchor.startsWith("nvidia_")) { setView("flags"); setFlagsVisited(true); }
     else if (anchor === "matchmaker") setView("matchmaker");
     else if (anchor.startsWith("games_") || anchor === "join_notifications") setView("library");
-    else { setView("settings"); if (anchor === "roblox_maintenance") setToolsOpen(true); }
+    else setView("settings");
   }, [anchor]);
 
   return <div className="flex flex-col gap-4 pb-12">
@@ -57,21 +53,7 @@ export function GamesTab() {
 
     {view === "library" && <GameLibraryPanel />}
     {view === "matchmaker" && <MatchmakerPanel />}
-    {view === "settings" && <div className="flex flex-col gap-4">
-      <BoostTab importPatch={imported} onImportConsumed={() => setImported(null)} />
-      {/* Collapsed like Repair's "Last repair", so occasional maintenance stays out of the way. */}
-      <section data-search-anchor="roblox_maintenance" className="instrument">
-        <button type="button" aria-expanded={toolsOpen} onClick={() => setToolsOpen(open => !open)} className="flex w-full items-center justify-between gap-3 px-3.5 py-3 text-left">
-          <span className="flex items-center gap-2">
-            <Icon name="chevron-right" size={12} strokeWidth={2.2} style={{ color: "var(--color-text-muted)", transform: toolsOpen ? "rotate(90deg)" : "none", transition: "transform 0.15s ease" }} />
-            <span className="eyebrow">Maintenance & existing launcher settings</span>
-          </span>
-          <span className="font-mono text-[10.5px] text-text-dimmed">Import · clean up · undo</span>
-        </button>
-        {/* Kept mounted while closed, as the old <details> did, so a half-reviewed import survives collapsing it. */}
-        <div hidden={!toolsOpen} className="border-t border-border-subtle"><GameToolsPanel disabled={false} onImport={patch => { setImported(patch); }} /></div>
-      </section>
-    </div>}
+    {view === "settings" && <BoostTab />}
     {flagsVisited && <div hidden={view !== "flags"}><FastFlagsPanel /></div>}
   </div>;
 }

@@ -1,4 +1,4 @@
-//! Bounded local launcher preferences, named profiles and session reports.
+//! Bounded local launcher preferences and legacy profile data.
 use crate::{roblox_library::valid_place_id, structs::RobloxSettingsConfig};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -112,7 +112,7 @@ pub fn valid_profile_name(name: &str) -> bool {
         && !name.chars().any(char::is_control)
 }
 fn path(name: &str) -> Result<PathBuf, String> {
-    if !matches!(name, "launcher.json" | "game-sessions.json") {
+    if name != "launcher.json" {
         return Err("Unknown launcher data file.".into());
     }
     Ok(crate::roblox_library::library_path()?.with_file_name(name))
@@ -170,96 +170,6 @@ pub fn qualifies(server: &crate::roblox_directory::GameServer, minimum_free_slot
             .zip(server.playing)
             .is_some_and(|(cap, playing)| cap.saturating_sub(playing) >= minimum_free_slots)
 }
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SessionReport {
-    pub relay_probe_loss_pct: Option<f32>,
-    pub relay_probe_variation_ms: Option<u32>,
-    pub place_id: String,
-    pub game_name: String,
-    pub started_at: u64,
-    pub duration_seconds: u64,
-    pub location: Option<String>,
-    pub samples: u32,
-    pub average_fps: Option<u32>,
-    pub low_fps: Option<u32>,
-    pub average_network_ms: Option<u32>,
-    pub network_variation_ms: Option<u32>,
-    pub frame_spikes: u64,
-    pub peak_frame_ms: Option<u32>,
-    pub ended_without_leave: bool,
-}
-#[derive(Default)]
-pub struct SessionRecorder {
-    pub probe_received: u64,
-    pub probe_samples: u32,
-    pub previous_probe: Option<u32>,
-    pub probe_variation: u64,
-    pub report: SessionReport,
-    pub fps_total: u64,
-    pub fps_samples: u32,
-    pub ping_total: u64,
-    pub ping_samples: u32,
-    pub last_ping: Option<u32>,
-    pub ping_variation: u64,
-}
-impl SessionRecorder {
-    pub fn sample_relay(&mut self, snapshot: Option<&crate::vpn::RelayPingSnapshot>) {
-        let Some(snapshot) = snapshot.filter(|s| s.enabled && s.sample_count >= 3) else {
-            return;
-        };
-        let Some(rtt) = snapshot.last_rtt_ms else {
-            return;
-        };
-        if self.probe_received == snapshot.received {
-            return;
-        }
-        self.probe_received = snapshot.received;
-        self.probe_samples = self.probe_samples.saturating_add(1);
-        if let Some(previous) = self.previous_probe {
-            self.probe_variation += previous.abs_diff(rtt) as u64;
-        }
-        self.previous_probe = Some(rtt);
-        if snapshot.loss_pct.is_finite() && (0.0..=100.0).contains(&snapshot.loss_pct) {
-            self.report.relay_probe_loss_pct = Some(snapshot.loss_pct);
-        }
-    }
-    pub fn sample(&mut self, fps: u32, ping: Option<u32>) {
-        self.report.samples = self.report.samples.saturating_add(1);
-        if fps > 0 {
-            self.fps_total += fps as u64;
-            self.fps_samples += 1;
-            self.report.low_fps = Some(self.report.low_fps.map_or(fps, |old| old.min(fps)));
-        }
-        if let Some(ping) = ping.filter(|v| *v <= 4000) {
-            self.ping_total += ping as u64;
-            self.ping_samples += 1;
-            if let Some(old) = self.last_ping {
-                self.ping_variation += old.abs_diff(ping) as u64;
-            }
-            self.last_ping = Some(ping);
-        }
-    }
-    pub fn finish(mut self, at: u64, unexpected: bool) -> SessionReport {
-        self.report.relay_probe_variation_ms = (self.probe_samples > 1)
-            .then(|| (self.probe_variation / (self.probe_samples - 1) as u64) as u32);
-        self.report.duration_seconds = at.saturating_sub(self.report.started_at);
-        self.report.ended_without_leave = unexpected;
-        self.report.average_fps =
-            (self.fps_samples > 0).then(|| (self.fps_total / self.fps_samples as u64) as u32);
-        self.report.average_network_ms =
-            (self.ping_samples > 0).then(|| (self.ping_total / self.ping_samples as u64) as u32);
-        self.report.network_variation_ms = (self.ping_samples > 1)
-            .then(|| (self.ping_variation / (self.ping_samples - 1) as u64) as u32);
-        self.report
-    }
-}
-pub fn save_report(report: SessionReport) -> Result<(), String> {
-    let mut reports: Vec<SessionReport> = load("game-sessions.json")?.unwrap_or_default();
-    reports.truncate(19);
-    reports.insert(0, report);
-    save("game-sessions.json", &reports)
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,12 +201,6 @@ mod tests {
         assert!(c.validate().is_err());
     }
     #[test]
-    fn missing_measurements_remain_unknown() {
-        let r = SessionRecorder::default().finish(5, false);
-        assert_eq!(r.average_network_ms, None);
-        assert_eq!(r.average_fps, None);
-    }
-    #[test]
     fn old_config_loads_disabled_and_profiles_reject_ignored_flags() {
         let config: LauncherConfig = serde_json::from_str("{}").unwrap();
         assert!(!config.matchmaker.enabled);
@@ -312,39 +216,5 @@ mod tests {
             settings,
         });
         assert!(invalid.validate().is_err());
-    }
-    #[test]
-    fn relay_variation_does_not_count_the_same_control_reply_twice() {
-        use crate::vpn::RelayPingSnapshot;
-        let mut r = SessionRecorder::default();
-        let mut s = RelayPingSnapshot {
-            enabled: true,
-            sent: 4,
-            received: 3,
-            loss_pct: 0.0,
-            last_rtt_ms: Some(20),
-            p50_rtt_ms: Some(20),
-            p99_rtt_ms: Some(20),
-            sample_count: 3,
-        };
-        r.sample_relay(Some(&s));
-        r.sample_relay(Some(&s));
-        s.received = 4;
-        s.last_rtt_ms = Some(24);
-        r.sample_relay(Some(&s));
-        let report = r.finish(5, false);
-        assert_eq!(report.relay_probe_variation_ms, Some(4));
-        assert_eq!(report.relay_probe_loss_pct, Some(0.0));
-    }
-    #[test]
-    fn recovery_is_not_inferred_from_normal_leave_and_jitter_uses_deltas() {
-        let mut r = SessionRecorder::default();
-        r.sample(120, Some(20));
-        r.sample(60, Some(30));
-        r.sample(0, None);
-        let report = r.finish(5, false);
-        assert!(!report.ended_without_leave);
-        assert_eq!(report.average_fps, Some(90));
-        assert_eq!(report.network_variation_ms, Some(10));
     }
 }
