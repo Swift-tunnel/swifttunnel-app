@@ -43,13 +43,13 @@ impl Default for Config {
     }
 }
 
-/// In-game overlay (stats bar) settings, surfaced in the "In-Game Settings" tab.
+/// Stats bar settings, surfaced in the Overlay tab.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlayConfig {
     /// Master on/off for the in-game stats overlay.
     pub enabled: bool,
-    /// Selected metrics, in display order (max 12). Ids: fps, ping, time,
+    /// Selected metrics, in display order (max 12). Ids: fps, ping, game_ping, time,
     /// playtime, battery, upload, download, cpu, cpu_temp, gpu, gpu_temp, ram,
     /// disk.
     pub metrics: Vec<String>,
@@ -62,18 +62,25 @@ pub struct OverlayConfig {
     /// One of nine anchors: top-left/top-center/top-right/center-left/center/
     /// center-right/bottom-left/bottom-center/bottom-right.
     pub position: String,
-    /// Free-drag override (CSS px from the monitor's top-left). When set, takes
+    /// Free-drag override (physical px from the monitor's top-left). When set, takes
     /// precedence over `position` so users can align the bar anywhere.
     #[serde(default)]
     pub custom_x: Option<f64>,
     #[serde(default)]
     pub custom_y: Option<f64>,
+    /// Keep the stats window click-through until the player unlocks movement.
+    #[serde(default = "overlay_position_locked")]
+    pub locked: bool,
     /// Global toggle hotkey, e.g. "Ctrl+Shift+O".
     pub hotkey: String,
     /// When a game starts: keep an FPS chart for the session.
     pub monitor_fps_chart: bool,
     /// After a game: show a desktop message with the session's max FPS.
     pub show_max_fps_message: bool,
+}
+
+fn overlay_position_locked() -> bool {
+    true
 }
 
 impl Default for OverlayConfig {
@@ -95,6 +102,7 @@ impl Default for OverlayConfig {
             position: "top-left".into(),
             custom_x: None,
             custom_y: None,
+            locked: true,
             hotkey: "Ctrl+Shift+O".into(),
             monitor_fps_chart: false,
             show_max_fps_message: false,
@@ -597,6 +605,20 @@ mod tests {
         assert_eq!(config.profile, OptimizationProfile::Balanced);
         assert!(!config.auto_start_with_roblox);
         assert!(config.show_overlay);
+        assert!(config.overlay.locked);
+    }
+
+    #[test]
+    fn old_overlay_settings_default_to_click_through_and_keep_saved_position() {
+        let overlay: OverlayConfig = serde_json::from_str(
+            r#"{"enabled":true,"custom_x":125.0,"custom_y":80.0,"metrics":["fps","ping"]}"#,
+        )
+        .unwrap();
+        assert!(overlay.locked);
+        assert_eq!(overlay.custom_x, Some(125.0));
+        assert_eq!(overlay.metrics, vec!["fps", "ping"]);
+        let unlocked: OverlayConfig = serde_json::from_str(r#"{"locked":false}"#).unwrap();
+        assert!(!unlocked.locked);
     }
 
     #[test]

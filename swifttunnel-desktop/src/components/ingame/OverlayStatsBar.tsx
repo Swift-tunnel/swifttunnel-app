@@ -11,6 +11,13 @@ import {
   type OverlayRenderPayload,
 } from "./overlayBus";
 import { boostCursorPos } from "../../lib/commands";
+import {
+  clampOverlayPosition,
+  overlayAnchor,
+  overlayHeartbeatExpired,
+  validOverlayMonitor,
+  type OverlayMonitor,
+} from "./overlayGeometry";
 
 const IDLE_POLL_MS = 350;
 const HIDDEN_POLL_MS = 1000;
@@ -18,17 +25,8 @@ const DRAG_POLL_MS = 16; // smooth window-follow while dragging
 // Slack (CSS px) around the bar so it's easy to land the cursor on it to grab.
 const GRAB_PAD = 8;
 /** CSS px from the monitor edge for the 3x3 anchor presets. */
-const ANCHOR_MARGIN = 22;
 /** After a drop, ignore payloads still carrying the pre-save position. */
 const DROP_GRACE_MS = 2500;
-
-interface MonitorInfo {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  scale: number;
-}
 
 /**
  * The stats-overlay window root. The window is sized to the BAR itself (not
@@ -47,12 +45,17 @@ export function OverlayStatsBar() {
   const payloadRef = useRef<OverlayRenderPayload | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
-  const monitorRef = useRef<MonitorInfo | null>(null);
+  const monitorRef = useRef<OverlayMonitor | null>(null);
+  const lastRenderRef = useRef(0);
   // Window geometry in physical px, tracked from our own setPosition/setSize
   // calls (nothing else moves this window).
   const winPosRef = useRef({ x: 0, y: 0 });
+  const moveWantedRef = useRef({ x: 0, y: 0 });
+  const moveTaskRef = useRef<Promise<void> | null>(null);
   const winSizeRef = useRef({ w: 0, h: 0 });
-  const interactiveRef = useRef(false);
+  const interactiveRef = useRef<boolean | null>(null);
+  const interactiveWantedRef = useRef(false);
+  const interactiveTaskRef = useRef<Promise<void> | null>(null);
   const interactingRef = useRef(false);
   const shownRef = useRef(false);
   const visibilityTaskRef = useRef<Promise<void> | null>(null);
@@ -63,13 +66,23 @@ export function OverlayStatsBar() {
 
   // Toggle window click-through (de-duped). interactive === !ignoreCursorEvents.
   const setInteractive = useCallback(async (interactive: boolean) => {
-    if (interactiveRef.current === interactive) return;
-    interactiveRef.current = interactive;
-    try {
-      await getCurrentWindow().setIgnoreCursorEvents(!interactive);
-    } catch {
-      /* ignore */
-    }
+    interactiveWantedRef.current = interactive;
+    if (interactiveTaskRef.current) return interactiveTaskRef.current;
+    const task = (async () => {
+      while (interactiveRef.current !== interactiveWantedRef.current) {
+        const next = interactiveWantedRef.current;
+        try {
+          await getCurrentWindow().setIgnoreCursorEvents(!next);
+          interactiveRef.current = next;
+        } catch {
+          return;
+        }
+      }
+    })();
+    interactiveTaskRef.current = task.finally(() => {
+      interactiveTaskRef.current = null;
+    });
+    return interactiveTaskRef.current;
   }, []);
 
   // Re-evaluate after interaction ends too: disabling emits only one payload.
@@ -78,7 +91,10 @@ export function OverlayStatsBar() {
     if (visibilityTaskRef.current) return visibilityTaskRef.current;
     const task = (async () => {
       for (;;) {
-        const wantShown = overlayShouldShow(payloadRef.current, interactingRef.current);
+        const wantShown = overlayShouldShow(
+          payloadRef.current,
+          interactingRef.current,
+        );
         if (!wantShown) {
           dragRef.current = null;
           interactingRef.current = false;
@@ -96,18 +112,34 @@ export function OverlayStatsBar() {
         }
       }
     })();
-    visibilityTaskRef.current = task.finally(() => { visibilityTaskRef.current = null; });
+    visibilityTaskRef.current = task.finally(() => {
+      visibilityTaskRef.current = null;
+    });
     return visibilityTaskRef.current;
   }, [setInteractive]);
 
   const moveWindow = useCallback((x: number, y: number) => {
-    const xi = Math.round(x);
-    const yi = Math.round(y);
-    if (winPosRef.current.x === xi && winPosRef.current.y === yi) return;
-    winPosRef.current = { x: xi, y: yi };
-    void getCurrentWindow()
-      .setPosition(new PhysicalPosition(xi, yi))
-      .catch(() => {});
+    moveWantedRef.current = { x: Math.round(x), y: Math.round(y) };
+    if (moveTaskRef.current) return;
+    const task = (async () => {
+      while (
+        winPosRef.current.x !== moveWantedRef.current.x ||
+        winPosRef.current.y !== moveWantedRef.current.y
+      ) {
+        const next = moveWantedRef.current;
+        try {
+          await getCurrentWindow().setPosition(
+            new PhysicalPosition(next.x, next.y),
+          );
+          winPosRef.current = next;
+        } catch {
+          return;
+        }
+      }
+    })();
+    moveTaskRef.current = task.finally(() => {
+      moveTaskRef.current = null;
+    });
   }, []);
 
   /** Place the window per config (custom spot or anchor preset). No-op while
@@ -131,27 +163,8 @@ export function OverlayStatsBar() {
       else if (Date.now() - drop.at < DROP_GRACE_MS) return;
     }
 
-    if (p.customX !== null && p.customY !== null) {
-      moveWindow(m.x + p.customX, m.y + p.customY);
-      return;
-    }
-    const margin = Math.round(ANCHOR_MARGIN * m.scale);
-    const parts = p.position.split("-");
-    const v = parts[0];
-    const hz = parts[1] ?? "center";
-    const x =
-      hz === "left"
-        ? m.x + margin
-        : hz === "right"
-          ? m.x + m.w - w - margin
-          : m.x + Math.round((m.w - w) / 2);
-    const y =
-      v === "top"
-        ? m.y + margin
-        : v === "bottom"
-          ? m.y + m.h - h - margin
-          : m.y + Math.round((m.h - h) / 2);
-    moveWindow(x, y);
+    const next = overlayAnchor(m, { w, h }, p.position, p.customX, p.customY);
+    moveWindow(next.x, next.y);
   }, [moveWindow]);
 
   // Mount: click-through immediately, then cache monitor geometry + where the
@@ -160,9 +173,9 @@ export function OverlayStatsBar() {
     const win = getCurrentWindow();
     void (async () => {
       try {
-        await win.setIgnoreCursorEvents(true);
+        await setInteractive(false);
         const monitor = await currentMonitor();
-        if (monitor) {
+        if (monitor && !validOverlayMonitor(payloadRef.current?.monitor)) {
           monitorRef.current = {
             x: monitor.position.x,
             y: monitor.position.y,
@@ -173,32 +186,38 @@ export function OverlayStatsBar() {
         }
         const pos = await win.outerPosition();
         winPosRef.current = { x: pos.x, y: pos.y };
+        applyConfiguredPosition();
       } catch {
         /* best-effort */
       }
     })();
-  }, []);
+  }, [applyConfiguredPosition, setInteractive]);
 
-  // Keep the window exactly the size of its content (the bar + hint).
+  const measureWindow = useCallback(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const scale = window.devicePixelRatio || 1;
+    const r = el.getBoundingClientRect();
+    const w = Math.max(1, Math.ceil(r.width * scale));
+    const h = Math.max(1, Math.ceil(r.height * scale));
+    if (w === winSizeRef.current.w && h === winSizeRef.current.h) return;
+    void getCurrentWindow()
+      .setSize(new PhysicalSize(w, h))
+      .then(() => {
+        winSizeRef.current = { w, h };
+        applyConfiguredPosition();
+      })
+      .catch(() => {});
+  }, [applyConfiguredPosition]);
+
+  // Keep the window content-sized, including after a display-scale change.
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => {
-      const scale = monitorRef.current?.scale ?? window.devicePixelRatio ?? 1;
-      const r = el.getBoundingClientRect();
-      const w = Math.max(1, Math.ceil(r.width * scale));
-      const h = Math.max(1, Math.ceil(r.height * scale));
-      if (w === winSizeRef.current.w && h === winSizeRef.current.h) return;
-      winSizeRef.current = { w, h };
-      void getCurrentWindow()
-        .setSize(new PhysicalSize(w, h))
-        .catch(() => {});
-      // Size feeds the anchor math (e.g. right-anchored bars).
-      applyConfiguredPosition();
-    });
+    const ro = new ResizeObserver(measureWindow);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [applyConfiguredPosition]);
+  }, [measureWindow]);
 
   // The poll drives everything: hover detection, click-through toggling, and
   // the whole drag, from the global cursor + button state. Drag-end runs
@@ -211,19 +230,37 @@ export function OverlayStatsBar() {
     const tick = async () => {
       if (disposed) return;
       try {
+        if (
+          overlayHeartbeatExpired(lastRenderRef.current, Date.now()) &&
+          payloadRef.current
+        ) {
+          payloadRef.current = {
+            ...payloadRef.current,
+            enabled: false,
+            forceHide: true,
+          };
+          await syncVisibility();
+        }
         const m = monitorRef.current;
+        if (shownRef.current) measureWindow();
         let over = false;
 
-        if (m && overlayMayInteract(payloadRef.current) && (shownRef.current || dragRef.current)) {
+        if (
+          m &&
+          overlayMayInteract(payloadRef.current) &&
+          (shownRef.current || dragRef.current)
+        ) {
           const c = await boostCursorPos();
           if (disposed) return;
           if (!overlayMayInteract(payloadRef.current)) {
             await syncVisibility();
           } else if (dragRef.current) {
-            const next = {
-              x: c.x - dragRef.current.offX,
-              y: c.y - dragRef.current.offY,
-            };
+            const next = clampOverlayPosition(
+              m,
+              winSizeRef.current,
+              c.x - dragRef.current.offX,
+              c.y - dragRef.current.offY,
+            );
             moveWindow(next.x, next.y);
             over = true;
             if (!c.left_down) {
@@ -237,8 +274,9 @@ export function OverlayStatsBar() {
           } else {
             const bar = barRef.current;
             if (bar && shownRef.current) {
-              const cx = (c.x - winPosRef.current.x) / m.scale;
-              const cy = (c.y - winPosRef.current.y) / m.scale;
+              const scale = window.devicePixelRatio || 1;
+              const cx = (c.x - winPosRef.current.x) / scale;
+              const cy = (c.y - winPosRef.current.y) / scale;
               const r = bar.getBoundingClientRect();
               over =
                 cx >= r.left - GRAB_PAD &&
@@ -275,10 +313,7 @@ export function OverlayStatsBar() {
           : shownRef.current
             ? IDLE_POLL_MS
             : HIDDEN_POLL_MS;
-        timer = window.setTimeout(
-          () => void tick(),
-          delay,
-        );
+        timer = window.setTimeout(() => void tick(), delay);
       }
     };
 
@@ -289,7 +324,7 @@ export function OverlayStatsBar() {
       dragRef.current = null;
       void setInteractive(false);
     };
-  }, [setInteractive, moveWindow, syncVisibility]);
+  }, [setInteractive, moveWindow, syncVisibility, measureWindow]);
 
   // Render snapshots from the main window. The bar stays MOUNTED regardless of
   // payload.enabled (visibility is window show/hide only), unmounting it
@@ -300,6 +335,16 @@ export function OverlayStatsBar() {
     void listen<OverlayRenderPayload>(OVERLAY_RENDER_EVENT, async (event) => {
       if (disposed) return;
       const p = event.payload;
+      lastRenderRef.current = Date.now();
+      if (validOverlayMonitor(p.monitor) && !dragRef.current) {
+        if (
+          monitorRef.current &&
+          (monitorRef.current.x !== p.monitor.x ||
+            monitorRef.current.y !== p.monitor.y)
+        )
+          lastDropRef.current = null;
+        monitorRef.current = p.monitor;
+      }
       payloadRef.current = p;
       setPayload(p);
       applyConfiguredPosition();
@@ -335,7 +380,11 @@ export function OverlayStatsBar() {
           <div
             ref={barRef}
             style={{
-              cursor: dragRef.current ? "grabbing" : active ? "grab" : "default",
+              cursor: dragRef.current
+                ? "grabbing"
+                : active
+                  ? "grab"
+                  : "default",
               borderRadius: 10,
               padding: 5,
               border: active
@@ -351,6 +400,14 @@ export function OverlayStatsBar() {
               size={payload.size}
               color={payload.color}
               style={payload.style}
+              maxWidth={
+                monitorRef.current
+                  ? Math.max(
+                      160,
+                    monitorRef.current.w / (window.devicePixelRatio || 1) - 70,
+                    )
+                  : undefined
+              }
             />
           </div>
 

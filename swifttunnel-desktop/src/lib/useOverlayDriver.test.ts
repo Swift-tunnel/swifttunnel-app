@@ -8,6 +8,9 @@ const h = vi.hoisted(() => ({
   metrics: vi.fn(),
   throughput: vi.fn(),
   ping: vi.fn(),
+  update: vi.fn(), save: vi.fn(),
+  gameIp: "128.116.47.33",
+  vpnState: { state:"connected", region:"mumbai", bytesUp:100, bytesDown:200, ping:30, pingReadings:0, gameRoute:null as {game_server_ip:string;estimated_path_ms:number;bypassed:boolean}|null },
   overlay: { enabled: true, metrics: ["ping", "upload"], size: "medium", color: "white", style: "solid", position: "top-left", custom_x: 0, custom_y: 0 },
 }));
 
@@ -22,10 +25,11 @@ vi.mock("../components/ingame/overlayBus", () => ({
   pushOverlayRender: h.push,
 }));
 vi.mock("../stores/settingsStore", () => ({
-  useSettingsStore: (select: (s: unknown) => unknown) => select({
-    settings: { config: { overlay: h.overlay } }, update: vi.fn(), save: vi.fn(),
-  }),
+  useSettingsStore: Object.assign((select: (s: unknown) => unknown) => select({
+    settings: { config: { overlay: h.overlay } }, update: h.update, save: h.save,
+  }), {getState:()=>({settings:{config:{overlay:h.overlay}},update:h.update,save:h.save})}),
 }));
+vi.mock("../stores/gameLibraryStore",()=>({useGameLibraryStore:{getState:()=>({library:{current:{ip:h.gameIp}}})}}));
 vi.mock("../stores/boostStore", () => ({
   useBoostStore: Object.assign(
     (select: (s: unknown) => unknown) => select({ fetchMetrics: h.metrics }),
@@ -35,7 +39,7 @@ vi.mock("../stores/boostStore", () => ({
 vi.mock("../stores/vpnStore", () => ({
   useVpnStore: Object.assign(
     (select: (s: unknown) => unknown) => select({ fetchThroughput: h.throughput, fetchPing: h.ping }),
-    { getState: () => ({ state: "connected", bytesUp: 100, bytesDown: 200, ping: 30 }) },
+    { getState: () => ({ ...h.vpnState }) },
   ),
 }));
 
@@ -59,11 +63,17 @@ describe("overlay polling under slow native calls", () => {
     vi.stubGlobal("window", globalThis);
     h.effects.length = 0;
     h.overlay.enabled = true;
+    h.overlay.metrics=["ping","upload"];
+    h.vpnState={state:"connected",region:"mumbai",bytesUp:100,bytesDown:200,ping:30,pingReadings:0,gameRoute:null};
+    h.gameIp="128.116.47.33";
     h.invoke.mockResolvedValue(undefined);
     h.metrics.mockResolvedValue(true);
-    h.throughput.mockResolvedValue(undefined);
+    h.throughput.mockResolvedValue(true);
     h.ping.mockResolvedValue(undefined);
     h.push.mockResolvedValue(undefined);
+    h.listen.mockResolvedValue(()=>{});
+    h.save.mockResolvedValue(undefined);
+    h.update.mockImplementation(change=>Object.assign(h.overlay,change.config.overlay));
   });
   afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -148,5 +158,42 @@ describe("overlay polling under slow native calls", () => {
     expect(h.push).toHaveBeenCalledTimes(1);
     expect(h.push.mock.calls[0][0]).toMatchObject({ enabled: false, forceHide: true });
     expect(h.metrics).not.toHaveBeenCalled();
+  });
+  it("does not create a window or poll for legacy selections with no supported metrics",async()=>{
+    h.overlay.metrics=["gpu","cpu_temp"];
+    start(); await vi.advanceTimersByTimeAsync(1000);
+    expect(h.invoke).not.toHaveBeenCalled();
+    expect(h.metrics).not.toHaveBeenCalled();
+    expect(h.push.mock.calls[0][0]).toMatchObject({enabled:false,forceHide:true,metrics:[]});
+  });
+  it("only shows an estimated game ping when it matches the current destination", async()=>{
+    h.overlay.metrics=["game_ping"];
+    h.vpnState.gameRoute={game_server_ip:h.gameIp,estimated_path_ms:26,bypassed:false};
+    const stop=start(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.push.mock.calls[0][0].values.game_ping).toBe("~26 ms");
+    h.vpnState.gameRoute.game_server_ip="128.116.46.33";
+    await vi.advanceTimersByTimeAsync(1000); stop();
+    expect(h.push.mock.calls[1][0].values.game_ping).toBe("--");
+  });
+  it("expires retained relay readings instead of displaying them indefinitely",async()=>{
+    h.ping.mockImplementationOnce(()=>{h.vpnState.pingReadings++;return Promise.resolve();});
+    const stop=start(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.push.mock.calls[0][0].values.ping).toBe("30 ms");
+    await vi.advanceTimersByTimeAsync(6000); stop();
+    expect(h.push.mock.calls[h.push.mock.calls.length-1]?.[0].values.ping).toBe("--");
+  });
+  it("does not turn a failed throughput sample into a zero traffic reading",async()=>{
+    h.throughput.mockResolvedValue(false);
+    const stop=start(); await vi.advanceTimersByTimeAsync(1000); stop();
+    expect(h.push.mock.calls[h.push.mock.calls.length-1]?.[0].values.upload).toBe("--");
+  });
+  it("registers the hotkey after its listener and toggles the latest overlay preference",async()=>{
+    useOverlayDriver(); const stop=h.effects[2]() as ()=>void;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.invoke).toHaveBeenCalledWith("ensure_overlay_shortcut");
+    const listener=h.listen.mock.calls[0][1];
+    listener(); expect(h.overlay.enabled).toBe(false);
+    listener(); expect(h.overlay.enabled).toBe(true);
+    expect(h.save).toHaveBeenCalledTimes(2); stop();
   });
 });

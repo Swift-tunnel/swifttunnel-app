@@ -1,7 +1,20 @@
 import { useState } from "react";
-import { Toggle, Chip, Panel, Readout, StatRail, Icon } from "../ui";
+import {
+  Toggle,
+  Chip,
+  Panel,
+  Readout,
+  StatRail,
+  Icon,
+  ErrorBanner,
+} from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
+import {
+  OVERLAY_HOTKEY,
+  useOverlayRuntimeStore,
+} from "../../stores/overlayRuntimeStore";
+import { formatErrorMessage } from "../../lib/errors";
 import type {
   Config,
   OverlayConfig,
@@ -17,6 +30,8 @@ import {
   OVERLAY_METRIC_GROUPS,
   OVERLAY_METRICS,
   OVERLAY_SAMPLE_VALUES,
+  supportedOverlayMetrics,
+  metricMeta,
 } from "./overlayMetrics";
 
 const POSITIONS: OverlayPosition[][] = [
@@ -31,19 +46,27 @@ const STYLES: { id: OverlayStyle; label: string }[] = [
   { id: "layered", label: "Layered" },
 ];
 
-export function InGameTab() {
+export function OverlayTab() {
   const config = useSettingsStore((s) => s.settings.config);
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
   const updateConfig = useBoostStore((s) => s.updateConfig);
   const [ramBusy, setRamBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const runtime = useOverlayRuntimeStore();
   const ov = config.overlay;
+  const selectedMetrics = supportedOverlayMetrics(ov.metrics);
   const hasCustomPos = ov.custom_x !== null && ov.custom_y !== null;
 
   function patch(p: Partial<OverlayConfig>) {
-    const next: Config = { ...config, overlay: { ...ov, ...p } };
+    const current = useSettingsStore.getState().settings.config;
+    const next: Config = {
+      ...current,
+      overlay: { ...current.overlay, ...p, hotkey: OVERLAY_HOTKEY },
+    };
     updateSettings({ config: next });
-    void saveSettings();
+    setError(null);
+    void saveSettings(true).catch((e) => setError(formatErrorMessage(e)));
   }
 
   // Auto-RAM-clean lives in system_optimization, which the backend applies -
@@ -60,25 +83,37 @@ export function InGameTab() {
     setRamBusy(true);
     try {
       const applied = await updateConfig(JSON.stringify(nextConfig));
-      updateSettings({ config: applied });
-      void saveSettings();
-    } catch {
-      // updateConfig surfaces errors through the boost store.
+      updateSettings({
+        config: {
+          ...applied,
+          overlay: useSettingsStore.getState().settings.config.overlay,
+        },
+      });
+      await saveSettings(true);
+    } catch (e) {
+      setError(formatErrorMessage(e));
     } finally {
       setRamBusy(false);
     }
   }
 
   function toggleMetric(id: OverlayMetric) {
-    const has = ov.metrics.includes(id);
+    const has = selectedMetrics.includes(id);
     const metrics = has
-      ? ov.metrics.filter((m) => m !== id)
-      : [...ov.metrics, id];
-    if (metrics.length > MAX_OVERLAY_METRICS) return;
+      ? selectedMetrics.filter((m) => m !== id)
+      : [...selectedMetrics, id];
+    if (metrics.length > MAX_OVERLAY_METRICS || (ov.enabled && !metrics.length))
+      return;
     patch({ metrics });
   }
 
-  const disabled = !ov.enabled;
+  function moveMetric(index: number, direction: number) {
+    const next = [...selectedMetrics];
+    const target = index + direction;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]];
+    patch({ metrics: next });
+  }
 
   return (
     <div className="flex w-full flex-col gap-4 pb-24">
@@ -88,8 +123,14 @@ export function InGameTab() {
         aurora
         corners
         anchorId="overlay_enabled"
-        watermark={{ icon: "ingame", at: "right", size: 180, rotate: -6, fade: true }}
-        eyebrow="In-Game Overlay"
+        watermark={{
+          icon: "ingame",
+          at: "right",
+          size: 180,
+          rotate: -6,
+          fade: true,
+        }}
+        eyebrow="Overlay"
         title={
           <span className="flex items-center gap-2">
             <span className="display-hero">
@@ -100,11 +141,12 @@ export function InGameTab() {
             </Chip>
           </span>
         }
-        desc="A movable on-screen bar showing live FPS, CPU, RAM, network and more, drawn over the game without touching it (anti-cheat safe)."
+        desc="Live FPS, CPU, memory and connection stats over Roblox. Hides when you switch apps."
         actions={
           <Toggle
             enabled={ov.enabled}
-            ariaLabel="In-Game Overlay"
+            disabled={!ov.enabled && !selectedMetrics.length}
+            ariaLabel="Enable overlay"
             onChange={(v) => patch({ enabled: v })}
           />
         }
@@ -117,40 +159,61 @@ export function InGameTab() {
               value={ov.enabled ? "ON" : "OFF"}
               label="State"
             />,
-            <Readout key="hotkey" size="md" value={ov.hotkey} label="Hotkey" />,
+            <Readout
+              key="hotkey"
+              size="md"
+              value={
+                runtime.shortcutAvailable === false
+                  ? "Unavailable"
+                  : OVERLAY_HOTKEY
+              }
+              label="Hotkey"
+            />,
             <Readout
               key="metrics"
               size="md"
-              value={`${ov.metrics.length}/${MAX_OVERLAY_METRICS}`}
+              value={`${selectedMetrics.length}/${MAX_OVERLAY_METRICS}`}
               label="Metrics"
             />,
           ]}
         />
       </Panel>
 
-      <div
-        className={disabled ? "pointer-events-none opacity-50" : ""}
-        style={{ transition: "opacity 120ms" }}
-      >
+      {(error || runtime.error) && (
+        <ErrorBanner tone="error">{error || runtime.error}</ErrorBanner>
+      )}
+      {runtime.shortcutAvailable === false && (
+        <ErrorBanner tone="warning">
+          Ctrl+Shift+O is unavailable. Use the overlay switch above.
+        </ErrorBanner>
+      )}
+      <div>
         {/* Live preview, sunk into the panel face like a screen. */}
         <Panel
           className="mb-4"
           anchorId="overlay_preview"
           eyebrow="Overlay preview"
+          actions={
+            <span className="font-mono text-[10px] text-text-dimmed">
+              SAMPLE VALUES
+            </span>
+          }
         >
           {/* The bar is as wide as the metric set the user picked, so at 7+
               metrics it outgrows the panel. Scroll it inside the well instead
               of letting it bleed past the panel edge. justify-start once it
               overflows, otherwise centring pushes the leading metric out of
               reach on the left. */}
-          <div className="instrument-well flex min-h-[52px] items-center justify-center overflow-x-auto px-3 py-4 [&>*]:shrink-0">
-            <OverlayBar
-              metrics={ov.metrics}
-              values={OVERLAY_SAMPLE_VALUES}
-              size={ov.size}
-              color={ov.color}
-              style={ov.style}
-            />
+          <div className="instrument-well overflow-x-auto px-3 py-4">
+            <div className="flex w-max min-w-full justify-center">
+              <OverlayBar
+                metrics={selectedMetrics}
+                values={OVERLAY_SAMPLE_VALUES}
+                size={ov.size}
+                color={ov.color}
+                style={ov.style}
+              />
+            </div>
           </div>
         </Panel>
 
@@ -159,23 +222,33 @@ export function InGameTab() {
           className="mb-4"
           anchorId="overlay_metrics"
           eyebrow="Metrics"
-          title={`${ov.metrics.length} / ${MAX_OVERLAY_METRICS} selected`}
-          desc="Pick what to display. Temperatures arrive in a later update."
+          title={`${selectedMetrics.length} / ${MAX_OVERLAY_METRICS} selected`}
+          desc="Game ping estimates the route to your detected server. Relay measures your connection to SwiftTunnel. Traffic counts the tunnel."
         >
           <div className="flex flex-col gap-3">
             {OVERLAY_METRIC_GROUPS.map((group) => {
-              const items = OVERLAY_METRICS.filter((m) => m.group === group);
+              const items = OVERLAY_METRICS.filter(
+                (m) => m.group === group && !m.soon,
+              );
               if (items.length === 0) return null;
               return (
                 <div key={group}>
-                  <h4 className="eyebrow mb-1.5 text-text-secondary">{group}</h4>
+                  <h4 className="eyebrow mb-1.5 text-text-secondary">
+                    {group}
+                  </h4>
                   <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3">
                     {items.map((m) => {
-                      const checked = ov.metrics.includes(m.id);
+                      const checked = selectedMetrics.includes(m.id);
                       return (
                         <button
                           key={m.id}
                           type="button"
+                          aria-pressed={checked}
+                          disabled={
+                            ov.enabled &&
+                            checked &&
+                            selectedMetrics.length === 1
+                          }
                           onClick={() => toggleMetric(m.id)}
                           className="flex items-center gap-2 rounded-[7px] px-2.5 py-1.5 text-left text-[11.5px] transition-colors"
                           style={{
@@ -219,13 +292,55 @@ export function InGameTab() {
               );
             })}
           </div>
+          {!selectedMetrics.length && (
+            <p className="mt-3 text-[11.5px] text-text-muted">
+              Choose at least one metric to enable the overlay.
+            </p>
+          )}
+          {!!selectedMetrics.length && (
+            <div className="mt-4 border-t border-border-subtle pt-3">
+              <p className="eyebrow mb-2 text-text-secondary">Display order</p>
+              <div className="flex flex-wrap gap-1.5">
+                {selectedMetrics.map((id, i) => (
+                  <div
+                    key={id}
+                    className="flex items-center gap-1 rounded-[7px] bg-bg-base px-2 py-1.5"
+                  >
+                    <span className="mr-1 text-[11px] text-text-secondary">
+                      {metricMeta(id)?.label}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`Move ${metricMeta(id)?.label} left`}
+                      disabled={i === 0}
+                      onClick={() => moveMetric(i, -1)}
+                      className="text-text-muted disabled:opacity-25"
+                    >
+                      <Icon name="chevron-left" size={11} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Move ${metricMeta(id)?.label} right`}
+                      disabled={i === selectedMetrics.length - 1}
+                      onClick={() => moveMetric(i, 1)}
+                      className="text-text-muted disabled:opacity-25"
+                    >
+                      <Icon name="chevron-right" size={11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </Panel>
 
         {/* Style + Size + Color */}
         <Panel className="mb-4" anchorId="overlay_style" eyebrow="Appearance">
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
             <div>
-              <h4 className="eyebrow mb-2 text-text-secondary">Display style</h4>
+              <h4 className="eyebrow mb-2 text-text-secondary">
+                Display style
+              </h4>
               <div className="flex gap-1.5">
                 {STYLES.map((st) => (
                   <SegBtn
@@ -260,6 +375,7 @@ export function InGameTab() {
                     key={c}
                     type="button"
                     aria-label={`Color ${c}`}
+                    aria-pressed={ov.color === c}
                     onClick={() => patch({ color: c })}
                     className="h-6 w-6 rounded-full transition-transform hover:scale-110"
                     style={{
@@ -284,7 +400,7 @@ export function InGameTab() {
           desc={
             hasCustomPos
               ? "Custom spot set by dragging in-game. Pick a corner to snap back."
-              : "Pick a corner here, or just grab the bar in-game to move it anywhere."
+              : "Pick a position, or unlock the bar to drag it while playing."
           }
           actions={
             hasCustomPos ? (
@@ -306,7 +422,10 @@ export function InGameTab() {
                 border: "1px solid var(--color-border-default)",
               }}
             >
-              <div className="grid grid-cols-3 grid-rows-3 gap-1.5" style={{ height: 150 }}>
+              <div
+                className="grid grid-cols-3 grid-rows-3 gap-1.5"
+                style={{ height: 150 }}
+              >
                 {POSITIONS.flat().map((pos) => {
                   const active = !hasCustomPos && ov.position === pos;
                   return (
@@ -314,6 +433,7 @@ export function InGameTab() {
                       key={pos}
                       type="button"
                       aria-label={pos}
+                      aria-pressed={active}
                       onClick={() =>
                         patch({ position: pos, custom_x: null, custom_y: null })
                       }
@@ -334,8 +454,13 @@ export function InGameTab() {
               <div className="mx-auto mt-2 h-1 w-16 rounded-full bg-[color:var(--color-border-default)]" />
             </div>
           </div>
+          <ToggleRow
+            label="Lock overlay position"
+            desc="Lets game clicks pass through. Unlock to drag the bar."
+            enabled={ov.locked ?? true}
+            onChange={(locked) => patch({ locked })}
+          />
         </Panel>
-
       </div>
 
       {/* When my game starts - independent of the overlay master toggle:
@@ -353,18 +478,6 @@ export function InGameTab() {
             enabled={config.system_optimization.auto_ram_clean}
             disabled={ramBusy}
             onChange={(v) => void toggleAutoRamClean(v)}
-          />
-          <ToggleRow
-            label="Monitor FPS and keep a session chart"
-            desc="Records FPS while you play so you can review it after the game."
-            enabled={ov.monitor_fps_chart}
-            onChange={(v) => patch({ monitor_fps_chart: v })}
-          />
-          <ToggleRow
-            label="Show max FPS after playing"
-            desc="A desktop notification with your session's peak FPS when the game closes."
-            enabled={ov.show_max_fps_message}
-            onChange={(v) => patch({ show_max_fps_message: v })}
           />
         </div>
       </Panel>
@@ -384,6 +497,7 @@ function SegBtn({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       className="rounded-[7px] px-3 py-1.5 text-[11.5px] font-medium transition-colors"
       style={{
@@ -413,7 +527,9 @@ function ToggleRow({
   return (
     <div className="flex items-center justify-between gap-4 px-4 py-2.5">
       <div className="min-w-0">
-        <div className="text-[12.5px] font-medium text-text-primary">{label}</div>
+        <div className="text-[12.5px] font-medium text-text-primary">
+          {label}
+        </div>
         <div className="text-[11px] text-text-muted">{desc}</div>
       </div>
       <Toggle

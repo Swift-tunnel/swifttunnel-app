@@ -83,7 +83,7 @@ const TABS: SearchEntry[] = [
   {
     id: "tab-ingame",
     tab: "ingame",
-    label: "In-Game",
+    label: "Overlay",
     section: "Go to page",
     icon: ingameIcon,
     keywords: "in game overlay hud fps counter cpu ram network monitor",
@@ -493,7 +493,7 @@ const OVERLAY: SearchEntry[] = (
   [
     {
       anchor: "overlay_enabled",
-      label: "In-Game Overlay",
+      label: "Overlay",
       keywords:
         "overlay hud in game enable turn on off stats bar show hide display",
     },
@@ -501,13 +501,13 @@ const OVERLAY: SearchEntry[] = (
       anchor: "overlay_enabled",
       label: "Overlay hotkey",
       keywords:
-        "hotkey shortcut keybind key bind toggle overlay shift f1 press key",
+        "hotkey shortcut keybind key bind toggle overlay ctrl shift o press key",
     },
     {
       anchor: "overlay_metrics",
       label: "Overlay metrics",
       keywords:
-        "metrics fps counter ping latency cpu gpu ram memory usage clock time netspeed download upload counters which stats",
+        "metrics fps counter game ping relay latency cpu ram memory usage clock time netspeed download upload counters which stats",
     },
     {
       anchor: "overlay_style",
@@ -537,23 +537,13 @@ const OVERLAY: SearchEntry[] = (
       keywords:
         "ram clean memory free clear boost on launch automatic auto clean standby",
     },
-    {
-      anchor: "auto_ram_clean",
-      label: "Monitor FPS and keep a session chart",
-      keywords: "fps chart graph session history monitor record track",
-    },
-    {
-      anchor: "auto_ram_clean",
-      label: "Show max FPS after playing",
-      keywords: "max fps peak highest notification after game session summary",
-    },
   ] as const
 ).map((s, i) => ({
   id: `ov-${s.anchor}-${i}`,
   tab: "ingame" as const,
   anchor: s.anchor,
   label: s.label,
-  section: "In-Game · Overlay",
+  section: "Overlay",
   icon: ingameIcon,
   keywords: s.keywords,
 }));

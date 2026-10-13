@@ -133,7 +133,7 @@ const OVERLAY_POSITIONS = [
   "bottom-left", "bottom-center", "bottom-right",
 ] as const;
 const OVERLAY_METRICS = [
-  "fps", "time", "playtime", "ping", "battery", "upload", "download",
+    "fps", "time", "playtime", "ping", "game_ping", "battery", "upload", "download",
   "cpu", "cpu_temp", "gpu", "gpu_temp", "ram", "disk",
 ] as const;
 
@@ -276,6 +276,7 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
             ? asNum(o.custom_y, -20000, 20000, 0)
             : null,
         hotkey: asStr(o.hotkey, 40, D.overlay.hotkey),
+        locked: asBool(o.locked, true),
         monitor_fps_chart: asBool(
           o.monitor_fps_chart,
           D.overlay.monitor_fps_chart,

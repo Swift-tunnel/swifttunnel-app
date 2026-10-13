@@ -59,7 +59,7 @@ pub async fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Resu
     // frontend should not be able to conjure arbitrary windows.
     let (title, width, height) = match label.as_str() {
         "overlay" => ("SwiftTunnel Overlay", 340.0, 132.0),
-        "overlay-stats" => ("SwiftTunnel In-Game Overlay", 600.0, 200.0),
+        "overlay-stats" => ("SwiftTunnel Stats Overlay", 600.0, 200.0),
         other => return Err(format!("unknown overlay window: {other}")),
     };
 

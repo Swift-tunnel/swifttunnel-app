@@ -6,6 +6,7 @@ pub mod launcher;
 pub mod network;
 pub mod optimization;
 pub mod optimizer;
+pub mod overlay;
 pub mod settings;
 pub mod system;
 pub mod updater;

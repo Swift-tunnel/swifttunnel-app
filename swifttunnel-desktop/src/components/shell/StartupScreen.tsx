@@ -17,7 +17,7 @@ import { startupProgress, type StartupStep } from "../../lib/startup";
 const TIPS: string[] = [
   "SwiftTunnel only routes your game traffic, everything else stays on your ISP at full speed.",
   "Every optimization is reversible. Turn it off and the previous Windows setting comes back.",
-  "The in-game overlay shows FPS, CPU, RAM and ping. Bind it to a hotkey in the In-Game tab.",
+  "Choose the stats you want while playing in the Overlay tab.",
   "Auto picks the lowest-latency relay for your Roblox server automatically.",
   "Unlock Roblox's frame cap and tune graphics from the Games tab.",
   "Press Ctrl+2 for Optimize, Ctrl+3 for Games, Ctrl+7 for the in-game overlay.",

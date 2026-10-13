@@ -4,7 +4,7 @@ import type {
   OverlaySize,
   OverlayStyle,
 } from "../../lib/types";
-import { metricMeta } from "./overlayMetrics";
+import { metricMeta, supportedOverlayMetrics } from "./overlayMetrics";
 
 interface OverlayBarProps {
   metrics: OverlayMetric[];
@@ -13,6 +13,7 @@ interface OverlayBarProps {
   size: OverlaySize;
   color: string;
   style: OverlayStyle;
+  maxWidth?: number;
 }
 
 const SIZE_PX: Record<
@@ -33,8 +34,8 @@ const SIZE_PX: Record<
  * a bold tabular value, with depth (gradient + inset highlight + drop shadow)
  * so they stay legible over any game background.
  */
-export function OverlayBar({ metrics, values, size, color, style }: OverlayBarProps) {
-  const s = SIZE_PX[size];
+export function OverlayBar({ metrics, values, size, color, style, maxWidth }: OverlayBarProps) {
+  const s = SIZE_PX[size] ?? SIZE_PX.small;
   const layered = style === "layered";
 
   const cell = (m: OverlayMetric): ReactElement | null => {
@@ -45,6 +46,7 @@ export function OverlayBar({ metrics, values, size, color, style }: OverlayBarPr
       <span
         key={m}
         className="inline-flex items-baseline gap-1.5 whitespace-nowrap"
+        data-overlay-metric={m}
         style={
           layered
             ? {
@@ -61,7 +63,7 @@ export function OverlayBar({ metrics, values, size, color, style }: OverlayBarPr
       >
         <span
           style={{
-            color: "rgba(255,255,255,0.42)",
+            color: "rgba(255,255,255,0.66)",
             fontWeight: 600,
             fontSize: s.label,
             textTransform: "uppercase",
@@ -70,14 +72,14 @@ export function OverlayBar({ metrics, values, size, color, style }: OverlayBarPr
         >
           {meta.label}
         </span>
-        <span style={{ color, fontWeight: 700, letterSpacing: "-0.01em" }}>
+        <span style={{ color: value === "--" ? "rgba(255,255,255,0.38)" : color, fontWeight: 700, letterSpacing: "-0.01em", minWidth: `${m === "time" ? 8 : m === "playtime" ? 8 : m === "fps" ? 4 : 7}ch`, textAlign:"right" }}>
           {value}
         </span>
       </span>
     );
   };
 
-  const cells = metrics
+  const cells = supportedOverlayMetrics(metrics)
     .map((m) => cell(m))
     .filter((el): el is ReactElement => el !== null);
 
@@ -107,13 +109,16 @@ export function OverlayBar({ metrics, values, size, color, style }: OverlayBarPr
 
   return (
     <div
-      className="inline-flex items-center"
+      className="inline-flex flex-wrap items-center"
+      role="status"
+      aria-label="SwiftTunnel overlay stats"
       style={{
         gap: s.gap,
+        maxWidth,
         fontSize: s.font,
         lineHeight: 1,
         padding: layered ? 0 : `${s.padY}px ${Math.round(s.gap * 1.15)}px`,
-        borderRadius: 9,
+        borderRadius: 10,
         background: layered
           ? "transparent"
           : "linear-gradient(180deg, rgba(22,22,24,0.86) 0%, rgba(9,9,10,0.9) 100%)",
@@ -125,7 +130,7 @@ export function OverlayBar({ metrics, values, size, color, style }: OverlayBarPr
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
       }}
     >
-      {metrics.length === 0 ? (
+      {cells.length === 0 ? (
         <span style={{ color: "rgba(255,255,255,0.4)", fontSize: s.font }}>
           No metrics selected
         </span>

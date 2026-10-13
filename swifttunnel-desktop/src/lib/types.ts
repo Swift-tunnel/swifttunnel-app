@@ -298,6 +298,7 @@ export type OverlayMetric =
   | "time"
   | "playtime"
   | "ping"
+  | "game_ping"
   | "battery"
   | "upload"
   | "download"
@@ -330,6 +331,7 @@ export interface OverlayConfig {
   position: OverlayPosition;
   custom_x: number | null;
   custom_y: number | null;
+  locked?: boolean;
   hotkey: string;
   monitor_fps_chart: boolean;
   show_max_fps_message: boolean;

@@ -794,6 +794,8 @@ pub fn run() {
             commands::auth::auth_refresh_profile,
             commands::auth::auth_update_required,
             commands::system::ensure_overlay_window,
+            commands::overlay::ensure_overlay_shortcut,
+            commands::overlay::overlay_game_monitor,
             // VPN
             commands::vpn::vpn_get_state,
             commands::vpn::vpn_preflight_binding,

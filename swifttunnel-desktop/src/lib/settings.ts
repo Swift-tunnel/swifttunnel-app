@@ -46,6 +46,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
       position: "top-left",
       custom_x: null,
       custom_y: null,
+      locked: true,
       hotkey: "Ctrl+Shift+O",
       monitor_fps_chart: false,
       show_max_fps_message: false,

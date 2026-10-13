@@ -5,6 +5,7 @@ import type {
   OverlaySize,
   OverlayStyle,
 } from "../../lib/types";
+import type { OverlayMonitor } from "./overlayGeometry";
 
 export const OVERLAY_STATS_WINDOW = "overlay-stats";
 export const OVERLAY_RENDER_EVENT = "overlay-render";
@@ -23,15 +24,17 @@ export interface OverlayRenderPayload {
   position: OverlayPosition;
   customX: number | null;
   customY: number | null;
+  locked?: boolean;
+  monitor?: OverlayMonitor | null;
   values: Partial<Record<OverlayMetric, string>>;
 }
 
 export function overlayMayInteract(payload: OverlayRenderPayload | null): boolean {
-  return !!payload && !payload.forceHide && payload.metrics.length > 0;
+  return !!payload && !payload.forceHide && !(payload.locked ?? true) && payload.metrics.length > 0;
 }
 
 export function overlayShouldShow(payload: OverlayRenderPayload | null, interacting: boolean): boolean {
-  return overlayMayInteract(payload) && (!!payload?.enabled || interacting);
+  return !!payload && !payload.forceHide && payload.metrics.length > 0 && (payload.enabled || (overlayMayInteract(payload) && interacting));
 }
 
 export interface OverlayPositionPayload {

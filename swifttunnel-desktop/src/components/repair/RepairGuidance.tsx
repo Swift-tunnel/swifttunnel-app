@@ -16,9 +16,9 @@ export const REPAIR_GUIDES: { title: string; steps: string[]; tab: TabId; action
     title: "Lower FPS, a white window, or the app stops responding",
     steps: [
       "Compare the same Roblox scene with the app visible and minimized. Note whether only FPS changes or the connection also drops.",
-      "Turn off the In-Game overlay for a comparison. If the problem began after a tweak, revert that tweak in Optimize and restart the PC if it is marked Restart PC.",
+      "Turn off the overlay for a comparison. If the problem began after a tweak, revert that tweak in Optimize and restart the PC if it is marked Restart PC.",
       "Capture a log after the problem. Repair resets the overlay layout, but it does not turn the overlay off or revert every Windows optimization.",
-    ], tab: "ingame", action: "Open In-Game",
+    ], tab: "ingame", action: "Open Overlay",
   },
   {
     title: "Windows Installer asks for an unavailable resource, or uninstall fails",

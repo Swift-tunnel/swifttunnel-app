@@ -459,7 +459,7 @@ interface VpnStore {
   resumeConnectWithAdapter: (guid: string) => Promise<void>;
   dismissBindingChooser: () => void;
   disconnect: () => Promise<void>;
-  fetchThroughput: () => Promise<void>;
+  fetchThroughput: () => Promise<boolean>;
   fetchPing: () => Promise<void>;
   fetchFreeTier: () => Promise<void>;
   tickFreeTier: () => void;
@@ -1056,7 +1056,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     const revision = sessionRevision;
     try {
       const stats = await vpnGetThroughput();
-      if (!isCurrentConnectAttempt(attempt) || revision !== sessionRevision) return;
+      if (!isCurrentConnectAttempt(attempt) || revision !== sessionRevision) return false;
       if (stats) {
         set({
           bytesUp: stats.bytes_up,
@@ -1064,12 +1064,14 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           packetsTunneled: stats.packets_tunneled,
           packetsBypassed: stats.packets_bypassed,
         });
+        return true;
       }
     } catch (error) {
       reportError("Failed to fetch VPN throughput", error, {
         dedupeKey: "vpn-fetch-throughput",
       });
     }
+    return false;
   },
 
   fetchFreeTier: async () => {

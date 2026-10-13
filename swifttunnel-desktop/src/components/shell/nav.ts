@@ -53,7 +53,7 @@ const ALL_SECTIONS: NavSection[] = [
       },
       {
         id: "ingame",
-        label: "In-Game",
+        label: "Overlay",
         description: "On-screen overlay, FPS, CPU, RAM, network",
         shortcut: "7",
         icon: "ingame",

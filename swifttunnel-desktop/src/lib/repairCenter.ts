@@ -1261,7 +1261,7 @@ async function repairOverlayLayout(
       status: "healthy",
       summary: "Overlay layout is already at the default position.",
       nextStep:
-        "If the overlay still isn't visible, enable it from the In-Game tab.",
+        "If the overlay still isn't visible, enable it from the Overlay tab.",
       changed: false,
       reversible: false,
       ranAt: deps.now(),
@@ -1278,7 +1278,7 @@ async function repairOverlayLayout(
     status: "fixed",
     summary: "Overlay moved back to the default on-screen position.",
     nextStep:
-      "Enable the overlay from the In-Game tab and re-position it where you like.",
+      "Enable the overlay from the Overlay tab and choose its position.",
     changed: false,
     reversible: false,
     ranAt: deps.now(),

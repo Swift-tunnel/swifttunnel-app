@@ -4,7 +4,8 @@ use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, RECT},
         Graphics::Gdi::{
-            EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+            EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
+            MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
         },
         UI::WindowsAndMessaging::*,
     },
@@ -18,6 +19,43 @@ pub struct Display {
     pub top: i32,
     pub width: i32,
     pub height: i32,
+}
+
+#[derive(Clone, Serialize)]
+pub struct GameMonitor {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub scale: f64,
+}
+
+pub fn monitor_for_player(pid: u32) -> Option<GameMonitor> {
+    let mut search = FindWindow { pid, window: None };
+    unsafe {
+        let _ = EnumWindows(
+            Some(window_callback),
+            LPARAM((&mut search as *mut FindWindow) as isize),
+        );
+        let window = search.window?;
+        let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
+            return None;
+        }
+        let r = info.rcMonitor;
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(window);
+        Some(GameMonitor {
+            x: r.left,
+            y: r.top,
+            w: r.right - r.left,
+            h: r.bottom - r.top,
+            scale: if dpi > 0 { f64::from(dpi) / 96.0 } else { 1.0 },
+        })
+    }
 }
 pub fn displays() -> Vec<Display> {
     let mut result = Vec::new();
