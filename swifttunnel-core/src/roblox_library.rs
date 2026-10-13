@@ -20,10 +20,16 @@ pub enum RobloxClient {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameEntry {
     pub place_id: String,
+    #[serde(default)]
+    pub universe_id: Option<String>,
     pub name: String,
     pub job_id: Option<String>,
     pub last_played: Option<u64>,
     pub favourite: bool,
+    #[serde(default)]
+    pub favourite_revision: u64,
+    #[serde(default)]
+    pub preferences_revision: u64,
     #[serde(default)]
     pub client: RobloxClient,
     #[serde(default)]
@@ -131,9 +137,13 @@ impl GameLibrary {
             "Your game library could not be read. The original file has been kept.".to_string()
         })?;
         if library.entries.len() > MAX_ENTRIES
-            || library.entries.iter().filter(|e| e.favourite).count() > MAX_FAVOURITES
+            || library.favourite_count() > MAX_FAVOURITES
             || library.entries.iter().any(|entry| {
                 !valid_place_id(&entry.place_id)
+                    || entry
+                        .universe_id
+                        .as_deref()
+                        .is_some_and(|id| !valid_place_id(id))
                     || entry.preferences.validate().is_err()
                     || entry
                         .icon_url
@@ -223,10 +233,13 @@ impl GameLibrary {
         }
         self.entries.push(GameEntry {
             place_id: place_id.into(),
+            universe_id: None,
             name: format!("Place {place_id}"),
             job_id: None,
             last_played: None,
             favourite: false,
+            favourite_revision: 0,
+            preferences_revision: 0,
             client,
             preferences: GamePreferences::default(),
             icon_url: None,
@@ -241,7 +254,7 @@ impl GameLibrary {
         favourite: bool,
     ) -> Result<(), String> {
         if favourite
-            && self.entries.iter().filter(|e| e.favourite).count() >= MAX_FAVOURITES
+            && self.favourite_count() >= MAX_FAVOURITES
             && !self
                 .entries
                 .iter()
@@ -250,8 +263,109 @@ impl GameLibrary {
             return Err("You can save up to 20 favourites. Remove one first.".into());
         }
         let index = self.ensure_entry(place_id, client)?;
-        self.entries[index].favourite = favourite;
+        let universe = self.entries[index].universe_id.clone();
+        let revision = self
+            .entries
+            .iter()
+            .map(|entry| entry.favourite_revision)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for entry in &mut self.entries {
+            if entry.client == client
+                && (entry.place_id == place_id
+                    || universe.is_some() && entry.universe_id == universe)
+            {
+                entry.favourite = favourite;
+                entry.favourite_revision = revision;
+            }
+        }
         Ok(())
+    }
+
+    fn favourite_count(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        self.entries
+            .iter()
+            .filter(|entry| {
+                entry.favourite
+                    && seen.insert((
+                        entry.client as u8,
+                        entry
+                            .universe_id
+                            .as_deref()
+                            .map(|id| format!("universe:{id}"))
+                            .unwrap_or_else(|| format!("place:{}", entry.place_id)),
+                    ))
+            })
+            .count()
+    }
+
+    /// Places within an experience share preferences and a favourite, but keep
+    /// their own server IDs so Rejoin targets the most recently played place.
+    pub fn set_universe(&mut self, place_id: &str, client: RobloxClient, universe: &str) {
+        if !valid_place_id(universe) {
+            return;
+        }
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.place_id == place_id && entry.client == client)
+        else {
+            return;
+        };
+        self.entries[index].universe_id = Some(universe.to_owned());
+        let members: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.client == client && entry.universe_id.as_deref() == Some(universe)
+            })
+            .collect();
+        // Preserve legacy favourites/custom settings, unless a newer explicit
+        // edit (including unstar or reset) exists while metadata was loading.
+        let favourite_revision = members
+            .iter()
+            .map(|entry| entry.favourite_revision)
+            .max()
+            .unwrap_or(0);
+        let favourite = if favourite_revision == 0 {
+            members.iter().any(|entry| entry.favourite)
+        } else {
+            members
+                .iter()
+                .find(|entry| entry.favourite_revision == favourite_revision)
+                .unwrap()
+                .favourite
+        };
+        let preferences_revision = members
+            .iter()
+            .map(|entry| entry.preferences_revision)
+            .max()
+            .unwrap_or(0);
+        let preferences = if preferences_revision > 0 {
+            members
+                .iter()
+                .find(|entry| entry.preferences_revision == preferences_revision)
+                .unwrap()
+                .preferences
+                .clone()
+        } else {
+            members
+                .iter()
+                .filter(|entry| entry.preferences != GamePreferences::default())
+                .max_by_key(|entry| entry.last_played)
+                .map(|entry| entry.preferences.clone())
+                .unwrap_or_default()
+        };
+        for entry in &mut self.entries {
+            if entry.client == client && entry.universe_id.as_deref() == Some(universe) {
+                entry.favourite = favourite;
+                entry.preferences = preferences.clone();
+                entry.favourite_revision = favourite_revision;
+                entry.preferences_revision = preferences_revision;
+            }
+        }
     }
 
     pub fn set_name(&mut self, place_id: &str, client: RobloxClient, name: &str) {
@@ -286,13 +400,37 @@ impl GameLibrary {
     ) -> Result<(), String> {
         preferences.validate()?;
         let index = self.ensure_entry(place_id, client)?;
-        self.entries[index].preferences = preferences;
+        let universe = self.entries[index].universe_id.clone();
+        let revision = self
+            .entries
+            .iter()
+            .map(|entry| entry.preferences_revision)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        for entry in &mut self.entries {
+            if entry.client == client
+                && (entry.place_id == place_id
+                    || universe.is_some() && entry.universe_id == universe)
+            {
+                entry.preferences = preferences.clone();
+                entry.preferences_revision = revision;
+            }
+        }
         Ok(())
     }
 
     pub fn forget(&mut self, place_id: &str, client: RobloxClient) {
-        self.entries
-            .retain(|e| e.place_id != place_id || e.client != client);
+        let universe = self
+            .entries
+            .iter()
+            .find(|entry| entry.place_id == place_id && entry.client == client)
+            .and_then(|entry| entry.universe_id.clone());
+        self.entries.retain(|entry| {
+            entry.client != client
+                || (entry.place_id != place_id
+                    && !(universe.is_some() && entry.universe_id == universe))
+        });
     }
 
     fn sort(&mut self) {
@@ -357,6 +495,83 @@ mod tests {
         assert!(valid_icon_url("https://tr.rbxcdn.com/image.png"));
     }
     const JOB: &str = "550e8400-e29b-41d4-a716-446655440000";
+    #[test]
+    fn experience_places_share_favourites_and_settings_without_losing_rejoin_targets() {
+        let mut lib = GameLibrary::default();
+        lib.record_join("6516141723", JOB, RobloxClient::Standard, 10)
+            .unwrap();
+        lib.set_favourite("6516141723", RobloxClient::Standard, true)
+            .unwrap();
+        let settings = GamePreferences {
+            fps_cap: Some(240),
+            ..Default::default()
+        };
+        lib.set_preferences("6516141723", RobloxClient::Standard, settings.clone())
+            .unwrap();
+        lib.set_universe("6516141723", RobloxClient::Standard, "2440500124");
+        lib.record_join("6839171747", JOB, RobloxClient::Standard, 20)
+            .unwrap();
+        lib.set_universe("6839171747", RobloxClient::Standard, "2440500124");
+        assert_eq!(lib.entries[0].place_id, "6839171747");
+        assert_eq!(lib.entries[0].job_id.as_deref(), Some(JOB));
+        assert!(
+            lib.entries
+                .iter()
+                .all(|entry| entry.favourite && entry.preferences == settings)
+        );
+        assert_eq!(lib.favourite_count(), 1);
+        lib.set_favourite("6839171747", RobloxClient::Standard, false)
+            .unwrap();
+        assert!(lib.entries.iter().all(|entry| !entry.favourite));
+        lib.set_preferences(
+            "6839171747",
+            RobloxClient::Standard,
+            GamePreferences::default(),
+        )
+        .unwrap();
+        assert!(
+            lib.entries
+                .iter()
+                .all(|entry| entry.preferences == GamePreferences::default())
+        );
+        lib.record_join("6516141723", JOB, RobloxClient::Vng, 30)
+            .unwrap();
+        lib.set_universe("6516141723", RobloxClient::Vng, "2440500124");
+        lib.forget("6839171747", RobloxClient::Standard);
+        assert_eq!(lib.entries.len(), 1);
+        assert_eq!(lib.entries[0].client, RobloxClient::Vng);
+    }
+
+    #[test]
+    fn late_metadata_cannot_undo_an_unstar_or_settings_reset() {
+        let mut lib = GameLibrary::default();
+        lib.record_join("1818", JOB, RobloxClient::Standard, 10)
+            .unwrap();
+        lib.set_favourite("1818", RobloxClient::Standard, true)
+            .unwrap();
+        lib.set_preferences(
+            "1818",
+            RobloxClient::Standard,
+            GamePreferences {
+                fps_cap: Some(240),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        lib.set_universe("1818", RobloxClient::Standard, "200");
+        lib.record_join("1819", JOB, RobloxClient::Standard, 20)
+            .unwrap();
+        lib.set_favourite("1819", RobloxClient::Standard, false)
+            .unwrap();
+        lib.set_preferences("1819", RobloxClient::Standard, GamePreferences::default())
+            .unwrap();
+        lib.set_universe("1819", RobloxClient::Standard, "200");
+        assert!(
+            lib.entries
+                .iter()
+                .all(|entry| !entry.favourite && entry.preferences == GamePreferences::default())
+        );
+    }
     #[test]
     fn favourite_changes_keep_cards_in_place_and_recent_order_survives_new_joins() {
         let mut lib = GameLibrary::default();

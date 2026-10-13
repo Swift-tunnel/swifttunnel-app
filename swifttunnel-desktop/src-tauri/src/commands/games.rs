@@ -120,20 +120,24 @@ pub async fn games_refresh_metadata(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    static BATCH_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let Ok(_batch) = BATCH_SLOT.try_acquire() else {
+        return Ok(());
+    };
     let targets: Vec<_> = state
         .games
         .lock()
         .library()?
         .entries
         .iter()
-        .filter(|e| e.icon_url.is_none())
-        .take(6)
+        .filter(|e| e.icon_url.is_none() || e.universe_id.is_none())
         .map(|e| (e.place_id.clone(), e.client))
         .collect();
     for (place, client) in targets {
-        let _ = refresh_name(&state, &place, client).await;
+        if refresh_name(&state, &place, client).await == Ok(true) {
+            let _ = app.emit(LIBRARY_CHANGED, ());
+        }
     }
-    let _ = app.emit(LIBRARY_CHANGED, ());
     Ok(())
 }
 
@@ -391,7 +395,9 @@ pub async fn refresh_name(
     let needs_name = state.games.lock().library()?.entries.iter().any(|e| {
         e.place_id == place_id
             && e.client == client
-            && (e.name == format!("Place {place_id}") || e.icon_url.is_none())
+            && (e.name == format!("Place {place_id}")
+                || e.icon_url.is_none()
+                || e.universe_id.is_none())
     });
     if !needs_name {
         return Ok(false);
@@ -444,6 +450,7 @@ pub async fn refresh_name(
     let name = name.to_owned();
     library_task(state.games.clone(), move |games| {
         games.mutate(|lib| {
+            lib.set_universe(&place_id, client, &universe.to_string());
             lib.set_name(&place_id, client, &name);
             if let Some(icon) = icon {
                 lib.set_icon(&place_id, client, &icon);

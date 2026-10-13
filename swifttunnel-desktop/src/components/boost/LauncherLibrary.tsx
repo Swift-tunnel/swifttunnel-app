@@ -6,7 +6,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useServerStore } from "../../stores/serverStore";
 import { boostCloseRoblox, boostGetMetrics, gamesAddFavourite, gamesForget, gamesLaunch, gamesLaunchPlan, gamesRefreshMetadata, gamesSetNotifications, gamesDismissRecovery, gamesCreateShortcut, gamesSuggestServer } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
-import { gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "../../lib/robloxGames";
+import { gameEntryKey, gameLibraryEntries, gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "../../lib/robloxGames";
 import { defaultGamePreferences, executeGameLaunch } from "../../lib/gameLaunchFlow";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import type { GameLaunchPlan, RobloxClient, RobloxGameEntry } from "../../lib/types";
@@ -142,7 +142,7 @@ export function GameLibraryPanel() {
   const entries = library?.entries ?? [];
   const current = library?.current;
   const active = entries.find(e => e.place_id === current?.place_id && e.client === current.client);
-  const shown = entries.filter(e => (filter !== "favourites" || e.favourite) && `${e.name} ${e.place_id}`.toLowerCase().includes(query.toLowerCase()));
+  const shown = gameLibraryEntries(entries, filter, query);
   const locked = busy || !!library?.launch_pending;
 
   return <div className="flex flex-col gap-4">
@@ -166,7 +166,7 @@ export function GameLibraryPanel() {
     {library && !!entries.length && !shown.length && <p className="py-10 text-center text-[12px] text-text-muted">No games match this view.</p>}
     {!!shown.length && <div data-search-anchor="games_cards" className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">{shown.map(entry => {
       const preferences = defaultGamePreferences(entry);
-      return <article key={`${entry.client}:${entry.place_id}`} className="instrument flex flex-col gap-3.5 p-4">
+      return <article key={gameEntryKey(entry)} className="instrument flex flex-col gap-3.5 p-4">
         <div className="flex items-start gap-3"><Artwork entry={entry} /><div className="min-w-0 flex-1"><h3 className="line-clamp-2 text-[13.5px] font-semibold leading-snug text-text-primary" title={entry.name}>{entry.name}</h3><p className="mt-1 text-[11px] text-text-muted">{entry.client === "vng" ? "Roblox VNG" : "Roblox"}{entry.last_played ? ` · ${new Date(entry.last_played * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : " · Saved"}</p><p className="mt-1 text-[10.5px] text-text-dimmed">{preferences.fps_cap ? `${preferences.fps_cap === 99999 ? "Uncapped" : `${preferences.fps_cap} FPS`} · ` : ""}{preferences.datacenter_id ? "Preferred region" : preferences.use_tunnel ? "Automatic connection" : "Use current connection"}</p></div>
           <button type="button" aria-label={`${entry.favourite ? "Remove" : "Add"} ${entry.name} ${entry.favourite ? "from" : "to"} favourites`} aria-pressed={entry.favourite} disabled={locked || !!loadError} className={`${iconButtonClass} -mt-1 ${entry.favourite ? "!text-text-primary" : ""}`} onClick={() => void useGameLibraryStore.getState().setFavourite(entry.place_id, entry.client, !entry.favourite).catch(error => setError(formatErrorMessage(error)))}><Star filled={entry.favourite} /></button></div>
         <div className="flex items-center gap-1.5"><Button size="sm" className="min-w-[92px]" disabled={locked} onClick={() => void prepare(entry)}>Play</Button>

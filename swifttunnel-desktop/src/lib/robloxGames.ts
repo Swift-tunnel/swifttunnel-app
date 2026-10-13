@@ -1,4 +1,24 @@
-import type { GameRouteStatus, RobloxClient, RobloxGameSession } from "./types";
+import type { GameRouteStatus, RobloxClient, RobloxGameSession, RobloxGameEntry } from "./types";
+
+export const gameEntryKey = (entry: RobloxGameEntry): string =>
+  `${entry.client}:${entry.universe_id ? `universe:${entry.universe_id}` : `place:${entry.place_id}`}`;
+
+/** One card per experience, keeping the latest place and job for Rejoin. */
+export function gameLibraryEntries(entries: RobloxGameEntry[], view: "all" | "favourites", query: string): RobloxGameEntry[] {
+  const groups = new Map<string, RobloxGameEntry>();
+  for (const entry of [...entries].sort((a, b) => (b.last_played ?? 0) - (a.last_played ?? 0))) {
+    const key = gameEntryKey(entry);
+    const existing = groups.get(key);
+    if (!existing) groups.set(key, { ...entry });
+    else {
+      existing.favourite ||= entry.favourite;
+      existing.icon_url ??= entry.icon_url;
+    }
+  }
+  const filtered = [...groups.values()].filter(entry => (view !== "favourites" || entry.favourite)
+    && `${entry.name} ${entry.place_id}`.toLowerCase().includes(query.trim().toLowerCase()));
+  return view === "all" ? filtered.slice(0, 4) : filtered;
+}
 
 export function gameLinkClient(input: string): RobloxClient | null {
   try {

@@ -21,6 +21,39 @@ beforeEach(() => {
   useGameLibraryStore.setState({ library: snapshot(), error: null, loading: false });
 });
 describe("game favourites", () => {
+  it("retains an unstar while metadata discovers that both places are one experience", async () => {
+    const original = snapshot();
+    original.entries = original.entries.map(entry => ({ ...entry, favourite: true }));
+    useGameLibraryStore.setState({ library: original });
+    const save = deferred<void>();
+    vi.mocked(gamesSetFavourite).mockReturnValue(save.promise);
+    const pending = useGameLibraryStore.getState().setFavourite("1818", "standard", false);
+    vi.mocked(gamesGetLibrary).mockResolvedValue({ ...original,
+      entries: original.entries.map(entry => ({ ...entry, universe_id: "200" })),
+    });
+    await useGameLibraryStore.getState().refresh();
+    expect(useGameLibraryStore.getState().library!.entries.every(entry => !entry.favourite)).toBe(true);
+    vi.mocked(gamesSetFavourite).mockResolvedValueOnce(undefined);
+    const next = useGameLibraryStore.getState().setFavourite("1819", "standard", true);
+    expect(next).toBe(pending);
+    expect(gamesSetFavourite).toHaveBeenCalledTimes(1);
+    save.resolve(); await pending;
+    expect(gamesSetFavourite).toHaveBeenCalledTimes(2);
+    expect(useGameLibraryStore.getState().library!.entries.every(entry => entry.favourite)).toBe(true);
+  });
+  it("unstars the whole experience through stale reads without moving the latest card", async () => {
+    const library = snapshot();
+    library.entries = library.entries.map(entry => ({ ...entry, universe_id: "200", favourite: true }));
+    useGameLibraryStore.setState({ library });
+    const save = deferred<void>();
+    vi.mocked(gamesSetFavourite).mockReturnValue(save.promise);
+    vi.mocked(gamesGetLibrary).mockResolvedValue(library);
+    const pending = useGameLibraryStore.getState().setFavourite("1819", "standard", false);
+    expect(useGameLibraryStore.getState().library!.entries.every(entry => !entry.favourite)).toBe(true);
+    await useGameLibraryStore.getState().refresh();
+    expect(useGameLibraryStore.getState().library!.entries.every(entry => !entry.favourite)).toBe(true);
+    save.resolve(); await pending;
+  });
   it("updates the star immediately without loading, reordering or fetching the whole library", async () => {
     const save = deferred<void>();
     vi.mocked(gamesSetFavourite).mockReturnValue(save.promise);

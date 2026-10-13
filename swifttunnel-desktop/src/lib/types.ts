@@ -577,6 +577,7 @@ export interface UpdaterProgressEvent {
 export type RobloxClient = "standard" | "vng";
 export interface RobloxGameEntry {
   place_id: string;
+  universe_id?: string | null;
   name: string;
   job_id: string | null;
   last_played: number | null;
