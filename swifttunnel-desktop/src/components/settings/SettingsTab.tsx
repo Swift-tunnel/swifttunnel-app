@@ -307,7 +307,7 @@ export function SettingsTab() {
 
         <details className="group/diag">
           <summary
-            className="flex cursor-pointer items-center gap-2 px-3.5 py-2.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-muted transition-colors hover:text-text-secondary"
+            className="flex cursor-pointer items-center gap-2 px-4 py-2.5 text-[10.5px] font-semibold uppercase tracking-[0.1em] text-text-muted transition-colors hover:text-text-secondary"
             style={{ listStyle: "none" }}
           >
             <Icon
@@ -319,7 +319,7 @@ export function SettingsTab() {
             Adapter diagnostics
           </summary>
           <div
-            className="mx-3.5 mb-3 grid grid-cols-2 gap-x-4 gap-y-2 rounded-[7px] px-3.5 py-3 text-[10.5px]"
+            className="mx-4 mb-3 grid grid-cols-2 gap-x-4 gap-y-2 rounded-[7px] px-3.5 py-3 text-[10.5px]"
             style={{
               backgroundColor: "var(--color-bg-elevated)",
               border: "1px solid var(--color-border-subtle)",
@@ -412,7 +412,7 @@ export function SettingsTab() {
           />
         </Row>
 
-        <div className="px-3.5 py-3">
+        <div className="px-4 py-3">
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2.5">
               <span
@@ -722,7 +722,7 @@ function Section({
 
 /** Indented follow-up content that belongs to the row above it. */
 function SubRow({ children }: { children: ReactNode }) {
-  return <div className="px-3.5 pb-3 pt-0.5">{children}</div>;
+  return <div className="px-4 pb-3 pt-0.5">{children}</div>;
 }
 
 function HeroStat({

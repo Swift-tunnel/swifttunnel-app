@@ -30,10 +30,15 @@ export function Field({ label, hint, children, className }: FieldProps) {
   );
 }
 
+/**
+ * The width of a control in a row's right-hand column. Dropdowns, switches and
+ * sliders all take it, so a list of settings lines up on both edges.
+ */
+export const CONTROL_WIDTH = 288;
+
 interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
-  /** Fill the form's width. Without it every dropdown is the same width, so a column of them lines up. */
+  /** Fill the form's width. Without it every dropdown is CONTROL_WIDTH wide. */
   block?: boolean;
-  /** Only for a dropdown that shares its slot with a second control. */
   width?: number;
 }
 
@@ -41,7 +46,7 @@ interface SelectProps extends SelectHTMLAttributes<HTMLSelectElement> {
  * The native dropdown, so the keyboard and screen readers work as usual,
  * wearing the app's own face instead of the browser's.
  */
-export function Select({ block, width = 190, className, children, ...rest }: SelectProps) {
+export function Select({ block, width = CONTROL_WIDTH, className, children, ...rest }: SelectProps) {
   return (
     <span
       className={`relative inline-flex ${block ? "w-full" : ""} ${className ?? ""}`}
@@ -74,7 +79,7 @@ interface SliderInputProps {
   disabled?: boolean;
   ariaLabel: string;
   unit?: string;
-  /** Width of the slider track; the typed box sits to its right. */
+  /** Width of the whole control. The track takes whatever the box leaves. */
   width?: number;
 }
 
@@ -92,7 +97,7 @@ export function SliderInput({
   disabled,
   ariaLabel,
   unit,
-  width = 150,
+  width = CONTROL_WIDTH,
 }: SliderInputProps) {
   const [text, setText] = useState(String(value));
   const [typing, setTyping] = useState(false);
@@ -107,8 +112,8 @@ export function SliderInput({
   }
 
   return (
-    <div className="flex items-center gap-2.5">
-      <div className="flex items-center" style={{ width }}>
+    <div className="flex shrink-0 items-center gap-3" style={{ width }}>
+      <div className="flex min-w-0 flex-1 items-center">
         <Slider
           ariaLabel={`${ariaLabel} slider`}
           value={Math.max(min, Math.min(max, value))}
@@ -120,22 +125,27 @@ export function SliderInput({
           trackColor="var(--color-bg-active)"
         />
       </div>
-      <input
-        aria-label={ariaLabel}
-        inputMode="numeric"
-        value={text}
-        disabled={disabled}
-        onFocus={() => setTyping(true)}
-        onChange={(e) => setText(e.target.value.replace(/\D/g, ""))}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") e.currentTarget.blur();
-        }}
-        className={`${compactFieldClass} w-[58px] text-right font-mono font-semibold`}
-      />
-      {unit && (
-        <span className="w-7 font-mono text-[10px] text-text-dimmed">{unit}</span>
-      )}
+      {/* The unit sits inside the box, so boxes with and without one end on the same edge. */}
+      <label
+        className={`flex h-[30px] shrink-0 cursor-text items-center gap-1.5 rounded-[var(--radius-input)] border border-border-default bg-bg-elevated px-2.5 transition-colors focus-within:border-border-focus ${disabled ? "opacity-50" : ""}`}
+      >
+        <input
+          aria-label={ariaLabel}
+          inputMode="numeric"
+          value={text}
+          disabled={disabled}
+          onFocus={() => setTyping(true)}
+          onChange={(e) => setText(e.target.value.replace(/\D/g, ""))}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+          className="w-[38px] bg-transparent text-right font-mono text-[11.5px] font-semibold text-text-primary outline-none disabled:cursor-not-allowed"
+        />
+        {unit && (
+          <span className="font-mono text-[10px] text-text-dimmed">{unit}</span>
+        )}
+      </label>
     </div>
   );
 }

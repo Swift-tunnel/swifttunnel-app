@@ -6,6 +6,9 @@ import { formatErrorMessage } from "../../lib/errors";
 import { useSettingsStore } from "../../stores/settingsStore";
 import type { GamePreferences, RobloxDatacenter, RobloxGameEntry, RobloxSettingsConfig, GameDisplay } from "../../lib/types";
 
+/** Every control in this dialog is this wide, so they share both edges. */
+const COLUMN = 240;
+
 function Group({ title, children }: { title: string; children: ReactNode }) {
   return <section><p className="eyebrow mb-1.5 px-0.5">{title}</p><div className="divide-y divide-border-subtle rounded-[10px] bg-bg-base">{children}</div></section>;
 }
@@ -63,7 +66,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
       {catalogError && <p className="text-[11.5px] leading-relaxed text-text-muted">Locations could not load. Everything else can still be changed.</p>}
       <Group title="Server">
         <Setting label="Preferred location">
-          <Select width={210} aria-label="Preferred datacenter" value={preferences.datacenter_id ?? ""}
+          <Select width={COLUMN} aria-label="Preferred datacenter" value={preferences.datacenter_id ?? ""}
             disabled={busy} onChange={e => patch({ datacenter_id: e.target.value ? Number(e.target.value) : null })}>
             <option value="">Default matchmaking</option>
             {preferences.datacenter_id && !centers.some(c => c.id === preferences.datacenter_id) && <option value={preferences.datacenter_id}>Saved location unavailable</option>}
@@ -78,12 +81,12 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
         </Setting>
       </Group>
       <Group title="Performance">
-        <Setting label="Frame-rate cap" below={fpsMode === "custom" && <div className="flex justify-end"><SliderInput ariaLabel="Game frame-rate cap" value={fps ?? 144} min={30} max={1000} step={10} unit="FPS" width={230} disabled={busy} onChange={fps_cap => patch({ fps_cap })} /></div>}>
-          <Segmented ariaLabel="Frame-rate cap" disabled={busy} value={fpsMode} options={[{ value: "inherit", label: inherit }, { value: "custom", label: "Custom" }, { value: "uncapped", label: "Uncapped" }]}
+        <Setting label="Frame-rate cap" below={fpsMode === "custom" && <div className="flex justify-end"><SliderInput ariaLabel="Game frame-rate cap" value={fps ?? 144} min={30} max={1000} step={10} unit="FPS" width={COLUMN} disabled={busy} onChange={fps_cap => patch({ fps_cap })} /></div>}>
+          <Segmented width={COLUMN} ariaLabel="Frame-rate cap" disabled={busy} value={fpsMode} options={[{ value: "inherit", label: inherit }, { value: "custom", label: "Custom" }, { value: "uncapped", label: "Uncapped" }]}
             onChange={mode => patch({ fps_cap: mode === "inherit" ? null : mode === "uncapped" ? 99999 : Math.max(30, Math.min(1000, globalFps < 9999 ? globalFps : 144)) })} />
         </Setting>
-        <Setting label="Graphics" below={qualityMode === "manual" && <div className="flex justify-end"><SliderInput ariaLabel="Game graphics level" value={level} min={1} max={10} unit="of 10" width={230} disabled={busy} onChange={next => patch({ graphics_quality: `Level${next}` as RobloxSettingsConfig["graphics_quality"] })} /></div>}>
-          <Segmented ariaLabel="Graphics" disabled={busy} value={qualityMode} options={[{ value: "inherit", label: inherit }, { value: "auto", label: "Automatic" }, { value: "manual", label: "Manual" }]}
+        <Setting label="Graphics" below={qualityMode === "manual" && <div className="flex justify-end"><SliderInput ariaLabel="Game graphics level" value={level} min={1} max={10} unit="of 10" width={COLUMN} disabled={busy} onChange={next => patch({ graphics_quality: `Level${next}` as RobloxSettingsConfig["graphics_quality"] })} /></div>}>
+          <Segmented width={COLUMN} ariaLabel="Graphics" disabled={busy} value={qualityMode} options={[{ value: "inherit", label: inherit }, { value: "auto", label: "Automatic" }, { value: "manual", label: "Manual" }]}
             onChange={mode => patch({ graphics_quality: (mode === "inherit" ? null : mode === "auto" ? "Automatic" : `Level${level}`) as RobloxSettingsConfig["graphics_quality"] | null })} />
         </Setting>
       </Group>

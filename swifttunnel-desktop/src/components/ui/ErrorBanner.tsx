@@ -32,7 +32,7 @@ export function ErrorBanner({
 
   return (
     <div
-      className="flex items-center justify-between gap-3 rounded-[var(--radius-card)] px-3.5 py-2.5 text-[12px]"
+      className="flex items-center justify-between gap-3 rounded-[var(--radius-card)] px-4 py-2.5 text-[12px]"
       style={{
         backgroundColor: c.bg,
         border: `1px solid ${c.border}`,

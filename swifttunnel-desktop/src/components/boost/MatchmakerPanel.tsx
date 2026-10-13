@@ -9,6 +9,7 @@ import {
   Select,
   SliderInput,
   Toggle,
+  CONTROL_WIDTH,
   compactFieldClass,
 } from "../ui";
 import { Flag } from "../ui/Flag";
@@ -138,6 +139,7 @@ export function MatchmakerPanel() {
             desc="Closest goes by measured ping. Fewer players takes the emptiest server it finds."
           >
             <Segmented<LauncherConfig["matchmaker"]["mode"]>
+              width={CONTROL_WIDTH}
               ariaLabel="Matchmaker mode"
               value={m.mode}
               disabled={busy}

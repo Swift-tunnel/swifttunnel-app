@@ -15,7 +15,7 @@ export function Row({ label, desc, tooltip, children, dense, anchorId }: RowProp
     <div
       data-search-anchor={anchorId}
       className={`group flex items-center justify-between gap-4 transition-colors duration-100 ${
-        dense ? "px-3.5 py-2" : "px-3.5 py-2.5"
+        dense ? "px-4 py-2" : "px-4 py-2.5"
       }`}
     >
       <div className="flex min-w-0 flex-col gap-[3px]">

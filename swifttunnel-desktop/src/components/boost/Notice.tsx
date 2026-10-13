@@ -6,7 +6,7 @@ export const iconButtonClass =
 
 /** A calm progress or confirmation line. Failures use ErrorBanner instead. */
 export function Notice({ children, busy, inset }: { children: ReactNode; busy?: boolean; inset?: boolean }) {
-  return <p role="status" className={`flex items-center gap-2.5 rounded-[var(--radius-card)] px-3.5 py-2.5 text-[12px] leading-snug text-text-secondary ${inset ? "bg-bg-base" : "bg-bg-card"}`}>
+  return <p role="status" className={`flex items-center gap-2.5 rounded-[var(--radius-card)] px-4 py-2.5 text-[12px] leading-snug text-text-secondary ${inset ? "bg-bg-base" : "bg-bg-card"}`}>
     {busy ? <Spinner size={12} /> : <Icon name="info" size={14} className="shrink-0 text-text-muted" />}
     <span className="min-w-0">{children}</span>
   </p>;

@@ -84,7 +84,8 @@ export function LauncherImportPanel() {
   }
 
   return (
-    <Panel eyebrow="Roblox">
+    <Panel eyebrow="Roblox" flush>
+      <div className="border-t border-border-subtle">
       <Row
         anchorId="launcher_import"
         label="Import launcher settings"
@@ -97,13 +98,14 @@ export function LauncherImportPanel() {
           onChange={(next) => void review(next)}
         />
       </Row>
+      </div>
       {notice && (
-        <div className="px-3.5 pb-3">
+        <div className="px-4 pb-3">
           <Notice inset>{notice}</Notice>
         </div>
       )}
       {!enabled && error && (
-        <div className="px-3.5 pb-3">
+        <div className="px-4 pb-3">
           <ErrorBanner tone="error">{error}</ErrorBanner>
         </div>
       )}
