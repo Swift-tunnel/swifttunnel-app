@@ -237,7 +237,6 @@ impl GameLibrary {
         }
         let index = self.ensure_entry(place_id, client)?;
         self.entries[index].favourite = favourite;
-        self.sort();
         Ok(())
     }
 
@@ -283,11 +282,8 @@ impl GameLibrary {
     }
 
     fn sort(&mut self) {
-        self.entries.sort_by(|a, b| {
-            b.favourite
-                .cmp(&a.favourite)
-                .then(b.last_played.cmp(&a.last_played))
-        });
+        self.entries
+            .sort_by(|a, b| b.last_played.cmp(&a.last_played));
     }
 }
 
@@ -353,6 +349,33 @@ mod tests {
         assert!(valid_icon_url("https://tr.rbxcdn.com/image.png"));
     }
     const JOB: &str = "550e8400-e29b-41d4-a716-446655440000";
+    #[test]
+    fn favourite_changes_keep_cards_in_place_and_recent_order_survives_new_joins() {
+        let mut lib = GameLibrary::default();
+        lib.record_join("1818", JOB, RobloxClient::Standard, 10)
+            .unwrap();
+        lib.record_join("1819", JOB, RobloxClient::Standard, 20)
+            .unwrap();
+        let order = lib
+            .entries
+            .iter()
+            .map(|e| e.place_id.clone())
+            .collect::<Vec<_>>();
+        for favourite in [true, false, true] {
+            lib.set_favourite("1818", RobloxClient::Standard, favourite)
+                .unwrap();
+            assert_eq!(
+                lib.entries
+                    .iter()
+                    .map(|e| e.place_id.clone())
+                    .collect::<Vec<_>>(),
+                order
+            );
+        }
+        lib.record_join("1820", JOB, RobloxClient::Standard, 30)
+            .unwrap();
+        assert_eq!(lib.entries[0].place_id, "1820");
+    }
     #[test]
     fn joins_update_one_entry_and_preserve_favourites() {
         let mut lib = GameLibrary::default();

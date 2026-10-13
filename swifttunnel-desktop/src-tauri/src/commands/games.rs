@@ -306,14 +306,19 @@ pub fn games_set_notifications(state: State<'_, AppState>, enabled: bool) -> Res
 #[tauri::command]
 pub fn games_set_favourite(
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
     place_id: String,
     client: RobloxClient,
     favourite: bool,
 ) -> Result<(), String> {
-    state
-        .games
-        .lock()
-        .mutate(|lib| lib.set_favourite(&place_id, client, favourite))
+    {
+        let mut games = state.games.lock();
+        let warning = games.warning.clone();
+        games.mutate(|lib| lib.set_favourite(&place_id, client, favourite))?;
+        games.warning = warning;
+    }
+    let _ = app.emit(LIBRARY_CHANGED, ());
+    Ok(())
 }
 
 #[tauri::command]
