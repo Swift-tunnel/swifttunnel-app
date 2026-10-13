@@ -294,7 +294,7 @@ impl SystemOptimizer {
         }
     }
 
-    fn query_registry_checked<T: winreg::types::FromRegValue>(
+    pub(crate) fn query_registry_checked<T: winreg::types::FromRegValue>(
         path: &str,
         name: &str,
     ) -> Result<Option<T>> {
@@ -303,7 +303,7 @@ impl SystemOptimizer {
         match Self::optional_registry_read(
             root.open_subkey_with_flags(subkey, KEY_QUERY_VALUE | KEY_WOW64_64KEY),
         )? {
-            Some(key) => Self::optional_registry_read(key.get_value(name)),
+            Some(key) => crate::registry_value::read(&key, name).map_err(Into::into),
             None => Ok(None),
         }
     }
@@ -320,7 +320,7 @@ impl SystemOptimizer {
         let (key, _) = root
             .create_subkey_with_flags(subkey, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY)?;
         key.set_value(value_name, &value)?;
-        if key.get_value::<u32, _>(value_name)? != value {
+        if crate::registry_value::read::<u32>(&key, value_name)? != Some(value) {
             return Err(anyhow::anyhow!(
                 "Registry value did not match after writing {key_path}\\{value_name}"
             ));
@@ -328,13 +328,22 @@ impl SystemOptimizer {
         Ok(())
     }
 
-    fn set_registry_string_checked(key_path: &str, value_name: &str, value: &str) -> Result<()> {
+    pub(crate) fn set_registry_string_checked(
+        key_path: &str,
+        value_name: &str,
+        value: &str,
+    ) -> Result<()> {
+        if (value.encode_utf16().count() + 1) * 2 > crate::registry_value::MAX_VALUE_BYTES {
+            return Err(anyhow::anyhow!(
+                "Registry string exceeds the 64 KiB write limit"
+            ));
+        }
         use winreg::enums::{KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY};
         let (root, subkey) = Self::registry_root(key_path)?;
         let (key, _) = root
             .create_subkey_with_flags(subkey, KEY_SET_VALUE | KEY_QUERY_VALUE | KEY_WOW64_64KEY)?;
         key.set_value(value_name, &value)?;
-        if key.get_value::<String, _>(value_name)? != value {
+        if crate::registry_value::read::<String>(&key, value_name)?.as_deref() != Some(value) {
             return Err(anyhow::anyhow!(
                 "Registry value did not match after writing {key_path}\\{value_name}"
             ));
@@ -364,7 +373,7 @@ impl SystemOptimizer {
         }
     }
 
-    fn delete_registry_value_checked(key_path: &str, value_name: &str) -> Result<()> {
+    pub(crate) fn delete_registry_value_checked(key_path: &str, value_name: &str) -> Result<()> {
         use winreg::enums::{KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY};
         let (root, subkey) = Self::registry_root(key_path)?;
         let Some(key) = Self::optional_registry_read(
@@ -378,7 +387,7 @@ impl SystemOptimizer {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         }
-        if Self::optional_registry_read(key.get_raw_value(value_name))?.is_some() {
+        if crate::registry_value::exists(&key, value_name)? {
             return Err(anyhow::anyhow!(
                 "Registry value still exists after removing {key_path}\\{value_name}"
             ));
@@ -1971,6 +1980,25 @@ mod tests {
         assert!(SystemOptimizer::query_registry_checked::<u32>(&path, "Value").is_err());
         let mut present = Some(Some(9));
         SystemOptimizer::restore_dword_slot(&mut present, &path, "Value").unwrap();
+        assert_eq!(key.get_value::<u32, _>("Value").unwrap(), 9);
+        key.set_raw_value(
+            "Large",
+            &winreg::RegValue {
+                bytes: vec![0; crate::registry_value::MAX_VALUE_BYTES + 1],
+                vtype: winreg::enums::RegType::REG_BINARY,
+            },
+        )
+        .unwrap();
+        assert!(SystemOptimizer::query_registry_checked::<String>(&path, "Large").is_err());
+        assert!(crate::registry_value::exists(&key, "Large").unwrap());
+        assert!(
+            SystemOptimizer::set_registry_string_checked(
+                &path,
+                "Value",
+                &"x".repeat(crate::registry_value::MAX_VALUE_BYTES)
+            )
+            .is_err()
+        );
         assert_eq!(key.get_value::<u32, _>("Value").unwrap(), 9);
         drop(key);
         assert!(relative.starts_with(r"Software\SwiftTunnel\OptimizerTests\"));

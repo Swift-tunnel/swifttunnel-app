@@ -32,16 +32,46 @@ pub fn updater_running() -> bool {
     };
     let roots = [RobloxClient::Standard, RobloxClient::Vng]
         .map(|client| installation_root(&PathBuf::from(&root), client));
-    let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    system.processes().values().any(|p| {
-        matches!(
-            p.name().to_string_lossy().as_ref(),
-            "RobloxPlayerInstaller.exe" | "RobloxInstaller.exe" | "RobloxPlayerLauncher.exe"
-        ) && p
-            .exe()
-            .is_some_and(|p| roots.iter().any(|root| p.starts_with(root)))
-    })
+    #[cfg(windows)]
+    {
+        let Ok(processes) = crate::process_snapshot::list() else {
+            return false;
+        };
+        processes
+            .iter()
+            .filter(|process| is_updater_name(&process.name))
+            .any(|process| {
+                crate::process_snapshot::image_path(process.pid)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|image| {
+                        roots.iter().any(|root| Path::new(&image).starts_with(root))
+                    })
+            })
+    }
+    #[cfg(not(windows))]
+    {
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        system.processes().values().any(|p| {
+            matches!(
+                p.name().to_string_lossy().as_ref(),
+                "RobloxPlayerInstaller.exe" | "RobloxInstaller.exe" | "RobloxPlayerLauncher.exe"
+            ) && p
+                .exe()
+                .is_some_and(|p| roots.iter().any(|root| p.starts_with(root)))
+        })
+    }
+}
+#[cfg(windows)]
+fn is_updater_name(name: &str) -> bool {
+    [
+        "RobloxPlayerInstaller.exe",
+        "RobloxInstaller.exe",
+        "RobloxPlayerLauncher.exe",
+    ]
+    .iter()
+    .any(|expected| name.eq_ignore_ascii_case(expected))
 }
 fn find_player(versions: &Path) -> Result<PathBuf, String> {
     let mut players = Vec::new();

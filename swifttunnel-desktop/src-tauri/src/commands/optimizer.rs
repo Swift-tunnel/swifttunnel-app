@@ -31,8 +31,8 @@ pub async fn boost_get_metrics(
         let mut metrics = swifttunnel_core::structs::PerformanceMetrics::default();
         monitor.update_metrics(&mut metrics);
 
-        // Only startup and settings changes own ETW enablement. A slow poll
-        // completing after disable must not start a new trace behind the UI.
+        // Settings own permission to trace; polls supply game presence. A
+        // slow poll after disable cannot grant permission to restart tracing.
         let fps = fps_monitor.sample_for_process(
             metrics.process_id.filter(|_| metrics.roblox_running),
             overlay_wants_fps.unwrap_or(true),

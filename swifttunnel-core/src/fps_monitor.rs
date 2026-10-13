@@ -106,6 +106,7 @@ impl FpsRuntime {
 /// tunnel does not start an additional trace for diagnostic logging.
 pub struct FpsMonitor {
     runtime: std::sync::Mutex<Option<FpsRuntime>>,
+    requested_enabled: AtomicBool,
     target_pid: AtomicU32,
     session_name: &'static str,
 }
@@ -121,6 +122,7 @@ impl FpsMonitor {
     pub fn named(session_name: &'static str) -> Self {
         Self {
             runtime: std::sync::Mutex::new(None),
+            requested_enabled: AtomicBool::new(false),
             target_pid: AtomicU32::new(0),
             session_name,
         }
@@ -128,12 +130,19 @@ impl FpsMonitor {
 
     /// Start or stop the ETW session + sampler. Idempotent and cheap when the
     /// state already matches, so callers may invoke it on every settings save.
-    /// Starting never fails: if ETW can't start (e.g. not elevated) the
-    /// supervisor retries and FPS stays 0.
+    /// No session starts without a target. If ETW is unavailable its supervisor
+    /// retries; worker creation failures leave no partial runtime behind.
     pub fn set_enabled(&self, enabled: bool) {
         let Ok(mut runtime) = self.runtime.lock() else {
             return;
         };
+        self.requested_enabled.store(enabled, Ordering::Release);
+        self.reconcile_runtime(&mut runtime);
+    }
+
+    fn reconcile_runtime(&self, runtime: &mut Option<FpsRuntime>) {
+        let enabled = self.requested_enabled.load(Ordering::Acquire)
+            && self.target_pid.load(Ordering::Acquire) != 0;
         if enabled == runtime.is_some() {
             return;
         }
@@ -170,21 +179,31 @@ impl FpsMonitor {
                 .ok()
         };
 
-        log::info!("FPS monitor started ({})", self.session_name);
-        *runtime = Some(FpsRuntime {
+        let mut active = FpsRuntime {
             shared,
             etw_thread,
             sampler_thread,
-        });
+        };
+        if active.etw_thread.is_none() || active.sampler_thread.is_none() {
+            active.stop();
+            log::warn!("FPS monitor worker could not start ({})", self.session_name);
+            return;
+        }
+        log::info!("FPS monitor started ({})", self.session_name);
+        *runtime = Some(active);
     }
 
     /// Point the monitor at a game process (0 to clear). Switching targets
     /// resets the window so a new game never inherits the old one's count.
     pub fn set_target_pid(&self, pid: u32) {
-        self.target_pid.store(pid, Ordering::Release);
-        let Ok(runtime) = self.runtime.lock() else {
+        let Ok(mut runtime) = self.runtime.lock() else {
             return;
         };
+        self.target_pid.store(pid, Ordering::Release);
+        // The saved preference owns permission to trace; a poll supplies only
+        // presence. No trace runs while Roblox is closed, and a late poll
+        // cannot override a disabled preference.
+        self.reconcile_runtime(&mut runtime);
         let Some(active) = runtime.as_ref() else {
             return;
         };
@@ -207,8 +226,7 @@ impl FpsMonitor {
             .unwrap_or(0)
     }
 
-    /// A metrics poll may update its target and read FPS, but must not change
-    /// trace ownership. In-flight polls can finish after settings disable it.
+    /// A poll supplies target presence, never permission to enable tracing.
     pub fn sample_for_process(&self, pid: Option<u32>, requested: bool) -> u32 {
         self.set_target_pid(pid.unwrap_or(0));
         if requested && pid.is_some() {
@@ -508,6 +526,7 @@ impl FpsMonitor {
                 etw_thread: None,
                 sampler_thread: None,
             })),
+            requested_enabled: AtomicBool::new(true),
             target_pid: AtomicU32::new(0),
             session_name: OVERLAY_SESSION_NAME,
         }
@@ -531,6 +550,30 @@ mod tests {
     #[test]
     fn late_metrics_poll_cannot_restart_a_disabled_trace() {
         let monitor = FpsMonitor::inert_active();
+        monitor.set_enabled(false);
+        assert_eq!(monitor.sample_for_process(Some(1234), true), 0);
+        assert!(monitor.runtime.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn an_enabled_fps_preference_does_not_start_threads_without_a_game() {
+        let monitor = FpsMonitor::new();
+        monitor.set_enabled(true);
+        for _ in 0..10 {
+            assert_eq!(monitor.sample_for_process(None, true), 0);
+        }
+        assert!(monitor.requested_enabled.load(Ordering::Acquire));
+        assert!(monitor.runtime.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn closing_the_game_stops_the_runtime_and_stale_polls_cannot_override_disable() {
+        let monitor = FpsMonitor::inert_active();
+        monitor.set_target_pid(1234);
+        assert!(monitor.runtime.lock().unwrap().is_some());
+        monitor.sample_for_process(None, true);
+        assert!(monitor.runtime.lock().unwrap().is_none());
+        assert!(monitor.requested_enabled.load(Ordering::Acquire));
         monitor.set_enabled(false);
         assert_eq!(monitor.sample_for_process(Some(1234), true), 0);
         assert!(monitor.runtime.lock().unwrap().is_none());

@@ -80,8 +80,8 @@ impl AppState {
 
         // The ETW FPS session is demand-driven (its callback fires for every
         // present from every process system-wide) - run it only while the
-        // in-game overlay wants FPS. `settings_save` keeps it in sync after
-        // toggles.
+        // overlay wants FPS and a game is running. Settings saves keep the
+        // preference in sync; metrics polling supplies the current game PID.
         let fps_monitor = Arc::new(FpsMonitor::new());
         fps_monitor.set_enabled(overlay_wants_fps(&settings));
 

@@ -253,12 +253,21 @@ fn set(xml: &str, property: Property, number: Option<i32>) -> String {
     }
 }
 fn stopped() -> bool {
-    let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    !system
-        .processes()
-        .values()
-        .any(|p| crate::process_names::is_roblox_player_process_name(&p.name().to_string_lossy()))
+    #[cfg(windows)]
+    {
+        // An unreadable process snapshot is not proof that changing the
+        // player's files is safe. Keep the journal for a later retry.
+        crate::process_snapshot::any_named(crate::process_names::ROBLOX_PLAYER_PROCESS_NAMES)
+            .is_ok_and(|running| !running)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut system = sysinfo::System::new();
+        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+        !system.processes().values().any(|p| {
+            crate::process_names::is_roblox_player_process_name(&p.name().to_string_lossy())
+        })
+    }
 }
 pub fn player_stopped() -> bool {
     stopped()

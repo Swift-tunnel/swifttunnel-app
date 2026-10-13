@@ -24,7 +24,11 @@ pub mod optimizations;
 pub mod optional_components;
 pub mod performance_monitor;
 mod process_names;
+#[cfg(windows)]
+mod process_snapshot;
 pub mod ram_cleaner;
+#[cfg(windows)]
+mod registry_value;
 pub mod roblox_directory;
 pub mod roblox_flag_cleanup;
 pub mod roblox_game_profile;
