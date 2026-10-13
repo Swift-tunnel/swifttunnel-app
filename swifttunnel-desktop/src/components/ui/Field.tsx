@@ -117,6 +117,7 @@ export function SliderInput({
           step={step}
           onChange={onChange}
           disabled={disabled}
+          trackColor="var(--color-bg-active)"
         />
       </div>
       <input
