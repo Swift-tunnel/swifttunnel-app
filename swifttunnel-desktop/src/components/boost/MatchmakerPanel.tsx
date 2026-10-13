@@ -258,7 +258,7 @@ export function MatchmakerPanel() {
           </Row>
           <Row
             label="Connect SwiftTunnel first"
-            desc="Uses the relay that matches the server and disconnects when the game ends."
+            desc="Connects to the relay for the chosen server."
           >
             <Toggle
               enabled={m.prepare_tunnel}

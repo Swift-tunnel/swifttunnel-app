@@ -188,7 +188,6 @@ pub struct GamesState {
     pub launch_player_seen: bool,
     pub launch_updating: bool,
     pub launch_gone_since: Option<std::time::Instant>,
-    pub owned_connection: Option<std::time::Instant>,
     pub cleanup_scheduled: bool,
     pub last_cleanup: Option<std::time::Instant>,
     pub idle_since: Option<std::time::Instant>,

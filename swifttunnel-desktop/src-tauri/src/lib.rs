@@ -688,7 +688,7 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                 }
                 let state = app.state::<AppState>();
                 let has_game = state.games.lock().current.is_some();
-                let check_process = { let games = state.games.lock(); has_game || games.owned_connection.is_some() || games.launch_started.is_some() || (swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending()) };
+                let check_process = { let games = state.games.lock(); has_game || games.launch_started.is_some() || (swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending()) };
                 let running = check_process && state.performance_monitor.lock().is_roblox_running();
                 let updating = !running && state.games.lock().launch_started.is_some_and(|at|at.elapsed()<std::time::Duration::from_secs(600)) && swifttunnel_core::roblox_native_launch::updater_running();
                 if running { swifttunnel_core::vpn::game_destination::refresh(); }
@@ -728,14 +728,14 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                     && (!running || games.left_confirmed);
                 if idle { games.idle_since.get_or_insert(std::time::Instant::now()); } else { games.idle_since = None; }
                 let settled = games.idle_since.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(5));
-                let needs_cleanup = games.owned_connection.is_some() || (swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending());
+                let needs_cleanup = swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending();
                 if idle && settled && needs_cleanup && !games.cleanup_scheduled && games.last_cleanup.is_none_or(|at| at.elapsed() > std::time::Duration::from_secs(10)) {
                     games.cleanup_scheduled = true;
                     games.last_cleanup = Some(std::time::Instant::now());
                     let cleanup_app = app.clone();
                     state.runtime.spawn(async move {
                         let state = cleanup_app.state::<AppState>();
-                        commands::game_launch::finish_game_connection(&state).await;
+                        commands::game_launch::restore_game_profile(&state).await;
                         state.games.lock().cleanup_scheduled = false;
                         let _ = cleanup_app.emit(commands::games::LIBRARY_CHANGED, ());
                     });

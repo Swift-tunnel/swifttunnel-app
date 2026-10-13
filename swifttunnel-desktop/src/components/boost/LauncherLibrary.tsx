@@ -112,7 +112,7 @@ export function GameLibraryPanel() {
           const vpn = useVpnStore.getState();
           const existing = vpn.state === "connected";
           const family = findRegionForVpnRegion(useServerStore.getState().regions, vpn.region)?.id;
-          if (existing && (!requested || family === requested)) return { owned: false, token: null };
+          if (existing && (!requested || family === requested)) return;
           setProgress("Preparing your SwiftTunnel connection...");
           if (existing) await vpn.disconnect();
           const settings = useSettingsStore.getState().settings;
@@ -121,13 +121,11 @@ export function GameLibraryPanel() {
           const connected = useVpnStore.getState();
           if (connected.state !== "connected") throw new Error(connected.error ?? "Finish connecting in Connect, then try Play again.");
           if (requested && findRegionForVpnRegion(useServerStore.getState().regions, connected.region)?.id !== requested) throw new Error("Couldn't connect to the relay for this location. Check Connect, then try again.");
-          return { owned: !existing, token: connected.connectedAt };
         },
-        launch: async owned => {
+        launch: async () => {
           setProgress("Opening Roblox...");
-          await gamesLaunch(entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, true, owned, safe);
+          await gamesLaunch(entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, true, safe);
         },
-        cleanup: async token => { if (token !== null && useVpnStore.getState().connectedAt === token) await useVpnStore.getState().disconnect(); },
       });
     }, entry.client === "vng" ? "Opened the official VNG game page." : undefined);
   }

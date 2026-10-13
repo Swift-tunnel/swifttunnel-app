@@ -35,8 +35,8 @@ import { DEFAULT_SETTINGS } from "./settings";
 describe("lib/commands", () => {
   it("passes Safe launch as a one-time native request instead of saving it to the game profile", async () => {
     invoke.mockResolvedValue(undefined);
-    await gamesLaunch("1818","standard",null,null,false,false,true);
-    expect(invoke).toHaveBeenCalledWith("games_launch", { placeId:"1818",client:"standard",jobId:null,datacenterId:null,allowUnverified:false,connectionStarted:false,safeLaunch:true });
+    await gamesLaunch("1818","standard",null,null,false,true);
+    expect(invoke).toHaveBeenCalledWith("games_launch", { placeId:"1818",client:"standard",jobId:null,datacenterId:null,allowUnverified:false,safeLaunch:true });
   });
   beforeEach(() => {
     invoke.mockReset();

@@ -1,7 +1,7 @@
 use serde::Serialize;
 use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::events::{
@@ -10,7 +10,7 @@ use crate::events::{
 use crate::state::AppState;
 use swifttunnel_core::auth::types::AuthError;
 use swifttunnel_core::vpn::{
-    BindingPreferenceSource, BindingPreflightInfo, ConnectionState, VpnError, preflight_binding,
+    BindingPreferenceSource, BindingPreflightInfo, VpnError, preflight_binding,
     preflight_binding_for_connect,
 };
 // The connect-time policy: which adapter to bind, which region to land in,
@@ -316,32 +316,6 @@ pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), Strin
     }
 
     result
-}
-
-/// Auto-stop only the game-owned connection, checking identity while holding
-/// the same mutex as every connect/disconnect. A newer manual reconnect wins.
-pub(crate) async fn disconnect_game_session(
-    state: &AppState,
-    owned: Instant,
-) -> Result<bool, String> {
-    let mut vpn = state.vpn_connection.lock().await;
-    if !matches!(&*state.vpn_state_handle.borrow(), ConnectionState::Connected { since, .. } if *since == owned)
-        || vpn
-            .auto_router()
-            .is_some_and(|router| router.has_recent_game_traffic())
-    {
-        return Ok(false);
-    }
-    let result = vpn
-        .disconnect()
-        .await
-        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
-    *state.split_tunnel_handle.write() = None;
-    *state.throughput_stats.write() = None;
-    drop(vpn);
-    state.discord_manager.lock().set_idle();
-    persist_session_settings(state, None)?;
-    result.map(|_| true)
 }
 
 async fn cleanup_terminal_vpn_error(state: &AppState) {

@@ -481,7 +481,6 @@ pub async fn games_launch(
     job_id: Option<String>,
     datacenter_id: Option<u32>,
     allow_unverified: bool,
-    connection_started: bool,
     safe_launch: Option<bool>,
 ) -> Result<(), String> {
     let plan = games_launch_plan(
@@ -651,24 +650,9 @@ pub async fn games_launch(
         }
         return Err(error);
     }
-    let owned_connection = if connection_started {
-        match &*state.vpn_state_handle.borrow() {
-            ConnectionState::Connected { since, .. } => Some(*since),
-            _ => None,
-        }
-    } else {
-        let previous = state.games.lock().owned_connection;
-        match &*state.vpn_state_handle.borrow() {
-            ConnectionState::Connected { since, .. } if previous == Some(*since) => previous,
-            _ => None,
-        }
-    };
-    let mut games = state.games.lock();
     // The watcher owns completion. Do not revive a launch it already saw close,
     // or mistake an older session in the same place for this new launch.
-    games.owned_connection = owned_connection;
     launch_guard.complete = true;
-    drop(games);
     if plan.preferences.borderless || plan.preferences.monitor.is_some() {
         let monitor = state.performance_monitor.clone();
         let preferences = plan.preferences.clone();
@@ -752,7 +736,7 @@ pub fn update_session_location(
     true
 }
 
-pub async fn finish_game_connection(state: &AppState) {
+pub async fn restore_game_profile(state: &AppState) {
     {
         let games = state.games.lock();
         if games.current.is_some() || games.launch_started.is_some() {
@@ -767,26 +751,6 @@ pub async fn finish_game_connection(state: &AppState) {
         .is_some_and(|router| router.has_recent_game_traffic())
     {
         return;
-    }
-    let owned = state.games.lock().owned_connection;
-    if let Some(owned) = owned {
-        let matches = matches!(&*state.vpn_state_handle.borrow(), ConnectionState::Connected { since, .. } if *since == owned);
-        if matches {
-            match crate::commands::vpn::disconnect_game_session(state, owned).await {
-                Ok(true) => {}
-                Ok(false) => return,
-                Err(error) => {
-                    state.games.lock().warning = Some(format!(
-                        "The automatic game connection could not be stopped: {error}"
-                    ));
-                    return;
-                }
-            }
-        }
-        let mut games = state.games.lock();
-        if games.owned_connection == Some(owned) {
-            games.owned_connection = None;
-        }
     }
     let optimizer = state.roblox_optimizer.clone();
     let restored = tauri::async_runtime::spawn_blocking(move || {
