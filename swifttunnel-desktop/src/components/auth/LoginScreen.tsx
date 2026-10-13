@@ -2,7 +2,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAuthStore } from "../../stores/authStore";
-import { systemOpenUrl } from "../../lib/commands";
+import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { Button, Spinner, Icon, type IconName } from "../ui";
 import { SwiftLogo } from "../common/SwiftLogo";
 

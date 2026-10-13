@@ -554,21 +554,6 @@ export interface AuthStateEvent {
   banned_at?: string | null;
 }
 
-export interface ThroughputEvent {
-  bytes_up: number;
-  bytes_down: number;
-  packets_tunneled: number;
-  packets_bypassed: number;
-}
-
-export interface PerformanceMetricsEvent {
-  cpu_usage: number;
-  ram_usage: number;
-  ram_total: number;
-  fps: number;
-  roblox_running: boolean;
-}
-
 export interface RamCleanProgressEvent {
   stage: string;
   total_mb: number;

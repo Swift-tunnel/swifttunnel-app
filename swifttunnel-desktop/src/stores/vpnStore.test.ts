@@ -110,6 +110,66 @@ function disconnectedState() {
 }
 
 describe("stores/vpnStore", () => {
+  const deadRelayEvent = { state: "error" as const, region: "singapore",
+    server_endpoint: "1.2.3.4:51821", assigned_ip: null,
+    error: "Relay connection failed: relay stopped returning traffic" };
+
+  async function failoverFixture() {
+    const store = await loadStore();
+    const { useServerStore } = await import("./serverStore");
+    const { useSettingsStore } = await import("./settingsStore");
+    useSettingsStore.getState().update({ selected_region: "singapore", auto_routing_enabled: true });
+    const regions = [{ id: "singapore", name: "Singapore", description: "SG", country_code: "SG",
+      servers: ["singapore-01", "singapore-02"] }];
+    useServerStore.setState({ regions });
+    const connect = vi.fn().mockResolvedValue(undefined);
+    store.setState({ connect });
+    return { store, useServerStore, useSettingsStore, regions, connect };
+  }
+
+  it("does not reconnect after Disconnect while a failover notification is pending", async () => {
+    const { store, connect } = await failoverFixture();
+    const notification = deferred<void>();
+    notify.mockReturnValueOnce(notification.promise);
+    store.getState().handleStateEvent(deadRelayEvent);
+    expect(notify).toHaveBeenCalledTimes(1);
+    vpnGetState.mockResolvedValue(disconnectedState());
+    await store.getState().disconnect();
+    notification.resolve();
+    await Promise.resolve();
+    expect(connect).not.toHaveBeenCalled();
+    expect(store.getState().state).toBe("disconnected");
+  });
+
+  it("owns failover before a slow fleet read and cancels it on Disconnect", async () => {
+    const { store, useServerStore, regions, connect } = await failoverFixture();
+    const fleet = deferred<void>();
+    const fetchList = vi.fn(() => fleet.promise);
+    useServerStore.setState({ regions: [], fetchList });
+    store.getState().handleStateEvent(deadRelayEvent);
+    store.getState().handleStateEvent(deadRelayEvent);
+    expect(fetchList).toHaveBeenCalledTimes(1);
+    vpnGetState.mockResolvedValue(disconnectedState());
+    await store.getState().disconnect();
+    useServerStore.setState({ regions });
+    fleet.resolve();
+    await Promise.resolve();
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("does not replace a newly chosen region with an old relay failover", async () => {
+    const { store, useSettingsStore, connect } = await failoverFixture();
+    const notification = deferred<void>();
+    notify.mockReturnValueOnce(notification.promise);
+    store.getState().handleStateEvent(deadRelayEvent);
+    expect(notify).toHaveBeenCalledTimes(1);
+    useSettingsStore.getState().update({ selected_region: "tokyo" });
+    notification.resolve();
+    await Promise.resolve();
+    expect(connect).not.toHaveBeenCalled();
+    expect(useSettingsStore.getState().settings.selected_region).toBe("tokyo");
+  });
+
   it("does not claim disconnect succeeded when state verification fails", async () => {
     const store = await loadStore();
     store.setState({ state: "connected", region: "singapore", serverEndpoint: "1.2.3.4:51821", splitTunnelActive: true });

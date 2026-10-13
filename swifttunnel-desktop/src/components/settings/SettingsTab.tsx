@@ -1,3 +1,4 @@
+import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useAuthStore } from "../../stores/authStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -20,7 +21,6 @@ import {
   Watermark,
 } from "../ui";
 import {
-  systemOpenUrl,
   systemUninstall,
 } from "../../lib/commands";
 import { SupportToolsSection } from "../support/SupportToolsSection";

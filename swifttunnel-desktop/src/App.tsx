@@ -27,7 +27,7 @@ import { resolveValidRegion } from "./lib/regionMatch";
 import { useOverlayDriver } from "./lib/useOverlayDriver";
 import { useGameLibrary } from "./lib/useGameLibrary";
 import { reportError } from "./lib/errors";
-import { addTunneledMs } from "./lib/tunnelTime";
+import { addTunneledMs, createTunnelTimeTracker } from "./lib/tunnelTime";
 import {
   authUpdateRequired,
   systemLaunchedFromStartup,
@@ -520,17 +520,12 @@ function App() {
   // minute for a cosmetic stat is far more disk churn than it is worth. A
   // crash loses at most a minute of a lifetime total.
   useEffect(() => {
-    let baseline = Date.now();
-    const flush = () => {
-      const now = Date.now();
-      if (useVpnStore.getState().state === "connected") {
-        addTunneledMs(now - baseline);
-      }
-      baseline = now;
-    };
-    const id = window.setInterval(flush, 60_000);
+    const tracker = createTunnelTimeTracker(useVpnStore.getState().state === "connected", addTunneledMs);
+    const stop = useVpnStore.subscribe(state => tracker.setConnected(state.state === "connected"));
+    const id = window.setInterval(tracker.flush, 60_000);
     return () => {
-      flush();
+      stop();
+      tracker.flush();
       window.clearInterval(id);
     };
   }, []);

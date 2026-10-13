@@ -1076,7 +1076,7 @@ fn load_all() -> Result<Snapshots, String> {
 }
 
 fn read_snapshots(path: &Path) -> Result<Snapshots, String> {
-    match std::fs::read_to_string(path) {
+    match crate::utils::read_text_file_bounded(path, 4 * 1024 * 1024, "Rollback records") {
         Ok(content) => serde_json::from_str(&content).map_err(|e| {
             format!(
                 "Cannot read rollback records: {e}. Keep the snapshot file and contact support."

@@ -28,16 +28,6 @@ pub struct OAuthCallbackData {
     pub state: String,
 }
 
-/// Result from the OAuth server
-pub enum OAuthServerResult {
-    /// Callback received successfully
-    Success(OAuthCallbackData),
-    /// Server was stopped before callback received
-    Cancelled,
-    /// Server encountered an error
-    Error(String),
-}
-
 /// Localhost HTTP server for OAuth callbacks
 pub struct OAuthServer {
     /// Channel to receive callback data
@@ -90,9 +80,10 @@ impl OAuthServer {
 
         // Note: recv_timeout is used in run_server to check stop flag periodically
 
-        let thread_handle = thread::spawn(move || {
-            Self::run_server(server, tx, stop_flag_clone);
-        });
+        let thread_handle = thread::Builder::new()
+            .name("oauth-callback".into())
+            .spawn(move || Self::run_server(server, tx, stop_flag_clone))
+            .map_err(|error| format!("Could not start browser sign-in: {error}"))?;
 
         Ok(Self {
             receiver: rx,
@@ -394,21 +385,6 @@ impl OAuthServer {
         )
     }
 
-    /// Wait for the OAuth callback with a timeout
-    pub fn wait_for_callback(&self, timeout: Duration) -> OAuthServerResult {
-        match self.receiver.recv_timeout(timeout) {
-            Ok(data) => OAuthServerResult::Success(data),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                info!("OAuth callback timed out");
-                OAuthServerResult::Cancelled
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                info!("OAuth server disconnected before callback");
-                OAuthServerResult::Cancelled
-            }
-        }
-    }
-
     /// Check if a callback has been received (non-blocking)
     pub fn try_recv_callback(&self) -> Option<OAuthCallbackData> {
         self.receiver.try_recv().ok()
@@ -419,9 +395,17 @@ impl OAuthServer {
         info!("Stopping OAuth server");
         self.stop_flag.store(true, Ordering::Relaxed);
 
-        // Wait for thread to finish
+        // A stalled browser response must not hang cancellation or app exit.
         if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
+            let deadline = std::time::Instant::now() + Duration::from_millis(500);
+            while !handle.is_finished() && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                warn!("OAuth callback worker did not stop within 500ms; continuing shutdown");
+            }
         }
     }
 }
@@ -435,6 +419,33 @@ impl Drop for OAuthServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_does_not_wait_forever_for_a_stalled_browser_worker() {
+        let (release, rescue) = mpsc::channel::<()>();
+        let (done, finished) = mpsc::channel();
+        let (_, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _ = rescue.recv();
+        });
+        let cancel = thread::spawn(move || {
+            let mut server = OAuthServer {
+                receiver,
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                thread_handle: Some(worker),
+                port: 0,
+            };
+            server.stop();
+            let _ = done.send(());
+        });
+        let completed = finished.recv_timeout(Duration::from_secs(2)).is_ok();
+        let _ = release.send(());
+        cancel.join().unwrap();
+        assert!(
+            completed,
+            "OAuth cancellation waited indefinitely for the worker"
+        );
+    }
 
     #[test]
     fn test_parse_callback_valid() {

@@ -15,6 +15,9 @@ import { reportError } from "../lib/errors";
 // Reads may complete after a newer native event or account action. Only the
 // latest read in the current revision may publish a snapshot or an error.
 let authStateRevision = 0;
+// Account actions have a separate generation: native events from the action
+// itself may update the read revision while a request is still in flight.
+let authActionRevision = 0;
 
 function formatAuthError(error: unknown): string {
   const message = String(error);
@@ -87,14 +90,18 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   login: async (email, password) => {
+    const action = ++authActionRevision;
     ++authStateRevision;
     try {
       set({ state: "logging_in", isLoading: true, error: null });
       await authLogin(email, password);
+      if (action !== authActionRevision) return;
       await get().fetchState();
     } catch (e) {
+      if (action !== authActionRevision) return;
       const message = formatAuthError(e);
       await get().fetchState();
+      if (action !== authActionRevision) return;
       set({
         isLoading: false,
         error: message,
@@ -103,32 +110,39 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   },
 
   startOAuth: async () => {
+    const action = ++authActionRevision;
     ++authStateRevision;
     try {
       set({ state: "awaiting_oauth", error: null });
       // Native auth command already opens the browser and tracks pending state.
       await authStartOAuth();
     } catch (e) {
+      if (action !== authActionRevision) return;
       set({ state: "logged_out", error: formatAuthError(e) });
     }
   },
 
   pollOAuth: async () => {
+    const action = authActionRevision;
     try {
       const result = await authPollOAuth();
+      if (action !== authActionRevision || get().state !== "awaiting_oauth") return false;
       if (result.completed && result.token && result.state) {
         await authCompleteOAuth(result.token, result.state);
+        if (action !== authActionRevision) return false;
         await get().fetchState();
         return true;
       }
       return false;
     } catch (e) {
+      if (action !== authActionRevision) return false;
       set({ error: formatAuthError(e) });
       return false;
     }
   },
 
   cancelOAuth: async (reason = "Login cancelled.") => {
+    const action = ++authActionRevision;
     ++authStateRevision;
     try {
       await authCancelOAuth();
@@ -138,14 +152,17 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       });
     }
 
+    if (action !== authActionRevision) return;
     ++authStateRevision;
     set({ state: "logged_out", isLoading: false, error: reason });
   },
 
   logout: async () => {
+    const action = ++authActionRevision;
     ++authStateRevision;
     try {
       await authLogout();
+      if (action !== authActionRevision) return;
       ++authStateRevision;
       set({
         state: "logged_out",
@@ -159,15 +176,18 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         error: null,
       });
     } catch (e) {
+      if (action !== authActionRevision) return;
       set({ error: formatAuthError(e) });
     }
   },
 
   refreshProfile: async () => {
+    const action = authActionRevision;
     try {
       set({ error: null });
       await authRefreshProfile();
     } catch (e) {
+      if (action !== authActionRevision) return;
       set({ error: formatAuthError(e) });
     }
   },

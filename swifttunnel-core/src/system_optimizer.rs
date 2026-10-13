@@ -386,7 +386,11 @@ impl SystemOptimizer {
 
     fn load_persistent_snapshot() -> Option<PersistentSystemSnapshot> {
         let path = system_snapshot_path()?;
-        let content = match fs::read_to_string(&path) {
+        let content = match crate::utils::read_text_file_bounded(
+            &path,
+            256 * 1024,
+            "System optimizer recovery",
+        ) {
             Ok(content) => content,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
             Err(e) => {

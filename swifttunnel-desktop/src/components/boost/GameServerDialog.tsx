@@ -1,7 +1,8 @@
+import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { useEffect, useRef, useState } from "react";
 import { Button, Dialog, ErrorBanner, Icon, Segmented, SliderInput, Spinner } from "../ui";
 import { Flag } from "../ui/Flag";
-import { gamesDatacenters, gamesSearchServers, systemOpenUrl } from "../../lib/commands";
+import { gamesDatacenters, gamesSearchServers } from "../../lib/commands";
 import { defaultGamePreferences } from "../../lib/gameLaunchFlow";
 import { formatErrorMessage } from "../../lib/errors";
 import type { RobloxDatacenter, RobloxDirectoryServer, RobloxGameEntry, RobloxServerPage } from "../../lib/types";

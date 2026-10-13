@@ -66,20 +66,22 @@ export function TopBar() {
   useEffect(() => {
     const appWindow = getCurrentWindow();
     let unlisten: (() => void) | undefined;
+    let disposed = false;
 
     const syncMaximizedState = () => {
       void appWindow
         .isMaximized()
-        .then(setIsMaximized)
+        .then((maximized) => { if (!disposed) setIsMaximized(maximized); })
         .catch(() => undefined);
     };
 
     syncMaximizedState();
     void appWindow.onResized(syncMaximizedState).then((stopListening) => {
-      unlisten = stopListening;
-    });
+      if (disposed) stopListening();
+      else unlisten = stopListening;
+    }).catch(() => undefined);
 
-    return () => unlisten?.();
+    return () => { disposed = true; unlisten?.(); };
   }, []);
 
   const minimizeWindow = async () => {

@@ -240,7 +240,7 @@ pub fn load_cached_servers() -> Option<CachedServerList> {
         return None;
     }
 
-    match std::fs::read_to_string(&cache_path) {
+    match crate::utils::read_text_file_bounded(&cache_path, 4 * 1024 * 1024, "Server cache") {
         Ok(content) => match serde_json::from_str::<CachedServerList>(&content) {
             Ok(cached) => {
                 log::info!(

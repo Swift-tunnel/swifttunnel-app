@@ -32,6 +32,63 @@ describe("stores/authStore", () => {
     is_tester: false, is_banned: false, banned_reason: null, banned_at: null,
   };
 
+  it("does not exchange a late callback after OAuth is cancelled", async () => {
+    let finish!: (result: { completed: boolean; token: string; state: string }) => void;
+    commands.authPollOAuth.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    commands.authStartOAuth.mockResolvedValue(undefined);
+    commands.authCancelOAuth.mockResolvedValue(undefined);
+    const store = await loadStore();
+    await store.getState().startOAuth();
+    const poll = store.getState().pollOAuth();
+    await store.getState().cancelOAuth();
+    finish({ completed: true, token: "test-exchange", state: "test-state" });
+    expect(await poll).toBe(false);
+    expect(commands.authCompleteOAuth).not.toHaveBeenCalled();
+    expect(store.getState().state).toBe("logged_out");
+    expect(store.getState().error).toBe("Login cancelled.");
+  });
+
+  it("does not let an earlier cancel undo a newly started browser sign-in", async () => {
+    let finish!: () => void;
+    commands.authCancelOAuth.mockReturnValue(new Promise<void>(resolve => { finish = resolve; }));
+    commands.authStartOAuth.mockResolvedValue(undefined);
+    const store = await loadStore();
+    await store.getState().startOAuth();
+    const cancel = store.getState().cancelOAuth();
+    await store.getState().startOAuth();
+    finish();
+    await cancel;
+    expect(store.getState().state).toBe("awaiting_oauth");
+    expect(store.getState().error).toBeNull();
+  });
+
+  it("ignores a failed old browser start after a new sign-in starts", async () => {
+    let fail!: (error: Error) => void;
+    commands.authStartOAuth.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject; }))
+      .mockResolvedValueOnce(undefined);
+    const store = await loadStore();
+    const older = store.getState().startOAuth();
+    await store.getState().startOAuth();
+    fail(new Error("Old browser failed"));
+    await older;
+    expect(store.getState().state).toBe("awaiting_oauth");
+    expect(store.getState().error).toBeNull();
+  });
+
+  it("does not publish an old password error after logout", async () => {
+    let fail!: (error: Error) => void;
+    commands.authLogin.mockReturnValue(new Promise((_resolve, reject) => { fail = reject; }));
+    commands.authLogout.mockResolvedValue(undefined);
+    const store = await loadStore();
+    const login = store.getState().login("player@example.test", "test-password");
+    await store.getState().logout();
+    fail(new Error("Old login failed"));
+    await login;
+    expect(commands.authGetState).not.toHaveBeenCalled();
+    expect(store.getState().state).toBe("logged_out");
+    expect(store.getState().error).toBeNull();
+  });
+
   it("does not restore a signed-in snapshot after logout", async () => {
     let finish!: (value: typeof signedIn) => void;
     commands.authGetState.mockReturnValue(new Promise((resolve) => { finish = resolve; }));

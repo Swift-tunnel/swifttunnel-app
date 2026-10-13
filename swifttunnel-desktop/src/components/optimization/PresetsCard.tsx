@@ -1,9 +1,10 @@
+import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Button, Dialog, Spinner, Icon } from "../ui";
 import { useToastStore } from "../../stores/toastStore";
 import { usePresetStore, type SavedPreset } from "../../stores/presetStore";
-import { presetSaveToDownloads, systemOpenUrl } from "../../lib/commands";
+import { presetSaveToDownloads } from "../../lib/commands";
 import {
   decodePreset,
   encodePreset,

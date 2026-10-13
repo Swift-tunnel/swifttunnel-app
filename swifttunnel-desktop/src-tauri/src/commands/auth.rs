@@ -219,9 +219,16 @@ pub async fn auth_start_oauth(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<String, String> {
-    let auth = state.auth_manager.lock().await;
-    let result = auth.start_google_sign_in().map_err(|e| e.to_string());
-    drop(auth);
+    let auth_manager = state.auth_manager.clone();
+    // Listener startup and Windows shell launch are blocking operations.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        auth_manager
+            .blocking_lock()
+            .start_google_sign_in()
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("Browser sign-in task failed: {error}"))?;
     emit_auth_state(&app, &state).await;
     result
 }
@@ -273,9 +280,10 @@ pub async fn auth_poll_oauth(state: State<'_, AppState>) -> Result<OAuthPollResu
 
 #[tauri::command]
 pub async fn auth_cancel_oauth(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let auth = state.auth_manager.lock().await;
-    auth.cancel_oauth();
-    drop(auth);
+    let auth_manager = state.auth_manager.clone();
+    tauri::async_runtime::spawn_blocking(move || auth_manager.blocking_lock().cancel_oauth())
+        .await
+        .map_err(|error| format!("Browser sign-in cancellation failed: {error}"))?;
     emit_auth_state(&app, &state).await;
     Ok(())
 }

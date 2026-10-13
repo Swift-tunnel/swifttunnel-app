@@ -4,7 +4,6 @@ import type {
   VpnState,
   GameRouteStatus,
   VpnStateEvent,
-  ThroughputEvent,
   DiagnosticsResponse,
   BindingPreflightInfo,
   DriverCheckResponse,
@@ -320,35 +319,52 @@ async function failoverRelayAfterDeadSession(
   event: VpnStateEvent,
   connect: (region: string, gamePresets: string[]) => Promise<void>,
 ): Promise<void> {
-  if (relayFailoverInFlight) return;
+  if (relayFailoverInFlight || repairIsBusy()) return;
+  if (Date.now() - lastRelayFailoverAt < 5_000) return;
 
-  const now = Date.now();
-  if (now - lastRelayFailoverAt < 5_000) return;
+  const attempt = connectAttemptSeq;
+  const revision = sessionRevision;
+  const settings = useSettingsStore.getState().settings;
+  let expectedRegion = settings.selected_region;
+  const stillCurrent = () => {
+    const vpn = useVpnStore.getState();
+    const current = useSettingsStore.getState().settings;
+    return isCurrentConnectAttempt(attempt) && revision === sessionRevision &&
+      vpn.state === "error" && vpn.error === event.error && !repairIsBusy() &&
+      current.selected_region === expectedRegion &&
+      current.auto_routing_enabled === settings.auto_routing_enabled &&
+      current.enable_country_ban === settings.enable_country_ban &&
+      current.enable_api_tunneling === settings.enable_api_tunneling &&
+      !(current.manual_relay && !current.auto_routing_enabled);
+  };
+  if (!stillCurrent()) return;
 
-  const settingsStore = useSettingsStore.getState();
-  const settings = settingsStore.settings;
-  if (settings.manual_relay && !settings.auto_routing_enabled) return;
-  if (useServerStore.getState().regions.length === 0) {
-    await useServerStore.getState().fetchList();
-  }
-  const regionId = resolveFailoverRegionId(event.region, settings.selected_region);
-  if (!regionId) return;
-
-  const locationName = locationWithAnotherRelay(regionId);
-  if (!locationName) return;
-
+  // Own the guard before fetching the fleet. Duplicate failure events and a
+  // slow notification must not race a manual Disconnect or another connection.
   relayFailoverInFlight = true;
-  lastRelayFailoverAt = now;
   try {
-    if (settings.selected_region !== regionId) {
-      settingsStore.update({ selected_region: regionId });
-      await settingsStore.save();
+    if (useServerStore.getState().regions.length === 0) {
+      await useServerStore.getState().fetchList();
     }
+    if (!stillCurrent()) return;
+    const regionId = resolveFailoverRegionId(event.region, expectedRegion);
+    if (!regionId) return;
+    const locationName = locationWithAnotherRelay(regionId);
+    if (!locationName) return;
+    if (expectedRegion !== regionId) {
+      expectedRegion = regionId;
+      const settingsStore = useSettingsStore.getState();
+      settingsStore.update({ selected_region: regionId });
+      await settingsStore.save(true);
+    }
+    if (!stillCurrent()) return;
+    lastRelayFailoverAt = Date.now();
     await notify(
       "SwiftTunnel",
       `Relay stopped responding. Reconnecting to another ${locationName} relay.`,
     );
-    await connect(regionId, settings.selected_game_presets);
+    if (!stillCurrent()) return;
+    await connect(regionId, useSettingsStore.getState().settings.selected_game_presets);
   } catch (error) {
     reportError("Failed to fail over after relay stopped returning traffic", error, {
       dedupeKey: "vpn-relay-failover",
@@ -465,7 +481,6 @@ interface VpnStore {
   tickFreeTier: () => void;
   fetchDiagnostics: () => Promise<void>;
   handleStateEvent: (event: VpnStateEvent) => void;
-  handleThroughputEvent: (event: ThroughputEvent) => void;
 }
 
 export const useVpnStore = create<VpnStore>((set, get) => ({
@@ -1201,12 +1216,4 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   },
 
-  handleThroughputEvent: (event) => {
-    set({
-      bytesUp: event.bytes_up,
-      bytesDown: event.bytes_down,
-      packetsTunneled: event.packets_tunneled,
-      packetsBypassed: event.packets_bypassed,
-    });
-  },
 }));

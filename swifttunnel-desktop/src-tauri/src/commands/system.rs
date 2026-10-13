@@ -3567,9 +3567,9 @@ pub fn system_show_notification(title: String, body: String) {
 pub async fn system_open_url(url: String) -> Result<(), String> {
     // Shell/browser startup can wait for Explorer or an antivirus scan.
     // The UI must stay responsive while Windows handles the request.
-    tauri::async_runtime::spawn_blocking(move || swifttunnel_core::utils::open_url(&url))
+    tauri::async_runtime::spawn_blocking(move || swifttunnel_core::utils::try_open_url(&url))
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
 }
 
 #[cfg(windows)]

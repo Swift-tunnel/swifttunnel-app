@@ -20,6 +20,63 @@ async function loadStore() {
 }
 
 describe("stores/settingsStore", () => {
+  it("reports a shared save failure to every waiting caller and allows retry", async () => {
+    settingsSave.mockRejectedValueOnce(new Error("Disk unavailable")).mockResolvedValue(undefined);
+    const store = await loadStore();
+    const results = await Promise.allSettled([store.getState().save(true), store.getState().save(true)]);
+    expect(results.every(result => result.status === "rejected")).toBe(true);
+    expect(settingsSave).toHaveBeenCalledTimes(1);
+    expect(store.getState().saveError).toBe("Disk unavailable");
+    await store.getState().save(true);
+    expect(settingsSave).toHaveBeenCalledTimes(2);
+    expect(store.getState().saveError).toBeNull();
+  });
+
+  it("coalesces a burst behind a slow save and writes the latest preference", async () => {
+    let finish!: () => void;
+    settingsSave.mockReturnValueOnce(new Promise<void>(resolve => { finish = resolve; }))
+      .mockResolvedValue(undefined);
+    const store = await loadStore();
+    const first = store.getState().save(true);
+    await Promise.resolve();
+    const queued: Promise<void>[] = [];
+    for (let i = 1; i <= 40; i++) {
+      store.getState().update({ theme: i === 40 ? "light" : "dark" });
+      queued.push(store.getState().save(true));
+    }
+    expect(settingsSave).toHaveBeenCalledTimes(1);
+    finish();
+    await Promise.all([first, ...queued]);
+    expect(settingsSave).toHaveBeenCalledTimes(2);
+    expect(settingsSave.mock.calls[1][0].theme).toBe("light");
+  });
+
+  it("does not coalesce a post-reset save with one queued before Repair", async () => {
+    let finish!: () => void;
+    const order: string[] = [];
+    settingsSave.mockImplementationOnce(async () => {
+      order.push("first");
+      await new Promise<void>(resolve => { finish = resolve; });
+    }).mockImplementation(async (settings: AppSettings) => {
+      order.push(settings.config.roblox_settings.ultraboost ? "before reset" : "after reset");
+    });
+    boostResetRobloxSettings.mockImplementation(async () => {
+      order.push("reset");
+      return structuredClone(DEFAULT_SETTINGS.config.roblox_settings);
+    });
+    const store = await loadStore();
+    store.getState().update({ config: { ...DEFAULT_SETTINGS.config,
+      roblox_settings: { ...DEFAULT_SETTINGS.config.roblox_settings, ultraboost: true } } });
+    const first = store.getState().save(true);
+    await Promise.resolve();
+    const before = store.getState().save(true);
+    const reset = store.getState().resetRobloxSettings();
+    const after = store.getState().save(true);
+    finish();
+    await Promise.all([first, before, reset, after]);
+    expect(order).toEqual(["first", "before reset", "reset", "after reset"]);
+  });
+
   it("keeps an explicit relay until changing city or enabling Auto Route", async () => {
     const store = await loadStore();
     const manual = { region: "singapore", server_id: "singapore-02", ip: "192.0.2.2", port: 51821 };
@@ -51,7 +108,9 @@ describe("stores/settingsStore", () => {
   it("retains the newest failure after a successful earlier queued save", async () => {
     settingsSave.mockResolvedValueOnce(undefined).mockRejectedValueOnce({ message: "Access denied" });
     const store = await loadStore();
-    await Promise.all([store.getState().save(), store.getState().save()]);
+    const first = store.getState().save();
+    await Promise.resolve(); // Start this write before queuing the second one.
+    await Promise.all([first, store.getState().save()]);
     expect(store.getState().saveError).toBe("Access denied");
   });
 
@@ -155,6 +214,7 @@ describe("stores/settingsStore", () => {
     settingsSave.mockRejectedValueOnce(new Error("disk unavailable")).mockResolvedValueOnce(undefined);
     const useSettingsStore = await loadStore();
     const first = useSettingsStore.getState().save();
+    await Promise.resolve(); // The first request is already in flight.
     useSettingsStore.getState().update({ minimize_to_tray: true });
     const second = useSettingsStore.getState().save();
     await Promise.all([first, second]);

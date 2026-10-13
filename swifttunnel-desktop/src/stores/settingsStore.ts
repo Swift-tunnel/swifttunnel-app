@@ -8,6 +8,7 @@ import { NAV_ITEMS } from "../components/shell/nav";
 // Native saves perform filesystem and system work on blocking workers. Keep
 // one in flight so an older snapshot cannot finish after a newer preference.
 let saveTail: Promise<void> = Promise.resolve();
+let pendingSave: Promise<void> | null = null;
 
 /**
  * Keep the restored tab inside what this build actually has.
@@ -66,27 +67,38 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   save: async (propagateError = false) => {
     // Read after earlier writes and native resets finish. A queued save must
     // not restore the pre-reset config captured while Repair was still busy.
-    const write = saveTail.then(async () => {
-      try {
-        const { settings, activeTab } = get();
-        await settingsSave(structuredClone({ ...settings, current_tab: activeTab }));
-        set({ saveError: null });
-      } catch (error) {
-        set({ saveError: formatErrorMessage(error) });
-        throw error;
-      }
-    });
-    // A failed write must not poison the queue or drop subsequent changes.
-    saveTail = write.catch(() => {});
+    // Share the not-yet-started save. Sliders and background counters can
+    // otherwise queue dozens of identical full-file writes behind a slow disk.
+    let write = pendingSave;
+    if (!write) {
+      const next = saveTail.then(async () => {
+        if (pendingSave === next) pendingSave = null;
+        try {
+          const { settings, activeTab } = get();
+          await settingsSave(structuredClone({ ...settings, current_tab: activeTab }));
+          set({ saveError: null });
+        } catch (error) {
+          set({ saveError: formatErrorMessage(error) });
+          reportError("Failed to save settings", error);
+          throw error;
+        }
+      });
+      pendingSave = next;
+      write = next;
+      // A failed write must not poison the queue or drop subsequent changes.
+      saveTail = write.catch(() => {});
+    }
     try {
       await write;
     } catch (error) {
-      reportError("Failed to save settings", error);
       if (propagateError) throw error;
     }
   },
 
   resetRobloxSettings: async () => {
+    // A reset is an ordering barrier. Later saves must not share one queued
+    // before the reset or resolve before the reset settings reach disk.
+    pendingSave = null;
     const reset = saveTail.then(async () => {
       const roblox_settings = await boostResetRobloxSettings();
       // Refresh only the reset section, preserving other edits and this tab.

@@ -2,8 +2,6 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   VpnStateEvent,
   AuthStateEvent,
-  ThroughputEvent,
-  PerformanceMetricsEvent,
   RamCleanProgressEvent,
   UpdaterProgressEvent,
 } from "./types";
@@ -17,8 +15,6 @@ import { reportError } from "./errors";
 
 const EVENT_VPN_STATE_CHANGED = "vpn-state-changed";
 const EVENT_AUTH_STATE_CHANGED = "auth-state-changed";
-const EVENT_THROUGHPUT_UPDATE = "throughput-update";
-const EVENT_PERFORMANCE_METRICS_UPDATE = "performance-metrics-update";
 const EVENT_RAM_CLEAN_PROGRESS = "ram-clean-progress";
 const EVENT_SERVER_LIST_UPDATED = "server-list-updated";
 const EVENT_UPDATER_PROGRESS = "updater://progress";
@@ -64,17 +60,6 @@ export async function initEventListeners() {
     await register<AuthStateEvent>(EVENT_AUTH_STATE_CHANGED, (event) => {
       useAuthStore.getState().handleStateEvent(event.payload);
     });
-
-    await register<ThroughputEvent>(EVENT_THROUGHPUT_UPDATE, (event) => {
-      useVpnStore.getState().handleThroughputEvent(event.payload);
-    });
-
-    await register<PerformanceMetricsEvent>(
-      EVENT_PERFORMANCE_METRICS_UPDATE,
-      (event) => {
-        useBoostStore.getState().handleMetricsEvent(event.payload);
-      },
-    );
 
     await register<RamCleanProgressEvent>(EVENT_RAM_CLEAN_PROGRESS, (event) => {
       useBoostStore.getState().handleRamCleanProgress(event.payload);

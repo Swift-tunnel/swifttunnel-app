@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import type {
-  PerformanceMetricsEvent,
   RamCleanProgressEvent,
   RamCleanResultResponse,
   SystemMemorySnapshot,
@@ -64,7 +63,6 @@ interface BoostStore {
   restartRoblox: () => Promise<void>;
   cleanRam: () => Promise<void>;
   clearError: () => void;
-  handleMetricsEvent: (event: PerformanceMetricsEvent) => void;
   handleRamCleanProgress: (event: RamCleanProgressEvent) => void;
 }
 
@@ -254,16 +252,6 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
 
   clearError: () => {
     set({ error: null, warning: null });
-  },
-
-  handleMetricsEvent: (event) => {
-    set({
-      fps: event.fps,
-      cpuUsage: event.cpu_usage,
-      ramUsage: event.ram_usage,
-      ramTotal: event.ram_total,
-      robloxRunning: event.roblox_running,
-    });
   },
 
   handleRamCleanProgress: (event) => {

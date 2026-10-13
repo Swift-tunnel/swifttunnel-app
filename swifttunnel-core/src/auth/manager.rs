@@ -739,7 +739,7 @@ impl AuthManager {
         );
 
         // Open the browser
-        crate::utils::open_url(&oauth_url);
+        crate::utils::try_open_url(&oauth_url).map_err(AuthError::ApiError)?;
 
         // Store the OAuth server
         {
@@ -794,11 +794,7 @@ impl AuthManager {
         exchange_token: &str,
         callback_state: &str,
     ) -> Result<(), AuthError> {
-        debug!(
-            "Completing OAuth callback (exchange_token: {}..., state: {}...)",
-            &exchange_token[..exchange_token.len().min(8)],
-            &callback_state[..callback_state.len().min(8)]
-        );
+        debug!("Completing OAuth callback (credentials omitted)");
 
         // Get expected state from memory
         let expected_state = {
@@ -828,11 +824,7 @@ impl AuthManager {
         };
 
         if callback_state != expected_state {
-            error!(
-                "State mismatch: expected {}..., got {}...",
-                &expected_state[..expected_state.len().min(8)],
-                &callback_state[..callback_state.len().min(8)]
-            );
+            error!("OAuth callback state did not match the pending sign-in");
             // Reset state
             {
                 let mut state = self.state.lock();

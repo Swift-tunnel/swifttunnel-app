@@ -1,3 +1,4 @@
+import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { useEffect, useState } from "react";
 import {
   Button,
@@ -17,7 +18,6 @@ import {
   gamesDatacenters,
   gamesLauncherConfig,
   gamesSaveLauncherConfig,
-  systemOpenUrl,
 } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
 import { parsePlaceInput } from "../../lib/robloxGames";

@@ -81,6 +81,7 @@ export function useOverlayDriver() {
     })
       .then(() => true)
       .catch(() => {
+        if (disposed) return false;
         useOverlayRuntimeStore.setState({
           error: "The overlay could not open. Turn it off and on to retry.",
         });
@@ -263,7 +264,7 @@ export function useOverlayDriver() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen<OverlayPositionPayload>(OVERLAY_POSITION_EVENT, (e) => {
-      if (!Number.isFinite(e.payload.x) || !Number.isFinite(e.payload.y))
+      if (disposed || !Number.isFinite(e.payload.x) || !Number.isFinite(e.payload.y))
         return;
       const cfg = useSettingsStore.getState().settings.config;
       const next: Config = {
@@ -276,7 +277,9 @@ export function useOverlayDriver() {
       };
       updateSettings({ config: next });
       void saveSettings();
-    }).then((u) => (disposed ? u() : (unlisten = u)));
+    }).then((u) => (disposed ? u() : (unlisten = u))).catch(() => {
+      if (!disposed) useOverlayRuntimeStore.setState({ error: "Overlay position could not be saved. Turn it off and on to retry." });
+    });
     return () => {
       disposed = true;
       unlisten?.();
@@ -287,6 +290,7 @@ export function useOverlayDriver() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("overlay-toggle-request", () => {
+      if (disposed) return;
       const store = useSettingsStore.getState();
       const config = store.settings.config;
       const metrics = supportedOverlayMetrics(config.overlay.metrics);
@@ -319,9 +323,9 @@ export function useOverlayDriver() {
             useOverlayRuntimeStore.setState({ shortcutAvailable: false });
         }
       })
-      .catch(() =>
-        useOverlayRuntimeStore.setState({ shortcutAvailable: false }),
-      );
+      .catch(() => {
+        if (!disposed) useOverlayRuntimeStore.setState({ shortcutAvailable: false });
+      });
     return () => {
       disposed = true;
       unlisten?.();

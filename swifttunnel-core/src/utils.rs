@@ -12,6 +12,15 @@ pub fn read_text_file_bounded(
     max_bytes: usize,
     context: &str,
 ) -> std::io::Result<String> {
+    String::from_utf8(read_file_bounded(path, max_bytes, context)?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+pub(crate) fn read_file_bounded(
+    path: &std::path::Path,
+    max_bytes: usize,
+    context: &str,
+) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
     let too_large = || {
@@ -23,13 +32,13 @@ pub fn read_text_file_bounded(
     if file.metadata()?.len() > max_bytes as u64 {
         return Err(too_large());
     }
-    let mut text = String::new();
+    let mut bytes = Vec::new();
     file.take(max_bytes.saturating_add(1) as u64)
-        .read_to_string(&mut text)?;
-    if text.len() > max_bytes {
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
         return Err(too_large());
     }
-    Ok(text)
+    Ok(bytes)
 }
 
 #[cfg(windows)]
@@ -280,13 +289,13 @@ pub fn is_administrator() -> bool {
 //  URL OPENING
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Open a URL in the user's default browser using Windows ShellExecuteW
+/// Open a URL or folder, reporting failure without logging credential URLs.
 #[cfg(windows)]
-pub fn open_url(url: &str) {
+pub fn try_open_url(url: &str) -> Result<(), String> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
     use windows::core::HSTRING;
-    unsafe {
+    let result = unsafe {
         ShellExecuteW(
             None,
             &HSTRING::from("open"),
@@ -294,13 +303,21 @@ pub fn open_url(url: &str) {
             None,
             None,
             SW_SHOW,
-        );
+        )
+    };
+    let code = result.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(format!(
+            "Windows could not open this link (shell error {code}). Check your default browser."
+        ))
     }
 }
 
 #[cfg(not(windows))]
-pub fn open_url(_url: &str) {
-    // No-op on non-Windows platforms
+pub fn try_open_url(_url: &str) -> Result<(), String> {
+    Err("Opening links is only supported on Windows.".into())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

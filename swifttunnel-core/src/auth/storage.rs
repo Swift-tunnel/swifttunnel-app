@@ -18,7 +18,7 @@
 //! the same AES-GCM blob (the keyring copy is base64-encoded so it can be
 //! passed through the keyring's string API).
 
-use super::types::{AuthError, AuthSession, OAuthPendingState};
+use super::types::{AuthError, AuthSession};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use keyring::Entry;
@@ -31,8 +31,6 @@ use std::path::PathBuf;
 
 const SERVICE_NAME: &str = "SwiftTunnel";
 const SESSION_KEY: &str = "auth_session";
-#[allow(dead_code)]
-const OAUTH_STATE_FILE: &str = "oauth_pending.json";
 const AUTH_SESSION_FILE: &str = "auth_session.dat";
 const REFRESH_FAILURES_FILE: &str = "refresh_failures.json";
 const LEGACY_REFRESH_FAILURES_FILE: &str = "refresh_failures.txt";
@@ -385,7 +383,7 @@ impl SecureStorage {
             return Ok(None);
         }
 
-        let raw = match std::fs::read(&path) {
+        let raw = match crate::utils::read_file_bounded(&path, 1024 * 1024, "Auth session") {
             Ok(data) => data,
             Err(e) => {
                 error!("Failed to read session file: {}", e);
@@ -511,7 +509,11 @@ impl SecureStorage {
             match entry.delete_credential() {
                 Ok(_) => info!("Cleared session from keyring"),
                 Err(keyring::Error::NoEntry) => debug!("No keyring session to clear"),
-                Err(e) => warn!("Failed to clear keyring session: {}", e),
+                Err(e) => {
+                    return Err(AuthError::StorageError(format!(
+                        "Could not clear the saved login in Windows Credential Manager: {e}. Try signing out again."
+                    )));
+                }
             }
         }
         Ok(())
@@ -562,79 +564,12 @@ impl SecureStorage {
             error!("Keyring clear error: {}", e);
         }
 
+        // Both stores were attempted. Do not claim logout succeeded while
+        // a surviving credential can sign this account back in on restart.
+        file_result.and(keyring_result)?;
         info!("Auth session cleared");
         Ok(())
     }
-
-    /// Cheap check: is there a session *file* on disk? May return `true` for
-    /// files that won't actually decrypt — e.g. a file sealed under a
-    /// different Windows user, or a partial write from a crash mid-migration.
-    /// Callers MUST follow up with `load_session` before assuming the user is
-    /// logged in. We accept the false-positive because keyring reads on Windows
-    /// are synchronous RPCs that don't belong on a hot path.
-    #[allow(dead_code)]
-    pub fn has_session(&self) -> bool {
-        self.session_file_path().exists()
-    }
-
-    /// Get the OAuth state file path
-    #[allow(dead_code)]
-    fn oauth_state_path(&self) -> PathBuf {
-        self.data_dir.join(OAUTH_STATE_FILE)
-    }
-
-    /// Save OAuth pending state to disk (for deep link callback after app restart)
-    #[allow(dead_code)]
-    pub fn save_oauth_state(&self, state: &OAuthPendingState) -> Result<(), AuthError> {
-        let path = self.oauth_state_path();
-
-        let json = serde_json::to_string(state).map_err(|e| {
-            AuthError::StorageError(format!("Failed to serialize OAuth state: {}", e))
-        })?;
-
-        std::fs::write(&path, json)
-            .map_err(|e| AuthError::StorageError(format!("Failed to write OAuth state: {}", e)))?;
-
-        info!("Saved OAuth pending state to: {}", path.display());
-        Ok(())
-    }
-
-    /// Load OAuth pending state from disk
-    #[allow(dead_code)]
-    pub fn load_oauth_state(&self) -> Result<Option<OAuthPendingState>, AuthError> {
-        let path = self.oauth_state_path();
-
-        if !path.exists() {
-            debug!("No OAuth pending state file found");
-            return Ok(None);
-        }
-
-        let json = std::fs::read_to_string(&path)
-            .map_err(|e| AuthError::StorageError(format!("Failed to read OAuth state: {}", e)))?;
-
-        let state: OAuthPendingState = serde_json::from_str(&json).map_err(|e| {
-            AuthError::StorageError(format!("Failed to deserialize OAuth state: {}", e))
-        })?;
-
-        info!("Loaded OAuth pending state from disk");
-        Ok(Some(state))
-    }
-
-    /// Clear OAuth pending state from disk
-    #[allow(dead_code)]
-    pub fn clear_oauth_state(&self) -> Result<(), AuthError> {
-        let path = self.oauth_state_path();
-
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| {
-                AuthError::StorageError(format!("Failed to remove OAuth state: {}", e))
-            })?;
-            info!("Cleared OAuth pending state file");
-        }
-
-        Ok(())
-    }
-
     fn refresh_failures_path(&self) -> PathBuf {
         self.data_dir.join(REFRESH_FAILURES_FILE)
     }
@@ -652,7 +587,8 @@ impl SecureStorage {
         if !path.exists() {
             return None;
         }
-        let raw = std::fs::read_to_string(&path).ok()?;
+        let raw = crate::utils::read_text_file_bounded(&path, 16 * 1024, "Refresh failure record")
+            .ok()?;
         let record: RefreshFailureRecord = serde_json::from_str(&raw).ok()?;
         if Utc::now() - record.first_failure_at > REFRESH_FAILURE_WINDOW {
             None
@@ -725,6 +661,41 @@ impl Default for SecureStorage {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[cfg(windows)]
+    #[test]
+    fn logout_reports_a_locked_session_file_and_succeeds_after_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let storage = SecureStorage::with_isolated_data_dir();
+        storage
+            .store_session(&make_session("locked-logout"))
+            .unwrap();
+        let path = storage.session_file_path();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        assert!(storage.clear_session().is_err());
+        assert!(path.exists());
+        drop(lock);
+        storage.clear_session().unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir(storage.data_dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_session_file_is_refused_before_decoding_and_preserved() {
+        let storage = SecureStorage::with_isolated_data_dir();
+        let path = storage.session_file_path();
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(1024 * 1024 + 1).unwrap();
+        drop(file);
+        assert!(storage.load_from_file().unwrap().is_none());
+        assert!(path.exists());
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(storage.data_dir).unwrap();
+    }
 
     fn make_session(suffix: &str) -> AuthSession {
         AuthSession {

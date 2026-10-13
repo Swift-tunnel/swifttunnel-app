@@ -15,5 +15,5 @@ pub mod types;
 
 pub use http_client::{set_client_version, update_required_message};
 pub use manager::AuthManager;
-pub use oauth_server::{DEFAULT_OAUTH_PORT, OAuthCallbackData, OAuthServer, OAuthServerResult};
+pub use oauth_server::{DEFAULT_OAUTH_PORT, OAuthCallbackData, OAuthServer};
 pub use types::*;

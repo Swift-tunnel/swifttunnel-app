@@ -1,5 +1,5 @@
 import { useUpdaterStore } from "../../stores/updaterStore";
-import { systemOpenUrl } from "../../lib/commands";
+import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { Button } from "../ui";
 import { SwiftLogo } from "../common/SwiftLogo";
 

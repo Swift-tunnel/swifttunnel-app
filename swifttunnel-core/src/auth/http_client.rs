@@ -372,7 +372,7 @@ impl AuthClient {
     ) -> Result<SupabaseAuthResponse, AuthError> {
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             error!(
                 "Sign in failed: {} - {}",
                 status,
@@ -392,10 +392,7 @@ impl AuthClient {
             )));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))
+        read_auth_json(response, "response").await
     }
 
     async fn sign_in_with_password_via_desktop_api(
@@ -443,10 +440,9 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            // Read Retry-After before consuming the body: `text()` takes the
-            // response by value.
+            // Read Retry-After before the bounded reader consumes the response.
             let retry_after = retry_after_seconds(&response);
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             error!(
                 "Desktop token refresh failed: {} - {}",
                 status,
@@ -470,10 +466,7 @@ impl AuthClient {
             )));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))
+        read_auth_json(response, "response").await
     }
 
     /// Sign in with email and password via Supabase
@@ -563,7 +556,7 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             error!(
                 "Refresh token failed: {} - {}",
                 status,
@@ -582,10 +575,7 @@ impl AuthClient {
             )));
         }
 
-        let data: SupabaseAuthResponse = response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse response: {}", e)))?;
+        let data: SupabaseAuthResponse = read_auth_json(response, "response").await?;
 
         info!("Token refresh successful");
         Ok(data)
@@ -615,7 +605,7 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             error!(
                 "Get VPN config failed: {} - {}",
                 status,
@@ -634,10 +624,7 @@ impl AuthClient {
             )));
         }
 
-        let data: VpnConfig = response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse config: {}", e)))?;
+        let data: VpnConfig = read_auth_json(response, "config").await?;
 
         info!("Got VPN config for region {}", region);
         Ok(data)
@@ -661,7 +648,7 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             return Err(AuthError::ApiError(format!(
                 "Relay release failed: {} - {}",
                 status,
@@ -708,7 +695,7 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             error!(
                 "Relay ticket fetch failed: {} - {}",
                 status,
@@ -739,10 +726,7 @@ impl AuthClient {
             )));
         }
 
-        let data: RelayTicketResponse = response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse relay ticket: {}", e)))?;
+        let data: RelayTicketResponse = read_auth_json(response, "relay ticket").await?;
 
         info!(
             "Received relay ticket (auth_required: {}, key_id: {}, preflight_mode: {:?}, queue_full_mode: {:?})",
@@ -776,7 +760,7 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             error!(
                 "Exchange token failed: {} - {}",
                 status,
@@ -809,9 +793,7 @@ impl AuthClient {
             )));
         }
 
-        let data: ExchangeTokenResponse = response.json().await.map_err(|e| {
-            AuthError::ApiError(format!("Failed to parse exchange response: {}", e))
-        })?;
+        let data: ExchangeTokenResponse = read_auth_json(response, "exchange response").await?;
 
         info!("Successfully exchanged OAuth token");
         Ok(data)
@@ -836,7 +818,7 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             error!(
                 "Fetch user profile failed: {} - {}",
                 status,
@@ -855,10 +837,7 @@ impl AuthClient {
             )));
         }
 
-        let data: UserProfileResponse = response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse profile: {}", e)))?;
+        let data: UserProfileResponse = read_auth_json(response, "profile").await?;
 
         info!("Fetched user profile (is_tester: {})", data.is_tester);
         Ok(data)
@@ -872,11 +851,7 @@ impl AuthClient {
     ) -> Result<SupabaseAuthResponse, AuthError> {
         let url = format!("{}/auth/v1/verify", SUPABASE_URL);
 
-        debug!(
-            "Verifying magic link token for {} (token_hash: {}...)",
-            email,
-            &token_hash[..token_hash.len().min(8)]
-        );
+        debug!("Verifying magic link for {} (token omitted)", email);
 
         let response = self
             .send_to_fixed_url("magic link verification", |client| {
@@ -893,7 +868,7 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = read_auth_error(response).await;
             error!(
                 "Verify magic link failed: {} - {}",
                 status,
@@ -928,13 +903,34 @@ impl AuthClient {
             )));
         }
 
-        let data: SupabaseAuthResponse = response
-            .json()
-            .await
-            .map_err(|e| AuthError::ApiError(format!("Failed to parse auth response: {}", e)))?;
+        let data: SupabaseAuthResponse = read_auth_json(response, "auth response").await?;
 
         info!("Magic link verification successful");
         Ok(data)
+    }
+}
+
+const AUTH_JSON_LIMIT: usize = 1024 * 1024;
+const AUTH_ERROR_LIMIT: usize = 64 * 1024;
+
+async fn read_auth_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    context: &str,
+) -> Result<T, AuthError> {
+    let bytes =
+        crate::http_body::read_bounded(response, AUTH_JSON_LIMIT, "authentication response")
+            .await
+            .map_err(AuthError::ApiError)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| AuthError::ApiError(format!("Failed to parse {context}: {error}")))
+}
+
+async fn read_auth_error(response: reqwest::Response) -> String {
+    // Keep status/header classification (429, bans, quota, old builds) in the
+    // caller even if a proxy returns an oversized or incomplete error body.
+    match crate::http_body::read_bounded(response, AUTH_ERROR_LIMIT, "authentication error").await {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(error) => error,
     }
 }
 
@@ -1471,6 +1467,84 @@ mod tests {
                 r#"{"error":"User banned","code":"user_banned"}"#,
             )
             .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod bounded_response_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    async fn loopback_response(wire: Vec<u8>) -> reqwest::Response {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request);
+            socket.write_all(&wire).unwrap();
+        });
+        let response = Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        server.join().unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn normal_json_is_preserved_and_oversized_json_is_rejected() {
+        let body = br#"{"user_id":"test-player","remaining_seconds":123}"#;
+        let mut wire =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        wire.extend_from_slice(body);
+        let parsed: serde_json::Value =
+            read_auth_json(loopback_response(wire).await, "test response")
+                .await
+                .unwrap();
+        assert_eq!(parsed["remaining_seconds"], 123);
+        let wire = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            AUTH_JSON_LIMIT + 1
+        )
+        .into_bytes();
+        let error =
+            read_auth_json::<serde_json::Value>(loopback_response(wire).await, "test response")
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("download limit"));
+    }
+
+    #[tokio::test]
+    async fn bounded_errors_preserve_ban_details_and_reject_large_proxy_pages() {
+        let body =
+            br#"{"error":"User banned","code":"user_banned","banned_reason":"test restriction"}"#;
+        let mut wire = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        wire.extend_from_slice(body);
+        let text = read_auth_error(loopback_response(wire).await).await;
+        assert!(user_banned_error_from_body(&text).is_some());
+        let wire = format!(
+            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\n\r\n",
+            AUTH_ERROR_LIMIT + 1
+        )
+        .into_bytes();
+        assert!(
+            read_auth_error(loopback_response(wire).await)
+                .await
+                .contains("download limit")
         );
     }
 }

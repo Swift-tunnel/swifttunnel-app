@@ -39,16 +39,36 @@ export function getTotalTunneledMs(): number {
 }
 
 export function addTunneledMs(ms: number): void {
-  if (!(ms > 0)) return;
+  if (!Number.isFinite(ms) || ms < 1) return;
 
-  const total = getTotalTunneledMs() + ms;
+  const total = getTotalTunneledMs() + Math.floor(ms);
   const store = useSettingsStore.getState();
   store.update({ total_tunneled_ms: total });
-  void store.save();
+  // Only remove the old counter after persistence actually succeeds. Keep a
+  // newer legacy value if another window changed it during the save.
+  void store.save(true).then(() => {
+    if (legacyValue() <= total) clearLegacy();
+  }).catch(() => { /* The settings store reports the failure; migration retries later. */ });
+}
 
-  // Only once the new home has the value, so an interrupted migration cannot
-  // lose the old total.
-  if (legacyValue() > 0) {
-    clearLegacy();
-  }
+/** Count partial intervals using the connection state during each interval. */
+export function createTunnelTimeTracker(
+  connected: boolean,
+  add: (ms: number) => void,
+  now: () => number = () => performance.now(),
+) {
+  let baseline = now();
+  const flush = () => {
+    const time = now();
+    if (connected && time > baseline) add(time - baseline);
+    baseline = time;
+  };
+  return {
+    flush,
+    setConnected(next: boolean) {
+      if (connected === next) return;
+      flush();
+      connected = next;
+    },
+  };
 }
