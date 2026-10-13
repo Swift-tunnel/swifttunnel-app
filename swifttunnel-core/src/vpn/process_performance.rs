@@ -1,8 +1,7 @@
 use crate::settings::GameProcessPerformanceSettings;
 use std::collections::HashMap;
 
-const GPU_PREFERENCES_KEY_PATH: &str = r"Software\Microsoft\DirectX\UserGpuPreferences";
-const GPU_PREFERENCE_HIGH_PERFORMANCE: &str = "GpuPreference=2;";
+const GPU_PREFERENCES_KEY_PATH: &str = r"HKCU\Software\Microsoft\DirectX\UserGpuPreferences";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GameProcessPerformancePolicy {
@@ -28,12 +27,32 @@ impl From<GameProcessPerformanceSettings> for GameProcessPerformancePolicy {
 }
 
 #[derive(Debug, Clone)]
+struct TemporarySetting<T> {
+    original: T,
+    applied: T,
+}
+
+fn restore_setting<T: PartialEq>(
+    slot: &mut Option<TemporarySetting<T>>,
+    read: impl FnOnce() -> Result<T, String>,
+    restore: impl FnOnce(&T) -> Result<(), String>,
+) -> Result<(), String> {
+    if let Some(setting) = slot {
+        if read()? == setting.applied {
+            restore(&setting.original)?;
+        }
+        *slot = None;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
 struct AppliedProcessState {
     process_name: String,
-    affinity_original: Option<usize>,
-    affinity_applied: bool,
-    cpu_sets_original: Option<Vec<u32>>,
-    cpu_sets_applied: bool,
+    #[cfg(windows)]
+    created: Option<u64>,
+    affinity: Option<TemporarySetting<usize>>,
+    cpu_sets: Option<TemporarySetting<Vec<u32>>>,
     gpu_registry_key: Option<String>,
 }
 
@@ -41,16 +60,16 @@ impl AppliedProcessState {
     fn new(process_name: String) -> Self {
         Self {
             process_name,
-            affinity_original: None,
-            affinity_applied: false,
-            cpu_sets_original: None,
-            cpu_sets_applied: false,
+            #[cfg(windows)]
+            created: None,
+            affinity: None,
+            cpu_sets: None,
             gpu_registry_key: None,
         }
     }
 
     fn has_any_applied_control(&self) -> bool {
-        self.affinity_applied || self.cpu_sets_applied || self.gpu_registry_key.is_some()
+        self.affinity.is_some() || self.cpu_sets.is_some() || self.gpu_registry_key.is_some()
     }
 }
 
@@ -58,6 +77,7 @@ impl AppliedProcessState {
 struct GpuPreferenceSnapshot {
     value_name: String,
     previous_value: Option<String>,
+    applied_value: String,
     ref_count: usize,
 }
 
@@ -75,6 +95,7 @@ pub struct GameProcessPerformanceManager {
     policy: GameProcessPerformancePolicy,
     active_processes: HashMap<u32, AppliedProcessState>,
     gpu_preferences: HashMap<String, GpuPreferenceSnapshot>,
+    failed_attempts: HashMap<u32, (String, std::time::Instant)>,
 }
 
 impl GameProcessPerformanceManager {
@@ -83,6 +104,7 @@ impl GameProcessPerformanceManager {
             policy,
             active_processes: HashMap::new(),
             gpu_preferences: HashMap::new(),
+            failed_attempts: HashMap::new(),
         }
     }
 
@@ -101,10 +123,30 @@ impl GameProcessPerformanceManager {
         }
 
         for (&pid, name) in &desired {
+            #[cfg(windows)]
+            if let Some(original) = self
+                .active_processes
+                .get(&pid)
+                .and_then(|state| state.created)
+                && process_creation_for_pid(pid).is_some_and(|current| original != current)
+            {
+                self.revert_for_process(pid, "process_replaced");
+            }
             if !self.active_processes.contains_key(&pid) {
+                if self
+                    .failed_attempts
+                    .get(&pid)
+                    .is_some_and(|(previous_name, at)| {
+                        previous_name == name && at.elapsed() < std::time::Duration::from_secs(10)
+                    })
+                {
+                    continue;
+                }
                 self.apply_for_process(pid, name.clone());
             }
         }
+        self.failed_attempts
+            .retain(|pid, _| desired.contains_key(pid));
 
         let stale_pids: Vec<u32> = self
             .active_processes
@@ -119,35 +161,17 @@ impl GameProcessPerformanceManager {
     }
 
     pub fn cleanup_all(&mut self, reason: &str) {
+        self.failed_attempts.clear();
         let tracked: Vec<u32> = self.active_processes.keys().copied().collect();
         for pid in tracked {
             self.revert_for_process(pid, reason);
         }
 
         #[cfg(windows)]
-        {
-            // Defensive cleanup in case refs got out of sync.
-            if !self.gpu_preferences.is_empty() {
-                let remaining: Vec<String> = self.gpu_preferences.keys().cloned().collect();
-                for key in remaining {
-                    if let Some(snapshot) = self.gpu_preferences.remove(&key) {
-                        if let Err(e) =
-                            restore_gpu_preference(&snapshot.value_name, &snapshot.previous_value)
-                        {
-                            log::warn!(
-                                "Process tuning: failed to force-restore GPU preference '{}' during cleanup: {}",
-                                snapshot.value_name,
-                                e
-                            );
-                        } else {
-                            log::info!(
-                                "Process tuning: force-restored GPU preference for '{}' during cleanup",
-                                snapshot.value_name
-                            );
-                        }
-                    }
-                }
-            }
+        if !self.active_processes.is_empty() {
+            log::warn!(
+                "Process tuning restore has pending originals; they remain available for retry"
+            );
         }
 
         #[cfg(not(windows))]
@@ -172,8 +196,11 @@ impl GameProcessPerformanceManager {
         }
 
         if state.has_any_applied_control() {
+            self.failed_attempts.remove(&pid);
             self.active_processes.insert(pid, state);
         } else {
+            self.failed_attempts
+                .insert(pid, (process_name.clone(), std::time::Instant::now()));
             log::info!(
                 "Process tuning: no controls applied for '{}' (PID {})",
                 process_name,
@@ -183,13 +210,16 @@ impl GameProcessPerformanceManager {
     }
 
     fn revert_for_process(&mut self, pid: u32, reason: &str) {
-        let Some(state) = self.active_processes.remove(&pid) else {
+        let Some(mut state) = self.active_processes.remove(&pid) else {
             return;
         };
 
         #[cfg(windows)]
         {
-            self.revert_windows_process_controls(pid, &state, reason);
+            self.revert_windows_process_controls(pid, &mut state, reason);
+            if state.has_any_applied_control() {
+                self.active_processes.insert(pid, state);
+            }
         }
 
         #[cfg(not(windows))]
@@ -206,40 +236,33 @@ impl GameProcessPerformanceManager {
     #[cfg(windows)]
     fn apply_windows_process_controls(&mut self, pid: u32, state: &mut AppliedProcessState) {
         use windows::Win32::Foundation::CloseHandle;
-
-        let process = open_process_for_tuning(pid);
-        let mut process_open_failed = false;
-
-        match process {
-            Some(handle) => {
+        let Some(handle) = open_process_for_tuning(pid) else {
+            log::warn!(
+                "Process tuning could not open {} (PID {pid})",
+                state.process_name
+            );
+            return;
+        };
+        let identity = crate::process_snapshot::creation_time(handle);
+        let image = crate::process_snapshot::image_for_handle(handle);
+        if let (Ok(created), Ok(image)) = (identity, image) {
+            if crate::process_names::process_name_matches_alias(&image, &state.process_name) {
+                state.created = Some(created);
                 if self.policy.prefer_performance_cores || self.policy.unbind_cpu0 {
                     self.apply_cpu_policy_for_process(pid, handle, state);
                 }
-
                 if self.policy.high_performance_gpu_binding {
-                    self.apply_gpu_binding(pid, handle, state);
-                }
-
-                unsafe {
-                    let _ = CloseHandle(handle);
+                    self.apply_gpu_binding(pid, &image, state);
                 }
             }
-            None => {
-                process_open_failed = true;
-                log::warn!(
-                    "Process tuning: failed to open '{}' (PID {}) for tuning",
-                    state.process_name,
-                    pid
-                );
-            }
-        }
-
-        if process_open_failed && self.policy.high_performance_gpu_binding {
+        } else {
             log::warn!(
-                "Process tuning: GPU binding skipped for '{}' (PID {}) because process handle was unavailable",
-                state.process_name,
-                pid
+                "Process tuning could not verify {} (PID {pid}); controls were skipped",
+                state.process_name
             );
+        }
+        unsafe {
+            let _ = CloseHandle(handle);
         }
     }
 
@@ -247,83 +270,91 @@ impl GameProcessPerformanceManager {
     fn revert_windows_process_controls(
         &mut self,
         pid: u32,
-        state: &AppliedProcessState,
+        state: &mut AppliedProcessState,
         reason: &str,
     ) {
         use windows::Win32::Foundation::CloseHandle;
-
-        let process = open_process_for_tuning(pid);
-
-        if let Some(handle) = process {
-            if state.cpu_sets_applied {
-                match cpu_set_api() {
-                    Some(api) => {
-                        let restore_ids = state.cpu_sets_original.clone().unwrap_or_default();
-                        if let Err(e) = set_process_default_cpu_sets(api, handle, &restore_ids) {
+        if state.cpu_sets.is_some() || state.affinity.is_some() {
+            if let Some(handle) = open_process_for_tuning(pid) {
+                match crate::process_snapshot::creation_time(handle) {
+                    Ok(created) if state.created == Some(created) => {
+                        if state.cpu_sets.is_some() {
+                            let result = cpu_set_api()
+                                .ok_or_else(|| "CPU Sets API is unavailable".to_string())
+                                .and_then(|api| {
+                                    restore_setting(
+                                        &mut state.cpu_sets,
+                                        || {
+                                            get_process_default_cpu_sets(api, handle).map(
+                                                |mut ids| {
+                                                    ids.sort_unstable();
+                                                    ids.dedup();
+                                                    ids
+                                                },
+                                            )
+                                        },
+                                        |original| {
+                                            set_process_default_cpu_sets(api, handle, original)
+                                        },
+                                    )
+                                });
+                            if let Err(error) = result {
+                                log::warn!(
+                                    "CPU set restore for {} (PID {pid}) failed: {error}",
+                                    state.process_name
+                                );
+                            }
+                        }
+                        let result = restore_setting(
+                            &mut state.affinity,
+                            || {
+                                let (mut current, mut system) = (0, 0);
+                                unsafe {
+                                    windows::Win32::System::Threading::GetProcessAffinityMask(
+                                        handle,
+                                        &mut current,
+                                        &mut system,
+                                    )
+                                }
+                                .map_err(|error| error.to_string())?;
+                                Ok(current)
+                            },
+                            |original| {
+                                unsafe {
+                                    windows::Win32::System::Threading::SetProcessAffinityMask(
+                                        handle, *original,
+                                    )
+                                }
+                                .map_err(|error| error.to_string())
+                            },
+                        );
+                        if let Err(error) = result {
                             log::warn!(
-                                "Process tuning: failed to restore CPU sets for '{}' (PID {}): {}",
-                                state.process_name,
-                                pid,
-                                e
-                            );
-                        } else {
-                            log::info!(
-                                "Process tuning: restored CPU sets for '{}' (PID {}) on {}",
-                                state.process_name,
-                                pid,
-                                reason
+                                "Affinity restore for {} (PID {pid}) failed: {error}",
+                                state.process_name
                             );
                         }
                     }
-                    None => {
-                        log::warn!(
-                            "Process tuning: CPU Sets API unavailable while restoring '{}' (PID {})",
-                            state.process_name,
-                            pid
-                        );
+                    Ok(_) => {
+                        state.cpu_sets = None;
+                        state.affinity = None;
                     }
+                    Err(error) => log::warn!("Could not verify process for restore: {error}"),
                 }
-            }
-
-            if state.affinity_applied
-                && let Some(original_mask) = state.affinity_original
-            {
                 unsafe {
-                    if let Err(e) = windows::Win32::System::Threading::SetProcessAffinityMask(
-                        handle,
-                        original_mask,
-                    ) {
-                        log::warn!(
-                            "Process tuning: failed to restore affinity for '{}' (PID {}): {}",
-                            state.process_name,
-                            pid,
-                            e
-                        );
-                    } else {
-                        log::info!(
-                            "Process tuning: restored affinity for '{}' (PID {}) on {}",
-                            state.process_name,
-                            pid,
-                            reason
-                        );
-                    }
+                    let _ = CloseHandle(handle);
                 }
+            } else if crate::process_snapshot::list()
+                .is_ok_and(|processes| !processes.iter().any(|process| process.pid == pid))
+            {
+                state.cpu_sets = None;
+                state.affinity = None;
             }
-
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-        } else if state.cpu_sets_applied || state.affinity_applied {
-            log::info!(
-                "Process tuning: process '{}' (PID {}) already exited before runtime restore ({})",
-                state.process_name,
-                pid,
-                reason
-            );
         }
-
-        if let Some(gpu_key) = &state.gpu_registry_key {
-            self.decrement_gpu_binding_reference(gpu_key, &state.process_name, pid, reason);
+        if let Some(key) = state.gpu_registry_key.clone()
+            && self.decrement_gpu_binding_reference(&key, &state.process_name, pid, reason)
+        {
+            state.gpu_registry_key = None;
         }
     }
 
@@ -407,8 +438,10 @@ impl GameProcessPerformanceManager {
 
         set_process_default_cpu_sets(api, process, &selected)?;
 
-        state.cpu_sets_original = Some(original);
-        state.cpu_sets_applied = true;
+        state.cpu_sets = Some(TemporarySetting {
+            original,
+            applied: selected.clone(),
+        });
 
         log::info!(
             "Process tuning: applied CPU sets {:?} to '{}' (PID {}) (prefer_p_cores={}, unbind_cpu0={})",
@@ -482,8 +515,10 @@ impl GameProcessPerformanceManager {
             }
         }
 
-        state.affinity_original = Some(process_mask);
-        state.affinity_applied = true;
+        state.affinity = Some(TemporarySetting {
+            original: process_mask,
+            applied: updated_mask,
+        });
 
         log::info!(
             "Process tuning: applied CPU0 affinity unbind for '{}' (PID {}) (0x{:X} -> 0x{:X})",
@@ -495,22 +530,8 @@ impl GameProcessPerformanceManager {
     }
 
     #[cfg(windows)]
-    fn apply_gpu_binding(
-        &mut self,
-        pid: u32,
-        process: windows::Win32::Foundation::HANDLE,
-        state: &mut AppliedProcessState,
-    ) {
-        let Some(process_path) = resolve_process_image_path(process) else {
-            log::warn!(
-                "Process tuning: failed to resolve executable path for '{}' (PID {}), GPU binding skipped",
-                state.process_name,
-                pid
-            );
-            return;
-        };
-
-        let value_name = normalize_gpu_value_name(&process_path);
+    fn apply_gpu_binding(&mut self, pid: u32, process_path: &str, state: &mut AppliedProcessState) {
+        let value_name = normalize_gpu_value_name(process_path);
         let map_key = value_name.to_ascii_lowercase();
 
         if let Some(existing) = self.gpu_preferences.get_mut(&map_key) {
@@ -536,13 +557,20 @@ impl GameProcessPerformanceManager {
             }
         };
 
-        match write_gpu_preference_value(&value_name, GPU_PREFERENCE_HIGH_PERFORMANCE) {
+        let applied_value = crate::roblox_optimizer::RobloxOptimizer::high_performance_gpu_value(
+            previous_value.as_deref(),
+        );
+        if previous_value.as_deref() == Some(applied_value.as_str()) {
+            return;
+        }
+        match write_gpu_preference_value(&value_name, &applied_value) {
             Ok(()) => {
                 self.gpu_preferences.insert(
                     map_key.clone(),
                     GpuPreferenceSnapshot {
                         value_name: value_name.clone(),
                         previous_value,
+                        applied_value,
                         ref_count: 1,
                     },
                 );
@@ -569,50 +597,40 @@ impl GameProcessPerformanceManager {
     fn decrement_gpu_binding_reference(
         &mut self,
         gpu_key: &str,
-        process_name: &str,
-        pid: u32,
-        reason: &str,
-    ) {
-        let mut should_restore = false;
-        if let Some(entry) = self.gpu_preferences.get_mut(gpu_key) {
-            if entry.ref_count > 1 {
-                entry.ref_count -= 1;
-                log::info!(
-                    "Process tuning: decreased GPU preference ref for '{}' (PID {}), remaining refs={}",
-                    process_name,
-                    pid,
-                    entry.ref_count
-                );
-                return;
+        _process_name: &str,
+        _pid: u32,
+        _reason: &str,
+    ) -> bool {
+        self.release_gpu_reference_with(gpu_key, |snapshot| {
+            restore_gpu_preference(
+                &snapshot.value_name,
+                &snapshot.previous_value,
+                &snapshot.applied_value,
+            )
+        })
+    }
+
+    #[cfg(windows)]
+    fn release_gpu_reference_with(
+        &mut self,
+        key: &str,
+        restore: impl FnOnce(&GpuPreferenceSnapshot) -> Result<(), String>,
+    ) -> bool {
+        let Some(snapshot) = self.gpu_preferences.get_mut(key) else {
+            return true;
+        };
+        if snapshot.ref_count > 1 {
+            snapshot.ref_count -= 1;
+            return true;
+        }
+        match restore(snapshot) {
+            Ok(()) => {
+                self.gpu_preferences.remove(key);
+                true
             }
-            should_restore = true;
-        }
-
-        if !should_restore {
-            return;
-        }
-
-        if let Some(snapshot) = self.gpu_preferences.remove(gpu_key) {
-            match restore_gpu_preference(&snapshot.value_name, &snapshot.previous_value) {
-                Ok(()) => {
-                    log::info!(
-                        "Process tuning: restored GPU preference for '{}' after '{}' (PID {}, reason={})",
-                        snapshot.value_name,
-                        process_name,
-                        pid,
-                        reason
-                    );
-                }
-                Err(e) => {
-                    log::warn!(
-                        "Process tuning: failed to restore GPU preference for '{}' after '{}' (PID {}, reason={}): {}",
-                        snapshot.value_name,
-                        process_name,
-                        pid,
-                        reason,
-                        e
-                    );
-                }
+            Err(error) => {
+                log::warn!("GPU preference restore failed; original retained: {error}");
+                false
             }
         }
     }
@@ -682,79 +700,48 @@ fn open_process_for_tuning(pid: u32) -> Option<windows::Win32::Foundation::HANDL
 }
 
 #[cfg(windows)]
-unsafe extern "system" {
-    fn QueryFullProcessImageNameW(
-        hprocess: windows::Win32::Foundation::HANDLE,
-        dwflags: u32,
-        lpexename: *mut u16,
-        lpdwsize: *mut u32,
-    ) -> i32;
-}
-
-#[cfg(windows)]
-fn resolve_process_image_path(process: windows::Win32::Foundation::HANDLE) -> Option<String> {
-    let mut buffer = vec![0u16; 32_768];
-    let mut length: u32 = buffer.len() as u32;
-
-    let ok = unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length) };
-
-    if ok == 0 || length == 0 {
-        return None;
+fn process_creation_for_pid(pid: u32) -> Option<u64> {
+    let handle = open_process_for_tuning(pid)?;
+    let created = crate::process_snapshot::creation_time(handle).ok();
+    unsafe {
+        let _ = windows::Win32::Foundation::CloseHandle(handle);
     }
-
-    Some(String::from_utf16_lossy(&buffer[..length as usize]))
+    created
 }
 
 #[cfg(windows)]
 fn read_gpu_preference_value(value_name: &str) -> Result<Option<String>, String> {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu
-        .create_subkey(GPU_PREFERENCES_KEY_PATH)
-        .map_err(|e| format!("create_subkey {}: {}", GPU_PREFERENCES_KEY_PATH, e))?;
-
-    match key.get_value::<String, _>(value_name) {
-        Ok(value) => Ok(Some(value)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("get_value {}: {}", value_name, e)),
-    }
+    crate::system_optimizer::SystemOptimizer::query_registry_checked(
+        GPU_PREFERENCES_KEY_PATH,
+        value_name,
+    )
+    .map_err(|error| error.to_string())
 }
-
 #[cfg(windows)]
 fn write_gpu_preference_value(value_name: &str, value: &str) -> Result<(), String> {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu
-        .create_subkey(GPU_PREFERENCES_KEY_PATH)
-        .map_err(|e| format!("create_subkey {}: {}", GPU_PREFERENCES_KEY_PATH, e))?;
-
-    key.set_value(value_name, &value)
-        .map_err(|e| format!("set_value {}: {}", value_name, e))
+    crate::system_optimizer::SystemOptimizer::set_registry_string_checked(
+        GPU_PREFERENCES_KEY_PATH,
+        value_name,
+        value,
+    )
+    .map_err(|error| error.to_string())
 }
-
 #[cfg(windows)]
-fn restore_gpu_preference(value_name: &str, previous_value: &Option<String>) -> Result<(), String> {
-    use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (key, _) = hkcu
-        .create_subkey(GPU_PREFERENCES_KEY_PATH)
-        .map_err(|e| format!("create_subkey {}: {}", GPU_PREFERENCES_KEY_PATH, e))?;
-
-    match previous_value {
-        Some(value) => key
-            .set_value(value_name, value)
-            .map_err(|e| format!("restore set_value {}: {}", value_name, e)),
-        None => match key.delete_value(value_name) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("delete_value {}: {}", value_name, e)),
-        },
+fn restore_gpu_preference(
+    value_name: &str,
+    previous: &Option<String>,
+    applied: &str,
+) -> Result<(), String> {
+    if read_gpu_preference_value(value_name)?.as_deref() != Some(applied) {
+        return Ok(());
+    }
+    match previous {
+        Some(value) => write_gpu_preference_value(value_name, value),
+        None => crate::system_optimizer::SystemOptimizer::delete_registry_value_checked(
+            GPU_PREFERENCES_KEY_PATH,
+            value_name,
+        )
+        .map_err(|error| error.to_string()),
     }
 }
 
@@ -1003,6 +990,116 @@ fn set_process_default_cpu_sets(
 mod tests {
     use super::*;
 
+    #[test]
+    fn undo_keeps_failed_originals_but_does_not_overwrite_a_later_manual_setting() {
+        let mut setting = Some(TemporarySetting {
+            original: 7u32,
+            applied: 14u32,
+        });
+        assert!(restore_setting(&mut setting, || Err("Read denied".into()), |_| Ok(())).is_err());
+        assert_eq!(setting.as_ref().unwrap().original, 7);
+        assert!(restore_setting(&mut setting, || Ok(14), |_| Err("Write denied".into())).is_err());
+        assert_eq!(setting.as_ref().unwrap().original, 7);
+        restore_setting(
+            &mut setting,
+            || Ok(14),
+            |value| {
+                assert_eq!(*value, 7);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(setting.is_none());
+        setting = Some(TemporarySetting {
+            original: 7,
+            applied: 14,
+        });
+        restore_setting(
+            &mut setting,
+            || Ok(3),
+            |_| panic!("A manual value must not be overwritten"),
+        )
+        .unwrap();
+        assert!(setting.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_gpu_restore_keeps_the_original_and_shared_references_release_once() {
+        let mut manager =
+            GameProcessPerformanceManager::new(GameProcessPerformancePolicy::default());
+        manager.gpu_preferences.insert(
+            "fixture".into(),
+            GpuPreferenceSnapshot {
+                value_name: "fixture.exe".into(),
+                previous_value: Some("GpuPreference=1;".into()),
+                applied_value: "GpuPreference=2;".into(),
+                ref_count: 2,
+            },
+        );
+        assert!(manager.release_gpu_reference_with("fixture", |_| panic!(
+            "A shared preference cannot be restored yet"
+        )));
+        assert_eq!(manager.gpu_preferences["fixture"].ref_count, 1);
+        assert!(
+            !manager.release_gpu_reference_with("fixture", |_| Err("Permission denied".into()))
+        );
+        assert_eq!(
+            manager.gpu_preferences["fixture"].previous_value.as_deref(),
+            Some("GpuPreference=1;")
+        );
+        assert_eq!(manager.gpu_preferences["fixture"].ref_count, 1);
+        assert!(manager.release_gpu_reference_with("fixture", |_| Ok(())));
+        assert!(manager.gpu_preferences.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_restore_cannot_touch_a_replacement_process_or_retry_failed_apply_on_every_poll() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Child(
+            crate::hidden_command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Sleep -Seconds 20",
+                ])
+                .spawn()
+                .unwrap(),
+        );
+        let pid = child.0.id();
+        let mut state = AppliedProcessState::new("powershell.exe".into());
+        state.created = Some(process_creation_for_pid(pid).unwrap() ^ 1);
+        state.affinity = Some(TemporarySetting {
+            original: 0,
+            applied: usize::MAX,
+        }); // Invalid original exposes a wrong restore.
+        let mut manager =
+            GameProcessPerformanceManager::new(GameProcessPerformancePolicy::default());
+        manager.active_processes.insert(pid, state);
+        manager.revert_for_process(pid, "fixture_replaced");
+        assert!(manager.active_processes.is_empty());
+        // A nonexistent PID cannot be tuned; repeated polls retain one retry
+        // deadline instead of spawning repeated topology/registry operations.
+        manager.policy.unbind_cpu0 = true;
+        let missing = [(u32::MAX, "fixture.exe".to_string())];
+        manager.sync_targets(&missing);
+        let first = manager.failed_attempts[&u32::MAX].1;
+        for _ in 0..20 {
+            manager.sync_targets(&missing);
+        }
+        assert_eq!(manager.failed_attempts[&u32::MAX].1, first);
+        manager.sync_targets(&[]);
+        assert!(manager.failed_attempts.is_empty());
+    }
+
     fn cpu_set(id: u32, logical_index: u8, efficiency_class: u8) -> CpuSetDescriptor {
         CpuSetDescriptor {
             id,
@@ -1166,7 +1263,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(SET_CALLS.load(Ordering::SeqCst), 0);
-        assert!(!state.cpu_sets_applied);
+        assert!(state.cpu_sets.is_none());
         assert!(
             query_system_cpu_sets(
                 CpuSetApi {

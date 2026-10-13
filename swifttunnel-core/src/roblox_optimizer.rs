@@ -672,7 +672,7 @@ impl RobloxOptimizer {
         }
     }
 
-    fn high_performance_gpu_value(original: Option<&str>) -> String {
+    pub(crate) fn high_performance_gpu_value(original: Option<&str>) -> String {
         let mut fields: Vec<_> = original
             .unwrap_or_default()
             .split(';')

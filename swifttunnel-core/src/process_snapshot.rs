@@ -78,7 +78,7 @@ pub(crate) fn image_path(pid: u32) -> Result<Option<String>, String> {
     image_for_handle(handle.0).map(Some)
 }
 
-fn image_for_handle(handle: HANDLE) -> Result<String, String> {
+pub(crate) fn image_for_handle(handle: HANDLE) -> Result<String, String> {
     let mut buffer = vec![0u16; 32768];
     let mut length = buffer.len() as u32;
     unsafe {
@@ -94,6 +94,20 @@ fn image_for_handle(handle: HANDLE) -> Result<String, String> {
         return Err("Process image exceeded its buffer".into());
     }
     Ok(String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+pub(crate) fn creation_time(handle: HANDLE) -> Result<u64, String> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetProcessTimes;
+    let (mut created, mut exited, mut kernel, mut user) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }
+        .map_err(|error| format!("Could not read the process creation time: {error}"))?;
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
 fn terminate_entry(entry: &ProcessEntry, deadline: std::time::Instant) -> Result<bool, String> {
