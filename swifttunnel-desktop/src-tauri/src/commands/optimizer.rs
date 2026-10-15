@@ -343,6 +343,17 @@ pub async fn boost_sync_effective_config(
     .map_err(|e| format!("Boost config sync task failed: {}", e))?
 }
 
+fn persist_roblox_reset(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+    persist: impl FnOnce(&swifttunnel_core::settings::AppSettings) -> Result<(), String>,
+) -> Result<swifttunnel_core::structs::RobloxSettingsConfig, String> {
+    let mut updated = settings.clone();
+    updated.config.roblox_settings = swifttunnel_core::structs::RobloxSettingsConfig::default();
+    persist(&updated)?;
+    *settings = updated;
+    Ok(settings.config.roblox_settings.clone())
+}
+
 /// Reset all SwiftTunnel changes to the Roblox client — clears our FFlags
 /// (Ultraboost / custom), restores the GlobalBasicSettings backup (FPS, window,
 /// graphics) when present, and resets the saved Roblox config to defaults. Used
@@ -361,12 +372,7 @@ pub async fn boost_reset_roblox_settings(
         }
         {
             let mut s = settings.lock();
-            let mut updated = s.clone();
-            updated.config.roblox_settings =
-                swifttunnel_core::structs::RobloxSettingsConfig::default();
-            swifttunnel_core::settings::save_settings(&updated).map_err(|e| e.to_string())?;
-            *s = updated;
-            Ok(s.config.roblox_settings.clone())
+            persist_roblox_reset(&mut s, swifttunnel_core::settings::save_settings)
         }
     })
     .await
@@ -398,8 +404,7 @@ pub async fn boost_reset_roblox_client(
         // Ultraboost as on over a Roblox that no longer has a single flag in it.
         {
             let mut s = settings.lock();
-            s.config.roblox_settings = swifttunnel_core::structs::RobloxSettingsConfig::default();
-            swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
+            persist_roblox_reset(&mut s, swifttunnel_core::settings::save_settings)?;
         }
 
         Ok(report)
@@ -555,5 +560,44 @@ pub async fn boost_close_roblox(state: State<'_, AppState>) -> Result<(), String
     {
         let _ = state;
         Err("Roblox close is only supported on Windows".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swifttunnel_core::settings::AppSettings;
+
+    #[test]
+    fn failed_reset_save_keeps_the_previous_preferences_for_retry() {
+        let mut settings = AppSettings::default();
+        settings.config.roblox_settings.ultraboost = true;
+        settings.config.roblox_settings.target_fps = 650;
+        let before = serde_json::to_value(&settings).unwrap();
+        let result = persist_roblox_reset(&mut settings, |_| Err("disk full".into()));
+        assert_eq!(result.unwrap_err(), "disk full");
+        assert_eq!(serde_json::to_value(&settings).unwrap(), before);
+
+        let restored = persist_roblox_reset(&mut settings, |_| Ok(())).unwrap();
+        assert!(!restored.ultraboost);
+        assert_eq!(settings.config.roblox_settings, restored);
+    }
+
+    #[test]
+    fn reset_persists_only_the_roblox_section_and_returns_the_saved_values() {
+        let mut settings = AppSettings::default();
+        settings.selected_region = "tokyo".into();
+        settings.run_on_startup = true;
+        settings.config.roblox_settings.ultraboost = true;
+        let mut expected = settings.clone();
+        expected.config.roblox_settings = Default::default();
+        let expected = serde_json::to_value(expected).unwrap();
+        let result = persist_roblox_reset(&mut settings, |candidate| {
+            assert_eq!(serde_json::to_value(candidate).unwrap(), expected);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(serde_json::to_value(&settings).unwrap(), expected);
+        assert_eq!(result, settings.config.roblox_settings);
     }
 }
