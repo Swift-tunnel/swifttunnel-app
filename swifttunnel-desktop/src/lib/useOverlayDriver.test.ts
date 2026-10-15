@@ -10,6 +10,7 @@ const h = vi.hoisted(() => ({
   ping: vi.fn(),
   update: vi.fn(), save: vi.fn(),
   gameIp: "128.116.47.33",
+  boostState: { robloxRunning: true, robloxForeground: true, processId: 1, fps: 60, ramTotal: 100, ramUsage: 50, cpuUsage: 10 },
   vpnState: { state:"connected", region:"mumbai", bytesUp:100, bytesDown:200, ping:30, pingReadings:0, gameRoute:null as {game_server_ip:string;estimated_path_ms:number;bypassed:boolean}|null },
   overlay: { enabled: true, metrics: ["ping", "upload"], size: "medium", color: "white", style: "solid", position: "top-left", custom_x: 0, custom_y: 0 },
 }));
@@ -33,7 +34,7 @@ vi.mock("../stores/gameLibraryStore",()=>({useGameLibraryStore:{getState:()=>({l
 vi.mock("../stores/boostStore", () => ({
   useBoostStore: Object.assign(
     (select: (s: unknown) => unknown) => select({ fetchMetrics: h.metrics }),
-    { getState: () => ({ robloxRunning: true, robloxForeground: true, fps: 60, ramTotal: 100, ramUsage: 50, cpuUsage: 10 }) },
+    { getState: () => ({ ...h.boostState }) },
   ),
 }));
 vi.mock("../stores/vpnStore", () => ({
@@ -59,13 +60,14 @@ function start() {
 
 describe("overlay polling under slow native calls", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","Date","performance"]});
     vi.stubGlobal("window", globalThis);
     h.effects.length = 0;
     h.overlay.enabled = true;
     h.overlay.metrics=["ping","upload"];
     h.vpnState={state:"connected",region:"mumbai",bytesUp:100,bytesDown:200,ping:30,pingReadings:0,gameRoute:null};
     h.gameIp="128.116.47.33";
+    h.boostState={robloxRunning:true,robloxForeground:true,processId:1,fps:60,ramTotal:100,ramUsage:50,cpuUsage:10};
     h.invoke.mockResolvedValue(undefined);
     h.metrics.mockResolvedValue(true);
     h.throughput.mockResolvedValue(true);
@@ -87,6 +89,80 @@ describe("overlay polling under slow native calls", () => {
     const calls = h.push.mock.calls.length;
     stop();
     expect(calls).toBe(1);
+  });
+
+  it("forces a hovered or dragged overlay to hide when the player closes", async () => {
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.push.mock.calls[0][0]).toMatchObject({ enabled: true, forceHide: false });
+    h.boostState.robloxRunning = false;
+    h.boostState.robloxForeground = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.push.mock.calls[1][0]).toMatchObject({ enabled: false, forceHide: true, values: {} });
+    stop();
+  });
+
+  it("does not poll tunnel stats or the game monitor while no player is running", async () => {
+    h.boostState.robloxRunning = false;
+    h.boostState.robloxForeground = false;
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(3000);
+    stop();
+    expect(h.metrics).toHaveBeenCalledTimes(4);
+    expect(h.throughput).not.toHaveBeenCalled();
+    expect(h.ping).not.toHaveBeenCalled();
+    expect(h.invoke).toHaveBeenCalledTimes(1);
+    expect(h.invoke).toHaveBeenCalledWith("ensure_overlay_window", {label:"overlay-stats"});
+    expect(h.push.mock.calls.every(([payload])=>payload.forceHide && !payload.enabled)).toBe(true);
+  });
+
+  it.each(["closed", "replaced"] as const)("drops a sample if the player is %s during a slow monitor lookup", async state => {
+    const pending = deferred();
+    h.invoke.mockImplementation(command => command === "overlay_game_monitor" ? pending.promise : Promise.resolve());
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.invoke).toHaveBeenCalledWith("overlay_game_monitor");
+    if (state === "closed") {
+      h.boostState.robloxRunning = false;
+      h.boostState.robloxForeground = false;
+    } else h.boostState.processId = 2;
+    pending.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(h.push.mock.calls[0][0]).toMatchObject({enabled:false,forceHide:true,values:{}});
+  });
+
+  it("does not revive old metrics when a monitor lookup finishes after the freshness limit", async () => {
+    const pending = deferred();
+    h.invoke.mockImplementation(command => command === "overlay_game_monitor" ? pending.promise : Promise.resolve());
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(6000);
+    pending.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(h.push.mock.calls[0][0]).toMatchObject({enabled:false,forceHide:true,values:{}});
+  });
+
+  it("keeps session elapsed time through a temporary metrics failure", async () => {
+    h.overlay.metrics=["playtime"];
+    h.metrics.mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValue(true);
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(2000);
+    stop();
+    expect(h.push.mock.calls[1][0]).toMatchObject({enabled:false,forceHide:true});
+    expect(h.push.mock.calls[2][0].values.playtime).toBe("00:02");
+  });
+
+  it.each([-3600000, 3600000])("keeps elapsed time and traffic rates correct when the system clock changes by %i ms", async jump => {
+    h.overlay.metrics=["playtime","upload","ping"];
+    h.ping.mockImplementationOnce(()=>{h.vpnState.pingReadings++;return Promise.resolve();});
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(0);
+    vi.setSystemTime(Date.now() + jump);
+    h.vpnState.bytesUp += 1024;
+    await vi.advanceTimersByTimeAsync(1000);
+    stop();
+    expect(h.push.mock.calls[1][0].values).toMatchObject({playtime:"00:01",upload:"1.0 KB/s",ping:"30 ms"});
   });
 
   it("keeps one tick pending during a slow metrics sample and resumes", async () => {

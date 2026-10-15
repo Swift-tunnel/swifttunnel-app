@@ -33,5 +33,7 @@ describe("overlay screen placement", () => {
     expect(validOverlayMonitor({ ...monitor, x: NaN })).toBe(false);
     expect(overlayHeartbeatExpired(1000, 5500)).toBe(false);
     expect(overlayHeartbeatExpired(1000, 5501)).toBe(true);
+    expect(overlayHeartbeatExpired(null, 10000)).toBe(false);
+    expect(overlayHeartbeatExpired(0, 4501)).toBe(true);
   });
 });

@@ -25,6 +25,8 @@ import {
   useOverlayRuntimeStore,
 } from "../stores/overlayRuntimeStore";
 
+const MAX_SAMPLE_AGE_MS = 5000;
+
 /**
  * Main-window driver for the in-game stats overlay. While enabled, polls metrics
  * and pushes a config+values snapshot to the "overlay-stats" window ~1x/sec. The
@@ -104,12 +106,13 @@ export function useOverlayDriver() {
         /* A stale foreground flag must not keep a topmost overlay visible. */
       }
       if (disposed) return;
+      const gameActive = metricsFresh && useBoostStore.getState().robloxRunning;
       const needsThroughput =
         cfgBefore.metrics.includes("upload") ||
         cfgBefore.metrics.includes("download");
       const needsPing = cfgBefore.metrics.includes("ping");
       let trafficFresh = false;
-      if (needsThroughput && vpnBefore.state === "connected") {
+      if (gameActive && needsThroughput && vpnBefore.state === "connected") {
         try {
           trafficFresh = await fetchThroughput();
         } catch {
@@ -117,7 +120,7 @@ export function useOverlayDriver() {
         }
       }
       if (disposed) return;
-      if (needsPing && vpnBefore.state === "connected") {
+      if (gameActive && needsPing && vpnBefore.state === "connected") {
         try {
           await fetchPing();
         } catch {
@@ -127,12 +130,13 @@ export function useOverlayDriver() {
       if (disposed) return;
       const b = useBoostStore.getState();
       const vpn = useVpnStore.getState();
-      const nowMs = Date.now();
+      const nowMs = performance.now();
       let tunnelRates: OverlayRates = {
         uploadBps: null,
         downloadBps: null,
       };
       const sameTunnel =
+        gameActive &&
         vpn.state === "connected" &&
         vpnBefore.state === "connected" &&
         vpn.region === vpnBefore.region;
@@ -185,11 +189,22 @@ export function useOverlayDriver() {
       if (disposed) return;
       // Show only while Roblox is the FOREGROUND window (not just running) so
       // it never covers the desktop or apps you've alt-tabbed to.
-      const gate = metricsFresh && b.robloxForeground;
+      const latest = useBoostStore.getState();
+      const sampleCurrent = metricsFresh && b.processId === latest.processId
+        && b.robloxRunning === latest.robloxRunning && performance.now() - nowMs <= MAX_SAMPLE_AGE_MS;
+      if (!sampleCurrent) {
+        monitor = null;
+        // A missed sample hides the bar, but does not end a known session.
+        if (!latest.robloxRunning || sessionRef.current?.pid !== latest.processId)
+          sessionRef.current = null;
+        trafficRef.current = null;
+        pingRef.current = null;
+      }
+      const gate = sampleCurrent && latest.robloxRunning && latest.robloxForeground;
       const cfg = ovRef.current;
       await pushOverlayRender({
         enabled: cfg.enabled && gate,
-        forceHide: !cfg.enabled || !metricsFresh,
+        forceHide: !cfg.enabled || !sampleCurrent || !latest.robloxRunning,
         metrics: supportedOverlayMetrics(cfg.metrics),
         size: cfg.size,
         color: cfg.color,
@@ -203,9 +218,9 @@ export function useOverlayDriver() {
         // the bar isn't blanked to "--" if it's held visible mid-interaction
         // across a foreground blip.
         values:
-          gate || b.robloxRunning
+          sampleCurrent && latest.robloxRunning
             ? overlayValues(
-                b,
+                latest,
                 sessionRef.current ? nowMs - sessionRef.current.startedAt : 0,
                 tunnelRates,
                 sameTunnel &&

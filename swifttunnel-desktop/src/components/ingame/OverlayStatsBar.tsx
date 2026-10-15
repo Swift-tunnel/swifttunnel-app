@@ -46,7 +46,7 @@ export function OverlayStatsBar() {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
   const monitorRef = useRef<OverlayMonitor | null>(null);
-  const lastRenderRef = useRef(0);
+  const lastRenderRef = useRef<number | null>(null);
   // Window geometry in physical px, tracked from our own setPosition/setSize
   // calls (nothing else moves this window).
   const winPosRef = useRef({ x: 0, y: 0 });
@@ -160,7 +160,7 @@ export function OverlayStatsBar() {
         Math.abs(m.x + p.customX - drop.x) < 2 &&
         Math.abs(m.y + p.customY - drop.y) < 2;
       if (saved) lastDropRef.current = null;
-      else if (Date.now() - drop.at < DROP_GRACE_MS) return;
+      else if (performance.now() - drop.at < DROP_GRACE_MS) return;
     }
 
     const next = overlayAnchor(m, { w, h }, p.position, p.customX, p.customY);
@@ -231,7 +231,7 @@ export function OverlayStatsBar() {
       if (disposed) return;
       try {
         if (
-          overlayHeartbeatExpired(lastRenderRef.current, Date.now()) &&
+          overlayHeartbeatExpired(lastRenderRef.current, performance.now()) &&
           payloadRef.current
         ) {
           payloadRef.current = {
@@ -265,7 +265,7 @@ export function OverlayStatsBar() {
             over = true;
             if (!c.left_down) {
               dragRef.current = null;
-              lastDropRef.current = { x: next.x, y: next.y, at: Date.now() };
+              lastDropRef.current = { x: next.x, y: next.y, at: performance.now() };
               void emitOverlayPosition(
                 Math.round(next.x - m.x),
                 Math.round(next.y - m.y),
@@ -335,7 +335,7 @@ export function OverlayStatsBar() {
     void listen<OverlayRenderPayload>(OVERLAY_RENDER_EVENT, async (event) => {
       if (disposed) return;
       const p = event.payload;
-      lastRenderRef.current = Date.now();
+      lastRenderRef.current = performance.now();
       if (validOverlayMonitor(p.monitor) && !dragRef.current) {
         if (
           monitorRef.current &&
