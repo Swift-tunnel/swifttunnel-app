@@ -70,9 +70,16 @@ function langCache(lang: string): Map<string, string> {
     m = new Map();
     try {
       const raw = localStorage.getItem(CACHE_PREFIX + lang);
-      if (raw) {
-        for (const [k, v] of Object.entries(JSON.parse(raw) as Record<string, string>)) {
-          m.set(k, v);
+      if (raw && raw.length <= 1024 * 1024) {
+        const saved: unknown = JSON.parse(raw);
+        if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+          for (const [key, value] of Object.entries(saved)) {
+            // This cache is local, but old/corrupt data is not a typed dictionary.
+            // Never render an object as "[object Object]" or a numeric label.
+            if (key.length <= 4096 && typeof value === "string" && value.length > 0 && value.length <= 8192) {
+              m.set(key, value);
+            }
+          }
         }
       }
     } catch {

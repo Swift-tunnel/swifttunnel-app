@@ -46,6 +46,32 @@ beforeEach(() => {
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("runtime translation lifecycle", () => {
+  it("ignores damaged cache entries while retaining valid saved translations", async () => {
+    storage.set("st.i18n.fr", JSON.stringify({
+      Connected: { wrong: "object" }, Disconnected: 42,
+      Waiting: null, Play: "", Ready: "Prêt",
+    }));
+    nodes.push(text("Connected"), text("Disconnected"), text("Waiting"), text("Play"), text("Ready"));
+    const i18n = await import("./i18n");
+    await i18n.applyLanguage("fr");
+    expect(nodes.map(node => node.nodeValue)).toEqual(["FR:Connected", "FR:Disconnected", "FR:Waiting", "FR:Play", "Prêt"]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const repaired = JSON.parse(storage.get("st.i18n.fr")!);
+    expect(repaired.Connected).toBe("FR:Connected");
+    expect(repaired.Ready).toBe("Prêt");
+  });
+
+  it.each(["null", '["bad dictionary"]', " ".repeat(1024 * 1024) + '{"Connected":"stale"}'])(
+    "recovers from a non-dictionary or oversized cache %#", async (raw) => {
+      storage.set("st.i18n.fr", raw);
+      nodes.push(text("Connected"));
+      const i18n = await import("./i18n");
+      await i18n.applyLanguage("fr");
+      expect(nodes[0].nodeValue).toBe("FR:Connected");
+      expect(invoke).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("does not turn an offline batch into forty individual requests", async () => {
     nodes.push(...Array.from({ length: 40 }, (_, i) => text(`Setting number ${i}`)));
     invoke.mockRejectedValue(new Error("Network unavailable"));
