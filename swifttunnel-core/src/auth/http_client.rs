@@ -412,7 +412,7 @@ impl AuthClient {
                 return Err(error);
             }
             if body.contains("Invalid login credentials") {
-                return Err(AuthError::ApiError("Invalid email or password".to_string()));
+                return Err(AuthError::InvalidCredentials);
             }
             return Err(AuthError::ApiError(format!(
                 "Sign in failed: {} - {}",
@@ -1576,6 +1576,7 @@ mod bounded_response_tests {
     #[test]
     fn explicit_auth_policy_decisions_cannot_select_an_alternate_provider() {
         for error in [
+            AuthError::InvalidCredentials,
             AuthError::RateLimited(67),
             AuthError::UserBanned(": test policy".into()),
             AuthError::UpdateRequired("Update first".into()),
@@ -1609,6 +1610,24 @@ mod bounded_response_tests {
             assert!(matches!(error, AuthError::RateLimited(67)));
             assert!(!auth_fallback_allowed(&error));
         }
+    }
+
+    #[tokio::test]
+    async fn wrong_password_is_not_retried_through_the_second_provider() {
+        let body = r#"{"error":"Invalid login credentials"}"#;
+        let wire = format!(
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let client = AuthClient::with_device_hwid(None);
+        let error = client
+            .parse_password_sign_in_response(loopback_response(wire).await)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AuthError::InvalidCredentials));
+        assert!(!auth_fallback_allowed(&error));
+        assert_eq!(error.to_string(), "Invalid email or password");
     }
 
     #[tokio::test]

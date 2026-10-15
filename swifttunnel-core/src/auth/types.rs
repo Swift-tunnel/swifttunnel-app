@@ -73,10 +73,40 @@ pub struct UserInfo {
 pub struct SupabaseAuthResponse {
     pub access_token: String,
     pub refresh_token: String,
+    #[serde(deserialize_with = "deserialize_expires_in")]
     pub expires_in: i64,
     pub expires_at: Option<i64>,
     pub token_type: String,
     pub user: SupabaseUser,
+}
+
+// Supabase's documented maximum JWT lifetime is seven days. Invalid API
+// numbers must not reach Duration::seconds or DateTime addition, both of
+// which can panic on an overflowing lifetime.
+// https://supabase.com/docs/guides/self-hosting/auth/config
+const MAX_ACCESS_TOKEN_LIFETIME_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+fn validate_expires_in(value: i64) -> Result<i64, &'static str> {
+    if (1..=MAX_ACCESS_TOKEN_LIFETIME_SECONDS).contains(&value) {
+        Ok(value)
+    } else {
+        Err("invalid access-token lifetime")
+    }
+}
+
+fn deserialize_expires_in<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<i64, D::Error> {
+    validate_expires_in(i64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_expires_in<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<i64>, D::Error> {
+    Option::<i64>::deserialize(deserializer)?
+        .map(validate_expires_in)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 /// Supabase user from auth response
@@ -136,7 +166,7 @@ pub struct ExchangeTokenResponse {
     pub access_token: Option<String>,
     #[serde(default)]
     pub refresh_token: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_expires_in")]
     pub expires_in: Option<i64>,
     #[serde(default)]
     pub expires_at: Option<i64>,
@@ -252,6 +282,9 @@ pub enum AuthError {
     #[error("API error: {0}")]
     ApiError(String),
 
+    #[error("Invalid email or password")]
+    InvalidCredentials,
+
     #[error("Session expired, please sign in again")]
     RefreshTokenInvalid,
 
@@ -284,6 +317,60 @@ pub enum AuthError {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn malformed_access_token_lifetimes_are_rejected_before_session_arithmetic() {
+        let mut auth = serde_json::json!({
+            "access_token":"test-access", "refresh_token":"test-refresh",
+            "expires_in":3600, "token_type":"bearer", "user":{"id":"test-user"},
+        });
+        let mut exchange = serde_json::json!({
+            "type":"magiclink", "token":"test-code", "email":"owned@example.invalid",
+            "user_id":"test-user", "expires_in":3600,
+        });
+        for lifetime in [
+            i64::MIN,
+            -1,
+            0,
+            MAX_ACCESS_TOKEN_LIFETIME_SECONDS + 1,
+            i64::MAX,
+        ] {
+            auth["expires_in"] = lifetime.into();
+            exchange["expires_in"] = lifetime.into();
+            assert!(serde_json::from_value::<SupabaseAuthResponse>(auth.clone()).is_err());
+            assert!(serde_json::from_value::<ExchangeTokenResponse>(exchange.clone()).is_err());
+        }
+        for lifetime in [1, 3600, MAX_ACCESS_TOKEN_LIFETIME_SECONDS] {
+            auth["expires_in"] = lifetime.into();
+            exchange["expires_in"] = lifetime.into();
+            assert_eq!(
+                serde_json::from_value::<SupabaseAuthResponse>(auth.clone())
+                    .unwrap()
+                    .expires_in,
+                lifetime
+            );
+            assert_eq!(
+                serde_json::from_value::<ExchangeTokenResponse>(exchange.clone())
+                    .unwrap()
+                    .expires_in,
+                Some(lifetime)
+            );
+        }
+        exchange.as_object_mut().unwrap().remove("expires_in");
+        assert!(
+            serde_json::from_value::<ExchangeTokenResponse>(exchange.clone())
+                .unwrap()
+                .expires_in
+                .is_none()
+        );
+        exchange["expires_in"] = serde_json::Value::Null;
+        assert!(
+            serde_json::from_value::<ExchangeTokenResponse>(exchange)
+                .unwrap()
+                .expires_in
+                .is_none()
+        );
+    }
 
     fn make_session(expires_at: DateTime<Utc>) -> AuthSession {
         AuthSession {
