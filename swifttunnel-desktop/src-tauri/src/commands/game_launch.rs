@@ -677,8 +677,9 @@ pub async fn games_launch(
         })() {
             Ok(applied) => Ok(applied),
             Err(error) => {
-                swifttunnel_core::roblox_launch_flags::restore()?;
-                if let Err(restore_error) = swifttunnel_core::roblox_game_profile::restore() {
+                if let Err(restore_error) =
+                    swifttunnel_core::roblox_game_profile::restore_launch_settings()
+                {
                     return Err(format!(
                         "{error} The previous settings could not be restored: {restore_error}"
                     ));
@@ -718,10 +719,15 @@ pub async fn games_launch(
     )
     .map(|_| ());
     if let Err(error) = launched {
-        let _guard = state.roblox_optimizer.lock();
-        let restored = swifttunnel_core::roblox_game_profile::restore();
-        swifttunnel_core::roblox_launch_flags::restore()?;
         game_destination::clear();
+        let optimizer = state.roblox_optimizer.clone();
+        let restored = tauri::async_runtime::spawn_blocking(move || {
+            let _guard = optimizer.lock();
+            swifttunnel_core::roblox_game_profile::restore_launch_settings()
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|result| result);
         if let Err(restore_error) = restored {
             return Err(format!(
                 "{error} The previous settings could not be restored: {restore_error}"
@@ -819,20 +825,21 @@ pub async fn restore_game_profile(state: &AppState) {
             return;
         }
     }
-    if state
-        .vpn_connection
-        .lock()
-        .await
-        .auto_router()
-        .is_some_and(|router| router.has_recent_game_traffic())
-    {
+    // A connection holds this mutex throughout setup. Defer cleanup to the
+    // watcher's next attempt rather than blocking Play behind that setup.
+    let recent_traffic = match state.vpn_connection.try_lock() {
+        Ok(vpn) => vpn
+            .auto_router()
+            .is_some_and(|router| router.has_recent_game_traffic()),
+        Err(_) => return,
+    };
+    if recent_traffic {
         return;
     }
     let optimizer = state.roblox_optimizer.clone();
     let restored = tauri::async_runtime::spawn_blocking(move || {
         let _guard = optimizer.lock();
-        swifttunnel_core::roblox_game_profile::restore()
-            .and_then(|restored| swifttunnel_core::roblox_launch_flags::restore().map(|_| restored))
+        swifttunnel_core::roblox_game_profile::restore_launch_settings()
     })
     .await
     .map_err(|error| error.to_string())

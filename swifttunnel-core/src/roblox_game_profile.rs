@@ -316,14 +316,9 @@ fn apply_inner(
     preferences: &GamePreferences,
     native: bool,
 ) -> Result<bool, String> {
-    preferences.validate()?;
-    if preferences.fps_cap.is_none() && preferences.graphics_quality.is_none() {
+    if !prepare_profile(preferences, stopped, restore)? {
         return Ok(false);
     }
-    if !stopped() {
-        return Err("Close Roblox before applying a game's FPS or graphics profile.".into());
-    }
-    restore()?;
     let path = RobloxOptimizer::game_preferences_path(client)?;
     let mut xml = read(&path)?;
     if !xml.contains("</Properties>") {
@@ -371,6 +366,11 @@ fn apply_inner(
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
     };
+    // Never change the player's file if the originals would be rejected by
+    // our own recovery reader later.
+    validate_journal(&journal).map_err(|_| {
+        "Roblox's saved FPS or graphics settings aren't supported. Change them in Roblox, then try Play again.".to_string()
+    })?;
     write(
         &journal_path()?,
         &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
@@ -380,6 +380,44 @@ fn apply_inner(
         apply_flag(flag, false)?;
     }
     Ok(true)
+}
+
+fn prepare_profile(
+    preferences: &GamePreferences,
+    stopped: impl FnOnce() -> bool,
+    restore: impl FnOnce() -> Result<bool, String>,
+) -> Result<bool, String> {
+    preferences.validate()?;
+    let overrides = preferences.fps_cap.is_some() || preferences.graphics_quality.is_some();
+    if overrides && !stopped() {
+        return Err("Close Roblox before applying a game's FPS or graphics profile.".into());
+    }
+    // Even an unconfigured game must not inherit the previous game's
+    // temporary settings while background recovery is still waiting.
+    restore()?;
+    Ok(overrides)
+}
+
+/// Each restore is independent: a damaged profile must not prevent recovery
+/// of an otherwise valid FastFlags backup, or vice versa.
+pub fn restore_launch_settings() -> Result<bool, String> {
+    restore_settings_with(restore, crate::roblox_launch_flags::restore)
+}
+
+fn restore_settings_with(
+    profile: impl FnOnce() -> Result<bool, String>,
+    flags: impl FnOnce() -> Result<bool, String>,
+) -> Result<bool, String> {
+    let profile = profile();
+    let flags = flags();
+    match (profile, flags) {
+        (Ok(profile), Ok(flags)) => Ok(profile || flags),
+        (Err(profile), Err(flags)) => {
+            log::warn!("Both launch settings restores failed: profile={profile}; flags={flags}");
+            Err("Couldn't restore your Roblox settings or FastFlags. Contact support and include your log.".into())
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 fn restore_xml(mut xml: String, fields: &[Override]) -> String {
     for field in fields {
@@ -474,9 +512,7 @@ fn validate_journal(journal: &Journal) -> Result<(), String> {
                     .is_some_and(|n| !valid_property_value(f.property, n))
         })
     {
-        log::warn!(
-            "Game profile recovery record failed field, flag or path validation; retained for inspection"
-        );
+        log::warn!("Game profile recovery record failed field, flag or path validation");
         return Err(RESTORE_ERROR.into());
     }
     Ok(())
@@ -508,6 +544,74 @@ fn valid_flag_value(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn game_without_overrides_restores_the_previous_profile_before_returning() {
+        let restored = std::cell::Cell::new(false);
+        let overrides = prepare_profile(
+            &GamePreferences::default(),
+            || true,
+            || {
+                restored.set(true);
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert!(!overrides);
+        assert!(restored.get());
+        assert_eq!(
+            prepare_profile(
+                &GamePreferences::default(),
+                || true,
+                || Err("restore failed".into())
+            )
+            .unwrap_err(),
+            "restore failed"
+        );
+    }
+
+    #[test]
+    fn game_with_overrides_cannot_restore_or_apply_while_player_is_running() {
+        let preferences = GamePreferences {
+            fps_cap: Some(240),
+            ..Default::default()
+        };
+        assert!(
+            prepare_profile(
+                &preferences,
+                || false,
+                || panic!("must not change a running player's settings")
+            )
+            .is_err()
+        );
+        assert!(prepare_profile(&preferences, || true, || Ok(false)).unwrap());
+    }
+
+    #[test]
+    fn independent_recovery_attempts_both_backups_for_every_result_combination() {
+        let outcomes = [Ok(false), Ok(true), Err("fixture failure".to_string())];
+        for profile in &outcomes {
+            for flags in &outcomes {
+                let calls = std::cell::Cell::new(0);
+                let result = restore_settings_with(
+                    || {
+                        assert_eq!(calls.get(), 0);
+                        calls.set(1);
+                        profile.clone()
+                    },
+                    || {
+                        assert_eq!(calls.get(), 1);
+                        calls.set(2);
+                        flags.clone()
+                    },
+                );
+                assert_eq!(calls.get(), 2);
+                match (profile, flags) {
+                    (Ok(profile), Ok(flags)) => assert_eq!(result.unwrap(), *profile || *flags),
+                    _ => assert!(result.is_err()),
+                }
+            }
+        }
+    }
     #[test]
     fn recovery_accepts_the_real_engine_quality_range_and_restores_previous_values() {
         // The actual record that produced the user's false "invalid values" error.
