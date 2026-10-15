@@ -574,7 +574,7 @@ pub struct BoundedCommandOutput {
 }
 
 /// Preserve process-output callers while using the shared bounded collector.
-pub(crate) fn run_hidden_command_output_with_timeout<S: AsRef<std::ffi::OsStr>>(
+pub fn run_hidden_command_output_with_timeout<S: AsRef<std::ffi::OsStr>>(
     program: &str,
     args: &[S],
     timeout: Duration,

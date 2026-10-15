@@ -14,16 +14,17 @@ use std::sync::Arc;
 use log::{info, warn};
 use state::AppState;
 use swifttunnel_core::auth::types::{AuthError, AuthState};
+#[cfg(windows)]
+use swifttunnel_core::utils::run_hidden_command_output_with_timeout as run_hidden_command_with_timeout;
 use tauri::{Emitter, Manager};
 use window_restore::restore_main_window;
 
 const APP_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/icon.png");
 
 #[cfg(windows)]
-fn sync_runtime_assets(app: &tauri::App) {
+fn sync_runtime_assets(app: &tauri::AppHandle) {
     use std::fs;
     use std::path::{Path, PathBuf};
-    use swifttunnel_core::vpn::winpkfilter::WinpkFilterMsiArch;
 
     fn first_existing(candidates: Vec<PathBuf>) -> Option<PathBuf> {
         candidates.into_iter().find(|p| p.exists())
@@ -63,32 +64,6 @@ fn sync_runtime_assets(app: &tauri::App) {
         Ok(true)
     }
 
-    fn sync_entry(source: &Path, destination: &Path) -> Result<usize, String> {
-        if source.is_dir() {
-            fs::create_dir_all(destination).map_err(|e| {
-                format!(
-                    "Failed to create asset directory {}: {}",
-                    destination.display(),
-                    e
-                )
-            })?;
-
-            let mut copied_files = 0;
-            for entry in fs::read_dir(source).map_err(|e| {
-                format!("Failed to read asset directory {}: {}", source.display(), e)
-            })? {
-                let entry = entry
-                    .map_err(|e| format!("Failed to read entry in {}: {}", source.display(), e))?;
-                copied_files += sync_entry(&entry.path(), &destination.join(entry.file_name()))?;
-            }
-            Ok(copied_files)
-        } else if sync_file(source, destination)? {
-            Ok(1)
-        } else {
-            Ok(0)
-        }
-    }
-
     let resource_dir = match app.path().resource_dir() {
         Ok(path) => path,
         Err(e) => {
@@ -108,8 +83,7 @@ fn sync_runtime_assets(app: &tauri::App) {
         }
     };
 
-    let native_arch = swifttunnel_core::vpn::winpkfilter::detect_native_arch();
-    let mut targets: Vec<(&str, Option<PathBuf>, PathBuf)> = vec![{
+    let targets: Vec<(&str, Option<PathBuf>, PathBuf)> = vec![{
         let msi_name = swifttunnel_core::vpn::winpkfilter::native_msi_package().msi_name;
         (
             msi_name,
@@ -120,35 +94,6 @@ fn sync_runtime_assets(app: &tauri::App) {
             exe_dir.join("drivers").join(msi_name),
         )
     }];
-
-    if native_arch == WinpkFilterMsiArch::Arm64 {
-        log::debug!("Skipping x64-only legacy driver runtime assets on Windows ARM64");
-    } else {
-        targets.extend([
-            (
-                "wintun.dll",
-                first_existing(vec![
-                    resource_dir.join("drivers").join("wintun.dll"),
-                    resource_dir.join("wintun.dll"),
-                ]),
-                exe_dir.join("wintun.dll"),
-            ),
-            (
-                "winfw.dll",
-                first_existing(vec![resource_dir.join("drivers").join("winfw.dll")]),
-                exe_dir.join("drivers").join("winfw.dll"),
-            ),
-            (
-                "mullvad-split-tunnel.sys",
-                first_existing(vec![
-                    resource_dir
-                        .join("drivers")
-                        .join("mullvad-split-tunnel.sys"),
-                ]),
-                exe_dir.join("drivers").join("mullvad-split-tunnel.sys"),
-            ),
-        ]);
-    }
 
     for (name, source, destination) in targets {
         let Some(source) = source else {
@@ -163,8 +108,8 @@ fn sync_runtime_assets(app: &tauri::App) {
             continue;
         };
 
-        match sync_entry(&source, &destination) {
-            Ok(copied) if copied > 0 => info!(
+        match sync_file(&source, &destination) {
+            Ok(true) => info!(
                 "Staged runtime asset {} -> {}",
                 source.display(),
                 destination.display()
@@ -178,7 +123,7 @@ fn sync_runtime_assets(app: &tauri::App) {
 }
 
 #[cfg(not(windows))]
-fn sync_runtime_assets(_app: &tauri::App) {}
+fn sync_runtime_assets(_app: &tauri::AppHandle) {}
 
 fn recover_stale_network_state() {
     // Clean up any stale hosts-file entries from old proxy versions.
@@ -246,31 +191,6 @@ fn recover_stale_network_state() {
                 );
             }
         }
-    }
-}
-
-#[cfg(windows)]
-fn run_hidden_command_with_timeout(
-    program: &str,
-    args: &[&str],
-    timeout: std::time::Duration,
-) -> std::io::Result<std::process::Output> {
-    let mut command = swifttunnel_core::hidden_command(program);
-    command.args(args);
-    let mut child = command.spawn()?;
-    let started = std::time::Instant::now();
-
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
-        }
-
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            return child.wait_with_output();
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
@@ -862,7 +782,6 @@ pub fn run() {
                 std::process::exit(0);
             }
             info!("SwiftTunnel desktop app starting up");
-            sync_runtime_assets(app);
 
             // Report our version to the API so the server can lock out old builds
             // (X-SwiftTunnel-Version). Set before any auth/relay-ticket call.
@@ -1018,7 +937,13 @@ pub fn run() {
                 // 1. Crash recovery for stale network state (drivers, hosts
                 //    file, adapter modes). vpn_connect waits on the signal so
                 //    a quick connect can't race the reset.
-                let _ = tokio::task::spawn_blocking(recover_stale_network_state).await;
+                let recovery_handle = app_handle.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    // Staging may write the bundled driver package. Keep it
+                    // off the GUI thread and ahead of driver preflight.
+                    sync_runtime_assets(&recovery_handle);
+                    recover_stale_network_state();
+                }).await;
                 let Some(state) = app_handle.try_state::<AppState>() else {
                     return;
                 };
@@ -1078,14 +1003,20 @@ pub fn run() {
                     run_startup_connectivity_maintenance,
                 ));
 
-                // 2. Local recovery + Roblox settings sync (file IO, icacls,
-                //    powercfg - cheap for the runtime, too slow for setup).
-                state.sync_roblox_window_settings();
-                state.system_optimizer.lock().recover_from_snapshot();
-                match tokio::task::spawn_blocking(swifttunnel_core::vpn::process_performance::recover_gpu_preferences).await {
+                // 2. These paths can run icacls/powercfg and wait for mutexes.
+                // They must not occupy an async worker while networking and
+                // commands are trying to finish startup.
+                let local_recovery_handle = app_handle.clone();
+                match tokio::task::spawn_blocking(move || {
+                    if let Some(state) = local_recovery_handle.try_state::<AppState>() {
+                        state.sync_roblox_window_settings();
+                        state.system_optimizer.lock().recover_from_snapshot();
+                    }
+                    swifttunnel_core::vpn::process_performance::recover_gpu_preferences()
+                }).await {
                     Ok(Ok(_)) => {},
                     Ok(Err(error)) => log::warn!("Runtime GPU recovery has pending originals: {error}"),
-                    Err(error) => log::warn!("Runtime GPU recovery task failed: {error}"),
+                    Err(error) => log::warn!("Local startup recovery task failed: {error}"),
                 }
 
                 // 3. Refresh the profile (bounded) so boost recovery knows
