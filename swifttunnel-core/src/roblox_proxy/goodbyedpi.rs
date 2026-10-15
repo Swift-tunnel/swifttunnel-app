@@ -403,14 +403,25 @@ fn stop_child_process(child: &mut Child, exe_path: &Path) {
                     exe_path.display(),
                     e
                 );
+                // Waiting after a failed termination could block shutdown forever.
+                return;
             }
-            if let Err(e) = child.wait() {
-                warn!(
-                    "Failed to wait for GoodbyeDPI helper pid={} exe={}: {}",
-                    child.id(),
-                    exe_path.display(),
-                    e
-                );
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    result => {
+                        warn!(
+                            "GoodbyeDPI termination could not be confirmed within one second: pid={} exe={} result={result:?}",
+                            child.id(),
+                            exe_path.display()
+                        );
+                        break;
+                    }
+                }
             }
         }
         Err(e) => {
