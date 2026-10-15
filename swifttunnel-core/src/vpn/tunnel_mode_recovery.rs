@@ -36,8 +36,13 @@ pub struct TunnelModeMarker {
     pub adapter_name: String,
 }
 
+#[cfg(not(test))]
 fn get_marker_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("SwiftTunnel").join(TUNNEL_MODE_MARKER_FILE))
+}
+#[cfg(test)]
+fn get_marker_path() -> Option<PathBuf> {
+    Some(crate::test_support::recovery_directory().join(TUNNEL_MODE_MARKER_FILE))
 }
 
 /// Write the tunnel-mode marker. Called before the packet reader can put the
@@ -55,7 +60,7 @@ pub fn write_tunnel_mode_marker(adapter_name: &str) {
         adapter_name: adapter_name.trim().to_string(),
     };
     let payload = serde_json::to_vec(&marker).unwrap_or_else(|_| adapter_name.as_bytes().to_vec());
-    if let Err(e) = fs::write(&marker_path, payload) {
+    if let Err(e) = crate::atomic_file::replace(&marker_path, &payload) {
         log::warn!("Failed to write tunnel-mode marker: {}", e);
     } else {
         log::debug!(
@@ -84,7 +89,16 @@ pub fn delete_tunnel_mode_marker() {
 /// Read the tunnel-mode marker if present.
 pub fn read_tunnel_mode_marker() -> Option<TunnelModeMarker> {
     let marker_path = get_marker_path()?;
-    let raw = fs::read(&marker_path).ok()?;
+    let raw = match crate::utils::read_file_bounded(&marker_path, 4096, "Tunnel recovery record") {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            log::warn!("Tunnel recovery record could not be read; recovery is still required: {e}");
+            return Some(TunnelModeMarker {
+                adapter_name: "Unreadable recovery record".into(),
+            });
+        }
+    };
     if let Ok(marker) = serde_json::from_slice::<TunnelModeMarker>(&raw) {
         return Some(marker);
     }
@@ -286,6 +300,38 @@ pub fn recover_tunnel_mode_on_startup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_record_still_triggers_recovery_without_loading_it() {
+        let path = get_marker_path().unwrap();
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(16 * 1024 * 1024).unwrap();
+        drop(file);
+        assert!(read_tunnel_mode_marker().is_some());
+        assert_eq!(fs::metadata(&path).unwrap().len(), 16 * 1024 * 1024);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_marker_replacement_preserves_previous_recovery_data() {
+        use std::os::windows::fs::OpenOptionsExt;
+        write_tunnel_mode_marker("Original adapter");
+        let path = get_marker_path().unwrap();
+        let before = fs::read(&path).unwrap();
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        write_tunnel_mode_marker("Replacement adapter");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        drop(locked);
+        write_tunnel_mode_marker("Replacement adapter");
+        assert_eq!(
+            read_tunnel_mode_marker().unwrap().adapter_name,
+            "Replacement adapter"
+        );
+    }
 
     #[test]
     fn test_marker_roundtrip() {

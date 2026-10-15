@@ -307,8 +307,13 @@ impl Ipv6Marker {
 }
 
 /// Get the path to the IPv6 marker file
+#[cfg(not(test))]
 fn get_marker_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("SwiftTunnel").join(IPV6_MARKER_FILE))
+}
+#[cfg(test)]
+fn get_marker_path() -> Option<PathBuf> {
+    Some(crate::test_support::recovery_directory().join(IPV6_MARKER_FILE))
 }
 
 pub fn query_ipv6_binding_enabled(adapter_name: &str) -> Option<bool> {
@@ -609,24 +614,39 @@ pub fn delete_ipv6_marker() {
 
 /// Check if IPv6 marker exists and return captured state if so.
 pub fn read_ipv6_marker() -> Option<Ipv6Marker> {
-    let marker_path = get_marker_path()?;
-    if !marker_path.exists() {
-        return None;
+    match read_marker_at(&get_marker_path()?) {
+        Ok(marker) => marker,
+        Err(error) => {
+            log::warn!("IPv6 recovery record could not be read; it was kept: {error}");
+            None
+        }
     }
+}
 
-    let raw = fs::read(&marker_path).ok()?;
-    if let Ok(marker) = serde_json::from_slice::<Ipv6Marker>(&raw)
-        && !marker.adapter_name.trim().is_empty()
-    {
-        return Some(marker);
-    }
-
-    let adapter_name = String::from_utf8_lossy(&raw).trim().to_string();
-    if adapter_name.is_empty() {
-        None
+fn read_marker_at(path: &std::path::Path) -> std::io::Result<Option<Ipv6Marker>> {
+    let text = match crate::utils::read_text_file_bounded(path, 4096, "IPv6 recovery record") {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Invalid IPv6 recovery record",
+        )
+    };
+    let marker = if text.trim_start().starts_with('{') {
+        serde_json::from_str::<Ipv6Marker>(&text).map_err(|_| invalid())?
     } else {
-        Some(Ipv6Marker::legacy(adapter_name))
+        Ipv6Marker::legacy(text.trim().to_owned())
+    };
+    if marker.adapter_name.trim().is_empty()
+        || marker.adapter_name.len() > 256
+        || marker.adapter_name.chars().any(char::is_control)
+    {
+        return Err(invalid());
     }
+    Ok(Some(marker))
 }
 
 fn build_restore_script(marker: &Ipv6Marker) -> String {
@@ -871,8 +891,13 @@ fn restore_ipv6_for_marker(marker: &Ipv6Marker) -> bool {
 
 /// Restore IPv6 state from the marker file if one exists.
 pub fn restore_ipv6_from_marker() -> Option<bool> {
-    let marker = read_ipv6_marker()?;
-    Some(restore_ipv6_for_marker(&marker))
+    match read_marker_at(&get_marker_path()?) {
+        Ok(marker) => marker.map(|marker| restore_ipv6_for_marker(&marker)),
+        Err(error) => {
+            log::warn!("IPv6 recovery record could not be read; it was kept: {error}");
+            Some(false)
+        }
+    }
 }
 
 /// Recover IPv6 settings on application startup
@@ -895,6 +920,27 @@ pub fn recover_ipv6_on_startup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damaged_ipv6_records_are_refused_and_preserved() {
+        let path = get_marker_path().unwrap();
+        for bytes in [
+            b"{broken json".to_vec(),
+            vec![b'a'; 4097],
+            vec![0xff],
+            b"Test\nAdapter".to_vec(),
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(read_marker_at(&path).is_err());
+            assert_eq!(restore_ipv6_from_marker(), Some(false));
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        fs::write(&path, b"Legacy Ethernet\r\n").unwrap();
+        assert_eq!(
+            read_marker_at(&path).unwrap().unwrap().adapter_name(),
+            "Legacy Ethernet"
+        );
+    }
 
     #[cfg(windows)]
     #[test]

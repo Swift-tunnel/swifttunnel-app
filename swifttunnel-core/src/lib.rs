@@ -48,6 +48,8 @@ pub mod rolling_log;
 pub mod settings;
 pub mod structs;
 pub mod system_optimizer;
+#[cfg(test)]
+mod test_support;
 pub mod update_verify;
 pub mod updater;
 pub mod utils;

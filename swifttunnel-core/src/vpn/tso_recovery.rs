@@ -71,8 +71,13 @@ impl TsoMarker {
 }
 
 /// Get the path to the TSO marker file
+#[cfg(not(test))]
 fn get_marker_path() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("SwiftTunnel").join(TSO_MARKER_FILE))
+}
+#[cfg(test)]
+fn get_marker_path() -> Option<PathBuf> {
+    Some(crate::test_support::recovery_directory().join(TSO_MARKER_FILE))
 }
 
 /// Per-query timeout for adapter offload probes.
