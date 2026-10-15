@@ -31,6 +31,20 @@ use tokio::sync::{Mutex, watch};
 /// 500ms balances detection speed with CPU usage
 const REFRESH_INTERVAL_MS: u64 = 500;
 
+/// Let other runtime tasks continue during synchronous driver operations.
+/// Keep the operation on this stack so cancellation cannot abandon an owned
+/// driver halfway through configuration. Non-threaded callers retain their
+/// existing synchronous behavior instead of panicking in block_in_place.
+fn blocking_driver_step<T>(work: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|runtime| runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
+    }
+}
+
 /// How long after a successful connect we keep the local-connectivity watchdog
 /// armed. The point of the watchdog is specifically to catch *adapter-reset
 /// rollback* — `Set-NetAdapterAdvancedProperty` calls during interceptor start
@@ -1819,7 +1833,7 @@ impl VpnConnection {
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
         // Check if driver is available
-        if !SplitTunnelDriver::check_driver_available() {
+        if !blocking_driver_step(SplitTunnelDriver::check_driver_available) {
             return Err(VpnError::SplitTunnelNotAvailable);
         }
 
@@ -1827,13 +1841,13 @@ impl VpnConnection {
         let mut driver = SplitTunnelDriver::new();
 
         // Open driver
-        driver.open().map_err(|e| {
+        blocking_driver_step(|| driver.open()).map_err(|e| {
             VpnError::SplitTunnelSetupFailed(format!("Failed to open driver: {}", e))
         })?;
         log::info!("V3: Split tunnel driver opened");
 
         // Initialize driver
-        driver.initialize().map_err(|e| {
+        blocking_driver_step(|| driver.initialize()).map_err(|e| {
             let _ = driver.close();
             VpnError::SplitTunnelSetupFailed(format!("Failed to initialize driver: {}", e))
         })?;
@@ -2700,7 +2714,7 @@ impl VpnConnection {
             log::info!("V3: UDP gameplay tunneling disabled for TCP-only country-ban bypass");
         }
 
-        driver.configure(split_config).map_err(|e| {
+        blocking_driver_step(|| driver.configure(split_config)).map_err(|e| {
             let _ = driver.close();
             VpnError::SplitTunnelSetupFailed(format!("Failed to configure V3 split tunnel: {}", e))
         })?;
@@ -2727,7 +2741,7 @@ impl VpnConnection {
         // This handles the case where Roblox is ALREADY running when the user connects.
         // Without this, the snapshot is empty until the first periodic refresh (up to 2s),
         // and all traffic would rely on speculative IP matching which misses STUN/voice.
-        if let Err(e) = driver.refresh_exclusions() {
+        if let Err(e) = blocking_driver_step(|| driver.refresh_exclusions()) {
             log::warn!("V3: Initial cache warmup failed: {}", e);
         } else {
             log::info!("V3: Initial cache warmup completed - process snapshot populated");
@@ -3778,6 +3792,43 @@ impl Drop for VpnConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn slow_driver_step_does_not_starve_other_runtime_tasks() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let worker_started = started.clone();
+        let (release, waiting) = std::sync::mpsc::sync_channel(1);
+        let driver = tokio::spawn(async move {
+            blocking_driver_step(|| {
+                worker_started.notify_one();
+                waiting.recv_timeout(Duration::from_secs(2))
+            })
+        });
+        started.notified().await;
+        // This needs the sole runtime worker while the driver operation is
+        // blocked. Without the handoff it cannot release that operation.
+        let other_task = tokio::spawn(async move { release.send(()) });
+        assert!(driver.await.unwrap().is_ok());
+        assert!(other_task.await.unwrap().is_ok());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn driver_step_keeps_current_thread_callers_compatible() {
+        let mut value = 0;
+        let result = blocking_driver_step(|| {
+            value = 7;
+            Err::<(), _>("fixture driver error")
+        });
+        assert_eq!(value, 7);
+        assert_eq!(result, Err("fixture driver error"));
+    }
+
+    #[test]
+    fn driver_step_supports_callers_without_a_runtime() {
+        let mut value = 0;
+        blocking_driver_step(|| value += 1);
+        assert_eq!(value, 1);
+    }
 
     #[tokio::test]
     async fn lease_lifecycle_rejects_work_after_terminal_state() {
