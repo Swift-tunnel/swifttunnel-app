@@ -668,12 +668,14 @@ async fn elect_resolver(client: &reqwest::Client) -> Option<&'static str> {
                     .send()
                     .await
                 {
-                    Ok(response) if response.status().is_success() => match response.text().await {
-                        Ok(body) => parse_usable_a_records(&body)
-                            .map(|ips| !ips.is_empty())
-                            .unwrap_or(false),
-                        Err(_) => false,
-                    },
+                    Ok(response) if response.status().is_success() => {
+                        match read_dns_response(response).await {
+                            Ok(body) => parse_usable_a_records(&body)
+                                .map(|ips| !ips.is_empty())
+                                .unwrap_or(false),
+                            Err(_) => false,
+                        }
+                    }
                     _ => false,
                 };
                 (*resolver, ok)
@@ -731,7 +733,7 @@ async fn resolve_domain_ips(
             continue;
         }
 
-        let body = match response.text().await {
+        let body = match read_dns_response(response).await {
             Ok(body) => body,
             Err(e) => {
                 failures.push(format!("{resolver}: response read failed: {e}"));
@@ -1272,6 +1274,11 @@ fn build_doh_url(resolver: &str, domain: &str) -> String {
         .append_pair("type", "A")
         .finish();
     format!("{resolver}?{query}")
+}
+
+async fn read_dns_response(response: reqwest::Response) -> Result<String, String> {
+    let bytes = crate::http_body::read_bounded(response, 64 * 1024, "DNS response").await?;
+    String::from_utf8(bytes).map_err(|_| "DNS response was not valid UTF-8.".into())
 }
 
 fn parse_usable_a_records(body: &str) -> Result<Vec<Ipv4Addr>, String> {

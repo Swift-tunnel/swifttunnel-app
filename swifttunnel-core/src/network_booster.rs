@@ -106,8 +106,14 @@ impl PersistentSnapshot {
     }
 }
 
+const MAX_NETWORK_SNAPSHOT_BYTES: usize = 1024 * 1024;
+
 fn read_network_snapshot(path: &Path) -> Result<PersistentSnapshot> {
-    match std::fs::read(path) {
+    match crate::utils::read_file_bounded(
+        path,
+        MAX_NETWORK_SNAPSHOT_BYTES,
+        "Network recovery record",
+    ) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| {
             anyhow::anyhow!("Network rollback record is unreadable; preserve it for recovery: {e}")
         }),
@@ -127,6 +133,12 @@ fn save_network_snapshot(path: &Path, snapshot: &PersistentSnapshot) -> Result<(
             Err(e) => Err(e.into()),
         };
     }
+    let payload = serde_json::to_vec_pretty(snapshot)?;
+    if payload.len() > MAX_NETWORK_SNAPSHOT_BYTES {
+        anyhow::bail!(
+            "Network recovery record is too large to save safely; settings were left unchanged."
+        );
+    }
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("No snapshot directory"))?;
@@ -137,7 +149,7 @@ fn save_network_snapshot(path: &Path, snapshot: &PersistentSnapshot) -> Result<(
         .create_new(true)
         .open(&staged)?;
     let result: Result<()> = (|| {
-        file.write_all(&serde_json::to_vec_pretty(snapshot)?)?;
+        file.write_all(&payload)?;
         file.sync_all()?;
         drop(file);
         #[cfg(windows)]
@@ -1033,6 +1045,40 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn oversized_network_originals_are_refused_and_cannot_be_overwritten() {
+        let dir = snapshot_test_dir();
+        let path = dir.join(SNAPSHOT_FILE);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(1024 * 1024 + 1).unwrap();
+        drop(file);
+        assert!(read_network_snapshot(&path).is_err());
+        assert!(save_network_snapshot(&path, &PersistentSnapshot::default()).is_err());
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 1024 * 1024 + 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_snapshot_save_preserves_the_readable_previous_originals() {
+        let dir = snapshot_test_dir();
+        let path = dir.join(SNAPSHOT_FILE);
+        save_network_snapshot(&path, &example_snapshot()).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut snapshot = example_snapshot();
+        snapshot.nagle_registry_snapshot.insert(
+            "x".repeat(MAX_NETWORK_SNAPSHOT_BYTES),
+            NagleRegistrySnapshot::default(),
+        );
+        assert!(
+            save_network_snapshot(&path, &snapshot)
+                .unwrap_err()
+                .to_string()
+                .contains("too large")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
