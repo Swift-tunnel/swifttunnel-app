@@ -235,6 +235,53 @@ describe("stores/vpnStore", () => {
     expect(store.getState().ping).toBeNull();
     expect(store.getState().bytesDown).toBe(0);
   });
+  it("shares pending ping and traffic reads across the graph, overlay and focus refresh", async () => {
+    const ping = deferred<number>();
+    const traffic = deferred<{ bytes_up: number; bytes_down: number; packets_tunneled: number; packets_bypassed: number }>();
+    vpnGetPing.mockReturnValueOnce(ping.promise).mockResolvedValue(24);
+    vpnGetThroughput.mockReturnValueOnce(traffic.promise).mockResolvedValue(null);
+    const store = await loadStore();
+    const reads = Array.from({ length: 20 }, () => [store.getState().fetchPing(), store.getState().fetchThroughput()]).flat();
+    expect(vpnGetPing).toHaveBeenCalledOnce();
+    expect(vpnGetThroughput).toHaveBeenCalledOnce();
+    ping.resolve(22);
+    traffic.resolve({ bytes_up: 100, bytes_down: 200, packets_tunneled: 3, packets_bypassed: 0 });
+    await Promise.all(reads);
+    expect(store.getState().pingReadings).toBe(1);
+    expect(store.getState().bytesDown).toBe(200);
+    await Promise.all([store.getState().fetchPing(), store.getState().fetchThroughput()]);
+    expect(vpnGetPing).toHaveBeenCalledTimes(2);
+    expect(vpnGetThroughput).toHaveBeenCalledTimes(2);
+  });
+  it("starts new-session reads immediately and keeps them shared when an old read completes", async () => {
+    const old = deferred<number>();
+    const current = deferred<number>();
+    vpnGetPing.mockReturnValueOnce(old.promise).mockReturnValueOnce(current.promise);
+    const store = await loadStore();
+    store.getState().handleStateEvent(connectedState("singapore"));
+    const before = store.getState().fetchPing();
+    store.getState().handleStateEvent(connectedState("tokyo"));
+    const after = store.getState().fetchPing();
+    expect(vpnGetPing).toHaveBeenCalledTimes(2);
+    old.resolve(999);
+    await before;
+    expect(store.getState().ping).toBeNull();
+    const duplicate = store.getState().fetchPing();
+    expect(vpnGetPing).toHaveBeenCalledTimes(2);
+    current.resolve(23);
+    await Promise.all([after, duplicate]);
+    expect(store.getState().ping).toBe(23);
+    expect(store.getState().pingReadings).toBe(1);
+  });
+  it("releases a failed telemetry read so the next poll can recover", async () => {
+    vpnGetPing.mockRejectedValueOnce(new Error("Read unavailable")).mockResolvedValueOnce(21);
+    vpnGetThroughput.mockRejectedValueOnce(new Error("Read unavailable")).mockResolvedValueOnce({ bytes_up: 7, bytes_down: 8, packets_tunneled: 0, packets_bypassed: 0 });
+    const store = await loadStore();
+    await Promise.all([store.getState().fetchPing(), store.getState().fetchThroughput()]);
+    await Promise.all([store.getState().fetchPing(), store.getState().fetchThroughput()]);
+    expect(store.getState().ping).toBe(21);
+    expect(store.getState().bytesDown).toBe(8);
+  });
   it("discards game route details when disconnected or moved to another relay", async () => {
     const store = await loadStore();
     vpnGetState.mockResolvedValue({ ...connectedState("mumbai"), game_route: {

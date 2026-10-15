@@ -11,7 +11,7 @@ import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useLiveUpdates } from "../../lib/useLiveUpdates";
-import { vpnGetThroughput } from "../../lib/commands";
+import { useTrafficSamples } from "../../lib/useTrafficSamples";
 import { RouteDiagram } from "./RouteDiagram";
 import { RelayPicker } from "./RelayPicker";
 import { regionGameEstimate } from "../../lib/gamePing";
@@ -20,12 +20,7 @@ import {
   resolveConnectStatus,
   stateLabel,
 } from "./connectState";
-import {
-  LiveGraph,
-  MAX_SAMPLES,
-  SAMPLE_INTERVAL_MS,
-  type DataSample,
-} from "./LiveGraph";
+import { LiveGraph } from "./LiveGraph";
 import { AdapterSelectionPanel } from "./AdapterSelectionPanel";
 import { StatusRing } from "./StatusRing";
 import { SessionCards } from "./SessionCards";
@@ -63,7 +58,6 @@ export function ConnectTab() {
   const repairDriver = useVpnStore((s) => s.repairDriver);
   const resetDriver = useVpnStore((s) => s.resetDriver);
   const installDriver = useVpnStore((s) => s.installDriver);
-  const fetchThroughput = useVpnStore((s) => s.fetchThroughput);
   const fetchPing = useVpnStore((s) => s.fetchPing);
   const fetchState = useVpnStore((s) => s.fetchState);
 
@@ -112,17 +106,6 @@ export function ConnectTab() {
     ? relayLatencies.get(`relay:${settings.manual_relay.server_id}`) ?? null
     : getLatency(settings.selected_region);
 
-  const [dataHistory, setDataHistory] = useState<DataSample[]>([]);
-  // Every sample lands here first; state (and so a redraw) only follows while
-  // the window is in front. In game they keep piling up, so the graph shows
-  // the match on the way back without being redrawn behind the game.
-  const samplesRef = useRef<DataSample[]>([]);
-  const live = useLiveUpdates();
-  const liveRef = useRef(live);
-  liveRef.current = live;
-  const prevBytesRef = useRef<{ up: number; down: number; t: number } | null>(
-    null,
-  );
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function saveDebounced() {
@@ -141,80 +124,6 @@ export function ConnectTab() {
       }
     };
   }, [save]);
-
-  useEffect(() => {
-    // No graph means nothing consumes these samples, so skip the whole loop:
-    // a throughput IPC call every 500ms plus a state update that re-renders
-    // the tab. This is what the setting is actually for.
-    if (!isConnected || !showLiveGraph) {
-      samplesRef.current = [];
-      setDataHistory([]);
-      prevBytesRef.current = null;
-      return;
-    }
-    // Fetch and sample in the same tick so each rate is computed from the
-    // bytes that fetch just delivered. Two separate 1s timers used to alias
-    // against each other and produce zero/double-rate spikes in the graph.
-    let cancelled = false;
-    let inFlight = false;
-    const readTotals = async (): Promise<{ up: number; down: number } | null> => {
-      if (liveRef.current) {
-        await fetchThroughput();
-        const { bytesUp, bytesDown } = useVpnStore.getState();
-        return { up: bytesUp, down: bytesDown };
-      }
-      // In game: read the counters without publishing them to the store,
-      // which would redraw the totals for nobody.
-      try {
-        const stats = await vpnGetThroughput();
-        return stats ? { up: stats.bytes_up, down: stats.bytes_down } : null;
-      } catch {
-        return null;
-      }
-    };
-    const sample = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      let totals: { up: number; down: number } | null = null;
-      try {
-        totals = await readTotals();
-      } finally {
-        inFlight = false;
-      }
-      if (cancelled || !totals) return;
-      const now = Date.now();
-      const prev = prevBytesRef.current;
-      if (prev) {
-        const dtMs = Math.max(1, now - prev.t);
-        const up = Math.max(0, ((totals.up - prev.up) / dtMs) * 1000);
-        const down = Math.max(0, ((totals.down - prev.down) / dtMs) * 1000);
-        samplesRef.current = [
-          ...samplesRef.current,
-          { t: now, up, down },
-        ].slice(-MAX_SAMPLES);
-        if (liveRef.current) setDataHistory(samplesRef.current);
-      }
-      prevBytesRef.current = { up: totals.up, down: totals.down, t: now };
-    };
-    void sample();
-    // Sampled through a plain interval because the closure owns per-tick
-    // state (prevBytesRef). Deliberately kept sampling in game: the graph is
-    // most useful for the period you were playing, which is exactly when the
-    // window is not in front. Only the drawing waits.
-    const id = setInterval(() => void sample(), SAMPLE_INTERVAL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-      prevBytesRef.current = null;
-    };
-  }, [isConnected, showLiveGraph, fetchThroughput]);
-
-  // Back in front: draw what piled up meanwhile and refresh the totals.
-  useEffect(() => {
-    if (!live || !isConnected) return;
-    setDataHistory(samplesRef.current);
-    void fetchThroughput();
-  }, [live, isConnected, fetchThroughput]);
 
   useFocusAwareInterval(() => void fetchState(), 2000, {
     enabled: isConnected || isTransitioning,
@@ -513,79 +422,14 @@ export function ConnectTab() {
 
       {/* ── Throughput (connected) ── */}
       {isConnected && (
-        <motion.section
-          initial={{ opacity: 0, y: 4 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.2 }}
-          className="flex flex-col gap-2.5"
-        >
-          {showLiveGraph ? (
-            <LiveGraph
-              samples={dataHistory}
-              onDisable={() => {
-                update({ show_live_graph: false });
-                saveDebounced();
-              }}
-            />
-          ) : (
-            // Hiding the graph must not be a one-way door. Without this the
-            // only way back was the Settings tab, which is a poor place to
-            // look for something you turned off here.
-            <button
-              type="button"
-              onClick={() => {
-                update({ show_live_graph: true });
-                saveDebounced();
-              }}
-              className="flex items-center justify-center gap-2 rounded-[var(--radius-card)] surface-card px-4 py-3 text-[12.5px] font-semibold text-text-muted transition-colors hover:text-text-primary"
-            >
-              <Icon name="pulse" size={15} strokeWidth={2} />
-              Show connection graph
-            </button>
-          )}
-
-          <div className="grid grid-cols-4 overflow-hidden rounded-[var(--radius-card)] surface-card">
-            <TransferCell direction="up" />
-            <TransferCell direction="down" />
-            <MetricCell
-              label="Session"
-              value={<SessionClock connectedAt={connectedAt} />}
-              mono
-              divider
-            />
-            <MetricCell
-              label="Ping"
-              value={ping !== null ? `${ping}` : "—"}
-              hint={ping !== null ? "ms" : undefined}
-              mono
-              valueColor={ping !== null ? undefined : "var(--color-text-muted)"}
-            />
-          </div>
-
-          {tunneled.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {tunneled.map((p) => (
-                <span
-                  key={p}
-                  className="inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 font-mono text-[10.5px]"
-                  style={{
-                    backgroundColor: "var(--color-bg-card)",
-                    border: "1px solid var(--color-border-subtle)",
-                    color: "var(--color-text-secondary)",
-                  }}
-                >
-                  <span
-                    className="h-1.5 w-1.5 rounded-full"
-                    style={{
-                      backgroundColor: "var(--color-status-connected)",
-                    }}
-                  />
-                  {p}
-                </span>
-              ))}
-            </div>
-          )}
-        </motion.section>
+        <ConnectionTraffic
+          key={connectedAt ?? "connected"}
+          showLiveGraph={showLiveGraph}
+          onToggleGraph={(value) => { update({ show_live_graph: value }); saveDebounced(); }}
+          connectedAt={connectedAt}
+          ping={ping}
+          tunneled={tunneled}
+        />
       )}
 
       {/* ── Regions ── */}
@@ -708,6 +552,90 @@ export function ConnectTab() {
 }
 
 // ── Sub-components ──
+
+/** Fast graph samples stay local instead of re-rendering the entire Connect tab. */
+function ConnectionTraffic({ showLiveGraph, onToggleGraph, connectedAt, ping, tunneled }: {
+  showLiveGraph: boolean;
+  onToggleGraph: (value: boolean) => void;
+  connectedAt: number | null;
+  ping: number | null;
+  tunneled: string[];
+}) {
+  const dataHistory = useTrafficSamples(showLiveGraph);
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 4 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.2 }}
+      className="flex flex-col gap-2.5"
+    >
+      {showLiveGraph ? (
+        <LiveGraph
+          samples={dataHistory}
+          onDisable={() => {
+            onToggleGraph(false);
+          }}
+        />
+      ) : (
+        // Hiding the graph must not be a one-way door. Without this the
+        // only way back was the Settings tab, which is a poor place to
+        // look for something you turned off here.
+        <button
+          type="button"
+          onClick={() => {
+            onToggleGraph(true);
+          }}
+          className="flex items-center justify-center gap-2 rounded-[var(--radius-card)] surface-card px-4 py-3 text-[12.5px] font-semibold text-text-muted transition-colors hover:text-text-primary"
+        >
+          <Icon name="pulse" size={15} strokeWidth={2} />
+          Show connection graph
+        </button>
+      )}
+
+      <div className="grid grid-cols-4 overflow-hidden rounded-[var(--radius-card)] surface-card">
+        <TransferCell direction="up" />
+        <TransferCell direction="down" />
+        <MetricCell
+          label="Session"
+          value={<SessionClock connectedAt={connectedAt} />}
+          mono
+          divider
+        />
+        <MetricCell
+          label="Ping"
+          value={ping !== null ? `${ping}` : "—"}
+          hint={ping !== null ? "ms" : undefined}
+          mono
+          valueColor={ping !== null ? undefined : "var(--color-text-muted)"}
+        />
+      </div>
+
+      {tunneled.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {tunneled.map((p) => (
+            <span
+              key={p}
+              className="inline-flex items-center gap-1.5 rounded-[5px] px-2 py-1 font-mono text-[10.5px]"
+              style={{
+                backgroundColor: "var(--color-bg-card)",
+                border: "1px solid var(--color-border-subtle)",
+                color: "var(--color-text-secondary)",
+              }}
+            >
+              <span
+                className="h-1.5 w-1.5 rounded-full"
+                style={{
+                  backgroundColor: "var(--color-status-connected)",
+                }}
+              />
+              {p}
+            </span>
+          ))}
+        </div>
+      )}
+    </motion.section>
+  );
+}
 
 /**
  * Session length, in its own component so the once-a-second tick re-renders

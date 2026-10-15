@@ -245,6 +245,25 @@ let stateReadSeq = 0;
 let stateEventRevision = 0;
 let sessionRevision = 0;
 
+// The graph, overlay and focus refresh may all request the same counters.
+// Share only within one connection generation, so an old slow read cannot
+// hold up a new session or multiply native work on every timer tick.
+function coalesceSessionRead<T>(read: () => Promise<T>): () => Promise<T> {
+  let pending: { attempt: number; revision: number; promise: Promise<T> } | null = null;
+  return () => {
+    if (pending?.attempt === connectAttemptSeq && pending.revision === sessionRevision) {
+      return pending.promise;
+    }
+    const flight = {
+      attempt: connectAttemptSeq,
+      revision: sessionRevision,
+      promise: read().finally(() => { if (pending === flight) pending = null; }),
+    };
+    pending = flight;
+    return flight.promise;
+  };
+}
+
 const clearedSessionTelemetry = {
   bytesUp: 0, bytesDown: 0, packetsTunneled: 0, packetsBypassed: 0,
   ping: null, pingReadings: 0, diagnostics: null,
@@ -1066,7 +1085,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   },
 
-  fetchThroughput: async () => {
+  fetchThroughput: coalesceSessionRead(async () => {
     const attempt = connectAttemptSeq;
     const revision = sessionRevision;
     try {
@@ -1087,7 +1106,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       });
     }
     return false;
-  },
+  }),
 
   fetchFreeTier: async () => {
     try {
@@ -1124,7 +1143,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   },
 
-  fetchPing: async () => {
+  fetchPing: coalesceSessionRead(async () => {
     const attempt = connectAttemptSeq;
     const revision = sessionRevision;
     try {
@@ -1143,7 +1162,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         dedupeKey: "vpn-fetch-ping",
       });
     }
-  },
+  }),
 
   fetchDiagnostics: async () => {
     const attempt = connectAttemptSeq;

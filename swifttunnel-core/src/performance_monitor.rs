@@ -1,7 +1,7 @@
 use crate::process_names::{is_roblox_player_process_name, is_roblox_process_name};
 use crate::structs::*;
 use std::time::Duration;
-use sysinfo::{Process, ProcessesToUpdate, System};
+use sysinfo::{Process, ProcessRefreshKind, ProcessesToUpdate, System};
 
 /// True when the foreground (focused) window belongs to a Roblox process. Used
 /// to show the in-game overlay only while Roblox is the active window, so it
@@ -113,6 +113,12 @@ pub fn set_window_no_activate(_hwnd_raw: isize) {}
 /// be a few seconds stale.
 const FULL_SCAN_MIN_INTERVAL: Duration = Duration::from_secs(4);
 
+// sysinfo's convenience refresh also reads disk I/O and executable paths for
+// every process. The performance monitor only consumes names, CPU and RAM.
+fn metrics_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::new().with_cpu().with_memory()
+}
+
 pub struct PerformanceMonitor {
     system: System,
     last_full_scan: Option<std::time::Instant>,
@@ -182,8 +188,11 @@ impl PerformanceMonitor {
     fn refresh_player(&mut self, force_discovery: bool) -> Option<u32> {
         if let Some(pid) = self.last_metrics.process_id {
             let process_pid = sysinfo::Pid::from_u32(pid);
-            self.system
-                .refresh_processes(ProcessesToUpdate::Some(&[process_pid]), true);
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[process_pid]),
+                true,
+                metrics_refresh_kind(),
+            );
             if self.system.process(process_pid).is_some_and(|process| {
                 is_roblox_player_process_name(&process.name().to_string_lossy())
             }) {
@@ -196,7 +205,11 @@ impl PerformanceMonitor {
                 .is_none_or(|at| at.elapsed() >= FULL_SCAN_MIN_INTERVAL);
         let pid = if scan_due {
             self.last_full_scan = Some(std::time::Instant::now());
-            self.system.refresh_processes(ProcessesToUpdate::All, true);
+            self.system.refresh_processes_specifics(
+                ProcessesToUpdate::All,
+                true,
+                metrics_refresh_kind(),
+            );
             #[cfg(test)]
             {
                 self.full_scans += 1;
@@ -254,13 +267,26 @@ mod polling_tests {
             old.refresh_processes(ProcessesToUpdate::All, true);
         }
         let repeated = started.elapsed();
+        let mut lean = System::new();
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            lean.refresh_processes_specifics(ProcessesToUpdate::All, true, metrics_refresh_kind());
+        }
+        let lean_scans = started.elapsed();
+        // Read-only host check: the reduced refresh must still populate the
+        // process identity and memory used by the dashboard.
+        let process = lean
+            .process(sysinfo::Pid::from_u32(std::process::id()))
+            .unwrap();
+        assert!(!process.name().is_empty());
+        assert!(process.memory() > 0);
         let mut monitor = PerformanceMonitor::new();
         let started = std::time::Instant::now();
         for _ in 0..20 {
             monitor.poll_roblox_pid();
         }
         println!(
-            "20 full scans: {repeated:?}; 20 shared polls: {:?}; full scans performed: {}",
+            "20 default scans: {repeated:?}; 20 CPU/RAM-only scans: {lean_scans:?}; 20 shared polls: {:?}; full scans performed: {}",
             started.elapsed(),
             monitor.full_scans
         );

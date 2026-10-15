@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, type ReactNode } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useBoostStore } from "../../stores/boostStore";
-import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useToastStore } from "../../stores/toastStore";
 import { formatErrorMessage } from "../../lib/errors";
 import { SettingsSaveNotice } from "../ui/SettingsSaveNotice";
@@ -88,7 +88,17 @@ export function BoostTab() {
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
 
-  const boost = useBoostStore();
+  // This is a settings form. Live FPS/CPU/RAM samples belong to their own
+  // readouts, not a subscription that rebuilds every control on every sample.
+  const boost = useBoostStore(useShallow((s) => ({
+    fetchMetrics: s.fetchMetrics,
+    syncEffectiveConfig: s.syncEffectiveConfig,
+    updateConfig: s.updateConfig,
+    restartRoblox: s.restartRoblox,
+    error: s.error,
+    warning: s.warning,
+    robloxRunning: s.robloxRunning,
+  })));
   const addToast = useToastStore((s) => s.addToast);
 
   const [networkApplying, setNetworkApplying] = useState(false);
@@ -233,16 +243,8 @@ export function BoostTab() {
   const windowValidationError = windowWidthError ?? windowHeightError;
   const validationError = configValidationError(draft);
 
-  useFocusAwareInterval(() => void boost.fetchMetrics(), 2000);
-
-  useEffect(() => {
-    void boost.fetchSystemMemory();
-  }, [boost.fetchSystemMemory]);
-
-  useFocusAwareInterval(
-    () => void boost.fetchSystemMemory(),
-    boost.isCleaningRam ? 250 : 1000,
-  );
+  // The shell keeps player presence current. No RAM or FPS readout lives
+  // here, so this form must not start another performance polling loop.
 
   const applyChanges = useCallback(async () => {
     if (validationError || isApplying || isRestarting) return;
