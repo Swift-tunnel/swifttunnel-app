@@ -12,6 +12,22 @@ type CloseToTrayDeps = {
   isDisposed?: () => boolean;
 };
 
+const EXIT_SAVE_TIMEOUT_MS = 2000;
+
+async function waitForExitSave(saving: Promise<void>) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Window placement is best effort. A stalled native settings command
+    // must not trap the user in a window whose Close button never works.
+    await Promise.race([
+      saving,
+      new Promise<void>(resolve => { timer = setTimeout(resolve, EXIT_SAVE_TIMEOUT_MS); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Creates an onCloseRequested handler that:
 // - If minimize_to_tray is enabled: prevents close, hides to tray
 // - If minimize_to_tray is disabled: persists state, then closes normally
@@ -62,8 +78,8 @@ export function createCloseToTrayHandler(deps: CloseToTrayDeps) {
         }
       }
 
-      // A real close ends the process, so retain the save-before-exit order.
-      await saving;
+      // Give the save a chance to finish before a real exit, within a deadline.
+      await waitForExitSave(saving);
       if (deps.isDisposed?.()) return;
       closing = true;
       try {

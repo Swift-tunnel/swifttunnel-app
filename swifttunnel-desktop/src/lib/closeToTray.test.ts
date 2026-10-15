@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCloseToTrayHandler } from "./closeToTray";
 
 function deferred<T>() {
@@ -12,6 +12,38 @@ function deferred<T>() {
 }
 
 describe("createCloseToTrayHandler", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("still exits when the native placement save never finishes", async () => {
+    vi.useFakeTimers();
+    const close = vi.fn(async () => {});
+    const handler = createCloseToTrayHandler({
+      persistWindowState: () => new Promise<void>(() => {}),
+      hide: vi.fn(async () => {}),
+      close,
+      shouldMinimizeToTray: () => false,
+    });
+    const pending = handler({ preventDefault: vi.fn() });
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await pending;
+    expect(close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears its exit deadline when placement saves promptly", async () => {
+    vi.useFakeTimers();
+    const handler = createCloseToTrayHandler({
+      persistWindowState: async () => {},
+      hide: async () => {},
+      close: async () => {},
+      shouldMinimizeToTray: () => false,
+    });
+    await handler({ preventDefault: vi.fn() });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("prevents close synchronously and hides to tray when minimize_to_tray is enabled", async () => {
     const preventDefault = vi.fn();
     const persistGate = deferred<void>();
