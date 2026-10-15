@@ -12,7 +12,7 @@ use swifttunnel_core::{
         game_destination::{self, ObservedGame},
     },
 };
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, State};
 
 #[derive(Serialize)]
 pub struct LaunchPlan {
@@ -27,6 +27,7 @@ pub struct LaunchPlan {
 
 struct LaunchGuard<'a> {
     state: &'a AppState,
+    generation: u64,
     complete: bool,
 }
 #[tauri::command]
@@ -96,7 +97,11 @@ pub async fn games_suggest_server(
 impl Drop for LaunchGuard<'_> {
     fn drop(&mut self) {
         if !self.complete {
-            self.state.games.lock().clear_launch();
+            let mut games = self.state.games.lock();
+            if games.window_placement_generation == self.generation {
+                games.cancel_window_placement();
+                games.clear_launch();
+            }
         }
     }
 }
@@ -595,8 +600,15 @@ pub async fn games_launch(
             "Server availability could not be verified. Review the warning before joining.".into(),
         );
     }
-    if plan.needs_close && state.performance_monitor.lock().is_roblox_running() {
-        return Err("Close Roblox first so this game's settings can be applied.".into());
+    // Native FastFlags preparation always requires a stopped player, even
+    // when this game has no FPS/graphics overrides. Check before replacing
+    // session state or writing either settings backup.
+    let monitor = state.performance_monitor.clone();
+    if tauri::async_runtime::spawn_blocking(move || monitor.lock().is_roblox_running())
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Err("Close Roblox before starting another game.".into());
     }
     if plan.preferences.use_tunnel {
         let connection = state.vpn_state_handle.borrow().clone();
@@ -615,7 +627,7 @@ pub async fn games_launch(
             return Err("The current connection is not in this game's requested relay region. Reconnect before joining.".into());
         }
     }
-    {
+    let placement_generation = {
         let mut games = state.games.lock();
         if games.cleanup_scheduled {
             return Err("The previous game's settings are still being restored. Try Play again in a moment.".into());
@@ -627,25 +639,12 @@ pub async fn games_launch(
         {
             return Err("A Roblox launch is already in progress.".into());
         }
-        games.launch_started = Some(Instant::now());
-        games.launch_player_seen = false;
-        games.launch_updating = false;
-        games.launch_gone_since = None;
-        games.warning = None;
-        games.status = Some(
-            match client {
-                RobloxClient::Standard => "Roblox is opening.",
-                RobloxClient::Vng => "Roblox VNG is opening.",
-            }
-            .into(),
-        );
-        games.recovery = None;
-        games.idle_since = None;
-        games.left_confirmed = false;
-        games.game_traffic_seen = false;
-    }
+        games.begin_launch(client)
+    };
+    game_destination::clear();
     let mut launch_guard = LaunchGuard {
         state: &state,
+        generation: placement_generation,
         complete: false,
     };
     let profile = plan.preferences.clone();
@@ -742,24 +741,73 @@ pub async fn games_launch(
         let monitor = state.performance_monitor.clone();
         let preferences = plan.preferences.clone();
         let window_app = app.clone();
+        let games = state.games.clone();
         state.runtime.spawn(async move {
+            let mut expected_pid = None;
             for _ in 0..45 {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                let pid = monitor.lock().get_roblox_pid();
-                if let Some(pid) = pid {
-                    match swifttunnel_core::roblox_window::place(
+                let worker_games = games.clone();
+                let worker_monitor = monitor.clone();
+                let worker_preferences = preferences.clone();
+                // Process queries and another process's window messages can
+                // block. Keep them off runtime workers and bind this attempt
+                // to its launch and the first player process it observes.
+                let placed = tauri::async_runtime::spawn_blocking(move || {
+                    let generation = worker_games.lock().window_placement_generation;
+                    if generation != placement_generation {
+                        return (expected_pid, Ok(true));
+                    }
+                    let pid = worker_monitor.lock().get_roblox_pid();
+                    let (generation, mut updating) = {
+                        let games = worker_games.lock();
+                        (games.window_placement_generation, games.launch_updating)
+                    };
+                    if expected_pid.is_some() && expected_pid != pid && !updating {
+                        updating = swifttunnel_core::roblox_native_launch::updater_running();
+                    }
+                    match placement_target(
+                        placement_generation,
+                        generation,
+                        expected_pid,
                         pid,
-                        preferences.borderless,
-                        preferences.monitor.as_deref(),
+                        updating,
                     ) {
-                        Ok(true) => break,
-                        Ok(false) => {}
-                        Err(error) => {
-                            log::warn!("Roblox window placement: {error}");
-                            window_app.state::<AppState>().games.lock().warning = Some(error);
-                            let _ = window_app.emit(games::LIBRARY_CHANGED, ());
-                            break;
+                        PlacementTarget::Finished => (expected_pid, Ok(true)),
+                        PlacementTarget::Waiting => (expected_pid, Ok(false)),
+                        PlacementTarget::Updating => (None, Ok(false)),
+                        PlacementTarget::Player(pid) => (
+                            Some(pid),
+                            swifttunnel_core::roblox_window::place(
+                                pid,
+                                worker_preferences.borderless,
+                                worker_preferences.monitor.as_deref(),
+                            ),
+                        ),
+                    }
+                })
+                .await;
+                match placed {
+                    Ok((pid, result)) => {
+                        expected_pid = pid;
+                        match result {
+                            Ok(true) => break,
+                            Ok(false) => {}
+                            Err(error) => {
+                                log::warn!("Roblox window placement: {error}");
+                                let mut games = games.lock();
+                                if games.window_placement_generation != placement_generation {
+                                    break;
+                                }
+                                games.warning = Some(error);
+                                drop(games);
+                                let _ = window_app.emit(games::LIBRARY_CHANGED, ());
+                                break;
+                            }
                         }
+                    }
+                    Err(error) => {
+                        log::warn!("Roblox window placement task failed: {error}");
+                        break;
                     }
                 }
             }
@@ -767,6 +815,98 @@ pub async fn games_launch(
     }
     let _ = app.emit(games::LIBRARY_CHANGED, ());
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PlacementTarget {
+    Waiting,
+    Updating,
+    Finished,
+    Player(u32),
+}
+
+fn placement_target(
+    request: u64,
+    current: u64,
+    expected_pid: Option<u32>,
+    observed_pid: Option<u32>,
+    updating: bool,
+) -> PlacementTarget {
+    if request != current {
+        PlacementTarget::Finished
+    } else if expected_pid.is_some() && expected_pid != observed_pid {
+        if updating {
+            PlacementTarget::Updating
+        } else {
+            PlacementTarget::Finished
+        }
+    } else if let Some(pid) = observed_pid {
+        PlacementTarget::Player(pid)
+    } else {
+        PlacementTarget::Waiting
+    }
+}
+
+#[cfg(test)]
+mod window_placement_tests {
+    use super::*;
+
+    #[test]
+    fn a_later_play_cancels_the_old_window_settings_even_without_new_window_preferences() {
+        let mut games = games::GamesState::default();
+        let old = games.cancel_window_placement();
+        assert_eq!(
+            placement_target(old, old, None, None, false),
+            PlacementTarget::Waiting
+        );
+        assert_eq!(
+            placement_target(old, old, None, Some(12), false),
+            PlacementTarget::Player(12)
+        );
+        games.cancel_window_placement();
+        assert_eq!(
+            placement_target(
+                old,
+                games.window_placement_generation,
+                None,
+                Some(13),
+                false
+            ),
+            PlacementTarget::Finished
+        );
+    }
+
+    #[test]
+    fn retries_cannot_follow_a_different_player_process_or_continue_after_exit() {
+        assert_eq!(
+            placement_target(1, 1, Some(12), Some(12), false),
+            PlacementTarget::Player(12)
+        );
+        assert_eq!(
+            placement_target(1, 1, Some(12), Some(13), false),
+            PlacementTarget::Finished
+        );
+        assert_eq!(
+            placement_target(1, 1, Some(12), None, false),
+            PlacementTarget::Finished
+        );
+    }
+
+    #[test]
+    fn confirmed_updates_allow_a_new_player_but_do_not_revive_a_cancelled_launch() {
+        assert_eq!(
+            placement_target(1, 1, Some(12), None, true),
+            PlacementTarget::Updating
+        );
+        assert_eq!(
+            placement_target(1, 1, None, Some(13), false),
+            PlacementTarget::Player(13)
+        );
+        assert_eq!(
+            placement_target(1, 2, Some(12), Some(13), true),
+            PlacementTarget::Finished
+        );
+    }
 }
 
 pub fn native_region(center: &Datacenter) -> Option<swifttunnel_core::geolocation::RobloxRegion> {

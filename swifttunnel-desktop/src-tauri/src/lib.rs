@@ -621,15 +621,13 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                             RobloxEvent::GameLeft { job_id } => {
                                 let state = app.state::<AppState>();
                                 let mut games = state.games.lock();
-                                if games.current.as_ref().is_some_and(|current| job_id.as_ref().is_none_or(|id| *id == current.job_id)) {
-                                    games.left_confirmed = true;
-                                    games.current = None;
-                                    games.clear_launch();
+                                if games.record_leave(job_id.as_deref()) {
                                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                                 } else if games.current.is_none() && games.launch_player_seen
                                     && !state.performance_monitor.lock().is_roblox_running()
                                     && !swifttunnel_core::roblox_native_launch::updater_running() {
                                     games.left_confirmed = true;
+                                    games.cancel_window_placement();
                                     games.clear_launch();
                                     games.warning = None;
                                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
@@ -688,6 +686,7 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                 let gone_settled={let mut games=state.games.lock();if !running && has_game {games.process_gone_since.get_or_insert(std::time::Instant::now());}else{games.process_gone_since=None;}games.process_gone_since.is_some_and(|at|at.elapsed()>=std::time::Duration::from_secs(3))};
                 if has_game && !running && gone_settled {
                     let mut games=state.games.lock();
+                    games.cancel_window_placement();
                     let previous=games.current.take();
                     let unexpected=!games.left_confirmed;
                     games.recovery_shown.retain(|at|at.elapsed()<std::time::Duration::from_secs(600));

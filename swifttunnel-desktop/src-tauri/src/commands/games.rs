@@ -183,6 +183,7 @@ pub struct GamesState {
     pub launch_player_seen: bool,
     pub launch_updating: bool,
     pub launch_gone_since: Option<std::time::Instant>,
+    pub window_placement_generation: u64,
     pub cleanup_scheduled: bool,
     pub last_cleanup: Option<std::time::Instant>,
     pub idle_since: Option<std::time::Instant>,
@@ -209,6 +210,51 @@ pub struct LibrarySnapshot {
 }
 
 impl GamesState {
+    pub fn begin_launch(&mut self, client: RobloxClient) -> u64 {
+        // The previous player has been closed. A delayed leave event for it
+        // must not clear the progress of this new launch.
+        self.current = None;
+        self.process_gone_since = None;
+        self.launch_started = Some(std::time::Instant::now());
+        self.launch_player_seen = false;
+        self.launch_updating = false;
+        self.launch_gone_since = None;
+        self.warning = None;
+        self.status = Some(
+            match client {
+                RobloxClient::Standard => "Roblox is opening.",
+                RobloxClient::Vng => "Roblox VNG is opening.",
+            }
+            .into(),
+        );
+        self.recovery = None;
+        self.idle_since = None;
+        self.left_confirmed = false;
+        self.game_traffic_seen = false;
+        self.cancel_window_placement()
+    }
+
+    pub fn cancel_window_placement(&mut self) -> u64 {
+        self.window_placement_generation = self.window_placement_generation.wrapping_add(1);
+        self.window_placement_generation
+    }
+
+    pub fn record_leave(&mut self, job_id: Option<&str>) -> bool {
+        // An anonymous or delayed leave event cannot identify the current
+        // session. Actual process exits are confirmed separately by polling.
+        if !self
+            .current
+            .as_ref()
+            .is_some_and(|current| job_id == Some(current.job_id.as_str()))
+        {
+            return false;
+        }
+        self.left_confirmed = true;
+        self.current = None;
+        self.cancel_window_placement();
+        self.clear_launch();
+        true
+    }
     pub fn launch_pending(&self) -> bool {
         self.launch_started.is_some() && (!self.launch_player_seen || self.launch_updating)
     }
@@ -258,6 +304,7 @@ impl GamesState {
                 return false;
             }
             self.clear_launch();
+            self.cancel_window_placement();
             self.warning = None;
             self.left_confirmed = true;
             log::info!("Roblox launch: player closed before game metadata was confirmed");
@@ -265,6 +312,7 @@ impl GamesState {
         }
         if now.saturating_duration_since(started) > std::time::Duration::from_secs(60) {
             self.clear_launch();
+            self.cancel_window_placement();
             self.left_confirmed = true;
             self.warning = Some("Roblox did not open within a minute. Try Play again.".into());
             log::warn!("Roblox launch: no player or active updater was observed before timeout");
@@ -568,5 +616,81 @@ mod launch_activity_tests {
             games.warning.as_deref(),
             Some("Roblox did not open within a minute. Try Play again.")
         );
+    }
+
+    #[test]
+    fn closing_or_timing_out_invalidates_window_work_but_join_confirmation_does_not() {
+        let at = Instant::now();
+        let mut games = launch(at);
+        let request = games.cancel_window_placement();
+        games.player_opened();
+        games.clear_launch(); // A confirmed join clears launch progress.
+        assert_eq!(games.window_placement_generation, request);
+        games.launch_started = Some(at);
+        games.launch_player_seen = true;
+        games.track_launch(at + Duration::from_secs(1), false, false);
+        games.track_launch(at + Duration::from_secs(4), false, false);
+        assert_ne!(games.window_placement_generation, request);
+        let mut timed_out = launch(at);
+        let request = timed_out.cancel_window_placement();
+        timed_out.track_launch(at + Duration::from_secs(61), false, false);
+        assert_ne!(timed_out.window_placement_generation, request);
+    }
+
+    #[test]
+    fn starting_another_game_removes_only_the_previous_live_session_state() {
+        let at = Instant::now();
+        let mut games = launch(at);
+        games.library = Some(GameLibrary::default());
+        games.current = Some(CurrentGame {
+            place_id: "1".into(),
+            job_id: "old-job".into(),
+            ip: "128.116.47.33".into(),
+            client: RobloxClient::Standard,
+            fresh_join: true,
+            observed_at: 0,
+            location: None,
+            location_source: None,
+        });
+        games.process_gone_since = Some(at);
+        games.launch_player_seen = true;
+        games.left_confirmed = true;
+        let previous = games.window_placement_generation;
+        games.begin_launch(RobloxClient::Vng);
+        assert!(games.current.is_none());
+        assert!(games.process_gone_since.is_none());
+        assert!(games.library.is_some());
+        assert!(!games.launch_player_seen);
+        assert!(!games.left_confirmed);
+        assert!(games.launch_pending());
+        assert_eq!(games.status.as_deref(), Some("Roblox VNG is opening."));
+        assert_ne!(games.window_placement_generation, previous);
+        assert!(!games.record_leave(Some("old-job")));
+        assert!(!games.record_leave(None));
+        assert!(games.launch_pending());
+    }
+
+    #[test]
+    fn anonymous_or_old_leave_events_cannot_erase_a_newer_session() {
+        let mut games = launch(Instant::now());
+        games.current = Some(CurrentGame {
+            place_id: "2".into(),
+            job_id: "new-job".into(),
+            ip: "128.116.47.34".into(),
+            client: RobloxClient::Standard,
+            fresh_join: true,
+            observed_at: 0,
+            location: None,
+            location_source: None,
+        });
+        let generation = games.cancel_window_placement();
+        assert!(!games.record_leave(None));
+        assert!(!games.record_leave(Some("old-job")));
+        assert_eq!(games.current.as_ref().unwrap().job_id, "new-job");
+        assert_eq!(games.window_placement_generation, generation);
+        assert!(games.record_leave(Some("new-job")));
+        assert!(games.current.is_none());
+        assert!(!games.launch_pending());
+        assert_ne!(games.window_placement_generation, generation);
     }
 }
