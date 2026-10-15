@@ -99,6 +99,8 @@ pub fn removable_msi_packages() -> &'static [&'static WinpkFilterMsiPackage] {
 /// the same reader-bind failure we thought we'd fixed. Keep this in lockstep
 /// with the MSI we ship.
 pub const MIN_DRIVER_VERSION: (u32, u32, u32) = (3, 6, 2);
+/// Both pinned driver packages are small. Reject oversized files before buffering.
+pub const MAX_DRIVER_MSI_BYTES: usize = 16 * 1024 * 1024;
 
 /// Format a `(major, minor, revision)` version triple for log messages.
 pub fn format_version((major, minor, revision): (u32, u32, u32)) -> String {
@@ -123,6 +125,9 @@ pub fn sha256_hex(data: &[u8]) -> String {
 /// (e.g. a partial copy from a flaky disk) would otherwise surface as an
 /// opaque msiexec 1603 with no hint that the file itself is the problem.
 pub fn validate_msi_payload(data: &[u8], pkg: &WinpkFilterMsiPackage) -> Result<(), String> {
+    if data.len() > MAX_DRIVER_MSI_BYTES {
+        return Err("WinpkFilter MSI exceeds its 16 MiB size limit.".into());
+    }
     if data.len() < pkg.min_size_bytes {
         return Err(format!(
             "WinpkFilter MSI too small ({} bytes, expected at least {} bytes). The bundled file is likely truncated — reinstall SwiftTunnel.",
@@ -144,9 +149,31 @@ pub fn validate_msi_payload(data: &[u8], pkg: &WinpkFilterMsiPackage) -> Result<
 
 /// Read `path` and validate it against the pinned size+hash from `pkg`.
 pub fn validate_msi_file(path: &Path, pkg: &WinpkFilterMsiPackage) -> Result<(), String> {
-    let data =
-        std::fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    validate_msi_payload(&data, pkg)
+    read_validated_msi_file(path, pkg).map(|_| ())
+}
+
+pub fn read_validated_msi_file(
+    path: &Path,
+    pkg: &WinpkFilterMsiPackage,
+) -> Result<Vec<u8>, String> {
+    let data = crate::utils::read_file_bounded(path, MAX_DRIVER_MSI_BYTES, "WinpkFilter MSI")
+        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    validate_msi_payload(&data, pkg)?;
+    Ok(data)
+}
+
+/// The download cache is writable by the user. Replace its directory entry,
+/// never truncate a pre-existing file that may have another hard-link name.
+pub fn save_msi_cache(path: &Path, data: &[u8], pkg: &WinpkFilterMsiPackage) -> Result<(), String> {
+    validate_msi_payload(data, pkg)?;
+    crate::roblox_native_launch::safe_path(path)
+        .map_err(|_| "The driver cache is redirected and was left unchanged.".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create the driver cache: {e}"))?;
+    }
+    crate::atomic_file::replace(path, data)
+        .map_err(|e| format!("Could not save the driver download: {e}"))
 }
 
 /// Detect the native machine architecture using `IsWow64Process2`, with an
@@ -863,6 +890,29 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn oversized_driver_files_are_rejected_before_hashing_without_changing_them() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-driver-limit-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("driver.msi");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(MAX_DRIVER_MSI_BYTES as u64 + 1).unwrap();
+        drop(file);
+        assert!(
+            read_validated_msi_file(&path, &MSI_PACKAGE_X64)
+                .unwrap_err()
+                .contains("exceeds")
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            MAX_DRIVER_MSI_BYTES as u64 + 1
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn msi_validation_rejects_same_size_replacement_and_truncation() {
         let dir = unique_temp_dir("msi_integrity");
         let file = dir.join("driver.msi");
@@ -888,6 +938,26 @@ mod tests {
         fs::remove_file(&file).unwrap();
         assert!(validate_msi_file(&file, &package).is_err());
         fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn saving_driver_cache_cannot_truncate_a_hard_link_or_replace_it_with_invalid_bytes() {
+        let dir = unique_temp_dir("msi_cache_links");
+        let unrelated = dir.join("unrelated.txt");
+        let cache = dir.join("driver.msi");
+        fs::write(&unrelated, b"keep my data").unwrap();
+        fs::hard_link(&unrelated, &cache).unwrap();
+        let package = WinpkFilterMsiPackage {
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            min_size_bytes: 3,
+            ..MSI_PACKAGE_X64
+        };
+        save_msi_cache(&cache, b"abc", &package).unwrap();
+        assert_eq!(fs::read(&unrelated).unwrap(), b"keep my data");
+        assert_eq!(fs::read(&cache).unwrap(), b"abc");
+        assert!(save_msi_cache(&cache, b"abd", &package).is_err());
+        assert_eq!(fs::read(&cache).unwrap(), b"abc");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {

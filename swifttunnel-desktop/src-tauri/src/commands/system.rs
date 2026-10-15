@@ -550,8 +550,27 @@ fn validate_winpkfilter_file(
     path: &Path,
     pkg: &swifttunnel_core::vpn::winpkfilter::WinpkFilterMsiPackage,
 ) -> Result<(), String> {
-    let data = fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    validate_winpkfilter_payload(&data, pkg)
+    swifttunnel_core::vpn::winpkfilter::validate_msi_file(path, pkg)
+}
+
+#[cfg(windows)]
+fn read_driver_download(
+    body: impl std::io::Read,
+    content_length: Option<u64>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    if content_length.is_some_and(|size| size > max_bytes as u64) {
+        return Err("WinpkFilter download exceeds its size limit.".into());
+    }
+    let mut bytes = Vec::new();
+    body.take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Could not finish downloading WinpkFilter: {e}"))?;
+    if bytes.len() > max_bytes {
+        return Err("WinpkFilter download exceeds its size limit.".into());
+    }
+    Ok(bytes)
 }
 
 #[cfg(windows)]
@@ -589,9 +608,12 @@ fn download_winpkfilter_msi(
         ));
     }
 
-    let data = response
-        .bytes()
-        .map_err(|e| format!("Failed to read WinpkFilter download bytes: {}", e))?;
+    let content_length = response.content_length();
+    let data = read_driver_download(
+        response,
+        content_length,
+        swifttunnel_core::vpn::winpkfilter::MAX_DRIVER_MSI_BYTES,
+    )?;
 
     validate_winpkfilter_payload(&data, pkg)?;
 
@@ -605,13 +627,7 @@ fn download_winpkfilter_msi(
         })?;
     }
 
-    fs::write(path, &data).map_err(|e| {
-        format!(
-            "Failed to save WinpkFilter MSI to {}: {}",
-            path.display(),
-            e
-        )
-    })?;
+    swifttunnel_core::vpn::winpkfilter::save_msi_cache(path, &data, pkg)?;
 
     Ok(())
 }
@@ -697,9 +713,7 @@ fn stage_winpkfilter_msi(
     pkg: &swifttunnel_core::vpn::winpkfilter::WinpkFilterMsiPackage,
 ) -> Result<DriverInstallWorkspace, String> {
     reject_reparse_point(source_path)?;
-    let data = fs::read(source_path)
-        .map_err(|e| format!("Failed to read {}: {}", source_path.display(), e))?;
-    validate_winpkfilter_payload(&data, pkg)?;
+    let data = swifttunnel_core::vpn::winpkfilter::read_validated_msi_file(source_path, pkg)?;
 
     let root = create_secure_driver_work_dir("install")?;
     let msi_path = root.join(pkg.msi_name);
@@ -2380,6 +2394,31 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("swifttunnel_{label}_{nanos}"));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn driver_download_limit_is_enforced_with_or_without_a_length_header() {
+        struct MustNotRead;
+        impl std::io::Read for MustNotRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("Oversized declaration must be refused before reading");
+            }
+        }
+        assert!(
+            read_driver_download(MustNotRead, Some(1_000_000_000), 4)
+                .unwrap_err()
+                .contains("size limit")
+        );
+        assert!(
+            read_driver_download(std::io::Cursor::new(b"hello"), None, 4)
+                .unwrap_err()
+                .contains("size limit")
+        );
+        assert_eq!(
+            read_driver_download(std::io::Cursor::new(b"data"), Some(4), 4).unwrap(),
+            b"data"
+        );
     }
 
     #[cfg(windows)]
