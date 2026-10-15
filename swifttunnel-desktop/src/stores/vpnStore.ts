@@ -244,6 +244,7 @@ let connectAttemptSeq = 0;
 let stateReadSeq = 0;
 let stateEventRevision = 0;
 let sessionRevision = 0;
+let quotaDisplaySample: { at: number; revision: number; remaining: number | null; grace: number | null } | null = null;
 
 // The graph, overlay and focus refresh may all request the same counters.
 // Share only within one connection generation, so an old slow read cannot
@@ -1115,6 +1116,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       const quota = await vpnGetFreeTier();
       if (!isCurrentConnectAttempt(attempt) || revision !== sessionRevision) return;
       const incoming = quota.remaining_seconds;
+      const grace = quota.grace_seconds ?? null;
+      quotaDisplaySample = { at: performance.now(), revision, remaining: incoming, grace };
 
       // Successful lease refreshes update this authoritative snapshot. The
       // one-second local tick only smooths the display between refreshes.
@@ -1123,7 +1126,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         freeTierLimit: quota.limit_seconds,
         // Always taken verbatim: grace is a backend decision about whether the
         // relay lease is still being renewed. The local countdown has no say.
-        freeTierGraceRemaining: quota.grace_seconds,
+        freeTierGraceRemaining: grace,
       });
     } catch (error) {
       reportError("Failed to fetch free tier quota", error, {
@@ -1136,13 +1139,17 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
   // server-reported budget even while the WebView is hidden or suspended.
   tickFreeTier: () => {
     const { state, freeTierRemaining, freeTierGraceRemaining } = get();
-    if (state !== "connected") return;
-    if (freeTierGraceRemaining !== null) {
-      if (freeTierGraceRemaining > 0) set({ freeTierGraceRemaining: freeTierGraceRemaining - 1 });
+    const sample = quotaDisplaySample;
+    if (state !== "connected" || !sample || sample.revision !== sessionRevision) return;
+    const elapsed = Math.max(0, Math.floor((performance.now() - sample.at) / 1000));
+    if (sample.grace !== null) {
+      const remaining = Math.max(0, sample.grace - elapsed);
+      if (remaining !== freeTierGraceRemaining) set({ freeTierGraceRemaining: remaining });
       return;
     }
-    if (freeTierRemaining !== null && freeTierRemaining > 0) {
-      set({ freeTierRemaining: freeTierRemaining - 1 });
+    if (sample.remaining !== null) {
+      const remaining = Math.max(0, sample.remaining - elapsed);
+      if (remaining !== freeTierRemaining) set({ freeTierRemaining: remaining });
     }
   },
 

@@ -1378,6 +1378,11 @@ describe("stores/vpnStore", () => {
 
   // Native core owns warnings and cutoff, including while WebView is hidden.
   describe("free tier enforcement", () => {
+    let quotaNow: number;
+    beforeEach(() => {
+      quotaNow = 0;
+      vi.spyOn(performance, "now").mockImplementation(() => quotaNow);
+    });
     it("shares pending quota reads and ignores the previous session's reply", async () => {
       const first = deferred<{ remaining_seconds: number; limit_seconds: number; grace_seconds: null }>();
       vpnGetFreeTier.mockReturnValueOnce(first.promise).mockResolvedValue({ remaining_seconds: 45, limit_seconds: 10800, grace_seconds: null });
@@ -1411,19 +1416,21 @@ describe("stores/vpnStore", () => {
       expect(vpnGetDiagnostics).toHaveBeenCalledTimes(3);
     });
 
-    async function connectedWithRemaining(remaining: number) {
+    async function connectedWithRemaining(remaining: number | null) {
       const useVpnStore = await loadStore();
+      vpnGetFreeTier.mockResolvedValue({ remaining_seconds: remaining, limit_seconds: 10800, grace_seconds: null });
       useVpnStore.setState({
         state: "connected",
         freeTierRemaining: remaining,
         freeTierGraceRemaining: null,
       });
+      await useVpnStore.getState().fetchFreeTier();
       return useVpnStore;
     }
 
     it("counts down without duplicating native quota warnings", async () => {
       const useVpnStore = await connectedWithRemaining(1);
-
+      quotaNow = 1000;
       useVpnStore.getState().tickFreeTier();
 
       expect(useVpnStore.getState().freeTierRemaining).toBe(0);
@@ -1433,7 +1440,7 @@ describe("stores/vpnStore", () => {
 
     it("does not re-warn on every tick once the allowance is spent", async () => {
       const useVpnStore = await connectedWithRemaining(1);
-
+      quotaNow = 1000;
       useVpnStore.getState().tickFreeTier();
       useVpnStore.getState().tickFreeTier();
       useVpnStore.getState().tickFreeTier();
@@ -1448,11 +1455,14 @@ describe("stores/vpnStore", () => {
         freeTierRemaining: 0,
         freeTierGraceRemaining: 2,
       });
-
+      vpnGetFreeTier.mockResolvedValue({ remaining_seconds: 0, limit_seconds: 10800, grace_seconds: 2 });
+      await useVpnStore.getState().fetchFreeTier();
+      quotaNow = 1000;
       useVpnStore.getState().tickFreeTier();
       expect(useVpnStore.getState().freeTierGraceRemaining).toBe(1);
       expect(notify).not.toHaveBeenCalled();
 
+      quotaNow = 2000;
       useVpnStore.getState().tickFreeTier();
       expect(useVpnStore.getState().freeTierGraceRemaining).toBe(0);
       expect(notify).not.toHaveBeenCalled();
@@ -1471,6 +1481,33 @@ describe("stores/vpnStore", () => {
 
       expect(useVpnStore.getState().freeTierRemaining).toBe(1);
       expect(notify).not.toHaveBeenCalled();
+    });
+
+    it("catches up after missed ticks without spending time twice", async () => {
+      const store = await connectedWithRemaining(120);
+      quotaNow = 90_000;
+      store.getState().tickFreeTier();
+      expect(store.getState().freeTierRemaining).toBe(30);
+      for (let i = 0; i < 20; i++) store.getState().tickFreeTier();
+      expect(store.getState().freeTierRemaining).toBe(30);
+      quotaNow = 180_000;
+      store.getState().tickFreeTier();
+      expect(store.getState().freeTierRemaining).toBe(0);
+      expect(vpnDisconnect).not.toHaveBeenCalled();
+    });
+
+    it("does not reuse a countdown sample after a new connection starts", async () => {
+      const store = await connectedWithRemaining(120);
+      store.getState().handleStateEvent(disconnectedState());
+      quotaNow = 90_000;
+      store.getState().handleStateEvent(connectedState("mumbai"));
+      store.getState().tickFreeTier();
+      expect(store.getState().freeTierRemaining).toBe(120);
+      vpnGetFreeTier.mockResolvedValue({ remaining_seconds: 60, limit_seconds: 10800, grace_seconds: null });
+      await store.getState().fetchFreeTier();
+      quotaNow += 1000;
+      store.getState().tickFreeTier();
+      expect(store.getState().freeTierRemaining).toBe(59);
     });
 
     // The backend value is frozen at the moment the last ticket was issued, so

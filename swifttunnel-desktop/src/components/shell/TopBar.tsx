@@ -4,6 +4,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
+import { useLiveUpdates } from "../../lib/useLiveUpdates";
 import { useAuthStore } from "../../stores/authStore";
 import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
@@ -30,10 +31,6 @@ export function TopBar() {
   const setTab = useSettingsStore((s) => s.setTab);
   const vpnState = useVpnStore((s) => s.state);
   const ping = useVpnStore((s) => s.ping);
-  const freeTierRemaining = useVpnStore((s) => s.freeTierRemaining);
-  const freeTierGraceRemaining = useVpnStore((s) => s.freeTierGraceRemaining);
-  const fetchFreeTier = useVpnStore((s) => s.fetchFreeTier);
-  const tickFreeTier = useVpnStore((s) => s.tickFreeTier);
   const robloxRunning = useBoostStore((s) => s.robloxRunning);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
   const email = useAuthStore((s) => s.email);
@@ -49,19 +46,6 @@ export function TopBar() {
     void fetchMetrics();
   }, [fetchMetrics]);
   useFocusAwareInterval(() => void fetchMetrics(), 4000);
-
-  // Free-tier budget. The authoritative number only changes when a relay
-  // ticket is refreshed (~2 min), so resync on a slow interval and tick the
-  // display down locally in between rather than polling every second.
-  useEffect(() => {
-    void fetchFreeTier();
-    const sync = window.setInterval(() => void fetchFreeTier(), 60_000);
-    const tick = window.setInterval(() => tickFreeTier(), 1000);
-    return () => {
-      window.clearInterval(sync);
-      window.clearInterval(tick);
-    };
-  }, [fetchFreeTier, tickFreeTier]);
 
   useEffect(() => {
     const appWindow = getCurrentWindow();
@@ -169,48 +153,7 @@ export function TopBar() {
           <Icon name="search" size={19} />
         </button>
 
-        {/* Grace takes over the readout once the allowance is spent, so the
-            badge counts down to the disconnect rather than sitting on 0:00
-            with no hint the session is about to end. */}
-        {freeTierGraceRemaining !== null ? (
-          <div
-            className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
-            title={`Free time used up. SwiftTunnel disconnects in ${formatFreeTier(freeTierGraceRemaining)}.`}
-            style={{
-              backgroundColor: "var(--color-bg-base)",
-              border: "1px solid var(--color-status-error-soft-20)",
-            }}
-          >
-            <span
-              className="lcd-readout text-[11px] font-medium leading-none"
-              style={{ color: "var(--color-status-error)" }}
-            >
-              {formatFreeTier(freeTierGraceRemaining)}
-            </span>
-            <span className="text-[9.5px] leading-none text-text-dimmed">
-              extra
-            </span>
-          </div>
-        ) : freeTierRemaining !== null ? (
-          <div
-            className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
-            title={`${formatFreeTier(freeTierRemaining)} of free SwiftTunnel time left. This limit is temporary and will be removed soon.`}
-            style={{
-              backgroundColor: "var(--color-bg-base)",
-              border: `1px solid ${freeTierColor(freeTierRemaining)}33`,
-            }}
-          >
-            <span
-              className="lcd-readout text-[11px] font-medium leading-none"
-              style={{ color: freeTierColor(freeTierRemaining) }}
-            >
-              {formatFreeTier(freeTierRemaining)}
-            </span>
-            <span className="text-[9.5px] leading-none text-text-dimmed">
-              free
-            </span>
-          </div>
-        ) : null}
+        <FreeTierBadge />
 
         {isConnected && ping !== null && (
           <div
@@ -334,6 +277,64 @@ export function TopBar() {
       </div>
     </header>
   );
+}
+
+function FreeTierBadge() {
+  const state = useVpnStore((s) => s.state);
+  const freeTierRemaining = useVpnStore((s) => s.freeTierRemaining);
+  const freeTierGraceRemaining = useVpnStore((s) => s.freeTierGraceRemaining);
+  const fetchFreeTier = useVpnStore((s) => s.fetchFreeTier);
+  const tickFreeTier = useVpnStore((s) => s.tickFreeTier);
+  const live = useLiveUpdates();
+  useEffect(() => { void fetchFreeTier(); }, [state, fetchFreeTier]);
+  useFocusAwareInterval(() => void fetchFreeTier(), 60_000, { idleMs: 60_000 });
+  useEffect(() => {
+    if (!live || state !== "connected") return;
+    tickFreeTier();
+    const timer = window.setInterval(tickFreeTier, 1000);
+    return () => window.clearInterval(timer);
+  }, [live, state, tickFreeTier]);
+  return (<>
+    {freeTierGraceRemaining !== null ? (
+      <div
+        className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
+        title={`Free time used up. SwiftTunnel disconnects in ${formatFreeTier(freeTierGraceRemaining)}.`}
+        style={{
+          backgroundColor: "var(--color-bg-base)",
+          border: "1px solid var(--color-status-error-soft-20)",
+        }}
+      >
+        <span
+          className="lcd-readout text-[11px] font-medium leading-none"
+          style={{ color: "var(--color-status-error)" }}
+        >
+          {formatFreeTier(freeTierGraceRemaining)}
+        </span>
+        <span className="text-[9.5px] leading-none text-text-dimmed">
+          extra
+        </span>
+      </div>
+    ) : freeTierRemaining !== null ? (
+      <div
+        className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
+        title={`${formatFreeTier(freeTierRemaining)} of free SwiftTunnel time left.`}
+        style={{
+          backgroundColor: "var(--color-bg-base)",
+          border: `1px solid color-mix(in srgb, ${freeTierColor(freeTierRemaining)} 20%, transparent)`,
+        }}
+      >
+        <span
+          className="lcd-readout text-[11px] font-medium leading-none"
+          style={{ color: freeTierColor(freeTierRemaining) }}
+        >
+          {formatFreeTier(freeTierRemaining)}
+        </span>
+        <span className="text-[9.5px] leading-none text-text-dimmed">
+          free
+        </span>
+      </div>
+    ) : null}
+  </>);
 }
 
 function WindowButton({
