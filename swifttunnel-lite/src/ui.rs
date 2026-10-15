@@ -1266,8 +1266,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         0x41 if ctrl => field.select_all(),
                         0x56 if ctrl => {
                             if let Some(text) = crate::clipboard::text(256) {
-                                let line = text.lines().next().unwrap_or("").trim().to_string();
-                                field.insert(&line, 128);
+                                field.paste_login(&text, email);
                             }
                         }
                         _ => changed = false,

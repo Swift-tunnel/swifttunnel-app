@@ -164,6 +164,13 @@ impl TextField {
         self.anchor = self.caret;
     }
 
+    pub fn paste_login(&mut self, value: &str, email: bool) {
+        let line = value.lines().next().unwrap_or("");
+        // Spaces are part of a password, just as when they are typed. Only
+        // email addresses get whitespace cleanup when pasted from a message.
+        self.insert(if email { line.trim() } else { line }, 128);
+    }
+
     pub fn backspace(&mut self, word: bool) {
         if self.delete_selection() {
             return;
@@ -513,5 +520,41 @@ impl RobloxDraft {
             return false;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod login_edit_tests {
+    use super::TextField;
+
+    #[test]
+    fn pasting_a_password_preserves_the_same_spaces_and_unicode_as_typing() {
+        let password = "  p\u{e4}ss\u{1f642} word  ";
+        let mut typed = TextField::default();
+        typed.insert(password, 128);
+        let mut pasted = TextField::default();
+        pasted.paste_login(password, false);
+        assert_eq!(pasted, typed);
+        assert_eq!(pasted.text, password);
+    }
+
+    #[test]
+    fn email_paste_still_trims_message_whitespace_and_uses_one_line() {
+        let mut field = TextField::default();
+        field.paste_login("  user@example.test  \r\nmessage footer", true);
+        assert_eq!(field.text, "user@example.test");
+    }
+
+    #[test]
+    fn password_paste_replaces_the_selection_and_keeps_the_input_limit() {
+        let mut field = TextField::default();
+        field.insert("old password", 128);
+        field.select_all();
+        field.paste_login(" new password \r\nother line", false);
+        assert_eq!(field.text, " new password ");
+        field.select_all();
+        field.paste_login(&"\u{1f642}".repeat(200), false);
+        assert_eq!(field.len(), 128);
+        assert_eq!(field.caret, 128);
     }
 }
