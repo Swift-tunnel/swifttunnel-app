@@ -19,38 +19,65 @@ interface DeepLinkState {
  * because the element may mount a few frames after we switch tabs or a
  * carousel pages to it.
  */
-function flashAnchor(anchor: string) {
+function flashAnchor(anchor: string, isCurrentTab: () => boolean, done: () => void): () => void {
   const selector = `[data-search-anchor="${CSS.escape(anchor)}"]`;
-  const deadline = Date.now() + 5000;
+  const deadline = performance.now() + 5000;
+  let cancelled = false;
+  let highlighted: HTMLElement | null = null;
+  const timers = new Set<number>();
+  const retire = () => {
+    cancelled = true;
+    timers.forEach(timer => window.clearTimeout(timer));
+    timers.clear();
+    highlighted?.classList.remove("search-flash");
+    highlighted = null;
+  };
+  const later = (callback: () => void, delay: number) => {
+    const timer = window.setTimeout(() => {
+      timers.delete(timer);
+      if (cancelled) return;
+      if (!isCurrentTab()) { retire(); done(); return; }
+      callback();
+    }, delay);
+    timers.add(timer);
+  };
   const attempt = () => {
+    if (cancelled) return;
     const el = document.querySelector<HTMLElement>(selector);
     if (el) {
       // Give a paging carousel a beat to slide the card on-screen first.
-      window.setTimeout(() => {
+      later(() => {
+        if (!el.isConnected) { attempt(); return; }
         el.scrollIntoView({ behavior: "smooth", block: "center" });
         el.classList.add("search-flash");
-        window.setTimeout(() => el.classList.remove("search-flash"), 2000);
+        highlighted = el;
+        later(() => { el.classList.remove("search-flash"); highlighted = null; done(); }, 2000);
       }, 280);
       return;
     }
-    if (Date.now() < deadline) window.setTimeout(attempt, 90);
+    if (performance.now() < deadline) later(attempt, 90);
+    else done();
   };
   attempt();
+  return retire;
 }
 
-export const useDeepLinkStore = create<DeepLinkState>((set) => ({
+export const useDeepLinkStore = create<DeepLinkState>((set) => {
+  let cancelFlash: (() => void) | undefined;
+  let generation = 0;
+  return {
   anchor: null,
   navigateTo: ({ tab, anchor }) => {
+    const request = ++generation;
+    cancelFlash?.();
+    cancelFlash = undefined;
     useSettingsStore.getState().setTab(tab);
     set({ anchor: anchor ?? null });
     if (anchor) {
-      flashAnchor(anchor);
-      // Clear the anchor after the flash so a later re-render can't yank a
-      // carousel back to this card.
-      window.setTimeout(
-        () => set((s) => (s.anchor === anchor ? { anchor: null } : {})),
-        3200,
-      );
+      cancelFlash = flashAnchor(anchor, () => useSettingsStore.getState().activeTab === tab, () => {
+        if (request === generation) set({ anchor: null });
+      });
     }
   },
-}));
+  };
+});

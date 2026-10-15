@@ -128,3 +128,32 @@ it("revalidates persisted preset values using the same rules as new imports", as
   expect(loaded.presets[0].config.system_optimization).not.toHaveProperty("cpu_cores");
   expect(loaded.activeId).toBe("valid");
 });
+
+it("does not claim a created or imported preset was saved when storage rejects the write", () => {
+  vi.stubGlobal("localStorage", { setItem: () => { throw new Error("Quota exceeded"); } });
+  const store = usePresetStore;
+  expect(() => store.getState().createFromCurrent("New")).toThrow("Couldn't save your presets");
+  expect(store.getState().presets).toEqual([]);
+  expect(store.getState().activeId).toBe("previous");
+  expect(() => store.getState().addImported(buildPreset("Imported", h.settings, []))).toThrow("Couldn't save your presets");
+  expect(store.getState().presets).toEqual([]);
+});
+
+it("retains the saved preset and active marker if deletion cannot be persisted", () => {
+  addPreset();
+  usePresetStore.setState({ activeId: "test" });
+  vi.stubGlobal("localStorage", { setItem: () => { throw new Error("Storage blocked"); } });
+  expect(() => usePresetStore.getState().remove("test")).toThrow("Couldn't save your presets");
+  expect(usePresetStore.getState().presets).toHaveLength(1);
+  expect(usePresetStore.getState().activeId).toBe("test");
+});
+
+it("does not remove the preset being applied", () => {
+  addPreset();
+  usePresetStore.setState({ applyingId: "test" });
+  const write = vi.fn();
+  vi.stubGlobal("localStorage", { setItem: write });
+  expect(() => usePresetStore.getState().remove("test")).toThrow("still being applied");
+  expect(write).not.toHaveBeenCalled();
+  expect(usePresetStore.getState().presets).toHaveLength(1);
+});

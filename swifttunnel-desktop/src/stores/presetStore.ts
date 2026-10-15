@@ -61,7 +61,7 @@ function persistList(list: SavedPreset[]) {
   try {
     localStorage.setItem(LIST_KEY, JSON.stringify(list));
   } catch {
-    /* best-effort */
+    throw new Error("Couldn't save your presets. Check available disk space, then retry.");
   }
 }
 function loadActive(): string | null {
@@ -135,6 +135,9 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
   },
 
   remove: (id) => {
+    if (get().applyingId === id) {
+      throw new Error("This preset is still being applied. Wait for it to finish.");
+    }
     const presets = get().presets.filter((p) => p.id !== id);
     const activeId = get().activeId === id ? null : get().activeId;
     persistList(presets);

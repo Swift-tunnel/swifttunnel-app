@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { Button, Dialog, Spinner, Icon } from "../ui";
 import { useToastStore } from "../../stores/toastStore";
+import { formatErrorMessage } from "../../lib/errors";
 import { usePresetStore, type SavedPreset } from "../../stores/presetStore";
 import { presetSaveToDownloads } from "../../lib/commands";
 import {
@@ -106,7 +107,10 @@ export function PresetsPanel({
               anyApplying={applyingId !== null}
               onApply={() => void apply(p.id)}
               onShare={() => setShareId(p.id)}
-              onDelete={() => remove(p.id)}
+              onDelete={() => {
+                try { remove(p.id); }
+                catch (error) { useToastStore.getState().addToast({ type: "error", message: formatErrorMessage(error) }); }
+              }}
             />
           ))}
           <div className="mt-1 flex gap-2">
@@ -352,9 +356,13 @@ function CreateDialog({ open, onClose }: { open: boolean; onClose: () => void })
   }, [open]);
 
   function doCreate() {
-    const p = createFromCurrent(name);
-    setCreated(p);
-    addToast({ type: "success", message: `Preset "${p.name}" saved` });
+    try {
+      const p = createFromCurrent(name);
+      setCreated(p);
+      addToast({ type: "success", message: `Preset "${p.name}" saved` });
+    } catch (error) {
+      addToast({ type: "error", message: formatErrorMessage(error) });
+    }
   }
 
   return (
@@ -441,10 +449,15 @@ function ImportDialog({ open, onClose }: { open: boolean; onClose: () => void })
     }
     setBusy(true);
     setError(null);
-    const saved = addImported(preset);
-    await apply(saved.id);
-    setBusy(false);
-    onClose();
+    try {
+      const saved = addImported(preset);
+      await apply(saved.id);
+      onClose();
+    } catch (error) {
+      setError(formatErrorMessage(error));
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
