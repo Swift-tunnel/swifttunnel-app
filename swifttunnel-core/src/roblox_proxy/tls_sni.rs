@@ -35,6 +35,13 @@ pub fn parse_client_hello_sni(payload: &[u8]) -> Option<&str> {
     let record = payload.get(5..record_end)?;
 
     // Handshake header: msg_type(1) length(3).
+    // A record may contain more than one handshake. Never interpret trailing
+    // message bytes as part of this ClientHello (RFC 8446 section 4).
+    let handshake_len = ((*record.get(1)? as usize) << 16)
+        | ((*record.get(2)? as usize) << 8)
+        | *record.get(3)? as usize;
+    let handshake_end = 4usize.checked_add(handshake_len)?;
+    let record = record.get(..handshake_end.min(record.len()))?;
     let mut cursor = 4usize;
 
     // client_version(2) + random(32)
@@ -56,7 +63,11 @@ pub fn parse_client_hello_sni(payload: &[u8]) -> Option<&str> {
     let extensions_len =
         u16::from_be_bytes([*record.get(cursor)?, *record.get(cursor + 1)?]) as usize;
     cursor = cursor.checked_add(2)?;
-    let extensions_end = cursor.checked_add(extensions_len)?.min(record.len());
+    let declared_extensions_end = cursor.checked_add(extensions_len)?;
+    if declared_extensions_end > handshake_end {
+        return None;
+    }
+    let extensions_end = declared_extensions_end.min(record.len());
 
     while cursor + 4 <= extensions_end {
         let ext_type = u16::from_be_bytes([record[cursor], record[cursor + 1]]);
@@ -80,7 +91,12 @@ pub fn parse_client_hello_sni(payload: &[u8]) -> Option<&str> {
 /// name_type(1) + name_length(2) + name. Only host_name (type 0) is used.
 fn parse_server_name_extension(ext: &[u8]) -> Option<&str> {
     let list_len = u16::from_be_bytes([*ext.first()?, *ext.get(1)?]) as usize;
-    let list_end = 2usize.checked_add(list_len)?.min(ext.len());
+    // The extension has already been bounded and fully received above. Its
+    // nested list cannot claim bytes beyond it (RFC 6066 section 3).
+    let list_end = 2usize.checked_add(list_len)?;
+    if list_end != ext.len() {
+        return None;
+    }
     let mut cursor = 2usize;
 
     while cursor + 3 <= list_end {
@@ -163,6 +179,24 @@ mod tests {
             parse_client_hello_sni(&hello),
             Some("clientsettingscdn.roblox.com")
         );
+    }
+
+    #[test]
+    fn ignores_hostname_bytes_outside_the_declared_handshake() {
+        let mut hello = build_client_hello_with_sni("clientsettingscdn.roblox.com");
+        // Keep a full record with an apparent SNI, but declare a ClientHello
+        // body which ends before the hostname. Those bytes are not its SNI.
+        hello[6..9].copy_from_slice(&[0, 0, 40]);
+        assert_eq!(parse_client_hello_sni(&hello), None);
+    }
+
+    #[test]
+    fn rejects_name_list_length_that_overruns_its_complete_extension() {
+        let mut hello = build_client_hello_with_sni("clientsettingscdn.roblox.com");
+        let name = b"clientsettingscdn.roblox.com";
+        let pos = hello.windows(name.len()).position(|w| w == name).unwrap();
+        hello[pos - 5..pos - 3].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(parse_client_hello_sni(&hello), None);
     }
 
     #[test]
