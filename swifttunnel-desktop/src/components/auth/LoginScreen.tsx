@@ -1,14 +1,14 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useState } from "react";
 import { motion } from "framer-motion";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAuthStore } from "../../stores/authStore";
 import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { Button, Spinner, Icon, type IconName } from "../ui";
 import { SwiftLogo } from "../common/SwiftLogo";
+import { OAUTH_TIMEOUT_MS, useOAuthPolling } from "../../lib/useOAuthPolling";
 
 declare const __APP_VERSION__: string;
 
-const OAUTH_TIMEOUT_MS = 120_000;
 const SIGNUP_URL = "https://www.swifttunnel.net/signup";
 
 const FEATURES: { icon: IconName; title: string; desc: string }[] = [
@@ -36,13 +36,11 @@ const FEATURES: { icon: IconName; title: string; desc: string }[] = [
 export function LoginScreen() {
   const { state, error, login, startOAuth, pollOAuth, cancelOAuth } =
     useAuthStore();
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const startedAtRef = useRef<number | null>(null);
-  const [elapsedSecs, setElapsedSecs] = useState(0);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const isAwaiting = state === "awaiting_oauth";
   const isLoggingIn = state === "logging_in";
+  const elapsedSecs = useOAuthPolling(isAwaiting, pollOAuth, cancelOAuth);
   const remaining = Math.max(
     0,
     Math.ceil(OAUTH_TIMEOUT_MS / 1000 - elapsedSecs),
@@ -56,51 +54,6 @@ export function LoginScreen() {
   const openSignup = () => {
     void systemOpenUrl(SIGNUP_URL);
   };
-
-  useEffect(() => {
-    let polling = false;
-
-    if (isAwaiting) {
-      startedAtRef.current = Date.now();
-      setElapsedSecs(0);
-
-      pollRef.current = setInterval(async () => {
-        if (polling) return;
-        polling = true;
-
-        const startedAt = startedAtRef.current ?? Date.now();
-        const elapsedMs = Date.now() - startedAt;
-        setElapsedSecs(Math.floor(elapsedMs / 1000));
-
-        if (elapsedMs >= OAUTH_TIMEOUT_MS) {
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
-          await cancelOAuth("Login timed out. Please try again.");
-          polling = false;
-          return;
-        }
-
-        const done = await pollOAuth();
-        if (done && pollRef.current) {
-          clearInterval(pollRef.current);
-          pollRef.current = null;
-        }
-        polling = false;
-      }, 1000);
-    } else {
-      startedAtRef.current = null;
-      setElapsedSecs(0);
-    }
-
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-  }, [cancelOAuth, isAwaiting, pollOAuth]);
 
   return (
     <div
