@@ -36,8 +36,10 @@ export function useGameLibrary() {
     const key = `${current.client}:${current.place_id}:${current.job_id}:${current.observed_at}`;
     if (notified.current === key) return;
     // Opt-in; toggling the preference doesn't replay an old join.
-    notified.current = key;
-    if (!current.fresh_join || !useGameLibraryStore.getState().library?.notify_joins) return;
+    if (!current.fresh_join || !useGameLibraryStore.getState().library?.notify_joins) {
+      notified.current = key;
+      return;
+    }
     let disposed = false;
     let attempts = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -46,6 +48,9 @@ export function useGameLibrary() {
       if (disposed) return;
       const route = useVpnStore.getState().gameRoute;
       const latest = useGameLibraryStore.getState().library?.current;
+      // The store can advance before React runs this effect's cleanup. Never
+      // announce a closed game or borrow the next join's location.
+      if (!latest || `${latest.client}:${latest.place_id}:${latest.job_id}:${latest.observed_at}` !== key) return;
       if ((!route || route.game_server_ip !== current.ip) && !latest?.location && ++attempts < 5) {
         timer = setTimeout(send, 2000);
         return;
@@ -53,7 +58,10 @@ export function useGameLibrary() {
       const library = useGameLibraryStore.getState().library;
       if (!library?.notify_joins) return;
       const entry = library.entries.find(e => e.place_id === current.place_id && e.client === current.client);
-      await notify(entry?.name ?? "Roblox game joined", gameSessionDescription(latest ?? current, route));
+      // Claim only when sending. Effect cleanup/replay (including React's dev
+      // replay) must not permanently cancel an unsent notification.
+      notified.current = key;
+      await notify(entry?.name ?? "Roblox game joined", gameSessionDescription(latest, route));
     };
     const send = () => { void show().catch(error => reportError("Could not show game notification", error, { dedupeKey: "game-join-notification" })); };
     timer = setTimeout(send, 2000);
