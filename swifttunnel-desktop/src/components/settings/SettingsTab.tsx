@@ -393,7 +393,12 @@ export function SettingsTab() {
           <Segmented
             options={["Stable", "Live"] as UpdateChannel[]}
             value={settings.update_channel}
-            onChange={(ch) => set({ update_channel: ch })}
+            disabled={updaterStatus === "installing"}
+            onChange={(ch) => {
+              if (ch === settings.update_channel) return;
+              set({ update_channel: ch });
+              void checkForUpdates();
+            }}
           />
         </Row>
         <Row

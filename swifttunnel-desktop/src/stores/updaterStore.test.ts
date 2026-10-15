@@ -323,25 +323,56 @@ describe("stores/updaterStore", () => {
     expect(updaterCheckChannel).toHaveBeenCalledWith("Live");
   });
 
-  it("installs using the channel that was checked, even if settings change later", async () => {
-    updaterCheckChannel.mockResolvedValue({
-      current_version: "1.0.0",
-      available_version: "1.5.1",
-      release_tag: "v1.5.1",
-      channel: "Stable",
-    });
-    updaterInstallChannel.mockResolvedValue({
-      installed_version: "1.5.1",
-      release_tag: "v1.5.1",
-    });
-
-    const useUpdaterStore = await loadStore();
-    await useUpdaterStore.getState().checkForUpdates(true);
-
+  it("rechecks Stable instead of installing a withdrawn Live offer", async () => {
     mockSettingsStore.settings.update_channel = "Live";
-    await useUpdaterStore.getState().installUpdate();
-
+    updaterCheckChannel.mockResolvedValueOnce({
+      ...available, available_version: "1.6.0-beta.1", channel: "Live",
+    }).mockResolvedValueOnce(available);
+    const store = await loadStore();
+    await store.getState().checkForUpdates();
+    mockSettingsStore.settings.update_channel = "Stable";
+    await store.getState().installUpdate();
+    expect(updaterInstallChannel).not.toHaveBeenCalled();
+    expect(updaterCheckChannel).toHaveBeenLastCalledWith("Stable");
+    expect(store.getState().availableVersion).toBe("1.5.1");
+    updaterInstallChannel.mockResolvedValue({ reboot_required: false });
+    await store.getState().installUpdate();
     expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
+  });
+
+  it.each(["success", "failure"])("ignores a previous channel's late %s", async (outcome) => {
+    mockSettingsStore.settings.update_channel = "Live";
+    const check = deferred<typeof available>();
+    updaterCheckChannel.mockReturnValue(check.promise);
+    const store = await loadStore();
+    const checking = store.getState().checkForUpdates(false, true);
+    mockSettingsStore.settings.update_channel = "Stable";
+    if (outcome === "success") check.resolve({ ...available, channel: "Live" });
+    else check.reject(new Error("old channel unavailable"));
+    await checking;
+    expect(store.getState().status).toBe("idle");
+    expect(store.getState().availableVersion).toBeNull();
+    expect(store.getState().error).toBeNull();
+    expect(updaterInstallChannel).not.toHaveBeenCalled();
+    expect(mockSettingsStore.save).not.toHaveBeenCalled();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("clears the previous offer while the new channel is being checked", async () => {
+    updaterCheckChannel.mockResolvedValueOnce(available);
+    const next = deferred<typeof available>();
+    updaterCheckChannel.mockReturnValueOnce(next.promise);
+    const store = await loadStore();
+    await store.getState().checkForUpdates();
+    mockSettingsStore.settings.update_channel = "Live";
+    const checking = store.getState().checkForUpdates();
+    expect(store.getState().showWhatsNew).toBe(false);
+    expect(store.getState().availableVersion).toBeNull();
+    await store.getState().installUpdate();
+    expect(updaterInstallChannel).not.toHaveBeenCalled();
+    next.resolve({ ...available, channel: "Live" });
+    await checking;
+    expect(store.getState().status).toBe("update_available");
   });
 
   it("updates install progress from updater progress events", async () => {

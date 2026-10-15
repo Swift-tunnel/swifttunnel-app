@@ -23,6 +23,13 @@ interface PendingUpdate {
 let pendingUpdate: PendingUpdate | null = null;
 let updaterGeneration = 0;
 const WHATS_NEW_DISMISSED_KEY = "swifttunnel:whats-new-dismissed-release";
+const EMPTY_OFFER = {
+  availableVersion: null,
+  releaseTag: null,
+  releaseNotes: null,
+  showWhatsNew: false,
+  progressPercent: 0,
+};
 
 function releaseId(version: string, tag: string | null) {
   return tag ?? `v${version}`;
@@ -81,13 +88,23 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
   checkForUpdates: async (manual = false, autoInstall = false) => {
     if (get().status === "installing") return;
     const generation = ++updaterGeneration;
+    const channel = useSettingsStore.getState().settings.update_channel;
+    if (pendingUpdate && pendingUpdate.channel !== channel) {
+      pendingUpdate = null;
+      set(EMPTY_OFFER);
+    }
+    const channelChanged = () => {
+      if (channel === useSettingsStore.getState().settings.update_channel) return false;
+      pendingUpdate = null;
+      set({ ...EMPTY_OFFER, status: "idle", error: null });
+      return true;
+    };
     try {
       set({ status: "checking", error: null });
 
-      const settingsStore = useSettingsStore.getState();
-      const channel = settingsStore.settings.update_channel;
       const update = await updaterCheckChannel(channel);
       if (generation !== updaterGeneration) return;
+      if (channelChanged()) return;
       const checkedAt = Math.floor(Date.now() / 1000);
 
       // The request can outlive a preference edit. Only add the timestamp to
@@ -160,6 +177,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       }
     } catch (e) {
       if (generation !== updaterGeneration) return;
+      if (channelChanged()) return;
       set({
         status: "error",
         error: String(e),
@@ -169,6 +187,14 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
 
   installUpdate: async () => {
     if (!pendingUpdate || get().status === "installing") return;
+    if (pendingUpdate.channel !== useSettingsStore.getState().settings.update_channel) {
+      pendingUpdate = null;
+      set({ ...EMPTY_OFFER, status: "idle", error: null });
+      // Show the current channel's offer for review rather than installing
+      // a release the player withdrew by changing channels.
+      await get().checkForUpdates(true);
+      return;
+    }
     // Installing the offered version supersedes checks already in flight.
     // Keep its channel/version fixed and prevent a second native install.
     ++updaterGeneration;
