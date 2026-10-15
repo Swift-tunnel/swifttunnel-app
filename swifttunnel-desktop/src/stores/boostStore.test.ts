@@ -120,6 +120,30 @@ describe("stores/boostStore", () => {
     expect(boostGetMetrics).toHaveBeenCalledTimes(2);
   });
 
+  it("does not revive a closed player with a late response from another view", async () => {
+    let oldReply!: (value: typeof metrics) => void;
+    boostGetMetrics.mockReturnValueOnce(new Promise(resolve => { oldReply = resolve; }))
+      .mockResolvedValueOnce({ ...metrics, roblox_running: false, roblox_foreground: false, process_id: null, fps: 0 });
+    const store = await loadStore();
+    const oldRequest = store.getState().fetchMetrics({overlayWantsFps:true});
+    await expect(store.getState().fetchMetrics({overlayWantsFps:false})).resolves.toBe(true);
+    oldReply(metrics);
+    await expect(oldRequest).resolves.toBe(false);
+    expect(store.getState()).toMatchObject({robloxRunning:false,robloxForeground:false,processId:null,fps:0});
+  });
+
+  it("keeps the next game's process and values when an older sample completes last", async () => {
+    let oldReply!: (value: typeof metrics) => void;
+    boostGetMetrics.mockReturnValueOnce(new Promise(resolve => { oldReply = resolve; }))
+      .mockResolvedValueOnce({...metrics,process_id:456,fps:120});
+    const store = await loadStore();
+    const oldRequest = store.getState().fetchMetrics({overlayWantsFps:true});
+    await store.getState().fetchMetrics({overlayWantsFps:false});
+    oldReply(metrics);
+    await oldRequest;
+    expect(store.getState()).toMatchObject({processId:456,fps:120});
+  });
+
   it("does not merge requests with different overlay settings", async () => {
     let release!: (value: typeof metrics) => void;
     boostGetMetrics.mockReturnValue(new Promise(resolve => { release = resolve; }));

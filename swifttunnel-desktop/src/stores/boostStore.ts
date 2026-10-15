@@ -21,6 +21,8 @@ import { notify } from "../lib/notifications";
 // Each option is boolean or absent, so at most nine native requests can be
 // pending in this window. Slow samplers must not queue another job every tick.
 const pendingMetrics = new Map<string, Promise<boolean>>();
+let metricsRequestRevision = 0;
+let appliedMetricsRevision = 0;
 let pendingMemory: Promise<void> | null = null;
 let memoryRevision = 0;
 
@@ -93,9 +95,15 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
     const key = `${options?.overlayWantsFps ?? "saved"}:${options?.overlayWantsPing ?? "saved"}`;
     const pending = pendingMetrics.get(key);
     if (pending) return pending;
+    const revision = ++metricsRequestRevision;
     const request = (async () => {
       try {
         const m = await boostGetMetrics(options);
+        // Different views use different sampling options and can finish out
+        // of order. An older response must not revive a player that a newer
+        // sample already saw close, or replace the next game's process ID.
+        if (revision < appliedMetricsRevision) return false;
+        appliedMetricsRevision = revision;
         set({
           fps: m.fps,
           cpuUsage: m.cpu_usage,
