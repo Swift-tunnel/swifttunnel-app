@@ -9,6 +9,28 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+#[derive(Default)]
+struct TicketRetryWindow {
+    until: Option<Instant>,
+}
+
+impl TicketRetryWindow {
+    fn remaining(&self, now: Instant) -> Option<u64> {
+        let wait = self.until?.saturating_duration_since(now);
+        (!wait.is_zero()).then(|| wait.as_secs() + u64::from(wait.subsec_nanos() > 0))
+    }
+
+    fn defer(&mut self, now: Instant, seconds: u64) {
+        let until = now + Duration::from_secs(seconds.clamp(1, MAX_RETRY_AFTER_SECONDS));
+        self.until = Some(self.until.map_or(until, |previous| previous.max(until)));
+    }
+}
+
+// A fresh HTTP client or re-auth hint must not reset a server-issued cooldown.
+static TICKET_RETRY_WINDOW: parking_lot::Mutex<TicketRetryWindow> =
+    parking_lot::Mutex::new(TicketRetryWindow { until: None });
 
 /// Response from the user profile API
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -668,6 +690,9 @@ impl AuthClient {
         session_id: &str,
     ) -> Result<RelayTicketResponse, AuthError> {
         let path = "/api/vpn/relay-ticket";
+        if let Some(wait) = TICKET_RETRY_WINDOW.lock().remaining(Instant::now()) {
+            return Err(AuthError::RateLimited(wait));
+        }
         // One renewal identity survives all transport retries and fallback hosts.
         let request_id: String = rand::random::<[u8; 16]>()
             .iter()
@@ -695,6 +720,7 @@ impl AuthClient {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = retry_after_seconds(&response);
             let body = read_auth_error(response).await;
             error!(
                 "Relay ticket fetch failed: {} - {}",
@@ -709,6 +735,10 @@ impl AuthClient {
             }
             if let Some(error) = free_tier_limit_error(status, &body) {
                 return Err(error);
+            }
+            if let Some(wait) = retryable_ticket_delay(status, retry_after) {
+                TICKET_RETRY_WINDOW.lock().defer(Instant::now(), wait);
+                return Err(AuthError::RateLimited(wait));
             }
             // A 401 here means the API rejected our access token, which is a
             // dead session and nothing the user can fix by retrying. It used to
@@ -1062,6 +1092,10 @@ fn parse_retry_after(raw: Option<&str>) -> u64 {
         .min(MAX_RETRY_AFTER_SECONDS)
 }
 
+fn retryable_ticket_delay(status: reqwest::StatusCode, retry_after: u64) -> Option<u64> {
+    matches!(status.as_u16(), 429 | 503).then(|| retry_after.clamp(1, MAX_RETRY_AFTER_SECONDS))
+}
+
 /// Detect the free-tier quota rejection. `/api/vpn/relay-ticket` answers 429
 /// with `{"error":"free_tier_limit_reached","message":"..."}` , note the code
 /// lands in `error`, not `code`, unlike the ban and update responses.
@@ -1269,6 +1303,45 @@ mod tests {
     fn retry_after_uses_the_servers_delta_seconds() {
         assert_eq!(parse_retry_after(Some("45")), 45);
         assert_eq!(parse_retry_after(Some("  120 ")), 120);
+    }
+
+    #[test]
+    fn ticket_cooldown_rounds_up_and_expires_at_the_server_deadline() {
+        let now = Instant::now();
+        let mut window = TicketRetryWindow::default();
+        window.defer(now, 60);
+        assert_eq!(window.remaining(now), Some(60));
+        assert_eq!(
+            window.remaining(now + Duration::from_millis(59_001)),
+            Some(1)
+        );
+        assert_eq!(window.remaining(now + Duration::from_secs(60)), None);
+    }
+
+    #[test]
+    fn a_shorter_reply_cannot_shorten_an_existing_ticket_cooldown() {
+        let now = Instant::now();
+        let mut window = TicketRetryWindow::default();
+        window.defer(now, u64::MAX);
+        window.defer(now + Duration::from_secs(10), 1);
+        assert_eq!(window.remaining(now), Some(MAX_RETRY_AFTER_SECONDS));
+        assert_eq!(window.remaining(now + Duration::from_secs(300)), None);
+    }
+
+    #[test]
+    fn ticket_backoff_applies_to_throttling_and_service_pressure() {
+        for code in [429, 503] {
+            assert_eq!(
+                retryable_ticket_delay(reqwest::StatusCode::from_u16(code).unwrap(), 120),
+                Some(120)
+            );
+        }
+        for code in [400, 401, 403, 426, 500] {
+            assert_eq!(
+                retryable_ticket_delay(reqwest::StatusCode::from_u16(code).unwrap(), 120),
+                None
+            );
+        }
     }
 
     #[test]

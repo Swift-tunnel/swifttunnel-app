@@ -83,6 +83,13 @@ const RELAY_DEAD_GRACE_SECS: u64 = 20;
 /// expiry while leaving enough room for a transient API failure and retry.
 const RELAY_LEASE_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 const RELAY_LEASE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+fn relay_lease_retry_delay(error: &AuthError) -> Duration {
+    match error {
+        AuthError::RateLimited(seconds) => Duration::from_secs((*seconds).clamp(5, 300)),
+        _ => RELAY_LEASE_RETRY_INTERVAL,
+    }
+}
 /// Number of ICMP samples to collect per relay candidate when probing.
 const AUTO_ROUTING_PING_SAMPLES: usize = 5;
 const CONNECT_FAIL_HANDSHAKE_TIMEOUT: &str = "ST_CONNECT_HANDSHAKE_TIMEOUT";
@@ -3340,6 +3347,7 @@ impl VpnConnection {
 
                 self.relay_lease_refresh_handle = Some(tokio::spawn(
                     run_relay_renewal_until_terminal(refresh_state, async move {
+                        let client = AuthClient::new();
                         let mut delay = RELAY_LEASE_REFRESH_INTERVAL;
                         let mut last_attempt = tokio::time::Instant::now() - Duration::from_secs(5);
                         loop {
@@ -3375,13 +3383,11 @@ impl VpnConnection {
                                         log::warn!(
                                             "Relay lease refresh could not obtain access token: {error}"
                                         );
-                                        delay = RELAY_LEASE_RETRY_INTERVAL;
+                                        delay = relay_lease_retry_delay(&error);
                                         continue;
                                     }
                                 }
                             };
-
-                            let client = AuthClient::new();
 
                             match client
                                 .get_relay_ticket(&access_token, &region, &session_id)
@@ -3432,7 +3438,7 @@ impl VpnConnection {
                                         break;
                                     }
                                     log::warn!("Relay lease refresh failed for {region}: {error}");
-                                    delay = RELAY_LEASE_RETRY_INTERVAL;
+                                    delay = relay_lease_retry_delay(&error);
                                 }
                             }
                         }
@@ -3792,6 +3798,26 @@ impl Drop for VpnConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lease_retries_honor_service_cooldowns_with_bounded_delays() {
+        assert_eq!(
+            relay_lease_retry_delay(&AuthError::RateLimited(120)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            relay_lease_retry_delay(&AuthError::RateLimited(0)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            relay_lease_retry_delay(&AuthError::RateLimited(u64::MAX)),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            relay_lease_retry_delay(&AuthError::NetworkError("offline".into())),
+            RELAY_LEASE_RETRY_INTERVAL
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn slow_driver_step_does_not_starve_other_runtime_tasks() {
