@@ -47,7 +47,11 @@ use state::Push;
 use view::Screen;
 
 fn main() {
-    init_logging();
+    let args: Vec<String> = std::env::args().collect();
+    let previewing = args.iter().any(|a| a == "--preview");
+    if !previewing {
+        init_logging();
+    }
 
     // Report this build's version, before anything can make a request.
     //
@@ -57,42 +61,6 @@ fn main() {
     // left Lite claiming core's version: the server saw 1.0.40 from a 3.1.0
     // client and answered "no longer supported".
     swifttunnel_core::auth::set_client_version(env!("CARGO_PKG_VERSION"));
-
-    // An update that landed is no longer an attempt worth remembering. Clearing
-    // it here means the guard only ever suppresses a retry of something that
-    // genuinely did not take.
-    swifttunnel_core::lite_update::clear_install_attempt();
-
-    // Keep this machine upgradeable, off the main thread.
-    //
-    // Windows falls back to the recorded install source when a cleanup tool
-    // deletes its cached copy of a package, and without a source that still
-    // exists an upgrade dies on "the feature you are trying to use is on a
-    // network resource that is unavailable", with the product then impossible
-    // to upgrade or remove. The repair clears a registration already in that
-    // state; preserving the source stops the next one reaching it.
-    //
-    // Lite does this itself because it installs standalone, and a machine
-    // with only Lite on it never runs the full app, which is the other place
-    // this happens.
-    std::thread::spawn(|| {
-        if let Ok(cleared) = swifttunnel_msi_repair::repair()
-            && !cleared.is_empty()
-        {
-            log::warn!("cleared {} orphaned registration(s)", cleared.len());
-        }
-        match swifttunnel_msi_repair::preserve_installer_sources() {
-            Ok(kept) if !kept.is_empty() => {
-                log::info!("installer source preserved for: {}", kept.join(", "))
-            }
-            Ok(_) => {}
-            Err(error) => log::warn!("could not preserve the installer source: {error}"),
-        }
-    });
-
-    // Before any window or font is created: the whole UI is set in these, and
-    // GDI substitutes silently rather than failing if they are missing.
-    fonts::install();
 
     // --cleanup: undo every system change and exit.
     //
@@ -162,25 +130,16 @@ fn main() {
     // exits, touching no driver and no network, and refusing to render a
     // screenshot because the app happens to be open would make the only
     // feedback loop this UI has depend on it being closed.
-    let previewing = std::env::args().any(|a| a == "--preview");
     if !previewing && !single_client::acquire() {
         return;
     }
-
-    let engine = match engine::Engine::new() {
-        Ok(engine) => engine,
-        Err(error) => {
-            log::error!("could not start: {error}");
-            return;
-        }
-    };
+    fonts::install();
 
     // Developer switch: paint one frame to a file and exit.
     //
     // Lite runs elevated, and Windows will not let an unelevated tool capture
     // an elevated window, which left visual work with no feedback loop and is
     // a large part of why several attempts at this interface shipped wrong.
-    let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--preview") {
         let path = args
             .get(i + 1)
@@ -211,17 +170,49 @@ fn main() {
             _ => None,
         };
         let login_text = named("--login-text").map(str::to_string);
-        match ui::render_preview(
-            engine, &path, screen, push, connected, lockout, login_text, bench,
-        ) {
+        match ui::render_preview(&path, screen, push, connected, lockout, login_text, bench) {
             Ok(()) => println!("wrote {path}"),
             Err(error) => eprintln!("preview failed: {error}"),
         }
         return;
     }
 
+    start_maintenance();
+    let engine = match engine::Engine::new() {
+        Ok(engine) => engine,
+        Err(error) => {
+            log::error!("could not start: {error}");
+            return;
+        }
+    };
     if let Err(error) = ui::run(engine) {
         log::error!("window failed: {error}");
+    }
+}
+
+fn start_maintenance() {
+    swifttunnel_core::lite_update::clear_install_attempt();
+    // Only the normal client repairs/preserves its installer registration.
+    // Never run this concurrently with an install/uninstall helper, or while
+    // rendering a preview that is supposed to leave the machine untouched.
+    if let Err(error) = std::thread::Builder::new()
+        .name("lite-installer-cache".into())
+        .spawn(|| {
+            if let Ok(cleared) = swifttunnel_msi_repair::repair()
+                && !cleared.is_empty()
+            {
+                log::warn!("cleared {} orphaned registration(s)", cleared.len());
+            }
+            match swifttunnel_msi_repair::preserve_installer_sources() {
+                Ok(kept) if !kept.is_empty() => {
+                    log::info!("installer source preserved for: {}", kept.join(", "))
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("could not preserve the installer source: {error}"),
+            }
+        })
+    {
+        log::warn!("could not start installer cache maintenance: {error}");
     }
 }
 

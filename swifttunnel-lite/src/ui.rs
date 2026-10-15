@@ -57,7 +57,7 @@ const TICK_TIMER: usize = 1;
 const TICK_MS: u32 = 1000;
 
 pub struct App {
-    engine: Engine,
+    engine: Option<Engine>,
     pub state: State,
     m: Metrics,
     fonts: Fonts,
@@ -95,6 +95,17 @@ pub struct App {
 }
 
 impl App {
+    fn refresh_from_engine(&mut self) {
+        if let Some(engine) = &self.engine {
+            engine.fill(&mut self.state);
+        }
+    }
+
+    fn dispatch_to_engine(&mut self, action: Action) {
+        if let Some(engine) = &self.engine {
+            engine.dispatch(action, &mut self.state);
+        }
+    }
     /// Rebuild the laid-out frames from the current state.
     ///
     /// Called after anything that changes what should be on screen. Layout is
@@ -607,7 +618,7 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
             }
         };
 
-        let app = new_app(engine, dpi);
+        let app = new_app(Some(engine), dpi);
         let m = Metrics::new(dpi);
 
         let hwnd = CreateWindowExW(
@@ -689,7 +700,9 @@ pub fn run(engine: Engine) -> windows::core::Result<()> {
         // are already running and a ping that lands before this point
         // would update the snapshot with nothing to tell about it.
         if let Some(app) = app_of(hwnd) {
-            app.engine.attach(hwnd.0 as isize);
+            if let Some(engine) = &app.engine {
+                engine.attach(hwnd.0 as isize);
+            }
         }
 
         let mut message = MSG::default();
@@ -792,10 +805,12 @@ fn centre(hwnd: HWND) {
 
 /// Build the application state. Shared by the window and the preview so there
 /// is one definition of what a fresh Lite looks like.
-pub fn new_app(engine: Engine, dpi: i32) -> Box<App> {
+fn new_app(engine: Option<Engine>, dpi: i32) -> Box<App> {
     let m = Metrics::new(dpi);
     let mut state = State::default();
-    engine.fill(&mut state);
+    if let Some(engine) = &engine {
+        engine.fill(&mut state);
+    }
 
     let mut app = Box::new(App {
         engine,
@@ -831,7 +846,6 @@ pub fn new_app(engine: Engine, dpi: i32) -> Box<App> {
 /// change without asking a person to look at their own screen. It drives the
 /// same [`paint`] the window does, so the two cannot drift.
 pub fn render_preview(
-    engine: Engine,
     path: &str,
     screen: Screen,
     push: Push,
@@ -847,14 +861,35 @@ pub fn render_preview(
     // slow machine can still afford this window.
     bench: bool,
 ) -> std::io::Result<()> {
-    // Give the background fetch a moment to land, or every preview of the
-    // region list shows an empty one. Only the harness waits; the window
-    // fills in as the data arrives.
-    std::thread::sleep(std::time::Duration::from_millis(2500));
-
     let dpi = 96;
     let m = Metrics::new(dpi);
-    let mut app = new_app(engine, dpi);
+    let mut app = new_app(None, dpi);
+    // Fixed examples, never a live account, fleet fetch, driver or setting.
+    app.state.signed_in = true;
+    app.state.driver.ready = true;
+    app.state.driver.status = "Ready".into();
+    app.state.free_tier_secs = Some(5400);
+    app.state.regions = [
+        ("singapore", "Singapore", "SG", 42),
+        ("mumbai", "Mumbai", "IN", 22),
+    ]
+    .into_iter()
+    .map(|(id, name, country, ping)| crate::state::RegionRow {
+        id: id.into(),
+        name: name.into(),
+        country: country.into(),
+        ping_ms: Some(ping),
+        relays: vec![crate::state::RelayRow {
+            id: format!("{id}-01"),
+            ip: "192.0.2.1".into(),
+            port: 51821,
+            available: true,
+            ping_ms: Some(ping),
+            preview: None,
+        }],
+    })
+    .collect();
+    app.state.selected_region = "singapore".into();
     app.state.screen = screen;
     app.state.push = push;
     if let Some(text) = login_text {
@@ -976,6 +1011,39 @@ fn login_field(app: &mut App, email: bool) -> &mut crate::state::TextField {
         &mut app.state.login.email
     } else {
         &mut app.state.login.password
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_renders_an_owned_bitmap_without_a_live_engine_or_account() {
+        let path = std::env::temp_dir().join(format!(
+            "swift-lite-offline-preview-{}-{}.bmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        render_preview(
+            path.to_str().unwrap(),
+            Screen::Connect,
+            Push::Regions,
+            true,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let bitmap = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(&bitmap[..2], b"BM");
+        let declared_size = u32::from_le_bytes(bitmap[2..6].try_into().unwrap()) as usize;
+        assert_eq!(declared_size, bitmap.len());
+        assert!(bitmap.len() > 1000);
     }
 }
 
@@ -1326,7 +1394,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                                 app.state.focus = Some(FieldId::Password);
                             } else {
                                 app.state.focus = None;
-                                app.engine.dispatch(Action::SubmitLogin, &mut app.state);
+                                app.dispatch_to_engine(Action::SubmitLogin);
                             }
                         }
                         27 => app.state.focus = None,
@@ -1406,7 +1474,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if wparam.0 == TICK_TIMER
                     && let Some(app) = app_of(hwnd)
                 {
-                    app.engine.fill(&mut app.state);
+                    app.refresh_from_engine();
                     app.rebuild(client_of(hwnd));
                     sync_timer(hwnd, app, on_screen(hwnd));
                     repaint(hwnd);
@@ -1418,7 +1486,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // connect or a fresh ping shows up without waiting for a tick.
             crate::engine::WM_ENGINE_UPDATE => {
                 if let Some(app) = app_of(hwnd) {
-                    app.engine.fill(&mut app.state);
+                    app.refresh_from_engine();
                     app.rebuild(client_of(hwnd));
                     sync_timer(hwnd, app, on_screen(hwnd));
                     repaint(hwnd);
@@ -1457,7 +1525,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         // Coming back from the taskbar: catch the session timer
                         // up before it is drawn, or it shows the value it had
                         // when the window went away.
-                        app.engine.fill(&mut app.state);
+                        app.refresh_from_engine();
                     }
                     app.rebuild(client_of(hwnd));
                     sync_timer(hwnd, app, visible);
@@ -1470,7 +1538,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if let Some(app) = app_of(hwnd) {
                     let visible = wparam.0 != 0;
                     if visible {
-                        app.engine.fill(&mut app.state);
+                        app.refresh_from_engine();
                         app.rebuild(client_of(hwnd));
                     }
                     sync_timer(hwnd, app, visible);
@@ -1528,20 +1596,26 @@ fn dispatch(hwnd: HWND, app: &mut App, action: Action) {
         Action::OpenRegions => {
             app.state.push = Push::Regions;
             app.scroll = 0;
-            app.engine.refresh_regions();
+            if let Some(engine) = &app.engine {
+                engine.refresh_regions();
+            }
         }
         Action::OpenAdapters => {
             app.state.push = Push::Adapters;
             app.scroll = 0;
-            app.engine.refresh_adapters();
+            if let Some(engine) = &app.engine {
+                engine.refresh_adapters();
+            }
         }
         Action::OpenRelays => {
             app.state.push = Push::Relays;
             app.scroll = 0;
-            app.engine.refresh_regions();
+            if let Some(engine) = &app.engine {
+                engine.refresh_regions();
+            }
         }
         other => {
-            app.engine.dispatch(other, &mut app.state);
+            app.dispatch_to_engine(other);
             app.state.push = match app.state.push {
                 // A pick closes the list it was made in.
                 Push::Regions | Push::Relays | Push::Adapters => Push::None,
@@ -1550,7 +1624,7 @@ fn dispatch(hwnd: HWND, app: &mut App, action: Action) {
         }
     }
 
-    app.engine.fill(&mut app.state);
+    app.refresh_from_engine();
     app.hot = None;
     app.rebuild(client_of(hwnd));
     sync_timer(hwnd, app, on_screen(hwnd));
