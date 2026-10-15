@@ -8,6 +8,13 @@ use winreg::{RegKey, RegValue, enums::RegType, types::FromRegValue};
 pub(crate) const MAX_VALUE_BYTES: usize = 64 * 1024;
 
 pub(crate) fn read<T: FromRegValue>(key: &RegKey, name: &str) -> std::io::Result<Option<T>> {
+    read_raw(key, name)?
+        .as_ref()
+        .map(T::from_reg_value)
+        .transpose()
+}
+
+pub(crate) fn read_raw(key: &RegKey, name: &str) -> std::io::Result<Option<RegValue>> {
     let name: Vec<_> = name.encode_utf16().chain(std::iter::once(0)).collect();
     for _ in 0..4 {
         let mut length = 0;
@@ -78,7 +85,7 @@ pub(crate) fn read<T: FromRegValue>(key: &RegKey, name: &str) -> std::io::Result
                 ));
             }
         };
-        return T::from_reg_value(&RegValue { bytes, vtype }).map(Some);
+        return Ok(Some(RegValue { bytes, vtype }));
     }
     Err(std::io::Error::other(
         "Registry value changed repeatedly during its read",

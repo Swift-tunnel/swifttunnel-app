@@ -1016,9 +1016,15 @@ enum ActionSnapshot {
     /// Whether the owned key already existed before apply.
     OwnedKey {
         existed: bool,
+        #[serde(default)]
+        default_captured: bool,
+        #[serde(default)]
+        default_value: Option<String>,
     },
     Power {
         value: Option<u32>,
+        #[serde(default)]
+        scheme: Option<String>,
     },
     Service {
         start_type: Option<u32>,
@@ -1176,11 +1182,12 @@ pub fn apply(id: &str) -> Result<bool, String> {
         captured.push(capture_action(action)?);
     }
 
+    let apply_context = captured.clone();
     apply_captured(
         id,
         &mut snapshots,
         captured,
-        |index| apply_action(&tweak.actions[index]),
+        |index| apply_action(&tweak.actions[index], &apply_context[index]),
         |index, snap| restore_action(&tweak.actions[index], snap),
         save_all,
     )?;
@@ -1286,40 +1293,70 @@ fn capture_action(action: &Action) -> Result<ActionSnapshot, String> {
         Action::RegDword {
             hive, path, name, ..
         } => ActionSnapshot::RegDword {
-            value: read_reg_dword(*hive, path, name),
+            value: read_reg_dword(*hive, path, name)?,
         },
         Action::RegString {
             hive, path, name, ..
         } => ActionSnapshot::RegString {
-            value: read_reg_string(*hive, path, name),
+            value: read_reg_string(*hive, path, name)?,
         },
         Action::RegBinary {
             hive, path, name, ..
         } => ActionSnapshot::RegBinary {
-            value: read_reg_binary(*hive, path, name),
+            value: read_reg_binary(*hive, path, name)?,
         },
         Action::RegOwnedKeyDefault {
-            hive, owned_path, ..
-        } => ActionSnapshot::OwnedKey {
-            existed: reg_key_exists(*hive, owned_path),
-        },
+            hive,
+            owned_path,
+            default_path,
+            ..
+        } => {
+            let existed = reg_key_exists(*hive, owned_path)?;
+            ActionSnapshot::OwnedKey {
+                existed,
+                default_captured: true,
+                default_value: if existed {
+                    read_reg_string(*hive, default_path, "")?
+                } else {
+                    None
+                },
+            }
+        }
         Action::PowerAc {
             subgroup, setting, ..
-        } => ActionSnapshot::Power {
-            value: read_power_ac(subgroup, setting),
-        },
-        Action::ServiceDisable { name } => ActionSnapshot::Service {
-            start_type: read_service_start_type(name),
-            was_running: read_service_running(name),
-        },
+        } => {
+            let scheme = crate::system_optimizer::SystemOptimizer::active_power_plan_guid()
+                .ok_or("Couldn't read your current power plan. Nothing was changed.")?;
+            ActionSnapshot::Power {
+                value: Some(
+                    read_power_ac(&scheme, subgroup, setting)
+                        .ok_or("Couldn't read the original power setting. Nothing was changed.")?,
+                ),
+                scheme: Some(scheme),
+            }
+        }
+        Action::ServiceDisable { name } => {
+            let start_type = read_service_start_type(name)?;
+            service_start_keyword(start_type)?;
+            let was_running = read_service_running(name)
+                .ok_or("Couldn't read the original service state. Nothing was changed.")?;
+            if start_type == Some(4) && was_running {
+                return Err("This disabled service is still running. It was left unchanged because that state cannot be restored safely.".into());
+            }
+            ActionSnapshot::Service {
+                start_type,
+                was_running: Some(was_running),
+            }
+        }
         Action::TaskDisable { path } => ActionSnapshot::Task {
-            was_enabled: read_task_enabled(path).unwrap_or(false),
+            was_enabled: read_task_enabled(path)
+                .ok_or("Couldn't read the original scheduled-task state. Nothing was changed.")?,
         },
     })
 }
 
 #[cfg(windows)]
-fn apply_action(action: &Action) -> Result<(), String> {
+fn apply_action(action: &Action, snapshot: &ActionSnapshot) -> Result<(), String> {
     match action {
         Action::RegDword {
             hive,
@@ -1352,7 +1389,18 @@ fn apply_action(action: &Action) -> Result<(), String> {
             subgroup,
             setting,
             value,
-        } => set_power_ac(subgroup, setting, *value),
+        } => {
+            let ActionSnapshot::Power {
+                scheme: Some(scheme),
+                ..
+            } = snapshot
+            else {
+                return Err(
+                    "Couldn't identify the original power plan. Nothing was changed.".into(),
+                );
+            };
+            set_power_ac(scheme, subgroup, setting, *value)
+        }
         Action::ServiceDisable { name } => {
             // Stop is best-effort (service may already be stopped).
             let _ = run("sc", &["stop", name]);
@@ -1401,12 +1449,16 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
                 default_path,
                 ..
             },
-            ActionSnapshot::OwnedKey { existed },
+            ActionSnapshot::OwnedKey { existed, default_captured, default_value },
         ) => {
             if *existed {
-                // Someone else introduced the key before us: only clear the
-                // default value we set, leave their tree alone.
-                delete_reg_value(*hive, default_path, "")
+                if !default_captured {
+                    return Err("This older undo record is missing the original Windows setting. Contact support and include your log.".into());
+                }
+                match default_value {
+                    Some(value) => write_reg_string(*hive, default_path, "", value),
+                    None => delete_reg_value(*hive, default_path, ""),
+                }
             } else {
                 delete_reg_key_tree(*hive, owned_path)
             }
@@ -1415,10 +1467,10 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
             Action::PowerAc {
                 subgroup, setting, ..
             },
-            ActionSnapshot::Power { value },
-        ) => match value {
-            Some(v) => set_power_ac(subgroup, setting, *v),
-            None => Ok(()),
+            ActionSnapshot::Power { value, scheme },
+        ) => match (value, scheme) {
+            (Some(value), Some(scheme)) => set_power_ac(scheme, subgroup, setting, *value),
+            _ => Err("The original power plan or setting is missing from this older undo record. Contact support and include your log.".into()),
         },
         (
             Action::ServiceDisable { name },
@@ -1427,26 +1479,15 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
                 was_running,
             },
         ) => {
-            let keyword = match start_type {
-                Some(2) => "auto",
-                Some(3) => "demand",
-                Some(4) => "disabled",
-                _ => "demand",
-            };
+            let keyword = service_start_keyword(*start_type)?;
+            if was_running.is_none() {
+                return Err("This older undo record is missing the original service state. Contact support and include your log.".into());
+            }
             run("sc", &["config", name, "start=", keyword])?;
-            match was_running {
-                Some(true) => {
-                    let _ = run("sc", &["start", name]);
-                }
-                Some(false) => {
-                    let _ = run("sc", &["stop", name]);
-                }
-                None if matches!(start_type, Some(2) | Some(3)) => {
-                    // Backward compatibility for snapshots written before
-                    // runtime service state was captured.
-                    let _ = run("sc", &["start", name]);
-                }
-                None => {}
+            if let Some(running) = was_running
+                && read_service_running(name) != Some(*running)
+            {
+                run("sc", &[if *running { "start" } else { "stop" }, name])?;
             }
             Ok(())
         }
@@ -1474,15 +1515,55 @@ fn reg_root(hive: Hive) -> winreg::RegKey {
 }
 
 #[cfg(windows)]
-fn read_reg_dword(hive: Hive, path: &str, name: &str) -> Option<u32> {
-    let key = reg_root(hive).open_subkey(path).ok()?;
-    key.get_value::<u32, _>(name).ok()
+fn read_reg_dword(hive: Hive, path: &str, name: &str) -> Result<Option<u32>, String> {
+    use winreg::types::FromRegValue;
+    read_typed_registry(hive, path, name, winreg::enums::RegType::REG_DWORD)?
+        .as_ref()
+        .map(u32::from_reg_value)
+        .transpose()
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(windows)]
-fn read_reg_string(hive: Hive, path: &str, name: &str) -> Option<String> {
-    let key = reg_root(hive).open_subkey(path).ok()?;
-    key.get_value::<String, _>(name).ok()
+fn read_reg_string(hive: Hive, path: &str, name: &str) -> Result<Option<String>, String> {
+    use winreg::types::FromRegValue;
+    read_typed_registry(hive, path, name, winreg::enums::RegType::REG_SZ)?
+        .as_ref()
+        .map(String::from_reg_value)
+        .transpose()
+        .map_err(|e| e.to_string())
+}
+
+// Missing is a valid original value. Denied access, corrupt data or a different
+// registry type is not missing and must never become a destructive undo record.
+#[cfg(windows)]
+fn optional_registry<T>(result: std::io::Result<T>) -> Result<Option<T>, String> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Couldn't read the original Windows setting. Nothing was changed: {error}"
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn read_typed_registry(
+    hive: Hive,
+    path: &str,
+    name: &str,
+    expected: winreg::enums::RegType,
+) -> Result<Option<winreg::RegValue>, String> {
+    let Some(key) = optional_registry(reg_root(hive).open_subkey(path))? else {
+        return Ok(None);
+    };
+    let value = crate::registry_value::read_raw(&key, name).map_err(|error| {
+        format!("Couldn't read the original Windows setting. Nothing was changed: {error}")
+    })?;
+    if value.as_ref().is_some_and(|value| value.vtype != expected) {
+        return Err("This Windows setting has an unexpected type. It was left unchanged.".into());
+    }
+    Ok(value)
 }
 
 #[cfg(windows)]
@@ -1504,10 +1585,11 @@ fn write_reg_string(hive: Hive, path: &str, name: &str, value: &str) -> Result<(
 }
 
 #[cfg(windows)]
-fn read_reg_binary(hive: Hive, path: &str, name: &str) -> Option<Vec<u8>> {
-    let key = reg_root(hive).open_subkey(path).ok()?;
-    let value: winreg::RegValue = key.get_raw_value(name).ok()?;
-    Some(value.bytes)
+fn read_reg_binary(hive: Hive, path: &str, name: &str) -> Result<Option<Vec<u8>>, String> {
+    Ok(
+        read_typed_registry(hive, path, name, winreg::enums::RegType::REG_BINARY)?
+            .map(|value| value.bytes),
+    )
 }
 
 #[cfg(windows)]
@@ -1524,8 +1606,8 @@ fn write_reg_binary(hive: Hive, path: &str, name: &str, value: &[u8]) -> Result<
 }
 
 #[cfg(windows)]
-fn reg_key_exists(hive: Hive, path: &str) -> bool {
-    reg_root(hive).open_subkey(path).is_ok()
+fn reg_key_exists(hive: Hive, path: &str) -> Result<bool, String> {
+    Ok(optional_registry(reg_root(hive).open_subkey(path))?.is_some())
 }
 
 #[cfg(windows)]
@@ -1552,12 +1634,32 @@ fn delete_reg_value(hive: Hive, path: &str, name: &str) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn read_service_start_type(name: &str) -> Option<u32> {
+fn read_service_start_type(name: &str) -> Result<Option<u32>, String> {
     read_reg_dword(
         Hive::Hklm,
         &format!(r"SYSTEM\CurrentControlSet\Services\{name}"),
         "Start",
     )
+}
+
+fn service_start_keyword(start_type: Option<u32>) -> Result<&'static str, String> {
+    match start_type {
+        Some(2) => Ok("auto"), Some(3) => Ok("demand"), Some(4) => Ok("disabled"),
+        _ => Err("The original service startup setting is unavailable or unsupported. It was left unchanged.".into()),
+    }
+}
+
+fn parse_service_running(text: &str) -> Option<bool> {
+    let state = text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("STATE")
+            .and_then(|rest| rest.trim().strip_prefix(':'))
+    })?;
+    match state.split_whitespace().next()? {
+        "1" => Some(false),
+        "4" => Some(true),
+        _ => None, // Starting, stopping or paused is not a stable original state.
+    }
 }
 
 #[cfg(windows)]
@@ -1572,25 +1674,33 @@ fn read_service_running(name: &str) -> Option<bool> {
     if !out.success {
         return None;
     }
-    let text = out.stdout;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with("STATE") {
-            return Some(line.contains("RUNNING"));
-        }
-    }
-    None
+    parse_service_running(&out.stdout)
 }
 
 // ── powercfg helpers (Windows) ──────────────────────────────────────────────
 
+fn valid_scheme_guid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        })
+}
+
 #[cfg(windows)]
-fn read_power_ac(subgroup: &str, setting: &str) -> Option<u32> {
-    let out = crate::hidden_command("powercfg")
-        .args(["/query", "SCHEME_CURRENT", subgroup, setting])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+fn read_power_ac(scheme: &str, subgroup: &str, setting: &str) -> Option<u32> {
+    let out = crate::run_hidden_command_with_timeout(
+        "powercfg",
+        &["/query", scheme, subgroup, setting],
+        std::time::Duration::from_secs(20),
+    );
+    if !out.success {
+        return None;
+    }
+    let text = out.stdout;
     for line in text.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("Current AC Power Setting Index:") {
@@ -1607,12 +1717,15 @@ fn read_power_ac(subgroup: &str, setting: &str) -> Option<u32> {
 }
 
 #[cfg(windows)]
-fn set_power_ac(subgroup: &str, setting: &str, value: u32) -> Result<(), String> {
+fn set_power_ac(scheme: &str, subgroup: &str, setting: &str, value: u32) -> Result<(), String> {
+    if !valid_scheme_guid(scheme) {
+        return Err("The saved power plan could not be identified. It was left unchanged.".into());
+    }
     run(
         "powercfg",
         &[
             "/setacvalueindex",
-            "SCHEME_CURRENT",
+            scheme,
             subgroup,
             setting,
             &value.to_string(),
@@ -1625,36 +1738,36 @@ fn set_power_ac(subgroup: &str, setting: &str, value: u32) -> Result<(), String>
 
 #[cfg(windows)]
 fn read_task_enabled(path: &str) -> Option<bool> {
-    let out = crate::hidden_command("schtasks")
-        .args(["/Query", "/TN", path, "/FO", "LIST"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    let (folder, name) = path.rsplit_once('\\')?;
+    let folder = format!("{folder}\\").replace('\'', "''");
+    let name = name.replace('\'', "''");
+    // Structured booleans are independent of Windows display language. The
+    // old human-readable Status line also describes readiness, not Enabled.
+    let script = format!(
+        "$ErrorActionPreference='Stop'; (Get-ScheduledTask -TaskPath '{folder}' -TaskName '{name}').Settings.Enabled | ConvertTo-Json -Compress"
+    );
+    let out = crate::run_hidden_command_with_timeout(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+        std::time::Duration::from_secs(20),
+    );
+    if !out.success {
         return None; // task does not exist
     }
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        if let Some(rest) = line.trim().strip_prefix("Status:") {
-            let status = rest.trim().to_ascii_lowercase();
-            return Some(status != "disabled");
-        }
-    }
-    None
+    serde_json::from_str::<bool>(out.stdout.trim().trim_start_matches('\u{feff}')).ok()
 }
 
 // ── command runner (Windows) ────────────────────────────────────────────────
 
 #[cfg(windows)]
 fn run(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = crate::hidden_command(program)
-        .args(args)
-        .output()
-        .map_err(|e| format!("run {program}: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let out =
+        crate::run_hidden_command_with_timeout(program, args, std::time::Duration::from_secs(20));
+    if out.success {
+        Ok(out.stdout)
     } else {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let stderr = out.stderr.trim().to_string();
+        let stdout = out.stdout.trim().to_string();
         let detail = if !stderr.is_empty() { stderr } else { stdout };
         Err(format!("{program} failed: {detail}"))
     }
@@ -1668,7 +1781,7 @@ fn capture_action(_action: &Action) -> Result<ActionSnapshot, String> {
 }
 
 #[cfg(not(windows))]
-fn apply_action(_action: &Action) -> Result<(), String> {
+fn apply_action(_action: &Action, _snapshot: &ActionSnapshot) -> Result<(), String> {
     Err("Optimizations are only supported on Windows".to_string())
 }
 
@@ -1680,6 +1793,205 @@ fn restore_action(_action: &Action, _snap: &ActionSnapshot) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn registry_snapshot_distinguishes_missing_denied_wrong_type_and_oversized_values() {
+        use winreg::{
+            RegKey, RegValue,
+            enums::{HKEY_CURRENT_USER, RegType},
+        };
+        struct Fixture(&'static str);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(self.0);
+            }
+        }
+        let path: &'static str = Box::leak(
+            format!(
+                r"Software\SwiftTunnel\AuditFixtures\{:016x}",
+                rand::random::<u64>()
+            )
+            .into_boxed_str(),
+        );
+        let fixture = Fixture(path);
+        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(path)
+            .unwrap();
+        assert_eq!(read_reg_dword(Hive::Hkcu, path, "missing").unwrap(), None);
+        assert!(
+            optional_registry::<()>(Err(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            )))
+            .is_err()
+        );
+        key.set_value("wrong", &"keep this string").unwrap();
+        assert!(
+            capture_action(&Action::RegDword {
+                hive: Hive::Hkcu,
+                path,
+                name: "wrong",
+                value: 1
+            })
+            .is_err()
+        );
+        assert_eq!(
+            key.get_value::<String, _>("wrong").unwrap(),
+            "keep this string"
+        );
+        key.set_value("number", &17u32).unwrap();
+        assert_eq!(
+            read_reg_dword(Hive::Hkcu, path, "number").unwrap(),
+            Some(17)
+        );
+        assert!(read_reg_binary(Hive::Hkcu, path, "number").is_err());
+        key.set_raw_value(
+            "large",
+            &RegValue {
+                vtype: RegType::REG_BINARY,
+                bytes: vec![0; 65538],
+            },
+        )
+        .unwrap();
+        assert!(read_reg_binary(Hive::Hkcu, path, "large").is_err());
+        drop(key);
+        drop(fixture);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_key_undo_restores_its_existing_default_instead_of_deleting_it() {
+        use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+        struct Fixture(&'static str);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(self.0);
+            }
+        }
+        let path: &'static str = Box::leak(
+            format!(
+                r"Software\SwiftTunnel\AuditFixtures\{:016x}",
+                rand::random::<u64>()
+            )
+            .into_boxed_str(),
+        );
+        let fixture = Fixture(path);
+        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+            .create_subkey(path)
+            .unwrap();
+        key.set_value("", &"original default").unwrap();
+        let action = Action::RegOwnedKeyDefault {
+            hive: Hive::Hkcu,
+            owned_path: path,
+            default_path: path,
+            value: "applied default",
+        };
+        let snapshot = capture_action(&action).unwrap();
+        let snapshot: ActionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        apply_action(&action, &snapshot).unwrap();
+        assert_eq!(key.get_value::<String, _>("").unwrap(), "applied default");
+        restore_action(&action, &snapshot).unwrap();
+        assert_eq!(key.get_value::<String, _>("").unwrap(), "original default");
+        let old: ActionSnapshot =
+            serde_json::from_str(r#"{"kind":"OwnedKey","existed":true}"#).unwrap();
+        assert!(restore_action(&action, &old).is_err());
+        assert_eq!(key.get_value::<String, _>("").unwrap(), "original default");
+        drop(key);
+        drop(fixture);
+    }
+
+    #[test]
+    fn service_snapshots_reject_unstable_states_and_never_invent_a_start_type() {
+        assert_eq!(parse_service_running("STATE : 4 RUNNING"), Some(true));
+        assert_eq!(parse_service_running("STATE : 1 STOPPED"), Some(false));
+        assert_eq!(parse_service_running("STATE : 2 START_PENDING"), None);
+        assert_eq!(parse_service_running("STATE : 3 STOP_PENDING"), None);
+        assert_eq!(parse_service_running("STATE : 7 PAUSED"), None);
+        assert_eq!(parse_service_running("Access denied"), None);
+        assert!(service_start_keyword(None).is_err());
+        assert!(service_start_keyword(Some(1)).is_err());
+        assert_eq!(service_start_keyword(Some(2)).unwrap(), "auto");
+        assert_eq!(service_start_keyword(Some(3)).unwrap(), "demand");
+        assert_eq!(service_start_keyword(Some(4)).unwrap(), "disabled");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn incomplete_legacy_power_and_service_undo_records_do_not_run_system_changes() {
+        let power = Action::PowerAc {
+            subgroup: "not-a-setting",
+            setting: "not-a-setting",
+            value: 100,
+        };
+        assert!(
+            restore_action(
+                &power,
+                &ActionSnapshot::Power {
+                    value: Some(10),
+                    scheme: None
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            restore_action(
+                &power,
+                &ActionSnapshot::Power {
+                    value: None,
+                    scheme: Some("not-a-guid".into())
+                }
+            )
+            .is_err()
+        );
+        assert!(set_power_ac("SCHEME_CURRENT", "invalid", "invalid", 0).is_err());
+        let service = Action::ServiceDisable {
+            name: "not-a-service",
+        };
+        assert!(
+            restore_action(
+                &service,
+                &ActionSnapshot::Service {
+                    start_type: None,
+                    was_running: Some(true)
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            restore_action(
+                &service,
+                &ActionSnapshot::Service {
+                    start_type: Some(3),
+                    was_running: None
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn power_snapshot_keeps_the_original_scheme_and_rejects_aliases_and_corrupt_guids() {
+        let scheme = "381b4222-f694-41f0-9685-ff5bb260df2e";
+        assert!(valid_scheme_guid(scheme));
+        for invalid in [
+            "SCHEME_CURRENT",
+            "../plan",
+            "--------------------1234567890123456",
+            "381b4222-f694-41f0-9685-ff5bb260df2g",
+        ] {
+            assert!(!valid_scheme_guid(invalid));
+        }
+        let snapshot = ActionSnapshot::Power {
+            value: Some(0),
+            scheme: Some(scheme.into()),
+        };
+        let roundtrip: ActionSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+        assert!(
+            matches!(roundtrip, ActionSnapshot::Power { value: Some(0), scheme: Some(original) } if original == scheme)
+        );
+    }
 
     #[test]
     fn snapshot_save_failure_prevents_system_changes() {

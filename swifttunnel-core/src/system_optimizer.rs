@@ -565,7 +565,7 @@ impl SystemOptimizer {
         }
     }
 
-    fn active_power_plan_guid() -> Option<String> {
+    pub(crate) fn active_power_plan_guid() -> Option<String> {
         let output = crate::utils::run_hidden_command_output_with_timeout(
             "powercfg",
             &["/GETACTIVESCHEME"],
