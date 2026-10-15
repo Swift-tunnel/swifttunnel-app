@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::process::Output;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State};
 
 use crate::state::AppState;
@@ -154,25 +154,6 @@ fn format_section(title: &str, body: &str) -> String {
     section
 }
 
-fn capture_from_output(result: Result<Output, std::io::Error>) -> CommandCapture {
-    match result {
-        Ok(output) => CommandCapture {
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            status_code: output.status.code(),
-            success: output.status.success(),
-            execution_error: None,
-        },
-        Err(e) => CommandCapture {
-            stdout: String::new(),
-            stderr: String::new(),
-            status_code: None,
-            success: false,
-            execution_error: Some(e.to_string()),
-        },
-    }
-}
-
 fn format_command_section(title: &str, capture: &CommandCapture) -> String {
     let mut body = String::new();
 
@@ -213,24 +194,40 @@ fn format_command_section(title: &str, capture: &CommandCapture) -> String {
     format_section(title, &body)
 }
 
-fn run_diagnostics_command(command: &DiagnosticsCommand) -> CommandCapture {
-    let mut process = swifttunnel_core::hidden_command(command.program);
-    for arg in &command.args {
-        process.arg(arg);
+fn run_diagnostics_command(command: &DiagnosticsCommand, timeout: Duration) -> CommandCapture {
+    let output =
+        swifttunnel_core::run_hidden_command_with_timeout(command.program, &command.args, timeout);
+    CommandCapture {
+        stdout: output.stdout,
+        stderr: output.stderr,
+        status_code: output.exit_code,
+        success: output.success,
+        execution_error: None,
     }
-    capture_from_output(process.output())
+}
+
+fn collect_diagnostics_sections(commands: &[DiagnosticsCommand], budget: Duration) -> Vec<String> {
+    let started = Instant::now();
+    commands
+        .iter()
+        .map(|command| {
+            let remaining = budget.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return format_section(
+                    command.title,
+                    "Skipped: diagnostics reached its time limit.",
+                );
+            }
+            let capture = run_diagnostics_command(command, remaining.min(Duration::from_secs(15)));
+            format_command_section(command.title, &capture)
+        })
+        .collect()
 }
 
 fn run_windows_diagnostics_sections() -> Vec<String> {
     #[cfg(windows)]
     {
-        windows_diagnostics_commands()
-            .into_iter()
-            .map(|command| {
-                let capture = run_diagnostics_command(&command);
-                format_command_section(command.title, &capture)
-            })
-            .collect()
+        collect_diagnostics_sections(&windows_diagnostics_commands(), Duration::from_secs(60))
     }
 
     #[cfg(not(windows))]
@@ -256,6 +253,7 @@ fn windows_diagnostics_commands() -> Vec<DiagnosticsCommand> {
             program: "powershell",
             args: vec![
                 "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
                 "-Command".to_string(),
                 "Get-NetAdapter | Format-Table Name,InterfaceDescription,ifIndex,Status,MacAddress,LinkSpeed -AutoSize | Out-String -Width 220".to_string(),
             ],
@@ -265,6 +263,7 @@ fn windows_diagnostics_commands() -> Vec<DiagnosticsCommand> {
             program: "powershell",
             args: vec![
                 "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
                 "-Command".to_string(),
                 "Get-NetIPInterface | Sort-Object InterfaceMetric | Format-Table InterfaceAlias,InterfaceIndex,AddressFamily,NlMtu,InterfaceMetric,ConnectionState -AutoSize | Out-String -Width 220".to_string(),
             ],
@@ -274,6 +273,7 @@ fn windows_diagnostics_commands() -> Vec<DiagnosticsCommand> {
             program: "powershell",
             args: vec![
                 "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
                 "-Command".to_string(),
                 "Get-NetRoute -DestinationPrefix '0.0.0.0/0','::/0' | Sort-Object RouteMetric,InterfaceMetric | Format-Table DestinationPrefix,NextHop,InterfaceIndex,RouteMetric,InterfaceMetric -AutoSize | Out-String -Width 220".to_string(),
             ],
@@ -283,6 +283,7 @@ fn windows_diagnostics_commands() -> Vec<DiagnosticsCommand> {
             program: "powershell",
             args: vec![
                 "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
                 "-Command".to_string(),
                 "Get-DnsClientServerAddress | Format-Table InterfaceAlias,AddressFamily,ServerAddresses -AutoSize | Out-String -Width 220".to_string(),
             ],
@@ -292,6 +293,7 @@ fn windows_diagnostics_commands() -> Vec<DiagnosticsCommand> {
             program: "powershell",
             args: vec![
                 "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
                 "-Command".to_string(),
                 "Get-NetOffloadGlobalSetting | Out-String -Width 220".to_string(),
             ],
@@ -301,6 +303,7 @@ fn windows_diagnostics_commands() -> Vec<DiagnosticsCommand> {
             program: "powershell",
             args: vec![
                 "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
                 "-Command".to_string(),
                 "Get-NetAdapterAdvancedProperty | Where-Object { $_.DisplayName -match 'offload|checksum|large send|udp|tcp' } | Format-Table Name,DisplayName,DisplayValue -AutoSize | Out-String -Width 260".to_string(),
             ],
@@ -325,6 +328,7 @@ fn windows_diagnostics_commands() -> Vec<DiagnosticsCommand> {
             program: "powershell",
             args: vec![
                 "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
                 "-Command".to_string(),
                 isp_lookup_script().to_string(),
             ],
@@ -486,6 +490,12 @@ pub async fn settings_generate_network_diagnostics_bundle(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<NetworkDiagnosticsBundleResponse, String> {
+    // Keep the permit inside the blocking worker, so cancelling the request
+    // cannot start another set of checks while the previous commands run.
+    static EXPORT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let permit = EXPORT.try_acquire().map_err(|_| {
+        "A diagnostics report is already being created. Wait for it to finish.".to_string()
+    })?;
     let settings = state.settings.lock().clone();
 
     let (vpn_state, split_tunnel_diag) = {
@@ -504,23 +514,23 @@ pub async fn settings_generate_network_diagnostics_bundle(
         split_tunnel_diag,
     };
 
-    let command_sections = tauri::async_runtime::spawn_blocking(run_windows_diagnostics_sections)
-        .await
-        .map_err(|e| format!("Diagnostics task failed: {}", e))?;
-    let bundle_text = compose_bundle_text(&bundle_context, &command_sections);
-
     let output_dir = resolve_output_dir(&app);
-    std::fs::create_dir_all(&output_dir)
-        .map_err(|e| format!("Failed to create diagnostics output directory: {e}"))?;
-
-    let file_path = output_dir.join(build_diagnostics_filename());
-    std::fs::write(&file_path, bundle_text)
-        .map_err(|e| format!("Failed to write diagnostics bundle: {e}"))?;
-
-    Ok(NetworkDiagnosticsBundleResponse {
-        file_path: file_path.to_string_lossy().to_string(),
-        folder_path: output_dir.to_string_lossy().to_string(),
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let command_sections = run_windows_diagnostics_sections();
+        let bundle_text = compose_bundle_text(&bundle_context, &command_sections);
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("Failed to create diagnostics output directory: {e}"))?;
+        let file_path = output_dir.join(build_diagnostics_filename());
+        std::fs::write(&file_path, bundle_text)
+            .map_err(|e| format!("Failed to write diagnostics bundle: {e}"))?;
+        Ok(NetworkDiagnosticsBundleResponse {
+            file_path: file_path.to_string_lossy().to_string(),
+            folder_path: output_dir.to_string_lossy().to_string(),
+        })
     })
+    .await
+    .map_err(|e| format!("Diagnostics task failed: {e}"))?
 }
 
 /// Sanitize a caller-supplied preset filename so it can never escape the output
@@ -578,7 +588,59 @@ pub async fn preset_save_to_downloads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+
+    #[cfg(windows)]
+    #[test]
+    fn diagnostics_keep_partial_output_and_skip_later_checks_after_the_budget() {
+        let commands = [
+            DiagnosticsCommand {
+                title: "Stuck owned check",
+                program: "powershell",
+                args: [
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[Console]::Out.WriteLine('captured before timeout'); Start-Sleep -Seconds 8",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            },
+            DiagnosticsCommand {
+                title: "Later check",
+                program: "must-not-be-executed",
+                args: vec![],
+            },
+        ];
+        let started = Instant::now();
+        let sections = collect_diagnostics_sections(&commands, Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(sections[0].contains("captured before timeout"));
+        assert!(sections[0].contains("did not finish within"));
+        assert!(sections[1].contains("Skipped: diagnostics reached its time limit."));
+        assert!(!sections[1].contains("Failed to start"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn diagnostics_report_nonzero_exit_and_continue_with_the_next_check() {
+        let commands = [
+            DiagnosticsCommand {
+                title: "Failed owned check",
+                program: "cmd",
+                args: vec!["/C".into(), "exit 42".into()],
+            },
+            DiagnosticsCommand {
+                title: "Successful owned check",
+                program: "cmd",
+                args: vec!["/C".into(), "echo next check completed".into()],
+            },
+        ];
+        let sections = collect_diagnostics_sections(&commands, Duration::from_secs(5));
+        assert!(sections[0].contains("Command failed (exit code: 42)"));
+        assert!(sections[1].contains("next check completed"));
+        assert!(!sections[1].contains("Command failed"));
+    }
 
     #[test]
     fn build_diagnostics_filename_has_expected_format() {
