@@ -32,8 +32,26 @@ const DRIVER_READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DRIVER_SERVICE_START_TIMEOUT: Duration = Duration::from_secs(30);
 const DRIVER_READY_TIMEOUT: Duration = Duration::from_secs(20);
 const WINPKFILTER_BINDING_CLEANUP_TIMEOUT: Duration = Duration::from_secs(12);
+const DRIVER_MSI_TIMEOUT: Duration = Duration::from_secs(600);
 const SERVICE_NAME: &str = "NDISRD";
 const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
+
+fn run_driver_msi(action: &str, msi_path: &Path) -> std::io::Result<std::process::Output> {
+    use std::ffi::OsStr;
+    let installer = swifttunnel_installer_cache::windows_installer_path()?;
+    // Match Desktop's MSI deadline. The old fallback paths waited forever,
+    // including when Windows Installer was stuck behind another installation.
+    crate::utils::run_hidden_command_output_with_timeout(
+        &installer.to_string_lossy(),
+        &[
+            OsStr::new(action),
+            msi_path.as_os_str(),
+            OsStr::new("/qn"),
+            OsStr::new("/norestart"),
+        ],
+        DRIVER_MSI_TIMEOUT,
+    )
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  GAME PRESETS
@@ -649,16 +667,8 @@ impl SplitTunnelDriver {
             msi_path.display()
         );
 
-        let output = {
-            use std::os::windows::process::CommandExt;
-            let installer = swifttunnel_installer_cache::windows_installer_path()
-                .map_err(|e| format!("Could not locate Windows Installer: {e}"))?;
-            std::process::Command::new(installer)
-                .args(["/i", &msi_path.to_string_lossy(), "/qn", "/norestart"])
-                .creation_flags(crate::utils::CREATE_NO_WINDOW)
-                .output()
-                .map_err(|e| format!("Failed to run msiexec: {}", e))?
-        };
+        let output = run_driver_msi("/i", &msi_path)
+            .map_err(|e| format!("Could not finish the driver installation: {e}"))?;
 
         let code = output.status.code().unwrap_or(-1);
         if matches!(code, 0 | 1638 | 1641 | 3010) {
@@ -1292,15 +1302,7 @@ impl SplitTunnelDriver {
                     msi_path.display()
                 );
 
-                let res = {
-                    use std::os::windows::process::CommandExt;
-                    swifttunnel_installer_cache::windows_installer_path().and_then(|installer| {
-                        std::process::Command::new(installer)
-                            .args(["/x", &msi_path.to_string_lossy(), "/qn", "/norestart"])
-                            .creation_flags(crate::utils::CREATE_NO_WINDOW)
-                            .output()
-                    })
-                };
+                let res = run_driver_msi("/x", &msi_path);
                 match res {
                     Ok(output) => {
                         let code = output.status.code().unwrap_or(-1);
@@ -1318,10 +1320,18 @@ impl SplitTunnelDriver {
                             ));
                         }
                     }
-                    Err(e) => issues.push(format!(
-                        "Failed to run driver MSI ({}) uninstall: {}",
-                        pkg.arch, e
-                    )),
+                    Err(e) => {
+                        issues.push(format!(
+                            "Driver MSI ({}) uninstall did not finish: {e}",
+                            pkg.arch
+                        ));
+                        // Installer's service may still be completing or
+                        // rolling back work. Do not race it with another MSI
+                        // or direct driver/service removal after a timeout.
+                        if e.kind() == std::io::ErrorKind::TimedOut {
+                            return Err(issues.join("; "));
+                        }
+                    }
                 }
             }
         }
