@@ -4,13 +4,12 @@ use tauri::State;
 
 use crate::state::AppState;
 
-// Frontend buttons already serialize tests in their own view. The backend
-// must also prevent Repair or another caller from starting competing load.
-static NETWORK_TEST_GATE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-fn network_test_permit() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
-    NETWORK_TEST_GATE
-        .try_acquire()
-        .map_err(|_| "Another network test is running. Wait for it to finish.".into())
+static NETWORK_TESTS: std::sync::LazyLock<super::network_control::NetworkTestControl> =
+    std::sync::LazyLock::new(super::network_control::NetworkTestControl::default);
+
+#[tauri::command]
+pub fn network_cancel_test(test_id: String) -> Result<(), String> {
+    NETWORK_TESTS.cancel(&test_id)
 }
 
 #[derive(Serialize)]
@@ -51,22 +50,24 @@ pub struct BufferbloatResultResponse {
 pub async fn network_start_stability_test(
     state: State<'_, AppState>,
     duration_secs: u32,
+    test_id: String,
 ) -> Result<StabilityResultResponse, String> {
-    let permit = network_test_permit()?;
     let (tx, rx) = mpsc::channel();
+    drop(rx); // Progress is not streamed by this command; do not queue it.
 
     let result = state
         .runtime
         .spawn(async move {
-            let _permit = permit;
-            swifttunnel_core::network_analyzer::run_stability_test(duration_secs, tx).await
+            NETWORK_TESTS
+                .run(
+                    test_id,
+                    swifttunnel_core::network_analyzer::run_stability_test(duration_secs, tx),
+                )
+                .await
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))?
         .map_err(|e| e.to_string())?;
-
-    // Drain the progress channel (we don't stream it in this simple command)
-    drop(rx);
 
     Ok(StabilityResultResponse {
         avg_ping: result.avg_ping,
@@ -91,22 +92,24 @@ pub async fn network_start_stability_test(
 #[tauri::command]
 pub async fn network_start_speed_test(
     state: State<'_, AppState>,
+    test_id: String,
 ) -> Result<SpeedResultResponse, String> {
-    let permit = network_test_permit()?;
     let (tx, rx) = mpsc::channel();
+    drop(rx);
 
     let result = state
         .runtime
         .spawn(async move {
-            let _permit = permit;
-            swifttunnel_core::network_analyzer::run_speed_test(tx).await
+            NETWORK_TESTS
+                .run(
+                    test_id,
+                    swifttunnel_core::network_analyzer::run_speed_test(tx),
+                )
+                .await
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))?
         .map_err(|e| e.to_string())?;
-
-    // Drain the progress channel
-    drop(rx);
 
     Ok(SpeedResultResponse {
         download_mbps: result.download_mbps,
@@ -118,22 +121,25 @@ pub async fn network_start_speed_test(
 #[tauri::command]
 pub async fn network_start_bufferbloat_test(
     state: State<'_, AppState>,
+    test_id: String,
 ) -> Result<BufferbloatResultResponse, String> {
-    let permit = network_test_permit()?;
     // Core API expects a channel for symmetry with other tests; UI doesn't stream yet.
     let (tx, rx) = mpsc::channel();
+    drop(rx);
 
     let result = state
         .runtime
         .spawn(async move {
-            let _permit = permit;
-            swifttunnel_core::network_analyzer::run_bufferbloat_test(tx).await
+            NETWORK_TESTS
+                .run(
+                    test_id,
+                    swifttunnel_core::network_analyzer::run_bufferbloat_test(tx),
+                )
+                .await
         })
         .await
         .map_err(|e| format!("Task join error: {}", e))?
         .map_err(|e| e.to_string())?;
-
-    drop(rx);
 
     Ok(BufferbloatResultResponse {
         idle_latency: result.idle_latency,
@@ -141,16 +147,4 @@ pub async fn network_start_bufferbloat_test(
         bufferbloat_ms: result.bufferbloat_ms,
         grade: result.grade.label().to_string(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn native_test_gate_refuses_overlapping_work_and_recovers_after_release() {
-        let running = network_test_permit().unwrap();
-        assert!(network_test_permit().is_err());
-        drop(running);
-        assert!(network_test_permit().is_ok());
-    }
 }

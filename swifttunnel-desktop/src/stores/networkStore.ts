@@ -9,12 +9,15 @@ import {
   networkStartStabilityTest,
   networkStartSpeedTest,
   networkStartBufferbloatTest,
+  networkCancelTest,
 } from "../lib/commands";
 
 type TestStatus = "idle" | "running" | "complete" | "error";
 
 interface NetworkStore {
   isRunning: boolean;
+  isCancelling: boolean;
+  cancelError: string | null;
   // Stability test
   stabilityStatus: TestStatus;
   stabilityResult: StabilityResultResponse | null;
@@ -35,10 +38,13 @@ interface NetworkStore {
   runSpeedTest: () => Promise<void>;
   runBufferbloatTest: () => Promise<void>;
   runAllTests: (durationSecs?: number) => Promise<void>;
+  cancelTests: () => Promise<void>;
   reset: () => void;
 }
 
 export const useNetworkStore = create<NetworkStore>((set, get) => {
+  type Run = { id: string; cancelled: boolean };
+  let currentRun: Run | null = null;
   const emptyResults = {
   stabilityStatus: "idle",
   stabilityResult: null,
@@ -51,68 +57,106 @@ export const useNetworkStore = create<NetworkStore>((set, get) => {
   bufferbloatError: null,
   } as const;
 
-  async function exclusive(work: () => Promise<void>) {
-    if (get().isRunning) return;
-    set({ isRunning: true });
-    try { await work(); } finally { set({ isRunning: false }); }
+  async function exclusive(work: (run: Run) => Promise<void>) {
+    if (currentRun || get().isRunning) return;
+    const run: Run = { id: crypto.randomUUID(), cancelled: false };
+    currentRun = run;
+    set({ isRunning: true, isCancelling: false, cancelError: null });
+    try {
+      await work(run);
+    } finally {
+      if (currentRun === run) {
+        currentRun = null;
+        set(state => ({
+          isRunning: false,
+          isCancelling: false,
+          ...(run.cancelled ? {
+            stabilityStatus: state.stabilityStatus === "running" ? "idle" : state.stabilityStatus,
+            speedStatus: state.speedStatus === "running" ? "idle" : state.speedStatus,
+            bufferbloatStatus: state.bufferbloatStatus === "running" ? "idle" : state.bufferbloatStatus,
+          } : {}),
+        }));
+      }
+    }
   }
 
-  async function stability(durationSecs: number) {
+  async function stability(run: Run, durationSecs: number) {
+    if (run.cancelled) return;
     try {
       set({
         stabilityStatus: "running",
         stabilityResult: null,
         stabilityError: null,
       });
-      const result = await networkStartStabilityTest(durationSecs);
-      set({ stabilityStatus: "complete", stabilityResult: result });
+      const result = await networkStartStabilityTest(durationSecs, run.id);
+      if (!run.cancelled) set({ stabilityStatus: "complete", stabilityResult: result });
     } catch (e) {
-      set({ stabilityStatus: "error", stabilityError: formatErrorMessage(e) });
+      if (!run.cancelled) set({ stabilityStatus: "error", stabilityError: formatErrorMessage(e) });
     }
   }
 
-  async function speed() {
+  async function speed(run: Run) {
+    if (run.cancelled) return;
     try {
       set({ speedStatus: "running", speedResult: null, speedError: null });
-      const result = await networkStartSpeedTest();
-      set({ speedStatus: "complete", speedResult: result });
+      const result = await networkStartSpeedTest(run.id);
+      if (!run.cancelled) set({ speedStatus: "complete", speedResult: result });
     } catch (e) {
-      set({ speedStatus: "error", speedError: formatErrorMessage(e) });
+      if (!run.cancelled) set({ speedStatus: "error", speedError: formatErrorMessage(e) });
     }
   }
 
-  async function bufferbloat() {
+  async function bufferbloat(run: Run) {
+    if (run.cancelled) return;
     try {
       set({
         bufferbloatStatus: "running",
         bufferbloatResult: null,
         bufferbloatError: null,
       });
-      const result = await networkStartBufferbloatTest();
-      set({ bufferbloatStatus: "complete", bufferbloatResult: result });
+      const result = await networkStartBufferbloatTest(run.id);
+      if (!run.cancelled) set({ bufferbloatStatus: "complete", bufferbloatResult: result });
     } catch (e) {
-      set({ bufferbloatStatus: "error", bufferbloatError: formatErrorMessage(e) });
+      if (!run.cancelled) set({ bufferbloatStatus: "error", bufferbloatError: formatErrorMessage(e) });
     }
   }
 
   return {
     ...emptyResults,
     isRunning: false,
-    runAllTests: (durationSecs = 10) => exclusive(async () => {
+    isCancelling: false,
+    cancelError: null,
+    runAllTests: (durationSecs = 10) => exclusive(async (run) => {
       set(emptyResults);
       // One permit covers idle sampling and all loaded phases, including
       // the gaps between tests. Prior grades do not belong to this run.
-      await stability(durationSecs);
-      await speed();
-      await bufferbloat();
+      await stability(run, durationSecs);
+      await speed(run);
+      await bufferbloat(run);
     }),
-    runStabilityTest: (durationSecs = 10) => exclusive(() => stability(durationSecs)),
+    runStabilityTest: (durationSecs = 10) => exclusive((run) => stability(run, durationSecs)),
     runSpeedTest: () => exclusive(speed),
     runBufferbloatTest: () => exclusive(bufferbloat),
+    cancelTests: async () => {
+      const run = currentRun;
+      if (!run || run.cancelled) return;
+      run.cancelled = true;
+      set({ isCancelling: true, cancelError: null });
+      try {
+        await networkCancelTest(run.id);
+        // The native command's reply releases the permit. A Stop acknowledgement
+        // alone does not prove that its load workers have finished unwinding.
+      } catch (error) {
+        if (currentRun === run) {
+          run.cancelled = false;
+          set({ isCancelling: false, cancelError: formatErrorMessage(error) });
+        }
+      }
+    },
     reset: () => {
       // This is a display reset, not native cancellation. Never unlock work
       // which is still using the network.
-      if (!get().isRunning) set(emptyResults);
+      if (!get().isRunning) set({ ...emptyResults, cancelError: null });
     },
   };
 });

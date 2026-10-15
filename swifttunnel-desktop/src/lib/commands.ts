@@ -200,16 +200,20 @@ export const boostResetRobloxClient = () =>
 
 // ── Network Tests ──
 
-export const networkStartStabilityTest = (durationSecs: number) =>
+export const networkStartStabilityTest = (durationSecs: number, testId: string) =>
   invoke<StabilityResultResponse>("network_start_stability_test", {
     durationSecs,
+    testId,
   });
 
-export const networkStartSpeedTest = () =>
-  invoke<SpeedResultResponse>("network_start_speed_test");
+export const networkStartSpeedTest = (testId: string) =>
+  invoke<SpeedResultResponse>("network_start_speed_test", { testId });
 
-export const networkStartBufferbloatTest = () =>
-  invoke<BufferbloatResultResponse>("network_start_bufferbloat_test");
+export const networkStartBufferbloatTest = (testId: string) =>
+  invoke<BufferbloatResultResponse>("network_start_bufferbloat_test", { testId });
+
+export const networkCancelTest = (testId: string) =>
+  invoke<void>("network_cancel_test", { testId });
 
 // ── Settings ──
 

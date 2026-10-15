@@ -4,6 +4,7 @@ pub mod games;
 pub mod i18n;
 pub mod launcher;
 pub mod network;
+mod network_control;
 pub mod optimization;
 pub mod optimizer;
 pub mod overlay;

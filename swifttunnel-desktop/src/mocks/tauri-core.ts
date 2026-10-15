@@ -394,6 +394,8 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     };
   },
 
+  network_cancel_test: () => {},
+
   network_start_speed_test: async () => {
     await new Promise((r) => setTimeout(r, 2000));
     return {

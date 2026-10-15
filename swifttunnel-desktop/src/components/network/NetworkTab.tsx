@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { motion } from "framer-motion";
 import { useNetworkStore } from "../../stores/networkStore";
 import type { PingSample } from "../../lib/types";
@@ -71,6 +71,10 @@ export function NetworkTab() {
   const net = useNetworkStore();
   const [duration, setDuration] = useState<number>(10);
 
+  useEffect(() => () => {
+    void useNetworkStore.getState().cancelTests();
+  }, []);
+
   const anyRunning =
     net.isRunning ||
     net.stabilityStatus === "running" ||
@@ -135,14 +139,15 @@ export function NetworkTab() {
           <Button
             variant={anyRunning ? "secondary" : "primary"}
             size="lg"
-            onClick={runAll}
-            disabled={anyRunning}
-            loading={anyRunning}
+            onClick={anyRunning ? () => { void net.cancelTests(); } : runAll}
+            disabled={net.isCancelling}
+            loading={net.isCancelling}
           >
-            {anyRunning ? "Running…" : "Run All Tests"}
+            {net.isCancelling ? "Stopping…" : anyRunning ? "Stop tests" : "Run All Tests"}
           </Button>
         }
       >
+        {net.cancelError && <p role="alert" className="text-sm text-[var(--color-latency-bad)]">Could not stop the test: {net.cancelError}</p>}
         <Readout
           size="xl"
           value={heroBigValue}

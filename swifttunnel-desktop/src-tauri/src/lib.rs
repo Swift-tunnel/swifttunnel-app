@@ -740,6 +740,7 @@ pub fn run() {
             commands::network::network_start_stability_test,
             commands::network::network_start_speed_test,
             commands::network::network_start_bufferbloat_test,
+            commands::network::network_cancel_test,
             // Settings
             commands::settings::settings_load,
             commands::settings::settings_save,
