@@ -62,6 +62,44 @@ describe("stores/authStore", () => {
     expect(store.getState().error).toBeNull();
   });
 
+  it.each(["logging_in", "logged_in", "banned"] as const)("does not overwrite native %s when cancellation completes late", async (state) => {
+    let finish!: () => void;
+    commands.authStartOAuth.mockResolvedValue(undefined);
+    commands.authCancelOAuth.mockReturnValue(new Promise<void>(resolve => { finish = resolve; }));
+    const store = await loadStore();
+    await store.getState().startOAuth();
+    const cancel = store.getState().cancelOAuth();
+    store.getState().handleStateEvent({ ...signedIn, state, is_banned: state === "banned" });
+    finish();
+    await cancel;
+    expect(store.getState().state).toBe(state);
+    expect(store.getState().isLoading).toBe(state === "logging_in");
+    expect(store.getState().userId).toBe("player");
+    expect(store.getState().error).toBeNull();
+  });
+
+  it("does not report an old OAuth poll as completed after cancellation during its final read", async () => {
+    let finish!: (value: typeof signedIn) => void;
+    let readStarted!: () => void;
+    const reading = new Promise<void>(resolve => { readStarted = resolve; });
+    commands.authStartOAuth.mockResolvedValue(undefined);
+    commands.authPollOAuth.mockResolvedValue({ completed: true, token: "exchange", state: "state" });
+    commands.authCompleteOAuth.mockResolvedValue(undefined);
+    commands.authCancelOAuth.mockResolvedValue(undefined);
+    commands.authGetState.mockImplementation(() => {
+      readStarted();
+      return new Promise(resolve => { finish = resolve; });
+    });
+    const store = await loadStore();
+    await store.getState().startOAuth();
+    const poll = store.getState().pollOAuth();
+    await reading;
+    await store.getState().cancelOAuth();
+    finish(signedIn);
+    expect(await poll).toBe(false);
+    expect(store.getState().state).toBe("logged_out");
+  });
+
   it("ignores a failed old browser start after a new sign-in starts", async () => {
     let fail!: (error: Error) => void;
     commands.authStartOAuth.mockReturnValueOnce(new Promise((_resolve, reject) => { fail = reject; }))

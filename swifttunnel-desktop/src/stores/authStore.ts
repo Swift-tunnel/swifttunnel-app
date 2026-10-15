@@ -131,7 +131,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         await authCompleteOAuth(result.token, result.state);
         if (action !== authActionRevision) return false;
         await get().fetchState();
-        return true;
+        return action === authActionRevision && get().state === "logged_in";
       }
       return false;
     } catch (e) {
@@ -153,6 +153,12 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
 
     if (action !== authActionRevision) return;
+    // Native cancellation only cancels a flow still waiting for the browser.
+    // The callback may already have started an exchange or signed in while
+    // cancellation waited for the auth lock. Preserve that authoritative event
+    // instead of drawing a logged-out screen over a live native session.
+    const state = get().state;
+    if (state === "logging_in" || state === "logged_in" || state === "banned") return;
     ++authStateRevision;
     set({ state: "logged_out", isLoading: false, error: reason });
   },
