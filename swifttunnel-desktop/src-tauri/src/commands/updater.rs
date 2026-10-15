@@ -11,6 +11,17 @@ use url::Url;
 const UPDATER_PROGRESS_EVENT: &str = "updater://progress";
 const UPDATER_DONE_EVENT: &str = "updater://done";
 
+// A webview guard is not sufficient: overlapping IPC callers must not stage
+// or launch competing installers. Keep this permit through the blocking work,
+// even if the caller stops waiting for its result.
+static INSTALL_OPERATION: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+fn begin_install() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
+    INSTALL_OPERATION
+        .try_acquire()
+        .map_err(|_| "An update is already in progress. Wait for it to finish.".to_string())
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct UpdaterProgressPayload {
     downloaded: u64,
@@ -614,6 +625,7 @@ pub async fn updater_install_channel(
     channel: UpdateChannel,
     expected_version: String,
 ) -> Result<UpdaterInstallResponse, String> {
+    let install_permit = begin_install()?;
     let current_version = Version::parse(&app.package_info().version.to_string())
         .map_err(|e| format!("Current app version is invalid semver: {}", e))?;
     let normalized_expected_version = Version::parse(expected_version.trim()).map_err(|e| {
@@ -676,40 +688,43 @@ pub async fn updater_install_channel(
     // that is unavailable", leaving the machine unable to upgrade or
     // uninstall. download() above performed the same signature verification
     // the plugin does, so nothing about trust changes here.
-    let installer_path = stage_installer(&update.version, &package)?;
+    let install_version = update.version.clone();
+    let reboot_required = tauri::async_runtime::spawn_blocking(move || {
+        let _install_permit = install_permit;
+        let installer_path = stage_installer(&install_version, &package)?;
 
-    // Clear a registration whose cached package has gone before handing over to
-    // msiexec. A major upgrade uninstalls the old version first, which needs
-    // that package; without it the install dies on "the feature you are trying
-    // to use is on a network resource that is unavailable" and the machine can
-    // neither upgrade nor uninstall. Staging above stops new orphans being
-    // made, but does nothing for a machine already in that state, which is
-    // every install predating it and anyone whose installer cache a cleanup
-    // tool removed.
-    //
-    // Best effort on purpose. It is a no-op when nothing is orphaned, and a
-    // failure here should still let the install be attempted: the worst case is
-    // the same error the user would have had anyway. The app is already
-    // elevated, which is the privilege the equivalent MSI custom action could
-    // never get.
-    match swifttunnel_msi_repair::repair() {
-        Ok(cleared) if !cleared.is_empty() => {
-            log::warn!(
-                "cleared {} orphaned SwiftTunnel registration(s) before upgrading",
-                cleared.len()
-            );
+        // Clear a registration whose cached package has gone before handing over to
+        // msiexec. A major upgrade uninstalls the old version first, which needs
+        // that package; without it the install dies on "the feature you are trying
+        // to use is on a network resource that is unavailable" and the machine can
+        // neither upgrade nor uninstall. Staging above stops new orphans being
+        // made, but does nothing for a machine already in that state, which is
+        // every install predating it and anyone whose installer cache a cleanup
+        // tool removed.
+        //
+        // Best effort on purpose. It is a no-op when nothing is orphaned, and a
+        // failure here should still let the install be attempted: the worst case is
+        // the same error the user would have had anyway. The app is already
+        // elevated, which is the privilege the equivalent MSI custom action could
+        // never get.
+        match swifttunnel_msi_repair::repair() {
+            Ok(cleared) if !cleared.is_empty() => {
+                log::warn!(
+                    "cleared {} orphaned SwiftTunnel registration(s) before upgrading",
+                    cleared.len()
+                );
+            }
+            Ok(_) => {}
+            Err(error) => log::warn!("could not check for an orphaned registration: {error}"),
         }
-        Ok(_) => {}
-        Err(error) => log::warn!("could not check for an orphaned registration: {error}"),
-    }
 
-    // Wait outside the async runtime workers. The MSI may close this process
-    // to replace it, in which case the new app's version is the confirmation.
-    // If this process survives, report success only from the installer's exit.
-    let reboot_required =
-        tauri::async_runtime::spawn_blocking(move || launch_msi_installer(&installer_path))
-            .await
-            .map_err(|error| format!("Could not observe installer completion: {error}"))??;
+        // Wait outside the async runtime workers. The MSI may close this process
+        // to replace it, in which case the new app's version is the confirmation.
+        // If this process survives, report success only from the installer's exit.
+        launch_msi_installer(&installer_path)
+    })
+    .await
+    .map_err(|error| format!("Could not complete the update installer task: {error}"))??;
 
     // Emit `done` only after signature verification + install actually
     // succeeded. The `on_download_finish` callback fires before the await
@@ -726,6 +741,26 @@ pub async fn updater_install_channel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlapping_install_is_rejected_until_worker_finishes() {
+        let permit = begin_install().unwrap();
+        assert!(begin_install().is_err());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _permit = permit;
+            entered_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            Err::<(), _>("simulated staging failure")
+        });
+        entered_rx.recv().unwrap();
+        // The operation owns the permit, independently of the original caller.
+        assert!(begin_install().is_err());
+        finish_tx.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert!(begin_install().is_ok());
+    }
 
     #[test]
     fn only_completed_installs_report_success() {
