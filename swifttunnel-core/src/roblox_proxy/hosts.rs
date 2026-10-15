@@ -823,10 +823,14 @@ async fn probe_tcp_reachable(ip: Ipv4Addr, port: u16) -> bool {
 /// Antivirus, malware cleaners and PC tidying tools all remove it.
 pub fn ensure_exists() -> Result<bool, String> {
     let path = hosts_path();
-    if path.exists() {
-        return Ok(false);
+    let created = ensure_exists_at(&path)?;
+    if created {
+        info!("Created a missing hosts file at {}", path.display());
     }
+    Ok(created)
+}
 
+fn ensure_exists_at(path: &std::path::Path) -> Result<bool, String> {
     if let Some(parent) = path.parent()
         && !parent.exists()
     {
@@ -834,9 +838,17 @@ pub fn ensure_exists() -> Result<bool, String> {
             .map_err(|e| format!("could not create the hosts directory: {e}"))?;
     }
 
-    fs::write(&path, "").map_err(|e| format!("could not create the hosts file: {e}"))?;
-    info!("Created a missing hosts file at {}", path.display());
-    Ok(true)
+    // Another application can recreate it between our check and open.
+    // create_new never truncates that application's entries.
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(format!("could not create the hosts file: {e}")),
+    }
 }
 
 /// Read the hosts file, treating a missing one as empty.
@@ -847,7 +859,7 @@ pub fn ensure_exists() -> Result<bool, String> {
 /// into "country ban bypass unavailable on this network", which is wrong and
 /// unfixable by the person reading it, since the wording blamed their network.
 fn read_hosts_or_empty(path: &std::path::Path) -> Result<String, String> {
-    match fs::read_to_string(path) {
+    match crate::utils::read_text_file_bounded(path, 16 * 1024 * 1024, "Hosts file") {
         Ok(text) => Ok(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
         Err(e) => Err(format!("Failed to read hosts file: {e}")),
@@ -1199,7 +1211,7 @@ pub fn recover_stale() {
 /// Returns `true` if the hosts file currently contains SwiftTunnel entries.
 pub fn has_overrides() -> bool {
     let path = hosts_path();
-    match fs::read_to_string(&path) {
+    match read_hosts_or_empty(&path) {
         Ok(content) => content.contains(MARKER_START),
         Err(_) => false,
     }
@@ -1324,6 +1336,46 @@ fn flush_dns_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct HostsFixture(PathBuf);
+    impl HostsFixture {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("swift-hosts-{:016x}", rand::random::<u64>()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for HostsFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn creating_a_missing_hosts_file_never_truncates_existing_entries() {
+        let dir = HostsFixture::new();
+        let path = dir.0.join("etc").join("hosts");
+        assert!(ensure_exists_at(&path).unwrap());
+        let original = b"127.0.0.1 localhost\r\n192.168.0.5 owned-fixture\r\n";
+        fs::write(&path, original).unwrap();
+        assert!(!ensure_exists_at(&path).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn oversized_hosts_files_are_refused_without_changing_them() {
+        let dir = HostsFixture::new();
+        let path = dir.0.join("hosts");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(16 * 1024 * 1024 + 1).unwrap();
+        drop(file);
+        let error = read_hosts_or_empty(&path).unwrap_err();
+        assert!(error.contains("exceeds"));
+        assert_eq!(fs::metadata(&path).unwrap().len(), 16 * 1024 * 1024 + 1);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(read_hosts_or_empty(&path).unwrap(), "");
+    }
 
     #[test]
     fn remove_marker_block_empty_input() {
