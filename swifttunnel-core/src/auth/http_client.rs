@@ -394,6 +394,7 @@ impl AuthClient {
     ) -> Result<SupabaseAuthResponse, AuthError> {
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = retry_after_seconds(&response);
             let body = read_auth_error(response).await;
             error!(
                 "Sign in failed: {} - {}",
@@ -401,6 +402,12 @@ impl AuthClient {
                 summarize_error_body(&body)
             );
 
+            if status.as_u16() == 429 {
+                return Err(AuthError::RateLimited(retry_after));
+            }
+            if let Some(error) = update_required_error(status, &body) {
+                return Err(error);
+            }
             if let Some(error) = user_banned_error_from_body(&body) {
                 return Err(error);
             }
@@ -460,35 +467,7 @@ impl AuthClient {
             })
             .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            // Read Retry-After before the bounded reader consumes the response.
-            let retry_after = retry_after_seconds(&response);
-            let body = read_auth_error(response).await;
-            error!(
-                "Desktop token refresh failed: {} - {}",
-                status,
-                summarize_error_body(&body)
-            );
-
-            if let Some(error) = user_banned_error_from_body(&body) {
-                return Err(error);
-            }
-            if is_refresh_token_permanently_invalid(&body) {
-                return Err(AuthError::RefreshTokenInvalid);
-            }
-            if status.as_u16() == 429 {
-                return Err(AuthError::RateLimited(retry_after));
-            }
-
-            return Err(AuthError::ApiError(format!(
-                "Refresh failed: {} - {}",
-                status,
-                summarize_error_body(&body)
-            )));
-        }
-
-        read_auth_json(response, "response").await
+        parse_refresh_response(response).await
     }
 
     /// Sign in with email and password via Supabase
@@ -507,6 +486,7 @@ impl AuthClient {
                 info!("Sign in successful for user {}", data.user.id);
                 return Ok(data);
             }
+            Err(error) if !auth_fallback_allowed(&error) => return Err(error),
             Err(primary_error) => {
                 warn!(
                     "Desktop API sign in failed; trying direct Supabase fallback: {}",
@@ -549,7 +529,7 @@ impl AuthClient {
 
         match self.refresh_token_via_desktop_api(refresh_token).await {
             Ok(data) => return Ok(data),
-            Err(AuthError::RefreshTokenInvalid) => return Err(AuthError::RefreshTokenInvalid),
+            Err(error) if !auth_fallback_allowed(&error) => return Err(error),
             Err(primary_error) => {
                 warn!(
                     "Desktop API token refresh failed; trying direct Supabase fallback: {}",
@@ -576,28 +556,7 @@ impl AuthClient {
             Err(primary_error) => return Err(primary_error),
         };
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = read_auth_error(response).await;
-            error!(
-                "Refresh token failed: {} - {}",
-                status,
-                summarize_error_body(&body)
-            );
-
-            // Detect permanently invalid refresh tokens (revoked, rotated, expired)
-            if is_refresh_token_permanently_invalid(&body) {
-                return Err(AuthError::RefreshTokenInvalid);
-            }
-
-            return Err(AuthError::ApiError(format!(
-                "Refresh failed: {} - {}",
-                status,
-                summarize_error_body(&body)
-            )));
-        }
-
-        let data: SupabaseAuthResponse = read_auth_json(response, "response").await?;
+        let data = parse_refresh_response(response).await?;
 
         info!("Token refresh successful");
         Ok(data)
@@ -942,6 +901,46 @@ impl AuthClient {
 
 const AUTH_JSON_LIMIT: usize = 1024 * 1024;
 const AUTH_ERROR_LIMIT: usize = 64 * 1024;
+
+// An alternate provider is for transport/API availability failures. Explicit
+// account, build, quota and rate-limit decisions must not trigger a second
+// request through a route that does not share those checks.
+fn auth_fallback_allowed(error: &AuthError) -> bool {
+    matches!(error, AuthError::NetworkError(_) | AuthError::ApiError(_))
+}
+
+async fn parse_refresh_response(
+    response: reqwest::Response,
+) -> Result<SupabaseAuthResponse, AuthError> {
+    if !response.status().is_success() {
+        let status = response.status();
+        let retry_after = retry_after_seconds(&response);
+        let body = read_auth_error(response).await;
+        error!(
+            "Token refresh failed: {} - {}",
+            status,
+            summarize_error_body(&body)
+        );
+        if status.as_u16() == 429 {
+            return Err(AuthError::RateLimited(retry_after));
+        }
+        if let Some(error) = update_required_error(status, &body) {
+            return Err(error);
+        }
+        if let Some(error) = user_banned_error_from_body(&body) {
+            return Err(error);
+        }
+        if is_refresh_token_permanently_invalid(&body) {
+            return Err(AuthError::RefreshTokenInvalid);
+        }
+        return Err(AuthError::ApiError(format!(
+            "Refresh failed: {} - {}",
+            status,
+            summarize_error_body(&body)
+        )));
+    }
+    read_auth_json(response, "response").await
+}
 
 async fn read_auth_json<T: serde::de::DeserializeOwned>(
     response: reqwest::Response,
@@ -1572,6 +1571,77 @@ mod bounded_response_tests {
             .unwrap();
         server.join().unwrap();
         response
+    }
+
+    #[test]
+    fn explicit_auth_policy_decisions_cannot_select_an_alternate_provider() {
+        for error in [
+            AuthError::RateLimited(67),
+            AuthError::UserBanned(": test policy".into()),
+            AuthError::UpdateRequired("Update first".into()),
+            AuthError::RefreshTokenInvalid,
+            AuthError::FreeTierLimitReached("Allowance exhausted".into()),
+        ] {
+            assert!(!auth_fallback_allowed(&error));
+        }
+        assert!(auth_fallback_allowed(&AuthError::NetworkError(
+            "offline".into()
+        )));
+        assert!(auth_fallback_allowed(&AuthError::ApiError(
+            "upstream unavailable".into()
+        )));
+    }
+
+    #[tokio::test]
+    async fn sign_in_and_refresh_keep_retry_after_even_with_an_unreadable_error_body() {
+        let client = AuthClient::with_device_hwid(None);
+        for length in [0, AUTH_ERROR_LIMIT + 1] {
+            let wire = format!("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 67\r\nContent-Length: {length}\r\n\r\n").into_bytes();
+            let error = client
+                .parse_password_sign_in_response(loopback_response(wire.clone()).await)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AuthError::RateLimited(67)));
+            assert!(!auth_fallback_allowed(&error));
+            let error = parse_refresh_response(loopback_response(wire).await)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AuthError::RateLimited(67)));
+            assert!(!auth_fallback_allowed(&error));
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_parser_preserves_bans_revocation_and_successful_sessions() {
+        for (status, body, expected) in [
+            (
+                "403 Forbidden",
+                r#"{"code":"user_banned","banned_reason":"test policy"}"#,
+                "banned",
+            ),
+            (
+                "400 Bad Request",
+                r#"{"error":"refresh_token_already_used"}"#,
+                "revoked",
+            ),
+            (
+                "200 OK",
+                r#"{"access_token":"test-access","refresh_token":"test-refresh","expires_in":3600,"token_type":"bearer","user":{"id":"owned-test","email":"owned@example.invalid"}}"#,
+                "session",
+            ),
+        ] {
+            let wire = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes();
+            let result = parse_refresh_response(loopback_response(wire).await).await;
+            match expected {
+                "banned" => assert!(matches!(result, Err(AuthError::UserBanned(_)))),
+                "revoked" => assert!(matches!(result, Err(AuthError::RefreshTokenInvalid))),
+                _ => assert_eq!(result.unwrap().user.id, "owned-test"),
+            }
+        }
     }
 
     #[tokio::test]

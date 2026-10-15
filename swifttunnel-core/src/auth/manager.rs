@@ -410,7 +410,14 @@ impl AuthManager {
                         let _ = self.force_logout();
                         return Err(e);
                     }
-                    if matches!(e, AuthError::UserBanned(_)) {
+                    if let AuthError::UserBanned(reason) = &e {
+                        // A ban can now come directly from the refresh API,
+                        // before try_refresh_token reaches the profile lookup.
+                        let _ = self.mark_current_session_banned(reason);
+                        self.storage.reset_refresh_failures();
+                        return Err(e);
+                    }
+                    if matches!(e, AuthError::UpdateRequired(_)) {
                         self.storage.reset_refresh_failures();
                         return Err(e);
                     }
