@@ -96,7 +96,8 @@ struct Shared {
     runtime: tokio::runtime::Runtime,
     auth: Arc<tokio::sync::Mutex<AuthManager>>,
     vpn: Arc<tokio::sync::Mutex<VpnConnection>>,
-    settings: RwLock<AppSettings>,
+    settings: Arc<RwLock<AppSettings>>,
+    settings_save_signal: std::sync::mpsc::SyncSender<()>,
     /// Rich Presence, driven from the same tunnel state the window shows.
     ///
     /// Its own lock rather than living in the snapshot: the manager talks to
@@ -175,12 +176,25 @@ impl Engine {
         let roblox_intent = loaded.config.roblox_settings.clone();
         let discord_enabled = loaded.enable_discord_rpc;
 
+        let settings = Arc::new(RwLock::new(loaded));
+        let (settings_save_signal, settings_writer) =
+            crate::settings_writer::start(settings.clone(), |snapshot| {
+                if let Err(error) = settings::save_settings(snapshot) {
+                    log::warn!("could not save settings: {error}");
+                }
+            })
+            .map_err(|error| format!("Could not start settings saving: {error}"))?;
+        // The writer owns only the settings and receiver, not Shared/runtime.
+        // It finishes when Shared drops its sender, without blocking the GUI.
+        drop(settings_writer);
+
         let shared = Arc::new(Shared {
             runtime,
             auth: Arc::new(tokio::sync::Mutex::new(auth)),
             vpn: Arc::new(tokio::sync::Mutex::new(VpnConnection::new())),
             discord: std::sync::Mutex::new(DiscordManager::new(discord_enabled)),
-            settings: RwLock::new(loaded),
+            settings,
+            settings_save_signal,
             snapshot: RwLock::new(Snapshot {
                 uninstall_note: None,
                 uninstall_busy: false,
@@ -455,12 +469,8 @@ impl Engine {
                         if let Ok(mut settings) = shared.settings.write() {
                             settings.auto_reconnect = false;
                             settings.resume_vpn_on_startup = false;
-                            let snapshot = settings.clone();
                             drop(settings);
-                            if let Err(error) = swifttunnel_core::settings::save_settings(&snapshot)
-                            {
-                                log::warn!("could not persist logout settings: {error}");
-                            }
+                            let _ = shared.settings_save_signal.try_send(());
                         }
                         refresh_auth(&shared).await;
                         shared.notify();
@@ -651,9 +661,8 @@ impl Engine {
             // straight back on over a Roblox with no flags left in it.
             if let Ok(mut guard) = shared.settings.write() {
                 guard.config.roblox_settings = RobloxSettingsConfig::default();
-                let snapshot = guard.clone();
                 drop(guard);
-                let _ = settings::save_settings(&snapshot);
+                let _ = shared.settings_save_signal.try_send(());
             }
 
             // Roblox usually outlives its own window, so somebody who believes
@@ -735,9 +744,8 @@ impl Engine {
                 roblox
                     .custom_fflags_json
                     .clone_from(&config.custom_fflags_json);
-                let snapshot = guard.clone();
                 drop(guard);
-                let _ = settings::save_settings(&snapshot);
+                let _ = shared.settings_save_signal.try_send(());
             }
 
             if error.is_none() && restart {
@@ -1053,22 +1061,16 @@ impl Engine {
 
     /// Change a setting and write the file.
     ///
-    /// Saved immediately rather than debounced: the file is shared with the
-    /// full app, and a Lite that held changes in memory would lose them to
-    /// whichever client saved last.
+    /// Wake one writer immediately. Changes while a save is running collapse
+    /// into its next snapshot instead of creating competing threads/writes.
     fn settings(&self, edit: impl FnOnce(&mut AppSettings)) {
-        let snapshot = {
+        {
             let Ok(mut guard) = self.shared.settings.write() else {
                 return;
             };
             edit(&mut guard);
-            guard.clone()
-        };
-        std::thread::spawn(move || {
-            if let Err(error) = settings::save_settings(&snapshot) {
-                log::warn!("could not save settings: {error}");
-            }
-        });
+        }
+        let _ = self.shared.settings_save_signal.try_send(());
     }
 }
 
@@ -1968,19 +1970,8 @@ async fn refresh_auth(shared: &Arc<Shared>) {
 fn friendly_auth_error(error: &swifttunnel_core::auth::AuthError) -> String {
     use swifttunnel_core::auth::AuthError;
     match error {
-        // A wrong password comes back as a 400 from the API, so the text is
-        // the only thing that separates it from a real server fault.
-        AuthError::ApiError(message) => {
-            let lowered = message.to_lowercase();
-            if lowered.contains("invalid")
-                || lowered.contains("credential")
-                || lowered.contains("password")
-            {
-                "Wrong email or password.".to_string()
-            } else {
-                message.clone()
-            }
-        }
+        AuthError::InvalidCredentials => "Wrong email or password.".to_string(),
+        AuthError::ApiError(message) => message.clone(),
         AuthError::NetworkError(_) => {
             "Could not reach SwiftTunnel. Check your connection.".to_string()
         }
@@ -2213,6 +2204,21 @@ fn open_logs() {
 #[cfg(test)]
 mod tests {
     use super::split_message;
+
+    #[test]
+    fn malformed_server_responses_are_not_reported_as_wrong_passwords() {
+        use swifttunnel_core::auth::AuthError;
+        assert_eq!(
+            super::friendly_auth_error(&AuthError::InvalidCredentials),
+            "Wrong email or password."
+        );
+        assert_eq!(
+            super::friendly_auth_error(&AuthError::ApiError(
+                "Invalid authentication response".into()
+            )),
+            "Invalid authentication response"
+        );
+    }
 
     #[test]
     fn region_picker_accepts_new_locations_and_removes_withdrawn_ones() {

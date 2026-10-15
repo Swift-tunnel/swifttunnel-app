@@ -32,6 +32,7 @@ mod gdi;
 mod picker;
 mod preview;
 mod screens;
+mod settings_writer;
 mod single_client;
 mod state;
 mod surface;
