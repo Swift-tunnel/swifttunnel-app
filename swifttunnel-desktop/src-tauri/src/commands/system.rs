@@ -143,21 +143,22 @@ fn reject_reparse_point(path: &Path) -> Result<(), String> {
 #[cfg(windows)]
 fn harden_driver_work_dir_acl(path: &Path) -> Result<(), String> {
     let path_string = path.to_string_lossy().to_string();
-    let output = swifttunnel_core::hidden_command("icacls")
-        .args([
+    let output = swifttunnel_core::run_hidden_command_with_timeout(
+        "icacls",
+        &[
             &path_string,
             "/inheritance:r",
             "/grant:r",
             "*S-1-5-18:(OI)(CI)F",
             "*S-1-5-32-544:(OI)(CI)F",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to harden driver work directory ACLs: {}", e))?;
+        ],
+        Duration::from_secs(30),
+    );
 
-    if output.status.success() {
+    if output.success {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = output.stderr.trim();
         Err(format!(
             "Failed to harden driver work directory ACLs for {}: {}",
             path.display(),
@@ -1365,70 +1366,13 @@ fn run_windows_repair_command(
     args: &[&str],
     timeout: Duration,
 ) -> WindowsRepairCommandOutput {
-    use std::io::Read;
-
-    fn read_pipe_to_string<R: Read>(pipe: Option<R>) -> String {
-        let mut out = String::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_string(&mut out);
-        }
-        out
-    }
-
-    let mut child = match swifttunnel_core::hidden_command(program)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(e) => {
-            return WindowsRepairCommandOutput {
-                success: false,
-                timed_out: false,
-                exit_code: None,
-                stdout: String::new(),
-                stderr: format!("Failed to spawn {program}: {e}"),
-            };
-        }
-    };
-
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return WindowsRepairCommandOutput {
-                    success: status.success(),
-                    timed_out: false,
-                    exit_code: status.code(),
-                    stdout: read_pipe_to_string(child.stdout.take()),
-                    stderr: read_pipe_to_string(child.stderr.take()),
-                };
-            }
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return WindowsRepairCommandOutput {
-                        success: false,
-                        timed_out: true,
-                        exit_code: None,
-                        stdout: read_pipe_to_string(child.stdout.take()),
-                        stderr: read_pipe_to_string(child.stderr.take()),
-                    };
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                return WindowsRepairCommandOutput {
-                    success: false,
-                    timed_out: false,
-                    exit_code: None,
-                    stdout: read_pipe_to_string(child.stdout.take()),
-                    stderr: format!("Failed to wait for {program}: {e}"),
-                };
-            }
-        }
+    let output = swifttunnel_core::run_hidden_command_with_timeout(program, args, timeout);
+    WindowsRepairCommandOutput {
+        success: output.success,
+        timed_out: output.timed_out,
+        exit_code: output.exit_code,
+        stdout: output.stdout,
+        stderr: output.stderr,
     }
 }
 
@@ -2436,6 +2380,39 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("swifttunnel_{label}_{nanos}"));
         fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repair_commands_drain_busy_pipes_and_preserve_deadlines_and_exit_codes() {
+        let script = "for ($i=0; $i -lt 3000; $i++) { [Console]::Out.WriteLine('owned stdout'); [Console]::Error.WriteLine('owned stderr') }";
+        let output = run_windows_repair_command(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", script],
+            Duration::from_secs(10),
+        );
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(output.stdout.lines().count(), 3000);
+        assert_eq!(output.stderr.lines().count(), 3000);
+        let failed = run_windows_repair_command("cmd", &["/C", "exit 42"], Duration::from_secs(2));
+        assert!(!failed.success);
+        assert!(!failed.timed_out);
+        assert_eq!(failed.exit_code, Some(42));
+        let started = std::time::Instant::now();
+        let stalled = run_windows_repair_command(
+            "powershell",
+            &[
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 8",
+            ],
+            Duration::from_secs(1),
+        );
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(stalled.timed_out);
+        assert!(!stalled.success);
+        assert!(stalled.stderr.contains("did not finish within"));
     }
 
     fn touch(path: &Path) {
