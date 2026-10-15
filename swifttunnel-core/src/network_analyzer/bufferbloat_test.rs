@@ -68,7 +68,11 @@ pub async fn run_bufferbloat_test(
     let download_transferred = Arc::new(AtomicBool::new(false));
     let upload_transferred = Arc::new(AtomicBool::new(false));
     let loaded_latency = sample_under_load(
-        download_load_loop(client.clone(), download_transferred.clone()),
+        download_load_loop(
+            client.clone(),
+            download_transferred.clone(),
+            format!("{}?bytes={}", DOWNLOAD_URL, DOWNLOAD_BYTES_PER_REQ),
+        ),
         upload_load_loop(client.clone(), upload_transferred.clone()),
         sample_latency(LOADED_SAMPLES),
     )
@@ -162,10 +166,9 @@ async fn ping_once(target: &str, timeout_ms: u64) -> Option<u32> {
     icmp::ping_ms(target, timeout_ms as u32).await
 }
 
-async fn download_load_loop(client: Client, transferred: Arc<AtomicBool>) {
+async fn download_load_loop(client: Client, transferred: Arc<AtomicBool>, url: String) {
     use futures_util::StreamExt;
 
-    let url = format!("{}?bytes={}", DOWNLOAD_URL, DOWNLOAD_BYTES_PER_REQ);
     debug!("Bufferbloat: download load url {}", url);
 
     loop {
@@ -185,20 +188,28 @@ async fn download_load_loop(client: Client, transferred: Arc<AtomicBool>) {
         }
 
         let mut stream = resp.bytes_stream();
+        let mut received = false;
+        let mut failed = false;
         loop {
             match stream.next().await {
                 Some(Ok(chunk)) => {
                     if !chunk.is_empty() {
+                        received = true;
                         transferred.store(true, Ordering::Relaxed);
                     }
                 }
                 Some(Err(e)) => {
                     debug!("Bufferbloat: download stream error: {}", e);
-                    tokio::time::sleep(RETRY_DELAY).await;
+                    failed = true;
                     break;
                 }
                 None => break,
             }
+        }
+        // Pace retries after EOF too: an empty 200 response is not a working
+        // load stream. Completed non-empty transfers can restart immediately.
+        if failed || !received {
+            tokio::time::sleep(RETRY_DELAY).await;
         }
     }
 }
@@ -246,6 +257,39 @@ async fn upload_load_loop(client: Client, transferred: Arc<AtomicBool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bufferbloat_empty_download_does_not_create_a_fast_retry_loop() {
+        use std::time::Instant;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            let first = Instant::now();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            socket.shutdown().await.unwrap();
+            drop(socket);
+            let _next = listener.accept().await.unwrap();
+            first.elapsed()
+        });
+        let client = Client::builder().no_proxy().build().unwrap();
+        let transferred = Arc::new(AtomicBool::new(false));
+        let worker = tokio::spawn(download_load_loop(client, transferred.clone(), url));
+        let next = tokio::time::timeout(Duration::from_secs(3), server).await;
+        worker.abort();
+        let _ = worker.await;
+        assert!(!transferred.load(Ordering::Relaxed));
+        assert!(
+            next.unwrap().unwrap() >= Duration::from_millis(400),
+            "empty load request retried without a pause"
+        );
+    }
 
     struct LoadWorker(Option<tokio::sync::oneshot::Sender<()>>);
     impl Drop for LoadWorker {
