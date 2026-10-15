@@ -65,7 +65,6 @@ use super::ipv6_recovery::{
 use super::process_cache::DNS_PORT;
 use super::process_cache::{LockFreeProcessCache, ProcessSnapshot};
 use super::process_tracker::{ConnectionKey, Protocol};
-use super::tso_recovery::{delete_tso_marker, restore_tso_from_marker, write_tso_marker};
 use super::{VpnError, VpnResult};
 
 // ============================================================================
@@ -1001,14 +1000,6 @@ pub struct ParallelInterceptor {
     monitor_handle: Option<JoinHandle<()>>,
     /// Cache refresher thread handle
     refresher_handle: Option<JoinHandle<()>>,
-    /// Background TSO-disable thread handle. The disable runs off the main
-    /// path because `Set-NetAdapterAdvancedProperty` can block for 30-60s on a
-    /// hung WMI provider (observed on Realtek RTL8821CE). We join it (with a
-    /// short timeout) before the matching enable runs on disconnect so the two
-    /// PowerShell calls don't race and leave the adapter in a half-configured
-    /// state — otherwise restore-on-disconnect can flip values back before the
-    /// disable even lands.
-    tso_disable_handle: Option<JoinHandle<()>>,
     /// Physical adapter index
     physical_adapter_idx: Option<usize>,
     /// Physical adapter internal name (GUID) for cross-thread lookup
@@ -1019,8 +1010,6 @@ pub struct ParallelInterceptor {
     physical_adapter_kind: Option<String>,
     /// Physical adapter interface index (IfIndex) for default-route validation
     physical_adapter_if_index: Option<u32>,
-    /// Whether we disabled TSO on the physical adapter (to restore on cleanup)
-    tso_was_disabled: bool,
     /// Whether we disabled IPv6 on the physical adapter (to restore on cleanup)
     ipv6_was_disabled: bool,
     /// Interface index of the adapter with the default route (for validation)
@@ -1144,14 +1133,12 @@ impl ParallelInterceptor {
             worker_handles: Vec::new(),
             reader_handle: None,
             monitor_handle: None,
-            tso_disable_handle: None,
             refresher_handle: None,
             physical_adapter_idx: None,
             physical_adapter_name: None,
             physical_adapter_friendly_name: None,
             physical_adapter_kind: None,
             physical_adapter_if_index: None,
-            tso_was_disabled: false,
             ipv6_was_disabled: false,
             default_route_if_index: None,
             default_route_next_hop: None,
@@ -3483,13 +3470,6 @@ impl ParallelInterceptor {
         )
     }
 
-    /// Run a PowerShell command with a timeout.
-    ///
-    /// Returns true if command succeeded, false otherwise.
-    fn run_powershell_with_timeout(script: &str, timeout_secs: u64) -> bool {
-        Self::run_powershell_with_timeout_capture(script, timeout_secs).success
-    }
-
     fn build_winpkfilter_binding_script(
         if_index: Option<u32>,
         adapter_name_hint: Option<&str>,
@@ -4043,210 +4023,6 @@ impl ParallelInterceptor {
                 Err(err)
             }
         }
-    }
-
-    /// Disable TCP Segmentation Offload (TSO/LSO) on the physical adapter
-    ///
-    /// Modern NICs use TSO to create large "super-packets" (up to 64KB) that get
-    /// segmented by hardware. When we intercept at the NDIS layer, we see these
-    /// un-segmented packets BEFORE the NIC processes them. Our buffers are sized
-    /// for normal MTU packets (1600 bytes), so TSO packets get truncated and corrupt
-    /// the TCP stream.
-    ///
-    /// Disabling TSO forces the OS to segment packets in software before they reach
-    /// the NIC, ensuring all packets are MTU-sized when we intercept them.
-    pub fn disable_adapter_offload(&mut self) -> VpnResult<()> {
-        let friendly_name = match &self.physical_adapter_friendly_name {
-            Some(name) => name.clone(),
-            None => {
-                log::warn!("No physical adapter friendly name available, skipping TSO disable");
-                return Ok(());
-            }
-        };
-
-        log::info!("Disabling TSO/LSO on adapter: {}", friendly_name);
-
-        // Disable Large Send Offload v2 for IPv4 and IPv6.
-        //
-        // We deliberately do NOT touch *TCPChecksumOffload* / *UDPChecksumOffload*
-        // here, even though the pre-2026-04 builds did. Each
-        // `Set-NetAdapterAdvancedProperty` call notifies the NDIS stack via WMI
-        // and on many real-world NICs (Realtek, Killer, USB-Ethernet, some
-        // Intel) each property change triggers a transient adapter reset to
-        // apply the new value — the same family of failure mode documented for
-        // `Disable-NetAdapterBinding ms_tcpip6` further down. Six sequential
-        // resets in a few seconds was thrashing the NIC enough to drop the
-        // IPv4 default route mid-connect (tushi report, 2026-04 stlog: route
-        // disappeared 4s after a successful relay handshake while this
-        // background script was still landing changes). Cutting the script
-        // from 6 properties to 2 cuts that thrash by ~67%.
-        //
-        // Tunneled correctness does not depend on disabling NIC checksum
-        // offload — `fix_packet_checksums` (this file, ~7350) zeros and
-        // recomputes IP/TCP/UDP checksums in software on every forwarded
-        // packet (callers at ~4605 outbound and ~5443 inbound). Bypassed
-        // (non-tunneled) traffic is unaffected: the NIC stamps checksums on
-        // the way out exactly like it does on a non-SwiftTunnel system.
-        let script = format!(
-            r#"
-            $ErrorActionPreference = 'SilentlyContinue'
-            $adapter = '{}'
-
-            # Disable LSO v2 IPv4
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4' -RegistryValue 0 2>$null
-
-            # Disable LSO v2 IPv6
-            Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 0 2>$null
-
-            Write-Host 'Offload disabled'
-            "#,
-            friendly_name.replace("'", "''") // Escape single quotes
-        );
-
-        // Mark as "disabled from our side" eagerly so `enable_adapter_offload`
-        // still runs its restore path on disconnect even if the background
-        // capture+disable thread hasn't finished yet. `tso_recovery` keeps the
-        // marker-file semantics correct because capture runs before disable
-        // within the thread (see ordering below).
-        self.tso_was_disabled = true;
-
-        // Run capture + disable off the connect path. On machines with a slow
-        // or hung WMI provider (Realtek RTL8821CE, 2026-04-19 incident), both
-        // `Get-NetAdapterAdvancedProperty` (the marker capture, 6× per run)
-        // and `Set-NetAdapterAdvancedProperty` can block for 30-60s; doing
-        // them synchronously stalls the connect flow for up to a minute even
-        // though the tunnel is otherwise ready. TSO-on-intercept is a
-        // performance concern, not a correctness one for the first few
-        // packets, so the whole PowerShell dance runs in the background and
-        // `enable_adapter_offload` joins this handle (bounded) on disconnect.
-        //
-        // Ordering inside the thread is load-bearing: `write_tso_marker` must
-        // complete BEFORE any `Set-NetAdapterAdvancedProperty` runs, otherwise
-        // a crash between disable and capture would leave the adapter in our
-        // modified state with no record of the originals — and startup
-        // recovery would skip the adapter (no marker) or restore generic
-        // defaults (legacy marker fallback). Capturing first means any marker
-        // that exists after a crash has the real pre-disable values.
-        let friendly_for_thread = friendly_name.clone();
-        let handle = std::thread::Builder::new()
-            .name("swifttunnel-tso-disable".into())
-            .spawn(move || {
-                // 1. Capture originals (6× PowerShell Get, each now bounded
-                //    by ADAPTER_QUERY_TIMEOUT_SECS inside tso_recovery).
-                write_tso_marker(&friendly_for_thread);
-
-                // 2. Apply the disable. 3s cap; anything longer is WMI hung
-                //    and not worth waiting for.
-                if ParallelInterceptor::run_powershell_with_timeout(&script, 3) {
-                    log::info!(
-                        "TSO/LSO disabled successfully on {} (background)",
-                        friendly_for_thread
-                    );
-                } else {
-                    log::warn!(
-                        "Failed to disable TSO on {} (non-fatal): adapter may not support these \
-                         settings, or WMI is unresponsive. Proceeding with tunnel anyway.",
-                        friendly_for_thread
-                    );
-                }
-            })
-            .map_err(|e| {
-                // Spawning a thread should never fail under normal load;
-                // if it does, fall back to blocking to keep behavior safe.
-                VpnError::SplitTunnel(format!("Failed to spawn TSO disable thread: {}", e))
-            })?;
-
-        // Keep the handle so `enable_adapter_offload` can join (bounded) before
-        // it runs its own PowerShell — avoids a disable-after-enable race where
-        // a slow WMI provider would clobber the restored values.
-        self.tso_disable_handle = Some(handle);
-
-        Ok(())
-    }
-
-    /// Re-enable TCP Segmentation Offload on the physical adapter
-    ///
-    /// Called when the VPN disconnects to restore normal NIC performance.
-    pub fn enable_adapter_offload(&mut self) {
-        if !self.tso_was_disabled {
-            return;
-        }
-
-        // Bound-wait for the background disable thread to finish so the two
-        // PowerShell invocations don't race. If the disable is still stuck in
-        // a hung WMI call, we give up after ~3.5s and proceed — the marker
-        // written eagerly before spawning still captures the original values
-        // for restore, so correctness is preserved.
-        if let Some(handle) = self.tso_disable_handle.take() {
-            let start = std::time::Instant::now();
-            let timeout = std::time::Duration::from_millis(3500);
-            let poll = std::time::Duration::from_millis(50);
-            loop {
-                if handle.is_finished() {
-                    let _ = handle.join();
-                    break;
-                }
-                if start.elapsed() >= timeout {
-                    log::warn!(
-                        "TSO disable thread still running after {}ms — detaching and proceeding \
-                         with restore (marker will guide the correct values)",
-                        timeout.as_millis()
-                    );
-                    // Intentionally drop the JoinHandle without joining —
-                    // detaches the OS thread, PowerShell finishes in the
-                    // background without blocking disconnect.
-                    break;
-                }
-                std::thread::sleep(poll);
-            }
-        }
-
-        let friendly_name = match &self.physical_adapter_friendly_name {
-            Some(name) => name.clone(),
-            None => return,
-        };
-
-        log::info!("Re-enabling TSO/LSO on adapter: {}", friendly_name);
-
-        match restore_tso_from_marker() {
-            Some(true) => {
-                log::info!("TSO/LSO restored to original state on {}", friendly_name);
-                delete_tso_marker();
-            }
-            Some(false) => {
-                log::warn!("Failed to restore TSO - will retry on next launch");
-            }
-            None => {
-                // Fallback restore (no marker file). Mirrors the disable
-                // script: only LSO is re-enabled because that's all we
-                // disable. The marker-driven path (`restore_tso_from_marker`)
-                // still emits checksum-offload restore commands for legacy
-                // markers from pre-2026-04 builds, so users who upgrade
-                // mid-session don't end up with checksum offload stuck off.
-                let script = format!(
-                    r#"
-                    $ErrorActionPreference = 'SilentlyContinue'
-                    $adapter = '{}'
-
-                    # Re-enable LSO v2
-                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4' -RegistryValue 1 2>$null
-                    Set-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv6' -RegistryValue 1 2>$null
-
-                    Write-Host 'Offload enabled'
-                    "#,
-                    friendly_name.replace("'", "''")
-                );
-
-                if Self::run_powershell_with_timeout(&script, 5) {
-                    log::info!("TSO/LSO re-enabled on {}", friendly_name);
-                    delete_tso_marker();
-                } else {
-                    log::warn!("Failed to re-enable TSO - manual re-enable may be needed");
-                }
-            }
-        }
-
-        self.tso_was_disabled = false;
     }
 
     #[cfg(target_os = "windows")]
@@ -5089,14 +4865,8 @@ impl ParallelInterceptor {
             injected
         );
 
-        // We no longer disable LSO on connect (see comment in `start`), so
-        // there's nothing to re-enable here for fresh sessions. Calling
-        // `enable_adapter_offload` regardless is still safe — the method
-        // short-circuits when `tso_was_disabled` is false — but we leave it
-        // out so the disconnect path doesn't issue any
-        // `Set-NetAdapterAdvancedProperty` calls at all and runs faster.
-        // Marker-driven recovery for legacy installs continues to run via
-        // `tso_recovery::recover_tso_on_startup` at app launch.
+        // Offload settings are left unchanged. Startup recovery still handles
+        // records left by older versions that disabled LSO.
 
         // Re-enable IPv6 on physical adapter
         self.enable_ipv6();
