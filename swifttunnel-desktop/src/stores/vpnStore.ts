@@ -1108,9 +1108,12 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     return false;
   }),
 
-  fetchFreeTier: async () => {
+  fetchFreeTier: coalesceSessionRead(async () => {
+    const attempt = connectAttemptSeq;
+    const revision = sessionRevision;
     try {
       const quota = await vpnGetFreeTier();
+      if (!isCurrentConnectAttempt(attempt) || revision !== sessionRevision) return;
       const incoming = quota.remaining_seconds;
 
       // Successful lease refreshes update this authoritative snapshot. The
@@ -1127,7 +1130,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         dedupeKey: "vpn-fetch-free-tier",
       });
     }
-  },
+  }),
 
   // Display-only smoothing. Native core owns warnings and enforces the last
   // server-reported budget even while the WebView is hidden or suspended.
@@ -1164,7 +1167,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     }
   }),
 
-  fetchDiagnostics: async () => {
+  fetchDiagnostics: coalesceSessionRead(async () => {
     const attempt = connectAttemptSeq;
     const revision = sessionRevision;
     try {
@@ -1176,7 +1179,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         dedupeKey: "vpn-fetch-diagnostics",
       });
     }
-  },
+  }),
 
   handleStateEvent: (event) => {
     // An event observed after a poll started takes precedence over its reply.

@@ -1378,6 +1378,39 @@ describe("stores/vpnStore", () => {
 
   // Native core owns warnings and cutoff, including while WebView is hidden.
   describe("free tier enforcement", () => {
+    it("shares pending quota reads and ignores the previous session's reply", async () => {
+      const first = deferred<{ remaining_seconds: number; limit_seconds: number; grace_seconds: null }>();
+      vpnGetFreeTier.mockReturnValueOnce(first.promise).mockResolvedValue({ remaining_seconds: 45, limit_seconds: 10800, grace_seconds: null });
+      const store = await loadStore();
+      store.getState().handleStateEvent(connectedState("mumbai"));
+      const pending = Array.from({ length: 20 }, () => store.getState().fetchFreeTier());
+      expect(vpnGetFreeTier).toHaveBeenCalledOnce();
+      store.getState().handleStateEvent(disconnectedState());
+      await store.getState().fetchFreeTier();
+      expect(vpnGetFreeTier).toHaveBeenCalledTimes(2);
+      first.resolve({ remaining_seconds: 10800, limit_seconds: 10800, grace_seconds: null });
+      await Promise.all(pending);
+      expect(store.getState().freeTierRemaining).toBe(45);
+      await store.getState().fetchFreeTier();
+      expect(vpnGetFreeTier).toHaveBeenCalledTimes(3);
+    });
+
+    it("shares stuck diagnostics reads without blocking a new session's read", async () => {
+      const first = deferred<null>();
+      vpnGetDiagnostics.mockReturnValueOnce(first.promise).mockResolvedValue(null);
+      const store = await loadStore();
+      store.getState().handleStateEvent(connectedState("mumbai"));
+      const pending = Array.from({ length: 20 }, () => store.getState().fetchDiagnostics());
+      expect(vpnGetDiagnostics).toHaveBeenCalledOnce();
+      store.getState().handleStateEvent(disconnectedState());
+      await store.getState().fetchDiagnostics();
+      expect(vpnGetDiagnostics).toHaveBeenCalledTimes(2);
+      first.resolve(null);
+      await Promise.all(pending);
+      await store.getState().fetchDiagnostics();
+      expect(vpnGetDiagnostics).toHaveBeenCalledTimes(3);
+    });
+
     async function connectedWithRemaining(remaining: number) {
       const useVpnStore = await loadStore();
       useVpnStore.setState({
