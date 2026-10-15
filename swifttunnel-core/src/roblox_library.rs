@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -177,25 +177,8 @@ impl GameLibrary {
         let parent = path.parent().ok_or("Invalid game-library location.")?;
         fs::create_dir_all(parent).map_err(|e| format!("Could not save your game library: {e}"))?;
         let bytes = serde_json::to_vec(self).map_err(|e| e.to_string())?;
-        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        let mut created = false;
-        let result = (|| -> std::io::Result<()> {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
-            created = true;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temporary, path)
-        })();
-        // Only remove a file we created; an existing temporary file belongs to
-        // another operation or is recoverable data from an interrupted save.
-        if result.is_err() && created {
-            let _ = fs::remove_file(&temporary);
-        }
-        result.map_err(|e| format!("Could not save your game library: {e}"))
+        crate::atomic_file::replace(path, &bytes)
+            .map_err(|e| format!("Could not save your game library: {e}"))
     }
 
     pub fn record_join(
@@ -777,5 +760,29 @@ mod tests {
         lib.save(&path).unwrap();
         assert_eq!(GameLibrary::load(&path).unwrap().entries, lib.entries);
         fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn an_interrupted_old_save_does_not_block_favourites_or_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-library-recovery-{:016x}",
+            rand::random::<u64>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("library.json");
+        let leftover = path.with_extension(format!("{}.tmp", std::process::id()));
+        fs::write(&leftover, b"interrupted save").unwrap();
+        let mut library = GameLibrary::default();
+        library
+            .record_join("1818", JOB, RobloxClient::Standard, 20)
+            .unwrap();
+        library.save(&path).unwrap();
+        library
+            .set_favourite("1818", RobloxClient::Standard, true)
+            .unwrap();
+        library.save(&path).unwrap();
+        assert_eq!(GameLibrary::load(&path).unwrap().entries, library.entries);
+        assert_eq!(fs::read(&leftover).unwrap(), b"interrupted save");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

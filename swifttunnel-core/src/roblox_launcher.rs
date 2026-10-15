@@ -1,11 +1,7 @@
 //! Bounded local launcher preferences.
 use crate::roblox_library::valid_place_id;
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    io::{Read, Write},
-    path::PathBuf,
-};
+use std::{fs, io::Read, path::PathBuf};
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MatchMode {
@@ -118,22 +114,7 @@ pub fn save<T: Serialize>(name: &str, value: &T) -> Result<(), String> {
     }
     fs::create_dir_all(path.parent().ok_or("Invalid launcher settings path.")?)
         .map_err(|e| e.to_string())?;
-    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .map_err(|e| e.to_string())?;
-    let result = (|| {
-        f.write_all(&bytes)?;
-        f.sync_all()?;
-        drop(f);
-        fs::rename(&temp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result.map_err(|e| e.to_string())
+    crate::atomic_file::replace(&path, &bytes).map_err(|e| e.to_string())
 }
 pub fn qualifies(server: &crate::roblox_directory::GameServer, minimum_free_slots: u32) -> bool {
     server.availability == crate::roblox_directory::Availability::Available

@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
 };
 #[derive(Serialize, Deserialize)]
@@ -62,22 +62,7 @@ fn read(path: &Path) -> Result<Option<String>, String> {
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     crate::roblox_native_launch::safe_path(path)?;
     fs::create_dir_all(path.parent().ok_or("Invalid flags path.")?).map_err(|e| e.to_string())?;
-    let temp = path.with_extension(format!("{}.launch.tmp", std::process::id()));
-    let mut f = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&temp)
-        .map_err(|e| e.to_string())?;
-    let result = (|| {
-        f.write_all(bytes)?;
-        f.sync_all()?;
-        drop(f);
-        fs::rename(&temp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temp);
-    }
-    result.map_err(|e| e.to_string())
+    crate::atomic_file::replace(path, bytes).map_err(|e| e.to_string())
 }
 fn hash(raw: &str) -> String {
     format!("{:x}", Sha256::digest(raw.as_bytes()))

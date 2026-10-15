@@ -213,7 +213,6 @@ fn read(path: &Path) -> Result<String, String> {
     })
 }
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -230,22 +229,8 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
             }
         }
     }
-    let temporary = path.with_extension(format!("{}.game-profile.tmp", std::process::id()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|e| format!("Could not save game preferences: {e}"))?;
-    let result = (|| -> std::io::Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result.map_err(|e| format!("Could not save game preferences: {e}"))
+    crate::atomic_file::replace(path, bytes)
+        .map_err(|e| format!("Could not save game preferences: {e}"))
 }
 fn pattern(property: Property) -> regex_lite::Regex {
     regex_lite::Regex::new(&format!(

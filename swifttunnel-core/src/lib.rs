@@ -3,6 +3,7 @@
 //! Core functionality for VPN, authentication, system optimization,
 //! and networking. Used by the Tauri desktop app.
 
+mod atomic_file;
 pub mod auth;
 pub mod autostart;
 pub mod discord_rpc;
