@@ -26,6 +26,7 @@ import {
 import { SupportToolsSection } from "../support/SupportToolsSection";
 import { LauncherImportPanel } from "./LauncherImportPanel";
 import type { AppSettings, UpdateChannel } from "../../lib/types";
+import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 
 declare const __APP_VERSION__: string;
 
@@ -74,10 +75,11 @@ export function SettingsTab() {
 
   function set(partial: Partial<AppSettings>, options?: { toast?: boolean }) {
     update(partial);
-    save();
-    if (options?.toast !== false) {
-      addToast({ type: "success", message: "Settings saved" });
-    }
+    void save(true).then(() => {
+      if (options?.toast !== false) addToast({ type: "success", message: "Settings saved" });
+    }).catch(() => {
+      // SettingsSaveNotice retains the failure and offers Retry saving.
+    });
   }
 
   function setQuietDebounced(partial: Partial<AppSettings>) {
@@ -102,12 +104,8 @@ export function SettingsTab() {
 
   useEffect(() => {
     void fetchVpnDiagnostics();
-    if (vpnState !== "connected") return;
-    const id = setInterval(() => {
-      void fetchVpnDiagnostics();
-    }, 3000);
-    return () => clearInterval(id);
   }, [fetchVpnDiagnostics, vpnState]);
+  useFocusAwareInterval(() => void fetchVpnDiagnostics(), 3000, { enabled: vpnState === "connected" });
 
   const updateLabel = (() => {
     switch (updaterStatus) {
