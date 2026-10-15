@@ -2860,6 +2860,9 @@ impl VpnConnection {
             let mut refresh_tick =
                 tokio::time::interval_at(first_tick, Duration::from_millis(REFRESH_INTERVAL_MS));
             let mut stop_tick = tokio::time::interval(Duration::from_millis(100));
+            // Rebinding or resuming the PC must not replay old scans in a burst.
+            refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            stop_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut etw_rx = etw_tokio_rx;
 
             // Adapter-reset watchdog. Armed for the first
@@ -3058,7 +3061,7 @@ impl VpnConnection {
                                     if transitioned {
                                         {
                                             let mut driver_guard = driver.lock().await;
-                                            if let Err(e) = driver_guard.close() {
+                                            if let Err(e) = blocking_driver_step(|| driver_guard.close()) {
                                                 log::warn!(
                                                     "V3: watchdog rollback cleanup — driver.close() returned {}",
                                                     e
@@ -3089,7 +3092,7 @@ impl VpnConnection {
                         }
 
                         let mut driver_guard = driver.lock().await;
-                        match driver_guard.maybe_rebind_on_default_route_change() {
+                        match blocking_driver_step(|| driver_guard.maybe_rebind_on_default_route_change()) {
                             Ok(true) => log::info!("V3: Split tunnel adapter re-bound to active interface"),
                             Ok(false) => {}
                             Err(e) => log::warn!("V3: Split tunnel adapter rebind failed: {}", e),
@@ -3190,7 +3193,7 @@ impl VpnConnection {
                                 if transitioned {
                                     {
                                         let mut driver_guard = driver.lock().await;
-                                        if let Err(e) = driver_guard.close() {
+                                        if let Err(e) = blocking_driver_step(|| driver_guard.close()) {
                                             log::warn!(
                                                 "V3: recovery cleanup — driver.close() returned {}",
                                                 e
@@ -3267,7 +3270,7 @@ impl VpnConnection {
                                         }
                                         {
                                             let mut driver_guard = driver.lock().await;
-                                            if let Err(e) = driver_guard.close() {
+                                            if let Err(e) = blocking_driver_step(|| driver_guard.close()) {
                                                 log::warn!(
                                                     "V3: relay recovery cleanup - driver.close() returned {}",
                                                     e
