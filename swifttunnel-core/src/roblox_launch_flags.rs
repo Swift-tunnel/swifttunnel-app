@@ -18,6 +18,8 @@ struct Journal {
     entries: Vec<Entry>,
     flags: HashMap<String, String>,
 }
+const RESTORE_ERROR: &str =
+    "Couldn't restore your Roblox FastFlags. Contact support and include your log.";
 fn journal_path() -> Result<PathBuf, String> {
     Ok(crate::roblox_library::library_path()?.with_file_name("native-launch-flags.json"))
 }
@@ -45,7 +47,13 @@ fn read(path: &Path) -> Result<Option<String>, String> {
         Err(e) => return Err(e.to_string()),
     }
     if bytes.len() > limit {
-        return Err("The flags recovery file is too large. It was kept.".into());
+        log::warn!(
+            "FastFlags file exceeds read limit of {limit} bytes: {}",
+            path.display()
+        );
+        return Err(
+            "Couldn't read your Roblox FastFlags. Contact support and include your log.".into(),
+        );
     }
     String::from_utf8(bytes)
         .map(Some)
@@ -142,15 +150,20 @@ pub fn restore() -> Result<bool, String> {
     let Some(raw) = read(&journal_path()?)? else {
         return Ok(false);
     };
-    let journal: Journal = serde_json::from_str(&raw)
-        .map_err(|_| "Invalid native flags recovery journal; it was kept.")?;
+    let journal: Journal = serde_json::from_str(&raw).map_err(|error| {
+        log::warn!("Native FastFlags recovery record could not be decoded; retained for inspection: {error}");
+        RESTORE_ERROR
+    })?;
     if journal.entries.len() > 4
         || journal
             .entries
             .iter()
             .any(|e| !allowed(&e.path) || e.applied.len() != 64)
     {
-        return Err("Invalid native flags recovery path; the journal was kept.".into());
+        log::warn!(
+            "Native FastFlags recovery record failed path or hash validation; retained for inspection"
+        );
+        return Err(RESTORE_ERROR.into());
     }
     for e in journal.entries {
         restore_entry(e)?;
@@ -174,10 +187,13 @@ pub fn diagnostic() -> Result<Option<String>, String> {
     let Some(raw) = read(&journal_path()?)? else {
         return Ok(None);
     };
-    let journal: Journal = serde_json::from_str(&raw)
-        .map_err(|_| "The launch flags recovery journal could not be read.")?;
+    let journal: Journal = serde_json::from_str(&raw).map_err(|error| {
+        log::warn!("Native FastFlags recovery diagnostic could not decode record: {error}");
+        RESTORE_ERROR
+    })?;
     if journal.entries.len() > 4 || journal.entries.iter().any(|e| !allowed(&e.path)) {
-        return Err("Invalid launch flags recovery path.".into());
+        log::warn!("Native FastFlags recovery diagnostic rejected record paths");
+        return Err(RESTORE_ERROR.into());
     }
     for entry in &journal.entries {
         if read(&entry.path)?
