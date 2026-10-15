@@ -15,8 +15,13 @@ const allowed = new Set<string>(FLAG_KEYS);
 export const MESH_FLAGS = FLAG_KEYS.filter(k => k.startsWith("DFIntCSG"));
 export const RENDERER_FLAGS = ["FFlagDebugGraphicsPreferD3D11", "FFlagDebugGraphicsPreferVulkan", "FFlagDebugGraphicsPreferOpenGL"];
 export function booleanFlag(key: string) { return key.startsWith("FFlag") || key.startsWith("DFFlag"); }
+function oversizedFlags(raw: string): boolean {
+  // Reject a large paste before allocating another full UTF-8 copy or parsing
+  // it for the editor, including while flag management is switched off.
+  return raw.length > 8192 || new TextEncoder().encode(raw).length > 8192;
+}
 export function validateCustomFflags(enabled: boolean, raw: string): string | null {
-  if (new TextEncoder().encode(raw).length > 8192) return "FastFlags must be under 8 KB.";
+  if (oversizedFlags(raw)) return "FastFlags must be under 8 KB.";
   if (!enabled) return null;
   let value: unknown;
   try { value = JSON.parse(raw); } catch { return "FastFlags must be valid JSON."; }
@@ -34,6 +39,7 @@ export function validateCustomFflags(enabled: boolean, raw: string): string | nu
   return null;
 }
 export function parseFlags(raw: string): FlagMap {
+  if (oversizedFlags(raw)) return {};
   try { const value = JSON.parse(raw); return value && !Array.isArray(value) && typeof value === "object" ? value : {}; }
   catch { return {}; }
 }

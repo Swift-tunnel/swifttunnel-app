@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { FLAG_KEYS, flagPreset, patchFlags, rendererPatch, validateCustomFflags } from "./fastFlags";
+import { FLAG_KEYS, flagPreset, parseFlags, patchFlags, rendererPatch, validateCustomFflags } from "./fastFlags";
 describe("FastFlags editor validation", () => {
+  it("does not expand oversized drafts into editable rows", () => {
+    for (const raw of [
+      JSON.stringify({ FFlagDebugSkyGray: "x".repeat(2 * 1024 * 1024) }),
+      JSON.stringify({ FFlagDebugSkyGray: "中".repeat(3000) }),
+    ]) {
+      expect(parseFlags(raw)).toEqual({});
+      expect(validateCustomFflags(false, raw)).toMatch(/8 KB/);
+    }
+    expect(parseFlags('{"FFlagDebugSkyGray":true}')).toEqual({ FFlagDebugSkyGray: true });
+  });
   it("rejects unknown flags, nested values and invalid boolean or integer values", () => {
     for (const value of [ {FFlagUnknown:true}, {FFlagDebugSkyGray:1}, {DFIntTextureQualityOverride:{}}, {DFIntTextureQualityOverride:1.5}, {DFIntTextureQualityOverride:true}, {DFIntTextureQualityOverride:1000001} ]) expect(validateCustomFflags(true,JSON.stringify(value))).toBeTruthy();
   });
