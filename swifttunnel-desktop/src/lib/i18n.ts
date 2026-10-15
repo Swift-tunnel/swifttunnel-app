@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { MAX_TRANSLATION_CACHE, MAX_TRANSLATION_SOURCE, TranslationCache } from "./translationCache";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Runtime UI translation.
@@ -8,14 +9,17 @@ import { invoke } from "@tauri-apps/api/core";
 // command (Google gtx, bypasses the webview CSP and batches), then swap the
 // node values. Originals are remembered so switching back to English restores
 // them, and a debounced MutationObserver re-translates anything React re-renders
-// or newly mounts (tab switches). Everything is cached per language, so after
-// the first pass a language switch is instant and offline.
+// or newly mounts (tab switches). Recent translations are cached per language
+// so revisiting ordinary controls does not require another network request.
 // ────────────────────────────────────────────────────────────────────────────
 
 const STORAGE_KEY = "st.lang";
 const CACHE_PREFIX = "st.i18n.";
 const BATCH_SIZE = 40;
 const DEBOUNCE_MS = 300;
+const MAX_BATCH_BYTES = 24 * 1024;
+const MAX_LANGUAGES = 8;
+const MAX_FAILED_STRINGS = 2048;
 
 const SKIP_TAGS = new Set([
   "SCRIPT",
@@ -37,14 +41,15 @@ const SKIP_TAGS = new Set([
 
 // Weak keys let removed tabs and replaced graph labels be collected. Remember
 // our last write too, so a later React update becomes the new source text.
-const originals = new WeakMap<Text, { original: string; applied: string }>();
+const originals = new WeakMap<Text, { original: string; applied: string; lang: string; cacheEpoch: number }>();
 /** per-language cache: englishCore → translatedCore. */
-const memCache = new Map<string, Map<string, string>>();
+const memCache = new Map<string, TranslationCache>();
+let cacheEpoch = 0;
 /**
  * `lang\u0000string` pairs the translate call threw on this session. A thrown
  * request caches nothing, so without this a string the service always rejects
  * gets re-requested on every single pass, the UI looks like it's re-translating
- * forever and never settling. Deliberately in-memory only: a restart retries.
+ * forever and never settling. History is bounded and in-memory only.
  */
 const failedStrings = new Set<string>();
 
@@ -56,21 +61,25 @@ let rerunRequested = false;
 /** Bumped on every language switch to invalidate in-flight translate passes. */
 let epoch = 0;
 
+function checkedLanguage(lang: string | null): string {
+  return lang && lang.length <= 16 && /^[a-z]+(?:-[a-z]+)*$/i.test(lang) ? lang : "en";
+}
+
 export function getStoredLang(): string {
   try {
-    return localStorage.getItem(STORAGE_KEY) || "en";
+    return checkedLanguage(localStorage.getItem(STORAGE_KEY));
   } catch {
     return "en";
   }
 }
 
-function langCache(lang: string): Map<string, string> {
+function langCache(lang: string): TranslationCache {
   let m = memCache.get(lang);
   if (!m) {
-    m = new Map();
+    m = new TranslationCache();
     try {
       const raw = localStorage.getItem(CACHE_PREFIX + lang);
-      if (raw && raw.length <= 1024 * 1024) {
+      if (raw && raw.length <= MAX_TRANSLATION_CACHE) {
         const saved: unknown = JSON.parse(raw);
         if (saved && typeof saved === "object" && !Array.isArray(saved)) {
           for (const [key, value] of Object.entries(saved)) {
@@ -85,9 +94,18 @@ function langCache(lang: string): Map<string, string> {
     } catch {
       // corrupt/unavailable cache, start empty.
     }
-    memCache.set(lang, m);
+    if (memCache.size >= MAX_LANGUAGES) memCache.delete(memCache.keys().next().value!);
   }
+  memCache.delete(lang);
+  memCache.set(lang, m);
   return m;
+}
+
+function rememberFailure(lang: string, source: string) {
+  const key = `${lang}\u0000${source}`;
+  failedStrings.delete(key);
+  if (failedStrings.size >= MAX_FAILED_STRINGS) failedStrings.delete(failedStrings.values().next().value!);
+  failedStrings.add(key);
 }
 
 function persistCache(lang: string) {
@@ -120,6 +138,7 @@ function isProtectedIdentifier(t: string): boolean {
 }
 
 function translatable(value: string): boolean {
+  if (value.length > MAX_TRANSLATION_SOURCE) return false;
   const t = value.trim();
   if (t.length < 2) return false;
   if (MEASUREMENT_RE.test(t)) return false;
@@ -157,58 +176,75 @@ function collectTextNodes(): Text[] {
   return out;
 }
 
-async function translatePerItem(chunk: string[], lang: string, cache: Map<string, string>, passEpoch: number) {
+async function translatePerItem(chunk: string[], lang: string, cache: TranslationCache, passEpoch: number, failed: Set<string>) {
   for (const orig of chunk) {
     if (epoch !== passEpoch) return;
     if (cache.has(orig)) continue;
     try {
       const t = await invoke<string>("i18n_translate", { text: orig, targetLang: lang });
+      if (epoch !== passEpoch) return;
       cache.set(orig, t.trim() || orig);
     } catch {
+      if (epoch !== passEpoch) return;
       // Don't retry this one for the rest of the session.
-      failedStrings.add(`${lang}\u0000${orig}`);
+      rememberFailure(lang, orig);
+      failed.add(orig);
     }
   }
 }
 
 async function fetchTranslations(strings: string[], lang: string) {
+  const failed = new Set<string>();
   const passEpoch = epoch;
   const cache = langCache(lang);
   const need = [...new Set(strings)].filter(
     (s) => s && !cache.has(s) && !failedStrings.has(`${lang}\u0000${s}`),
   );
-  if (!need.length) return;
+  if (!need.length) return failed;
 
   // Multi-line strings can't be safely batched (newline is the delimiter).
   const oneLine = need.filter((s) => !s.includes("\n"));
   const multiLine = need.filter((s) => s.includes("\n"));
+  const encoder = new TextEncoder();
 
-  for (let i = 0; i < oneLine.length; i += BATCH_SIZE) {
-    if (epoch !== passEpoch) return;
-    const chunk = oneLine.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < oneLine.length;) {
+    if (epoch !== passEpoch) return failed;
+    const chunk: string[] = [];
+    let bytes = 0;
+    while (i < oneLine.length && chunk.length < BATCH_SIZE) {
+      const next = oneLine[i];
+      const size = encoder.encode(next).byteLength + (chunk.length ? 1 : 0);
+      if (chunk.length && bytes + size > MAX_BATCH_BYTES) break;
+      chunk.push(next);
+      bytes += size;
+      i++;
+    }
     try {
       const res = await invoke<string>("i18n_translate", {
         text: chunk.join("\n"),
         targetLang: lang,
       });
+      if (epoch !== passEpoch) return failed;
       const lines = res.split("\n");
       if (lines.length === chunk.length) {
         chunk.forEach((orig, idx) => cache.set(orig, lines[idx].trim() || orig));
       } else {
         // Segment count drifted, fall back to per-item for guaranteed alignment.
-        await translatePerItem(chunk, lang, cache, passEpoch);
+        await translatePerItem(chunk, lang, cache, passEpoch, failed);
       }
     } catch {
+      if (epoch !== passEpoch) return failed;
       // An unavailable/rate-limited service cannot be fixed by retrying every
       // individual label. Keep English this session; reset/restart retries.
-      need.forEach(orig => failedStrings.add(`${lang}\u0000${orig}`));
+      need.forEach(orig => { rememberFailure(lang, orig); failed.add(orig); });
       persistCache(lang);
-      return;
+      return failed;
     }
   }
 
-  await translatePerItem(multiLine, lang, cache, passEpoch).catch(() => {});
-  persistCache(lang);
+  await translatePerItem(multiLine, lang, cache, passEpoch, failed).catch(() => {});
+  if (epoch === passEpoch) persistCache(lang);
+  return failed;
 }
 
 /**
@@ -229,16 +265,17 @@ function applyCached(lang: string): string[] {
     }
     const { lead, core: englishCore, trail } = splitWs(source);
     if (!translatable(source)) continue;
+    // Evicting a cached string must not re-request a translation already on
+    // this live node. Weak keys do not retain pages after navigation.
+    if (known && raw === known.applied && known.lang === lang && known.cacheEpoch === cacheEpoch) continue;
     const translated = cache.get(englishCore);
     if (translated === undefined) {
       missing.push(englishCore);
       continue;
     }
     const desired = lead + translated + trail;
-    if (raw === desired) continue;
-    node.nodeValue = desired;
-    if (desired === source) originals.delete(node);
-    else originals.set(node, { original: source, applied: desired });
+    if (raw !== desired) node.nodeValue = desired;
+    originals.set(node, { original: source, applied: desired, lang, cacheEpoch });
   }
   return missing;
 }
@@ -257,7 +294,7 @@ async function retranslate() {
     // our synchronous DOM writes, otherwise newly mounted pages are missed.
     ensureObserver();
     if (missing.length) {
-      await fetchTranslations(missing, lang);
+      const failed = await fetchTranslations(missing, lang);
       // The user may have switched language (or back to English) while the
       // fetch was in flight, applying the stale result would overwrite the
       // newer state with the old language.
@@ -265,7 +302,7 @@ async function retranslate() {
         observer?.disconnect();
         const remaining = applyCached(lang);
         const cache = langCache(lang);
-        if (remaining.some(s => !cache.has(s) && !failedStrings.has(`${lang}\u0000${s}`))) rerunRequested = true;
+        if (remaining.some(s => !cache.has(s) && !failed.has(s) && !failedStrings.has(`${lang}\u0000${s}`))) rerunRequested = true;
       }
     }
   } finally {
@@ -286,6 +323,23 @@ function scheduleRetranslate() {
   }, DEBOUNCE_MS);
 }
 
+function addedNodeNeedsTranslation(node: Node): boolean {
+  if (node.nodeValue != null) return translatable(node.nodeValue);
+  const element = node as Element;
+  if (SKIP_TAGS.has(element.tagName) || element.closest?.("[data-no-translate]")) return false;
+  // Do not flatten a whole newly mounted page into one large string. A large
+  // container can contain many valid short labels even when its total text
+  // is over the per-label limit. Bound the observer's inspection work too.
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  for (let i = 0; i < 64; i++) {
+    const text = walker.nextNode() as Text | null;
+    if (!text) return false;
+    if (text.parentElement && !SKIP_TAGS.has(text.parentElement.tagName)
+      && !text.parentElement.closest("[data-no-translate]") && translatable(text.nodeValue ?? "")) return true;
+  }
+  return true;
+}
+
 function ensureObserver() {
   if (!observer) {
     observer = new MutationObserver(records => {
@@ -293,7 +347,7 @@ function ensureObserver() {
       // copy, so avoid rescanning the whole page after every ping/FPS update.
       const needsPass = records.some(record => record.type === "characterData"
         ? translatable(record.target.nodeValue ?? "")
-        : record.type === "childList" && Array.from(record.addedNodes).some(node => translatable(node.textContent ?? node.nodeValue ?? "")));
+        : record.type === "childList" && Array.from(record.addedNodes).some(addedNodeNeedsTranslation));
       if (needsPass) scheduleRetranslate();
     });
   }
@@ -325,6 +379,7 @@ function restoreEnglish() {
 
 /** Switch the whole UI to `lang` ("en" restores originals). */
 export async function applyLanguage(lang: string): Promise<void> {
+  lang = checkedLanguage(lang);
   currentLang = lang;
   epoch += 1; // invalidate any in-flight pass for the previous language
   try {
@@ -361,6 +416,7 @@ export async function resetTranslationCache(): Promise<number> {
     // localStorage unavailable, the in-memory reset below still applies.
   }
   memCache.clear();
+  cacheEpoch++;
   failedStrings.clear();
   if (currentLang !== "en") {
     await applyLanguage(currentLang).catch(() => {

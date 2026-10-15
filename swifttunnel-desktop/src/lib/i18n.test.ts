@@ -26,8 +26,11 @@ beforeEach(() => {
   vi.stubGlobal("window", { setTimeout, clearTimeout });
   storage = new Map();
   vi.stubGlobal("localStorage", {
+    get length() { return storage.size; },
+    key: (index: number) => [...storage.keys()][index] ?? null,
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
   });
   vi.stubGlobal("NodeFilter", { SHOW_TEXT: 4, FILTER_ACCEPT: 1, FILTER_REJECT: 2 });
   vi.stubGlobal("document", {
@@ -44,6 +47,108 @@ beforeEach(() => {
     args.text.split("\n").map((line) => `FR:${line}`).join("\n"));
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it("splits long labels by encoded bytes instead of poisoning a whole oversized batch", async () => {
+  for (let i = 0; i < 40; i++) nodes.push(text(`Setting ${i}: ` + "x".repeat(1200)));
+  invoke.mockImplementation(async (_command, args) => {
+    if (new TextEncoder().encode(args.text).byteLength > 32 * 1024) throw new Error("Request too large");
+    return args.text.split("\n").map((line: string) => `FR:${line}`).join("\n");
+  });
+  const i18n = await import("./i18n");
+  await i18n.applyLanguage("fr");
+  expect(invoke.mock.calls.length).toBeGreaterThan(1);
+  expect(nodes.every(node => node.nodeValue.startsWith("FR:"))).toBe(true);
+});
+
+it("keeps saved dictionaries bounded while live translated nodes survive cache eviction", async () => {
+  for (let i = 0; i < 600; i++) nodes.push(text(`Setting ${i}: ` + "x".repeat(1900)));
+  const i18n = await import("./i18n");
+  await i18n.applyLanguage("fr");
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(nodes.every(node => node.nodeValue.startsWith("FR:"))).toBe(true);
+  expect(storage.get("st.i18n.fr")!.length).toBeLessThanOrEqual(1024 * 1024);
+  const completedCalls = invoke.mock.calls.length;
+  await i18n.applyLanguage("fr");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(invoke).toHaveBeenCalledTimes(completedCalls);
+});
+
+it("leaves oversized UI text alone instead of requesting and retaining it", async () => {
+  const large = text("Error: " + "x".repeat(100000));
+  nodes.push(large);
+  const i18n = await import("./i18n");
+  await i18n.applyLanguage("fr");
+  expect(invoke).not.toHaveBeenCalled();
+  expect(large.nodeValue).toHaveLength(100007);
+});
+
+it("translates labels inside a large mounted container without flattening its whole text", async () => {
+  nodes.push(text("Connected"));
+  const i18n = await import("./i18n");
+  await i18n.applyLanguage("fr");
+  const added = Array.from({ length: 60 }, (_, i) => text(`New control ${i}: ` + "x".repeat(100)));
+  nodes = added;
+  const container = { nodeValue: null, tagName: "DIV", closest: () => null,
+    get textContent(): string { throw new Error("observer flattened a whole page"); } };
+  observeChanges([{ type: "childList", addedNodes: [container] }]);
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(added.every(node => node.nodeValue.startsWith("FR:"))).toBe(true);
+});
+
+it("does not use corrupt language values as cache keys or translation requests", async () => {
+  nodes.push(text("Connected"));
+  storage.set("st.lang", "x".repeat(100000));
+  const i18n = await import("./i18n");
+  expect(i18n.getStoredLang()).toBe("en");
+  i18n.initI18n();
+  await i18n.applyLanguage("../../bad");
+  expect(invoke).not.toHaveBeenCalled();
+  expect(nodes[0].nodeValue).toBe("Connected");
+});
+
+it("does not apply or persist an oversized translation service answer", async () => {
+  nodes.push(text("Connected"));
+  invoke.mockResolvedValue("x".repeat(8193));
+  const i18n = await import("./i18n");
+  await i18n.applyLanguage("fr");
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(nodes[0].nodeValue).toBe("Connected");
+  expect(JSON.parse(storage.get("st.i18n.fr")!).Connected).toBe("Connected");
+  expect(invoke).toHaveBeenCalledTimes(1);
+});
+
+it("does not loop when an offline page has more labels than the retained failure history", async () => {
+  for (let i = 0; i < 3000; i++) nodes.push(text(`Setting ${i}`));
+  invoke.mockRejectedValue(new Error("offline"));
+  const i18n = await import("./i18n");
+  await i18n.applyLanguage("fr");
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(invoke).toHaveBeenCalledTimes(1);
+});
+
+it("refreshes live nodes after an explicit cache reset", async () => {
+  nodes.push(text("Connected"));
+  const i18n = await import("./i18n");
+  await i18n.applyLanguage("fr");
+  invoke.mockResolvedValue("Updated translation");
+  await i18n.resetTranslationCache();
+  expect(nodes[0].nodeValue).toBe("Updated translation");
+  expect(invoke).toHaveBeenLastCalledWith("i18n_translate", { text: "Connected", targetLang: "fr" });
+});
+
+it("does not let an obsolete failed request poison a freshly reset translation pass", async () => {
+  nodes.push(text("Connected"));
+  let failOld!: (error: Error) => void;
+  invoke.mockReturnValueOnce(new Promise((_resolve, reject) => { failOld = reject; }));
+  const i18n = await import("./i18n");
+  const old = i18n.applyLanguage("fr");
+  await i18n.resetTranslationCache();
+  failOld(new Error("old request failed"));
+  await old;
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(invoke).toHaveBeenCalledTimes(2);
+  expect(nodes[0].nodeValue).toBe("FR:Connected");
+});
 
 describe("runtime translation lifecycle", () => {
   it("ignores damaged cache entries while retaining valid saved translations", async () => {
