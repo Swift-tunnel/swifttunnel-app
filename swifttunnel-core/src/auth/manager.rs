@@ -693,8 +693,15 @@ impl AuthManager {
             }
         }
 
+        // Bind the listener to this attempt before the browser can reach it.
+        let state: String = rand::thread_rng()
+            .sample_iter(&rand::distributions::Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+
         // Start the localhost OAuth server
-        let oauth_server = match OAuthServer::start() {
+        let oauth_server = match OAuthServer::start(&state) {
             Ok(server) => server,
             Err(e) => {
                 error!("Failed to start OAuth server: {}", e);
@@ -707,13 +714,6 @@ impl AuthManager {
 
         let port = oauth_server.port();
         info!("OAuth server started on port {}", port);
-
-        // Generate a random state parameter for CSRF protection
-        let state: String = rand::thread_rng()
-            .sample_iter(&rand::distributions::Alphanumeric)
-            .take(32)
-            .map(char::from)
-            .collect();
 
         // Build the OAuth URL with the redirect port
         let query = form_urlencoded::Serializer::new(String::new())

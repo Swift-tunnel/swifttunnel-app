@@ -15,7 +15,7 @@ use std::sync::{
 };
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tiny_http::{Response, Server, StatusCode};
+use tiny_http::{Method, Response, Server, StatusCode};
 use url::Url;
 
 /// Default port for OAuth callback server
@@ -44,7 +44,10 @@ impl OAuthServer {
     /// Start the OAuth callback server on localhost
     ///
     /// Tries the default port first, then falls back to a random available port.
-    pub fn start() -> Result<Self, String> {
+    pub fn start(expected_state: &str) -> Result<Self, String> {
+        if expected_state.is_empty() || expected_state.len() > 256 {
+            return Err("Could not prepare browser sign-in. Please try again.".to_string());
+        }
         // Try default port first
         let (server, port) = match Server::http(format!("127.0.0.1:{}", DEFAULT_OAUTH_PORT)) {
             Ok(s) => {
@@ -74,6 +77,14 @@ impl OAuthServer {
             }
         };
 
+        Self::start_with_listener(server, port, expected_state.to_string())
+    }
+
+    fn start_with_listener(
+        server: Server,
+        port: u16,
+        expected_state: String,
+    ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = Arc::clone(&stop_flag);
@@ -82,7 +93,7 @@ impl OAuthServer {
 
         let thread_handle = thread::Builder::new()
             .name("oauth-callback".into())
-            .spawn(move || Self::run_server(server, tx, stop_flag_clone))
+            .spawn(move || Self::run_server(server, tx, stop_flag_clone, expected_state))
             .map_err(|error| format!("Could not start browser sign-in: {error}"))?;
 
         Ok(Self {
@@ -99,7 +110,12 @@ impl OAuthServer {
     }
 
     /// Run the HTTP server and handle requests
-    fn run_server(server: Server, tx: Sender<OAuthCallbackData>, stop_flag: Arc<AtomicBool>) {
+    fn run_server(
+        server: Server,
+        tx: Sender<OAuthCallbackData>,
+        stop_flag: Arc<AtomicBool>,
+        expected_state: String,
+    ) {
         info!("OAuth server thread started");
 
         loop {
@@ -122,10 +138,23 @@ impl OAuthServer {
                         Self::log_safe_path(url_str)
                     );
 
-                    // Parse the callback URL
-                    match Self::parse_callback(url_str) {
+                    // A previous browser tab may reach the reused port after a
+                    // new attempt starts. Ignore it without consuming the new
+                    // attempt's one callback. The manager also verifies state
+                    // before exchanging the token.
+                    let callback = (request.method() == &Method::Get)
+                        .then(|| Self::parse_callback(url_str))
+                        .flatten()
+                        .filter(|callback| callback.state == expected_state);
+                    match callback {
                         Some(callback) => {
                             info!("OAuth callback parsed successfully");
+
+                            // Deliver independently of whether the browser is
+                            // still connected or can accept the response.
+                            if let Err(e) = tx.send(callback) {
+                                error!("Failed to send callback data: {}", e);
+                            }
 
                             // Send success response to browser
                             let html = Self::success_html();
@@ -141,11 +170,6 @@ impl OAuthServer {
 
                             if let Err(e) = request.respond(response) {
                                 warn!("Failed to send success response: {}", e);
-                            }
-
-                            // Send callback data to main thread
-                            if let Err(e) = tx.send(callback) {
-                                error!("Failed to send callback data: {}", e);
                             }
 
                             // We're done after receiving the callback
@@ -196,6 +220,9 @@ impl OAuthServer {
 
     /// Parse the callback URL to extract token and state
     fn parse_callback(url_str: &str) -> Option<OAuthCallbackData> {
+        if url_str.len() > 8192 || !url_str.starts_with("/callback?") {
+            return None;
+        }
         // Construct a full URL for parsing
         let full_url = format!("http://localhost{}", url_str);
         let url = Url::parse(&full_url).ok()?;
@@ -210,8 +237,11 @@ impl OAuthServer {
 
         for (key, value) in url.query_pairs() {
             match key.as_ref() {
-                "token" => token = Some(value.to_string()),
-                "state" => state = Some(value.to_string()),
+                "token" if token.is_none() && value.len() <= 4096 => {
+                    token = Some(value.to_string())
+                }
+                "state" if state.is_none() && value.len() <= 256 => state = Some(value.to_string()),
+                "token" | "state" => return None,
                 _ => {}
             }
         }
@@ -419,6 +449,64 @@ impl Drop for OAuthServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_or_invalid_requests_do_not_consume_the_pending_sign_in() {
+        // An owned ephemeral port avoids the real app's callback listener.
+        let listener = Server::http("127.0.0.1:0").unwrap();
+        let port = listener.server_addr().to_ip().unwrap().port();
+        let server = OAuthServer::start_with_listener(listener, port, "current".into()).unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let base = format!("http://127.0.0.1:{port}");
+        for (method, path) in [
+            (reqwest::Method::GET, "/callback?token=old&state=previous"),
+            (
+                reqwest::Method::GET,
+                "/callback?token=x&state=current&state=previous",
+            ),
+            (reqwest::Method::POST, "/callback?token=x&state=current"),
+            (reqwest::Method::GET, "/favicon.ico"),
+        ] {
+            let response = client
+                .request(method, format!("{base}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert!(server.try_recv_callback().is_none());
+        }
+        let response = client
+            .get(format!("{base}/callback?token=valid&state=current"))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let callback = server
+            .try_recv_callback()
+            .expect("current callback delivered");
+        assert_eq!(callback.state, "current");
+        assert_eq!(callback.token, "valid");
+        assert!(server.try_recv_callback().is_none());
+    }
+
+    #[test]
+    fn callback_rejects_duplicate_and_oversized_credentials() {
+        for path in [
+            "/callback?token=first&token=second&state=s".to_string(),
+            "/callback?token=t&state=first&state=second".to_string(),
+            format!("/callback?token={}&state=s", "t".repeat(4097)),
+            format!("/callback?token=t&state={}", "s".repeat(257)),
+            format!("/callback?token=t&state=s&extra={}", "x".repeat(8192)),
+        ] {
+            assert!(OAuthServer::parse_callback(&path).is_none());
+        }
+        assert!(OAuthServer::start("").is_err());
+        assert!(OAuthServer::start(&"s".repeat(257)).is_err());
+    }
 
     #[test]
     fn cancellation_does_not_wait_forever_for_a_stalled_browser_worker() {
