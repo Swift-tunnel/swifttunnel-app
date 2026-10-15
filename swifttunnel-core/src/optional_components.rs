@@ -24,7 +24,11 @@
 //! byte-for-byte the one we tested, and a tampered mirror cannot substitute
 //! anything.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::File,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use sha2::{Digest, Sha256};
 
@@ -74,6 +78,9 @@ pub enum ComponentError {
         expected: String,
         actual: String,
     },
+
+    #[error("{file} did not match its pinned size of {expected} bytes")]
+    SizeMismatch { file: String, expected: u64 },
 
     /// Files verified, written, and then gone. On Windows that is antivirus,
     /// essentially always, and saying so beats a generic IO error the user
@@ -229,9 +236,57 @@ pub fn sha256_of(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn sha256_of_file(path: &Path) -> std::io::Result<String> {
-    let bytes = std::fs::read(path)?;
-    Ok(sha256_of(&bytes))
+fn verified_file(path: &Path, expected: &ComponentFile) -> Option<File> {
+    // Refuse redirected paths and hold a read handle that denies modification
+    // and deletion on Windows, including while the verified helper is running.
+    crate::roblox_native_launch::safe_path(path).ok()?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(1);
+    }
+    let mut file = options.open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() != expected.size_bytes {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    let mut remaining = expected.size_bytes;
+    let mut buffer = [0; 16 * 1024];
+    while remaining > 0 {
+        let requested = remaining.min(buffer.len() as u64) as usize;
+        let count = file.read(&mut buffer[..requested]).ok()?;
+        if count == 0 {
+            return None;
+        }
+        hasher.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    if file.read(&mut buffer[..1]).ok()? != 0
+        || format!("{:x}", hasher.finalize()) != expected.sha256
+    {
+        return None;
+    }
+    Some(file)
+}
+
+/// Verify the executable and its sibling DLL/drivers, retaining their locks.
+pub(crate) fn verified_flat_directory(
+    component: &OptionalComponent,
+    directory: &Path,
+) -> Option<Vec<File>> {
+    component
+        .files
+        .iter()
+        .map(|file| {
+            verified_file(
+                &directory.join(Path::new(file.relative_path).file_name()?),
+                file,
+            )
+        })
+        .collect()
 }
 
 /// Whether an installed component is complete and unmodified.
@@ -244,19 +299,17 @@ pub fn is_installed(component: &OptionalComponent) -> bool {
     let root = component_dir(component);
     component.files.iter().all(|file| {
         let path = root.join(file.relative_path);
-        match std::fs::metadata(&path) {
-            Ok(meta) if meta.len() == file.size_bytes => sha256_of_file(&path)
-                .map(|h| h == file.sha256)
-                .unwrap_or(false),
-            _ => false,
-        }
+        verified_file(&path, file).is_some()
     })
 }
 
 /// The installed executable for a component file, if the component is intact.
 pub fn installed_path(component: &OptionalComponent, relative_path: &str) -> Option<PathBuf> {
-    let path = component_dir(component).join(relative_path);
-    path.exists().then_some(path)
+    component
+        .files
+        .iter()
+        .find(|file| file.relative_path == relative_path)?;
+    is_installed(component).then(|| component_dir(component).join(relative_path))
 }
 
 // ---------------------------------------------------------------------------
@@ -269,17 +322,16 @@ pub fn installed_path(component: &OptionalComponent, relative_path: &str) -> Opt
 /// anything is moved into place, so a partial or tampered download never
 /// becomes a half-installed component that later looks valid.
 pub async fn ensure_installed(component: &OptionalComponent) -> Result<PathBuf, ComponentError> {
+    // Both architectures share a version directory. Do not let concurrent
+    // installs remove one another's staging files or live payload.
+    static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _install = INSTALL.lock().await;
     let root = component_dir(component);
     if is_installed(component) {
         return Ok(root);
     }
 
-    let staging = root.with_file_name(format!("{}.staging", component.version));
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging).map_err(|source| ComponentError::Io {
-        context: format!("could not create {}", staging.display()),
-        source,
-    })?;
+    let staging = Staging::create(&root)?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -308,17 +360,10 @@ pub async fn ensure_installed(component: &OptionalComponent) -> Result<PathBuf, 
             });
         }
 
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|source| ComponentError::Download {
-                url: url.clone(),
-                reason: source.to_string(),
-            })?;
+        let bytes = read_component_body(response, file).await?;
 
         let actual = sha256_of(&bytes);
         if actual != file.sha256 {
-            let _ = std::fs::remove_dir_all(&staging);
             return Err(ComponentError::HashMismatch {
                 file: file.relative_path.to_string(),
                 expected: file.sha256.to_string(),
@@ -326,7 +371,7 @@ pub async fn ensure_installed(component: &OptionalComponent) -> Result<PathBuf, 
             });
         }
 
-        let dest = staging.join(file.relative_path);
+        let dest = staging.path.join(file.relative_path);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ComponentError::Io {
                 context: format!("could not create {}", parent.display()),
@@ -340,17 +385,7 @@ pub async fn ensure_installed(component: &OptionalComponent) -> Result<PathBuf, 
     }
 
     // Swap in only after every file has been verified.
-    let _ = std::fs::remove_dir_all(&root);
-    if let Some(parent) = root.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| ComponentError::Io {
-            context: format!("could not create {}", parent.display()),
-            source,
-        })?;
-    }
-    std::fs::rename(&staging, &root).map_err(|source| ComponentError::Io {
-        context: format!("could not move {} into place", staging.display()),
-        source,
-    })?;
+    promote(&staging.path, &root)?;
 
     // Re-check after landing. A file that verified a moment ago and is now gone
     // was taken by something else on the machine, and on Windows that is
@@ -368,9 +403,286 @@ pub async fn ensure_installed(component: &OptionalComponent) -> Result<PathBuf, 
     Ok(root)
 }
 
+async fn read_component_body(
+    mut response: reqwest::Response,
+    file: &ComponentFile,
+) -> Result<Vec<u8>, ComponentError> {
+    let limit = usize::try_from(file.size_bytes).map_err(|_| ComponentError::SizeMismatch {
+        file: file.relative_path.into(),
+        expected: file.size_bytes,
+    })?;
+    let mismatch = || ComponentError::SizeMismatch {
+        file: file.relative_path.into(),
+        expected: file.size_bytes,
+    };
+    if response
+        .content_length()
+        .is_some_and(|size| size != file.size_bytes)
+    {
+        return Err(mismatch());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| ComponentError::Download {
+            url: response.url().to_string(),
+            reason: e.to_string(),
+        })?
+    {
+        if chunk.len() > limit.saturating_sub(bytes.len()) {
+            return Err(mismatch());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.len() != limit {
+        return Err(ComponentError::SizeMismatch {
+            file: file.relative_path.into(),
+            expected: file.size_bytes,
+        });
+    }
+    Ok(bytes)
+}
+
+struct Staging {
+    path: PathBuf,
+}
+impl Staging {
+    fn create(root: &Path) -> Result<Self, ComponentError> {
+        let parent = root.parent().ok_or_else(|| {
+            component_io(
+                "Invalid component location",
+                std::io::Error::from(std::io::ErrorKind::InvalidInput),
+            )
+        })?;
+        crate::roblox_native_launch::safe_path(parent).map_err(|e| {
+            component_io("Component folder is redirected", std::io::Error::other(e))
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| component_io("Could not create component folder", e))?;
+        let path = parent.join(format!(
+            ".{}.{}.staging",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)
+            .map_err(|e| component_io("Could not prepare component download", e))?;
+        Ok(Self { path })
+    }
+}
+impl Drop for Staging {
+    fn drop(&mut self) {
+        // Only the unique directory created by this attempt is ours to remove.
+        if crate::roblox_native_launch::safe_path(&self.path).is_ok() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+fn component_io(context: &str, source: std::io::Error) -> ComponentError {
+    ComponentError::Io {
+        context: context.into(),
+        source,
+    }
+}
+fn promote(staging: &Path, root: &Path) -> Result<(), ComponentError> {
+    crate::roblox_native_launch::safe_path(root)
+        .map_err(|e| component_io("Component folder is redirected", std::io::Error::other(e)))?;
+    let backup = staging.with_extension("previous");
+    let had_previous = match std::fs::rename(root, &backup) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => return Err(component_io("Could not preserve the existing component", e)),
+    };
+    if let Err(error) = std::fs::rename(staging, root) {
+        if had_previous && let Err(restore) = std::fs::rename(&backup, root) {
+            return Err(component_io(
+                "Could not install the component; its previous files were kept beside it",
+                std::io::Error::other(format!("{error}; restore: {restore}")),
+            ));
+        }
+        return Err(component_io(
+            "Could not install the component; the previous files were kept",
+            error,
+        ));
+    }
+    if had_previous {
+        // This backup contains only the directory we just moved ourselves.
+        if crate::roblox_native_launch::safe_path(&backup).is_ok() {
+            let _ = std::fs::remove_dir_all(backup);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    const TEST_FILE: ComponentFile = ComponentFile {
+        relative_path: "test/helper.exe",
+        sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        size_bytes: 5,
+    };
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("swift-components-{:016x}", rand::random::<u64>()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    async fn read_fixture(wire: &'static [u8]) -> Result<Vec<u8>, ComponentError> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done, finish) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            stream.write_all(wire).unwrap();
+            let _ = finish.recv_timeout(std::time::Duration::from_secs(3));
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        let result = read_component_body(response, &TEST_FILE).await;
+        let _ = done.send(());
+        worker.join().unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn component_downloads_refuse_oversized_fixed_or_chunked_bodies_before_eof() {
+        for wire in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1000000000\r\n\r\n".as_slice(),
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nhello!\r\n".as_slice(),
+        ] {
+            let error = read_fixture(wire).await.unwrap_err();
+            assert!(matches!(error, ComponentError::SizeMismatch { .. }));
+            assert!(!error.is_transient());
+        }
+        assert_eq!(
+            read_fixture(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n"
+            )
+            .await
+            .unwrap(),
+            b"hello"
+        );
+        assert!(matches!(
+            read_fixture(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nhell").await,
+            Err(ComponentError::SizeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn installed_payload_checks_hash_and_keeps_verified_files_immutable() {
+        let dir = Fixture::new();
+        let file = dir.0.join("helper.exe");
+        std::fs::write(&file, b"hello").unwrap();
+        let component = OptionalComponent {
+            id: "test",
+            version: "1",
+            files: &[TEST_FILE],
+        };
+        let verified = verified_flat_directory(&component, &dir.0).unwrap();
+        #[cfg(windows)]
+        {
+            assert!(std::fs::write(&file, b"other").is_err());
+            assert!(std::fs::remove_file(&file).is_err());
+        }
+        drop(verified);
+        std::fs::write(&file, b"other").unwrap();
+        assert!(verified_flat_directory(&component, &dir.0).is_none());
+        std::fs::write(&file, b"hello!").unwrap();
+        assert!(verified_flat_directory(&component, &dir.0).is_none());
+    }
+
+    #[test]
+    fn an_executable_alone_cannot_bypass_missing_or_modified_sibling_checks() {
+        const FILES: &[ComponentFile] = &[
+            TEST_FILE,
+            ComponentFile {
+                relative_path: "test/helper.dll",
+                sha256: TEST_FILE.sha256,
+                size_bytes: TEST_FILE.size_bytes,
+            },
+        ];
+        let dir = Fixture::new();
+        let component = OptionalComponent {
+            id: "test",
+            version: "1",
+            files: FILES,
+        };
+        std::fs::write(dir.0.join("helper.exe"), b"hello").unwrap();
+        assert!(verified_flat_directory(&component, &dir.0).is_none());
+        std::fs::write(dir.0.join("helper.dll"), b"hello").unwrap();
+        assert_eq!(
+            verified_flat_directory(&component, &dir.0).unwrap().len(),
+            2
+        );
+        std::fs::write(dir.0.join("helper.dll"), b"other").unwrap();
+        assert!(verified_flat_directory(&component, &dir.0).is_none());
+    }
+
+    #[test]
+    fn failed_component_promotion_restores_the_existing_directory() {
+        let dir = Fixture::new();
+        let root = dir.0.join("live");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("keep"), b"existing component").unwrap();
+        let missing = dir.0.join("missing.staging");
+        assert!(promote(&missing, &root).is_err());
+        assert_eq!(
+            std::fs::read(root.join("keep")).unwrap(),
+            b"existing component"
+        );
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+        let staging = Staging::create(&root).unwrap();
+        std::fs::write(staging.path.join("new"), b"new component").unwrap();
+        promote(&staging.path, &root).unwrap();
+        drop(staging);
+        assert_eq!(std::fs::read(root.join("new")).unwrap(), b"new component");
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_component_work_cleans_only_its_own_staging_directory() {
+        let dir = Fixture::new();
+        let root = dir.0.join("live");
+        let unrelated = dir.0.join("previous.staging");
+        std::fs::create_dir(&unrelated).unwrap();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let staging = Staging::create(&root).unwrap();
+            ready.send(staging.path.clone()).unwrap();
+            std::future::pending::<()>().await;
+            drop(staging);
+        });
+        let owned = started.await.unwrap();
+        assert!(owned.exists());
+        task.abort();
+        let _ = task.await;
+        assert!(!owned.exists());
+        assert!(unrelated.exists());
+    }
 
     /// The files as they still sit in the desktop crate, which is what gets
     /// uploaded to the component host.

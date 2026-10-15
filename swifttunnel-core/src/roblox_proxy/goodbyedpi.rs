@@ -48,6 +48,8 @@ pub(crate) enum GoodbyeDpiNativeArch {
 #[must_use = "dropping GoodbyeDpiGuard stops the GoodbyeDPI subprocess"]
 pub struct GoodbyeDpiGuard {
     child: Child,
+    // Keep verified executable, DLL and driver files immutable until shutdown.
+    _verified_files: Vec<fs::File>,
     exe_path: PathBuf,
     hostlist_path: PathBuf,
     stopped: bool,
@@ -94,6 +96,28 @@ impl Drop for GoodbyeDpiGuard {
     }
 }
 
+// A connect timeout can drop this future during startup or an HTTPS probe.
+// std::process::Child does not stop on drop, so own it before the first await.
+struct PendingHelper {
+    child: Option<Child>,
+    exe_path: PathBuf,
+}
+impl Drop for PendingHelper {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            stop_child_process(child, &self.exe_path);
+        }
+    }
+}
+struct PendingHostlist(Option<PathBuf>);
+impl Drop for PendingHostlist {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.as_ref() {
+            let _ = remove_hostlist_file(path);
+        }
+    }
+}
+
 pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
     if !cfg!(windows) {
         debug!("GoodbyeDPI helper skipped: supported only on Windows");
@@ -109,15 +133,15 @@ pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
         return Ok(None);
     }
 
-    let exe_path = match locate_goodbyedpi_executable() {
-        Some(path) => path,
+    let (exe_path, verified_files) = match locate_goodbyedpi_executable(native_arch) {
+        Some(found) => found,
         None => {
             // Not shipped in the installer any more, so the first user to turn
             // this on fetches it. Every failure here is survivable: the relay
             // already carries this traffic and needs none of it.
             match ensure_goodbyedpi_component(native_arch).await {
-                Ok(()) => match locate_goodbyedpi_executable() {
-                    Some(path) => path,
+                Ok(()) => match locate_goodbyedpi_executable(native_arch) {
+                    Some(found) => found,
                     None => {
                         warn!(
                             "GoodbyeDPI component installed but no executable found; staying on the relay"
@@ -134,6 +158,7 @@ pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
     };
 
     let hostlist_path = write_roblox_hostlist()?;
+    let mut pending_hostlist = PendingHostlist(Some(hostlist_path.clone()));
     let mut failures = Vec::new();
     let escalation_start = Instant::now();
 
@@ -148,17 +173,21 @@ pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
             break;
         }
         let args = build_goodbyedpi_args(mode, &hostlist_path);
-        let mut child = match spawn_goodbyedpi(&exe_path, &args) {
+        let child = match spawn_goodbyedpi(&exe_path, &args) {
             Ok(child) => child,
             Err(e) => {
                 failures.push(format!("-{mode}: {e}"));
                 continue;
             }
         };
+        let mut pending = PendingHelper {
+            child: Some(child),
+            exe_path: exe_path.clone(),
+        };
 
         info!(
             "Started GoodbyeDPI helper pid={} mode=-{} exe={} hostlist={}",
-            child.id(),
+            pending.child.as_ref().unwrap().id(),
             mode,
             exe_path.display(),
             hostlist_path.display()
@@ -166,7 +195,7 @@ pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
 
         tokio::time::sleep(GOODBYEDPI_MODE_STARTUP_WAIT).await;
 
-        match child.try_wait() {
+        match pending.child.as_mut().unwrap().try_wait() {
             Ok(Some(status)) => {
                 failures.push(format!("-{mode}: exited early with {status}"));
                 continue;
@@ -174,7 +203,6 @@ pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
             Ok(None) => {}
             Err(e) => {
                 failures.push(format!("-{mode}: failed to inspect process: {e}"));
-                stop_child_process(&mut child, &exe_path);
                 continue;
             }
         }
@@ -182,9 +210,10 @@ pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
         if roblox_https_reachable().await {
             info!("GoodbyeDPI mode -{} made Roblox HTTPS reachable", mode);
             return Ok(Some(GoodbyeDpiGuard {
-                child,
+                child: pending.child.take().unwrap(),
+                _verified_files: verified_files,
                 exe_path,
-                hostlist_path,
+                hostlist_path: pending_hostlist.0.take().unwrap(),
                 stopped: false,
             }));
         }
@@ -193,7 +222,6 @@ pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
             "-{mode}: {} was not reachable over HTTPS",
             ROBLOX_REACHABILITY_URL
         ));
-        stop_child_process(&mut child, &exe_path);
     }
 
     if let Err(cleanup_err) = remove_hostlist_file(&hostlist_path) {
@@ -282,12 +310,24 @@ fn goodbyedpi_path_override() -> Option<PathBuf> {
     None
 }
 
-fn locate_goodbyedpi_executable() -> Option<PathBuf> {
+fn locate_goodbyedpi_executable(arch: GoodbyeDpiNativeArch) -> Option<(PathBuf, Vec<fs::File>)> {
     let current_exe = std::env::current_exe().ok();
-
-    candidate_executable_paths(current_exe.as_deref(), goodbyedpi_path_override())
+    let override_path = goodbyedpi_path_override();
+    let component = crate::optional_components::goodbyedpi_component(match arch {
+        GoodbyeDpiNativeArch::X86 => crate::optional_components::ComponentArch::X86,
+        GoodbyeDpiNativeArch::X64 => crate::optional_components::ComponentArch::X64,
+        GoodbyeDpiNativeArch::Arm64 => return None,
+    });
+    candidate_executable_paths(current_exe.as_deref(), override_path.clone())
         .into_iter()
-        .find(|path| path.is_file())
+        .find_map(|path| {
+            if override_path.as_ref() == Some(&path) && path.is_file() {
+                return Some((path, vec![])); // Explicit debug-only developer opt-in.
+            }
+            let files =
+                crate::optional_components::verified_flat_directory(&component, path.parent()?)?;
+            Some((path, files))
+        })
 }
 
 fn write_roblox_hostlist() -> Result<PathBuf, String> {
@@ -506,6 +546,61 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cancelling_helper_startup_stops_the_owned_child() {
+        use windows::Win32::{
+            Foundation::{CloseHandle, WAIT_OBJECT_0},
+            System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+        };
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let child = crate::hidden_command("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "Start-Sleep -Seconds 8",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let pending = PendingHelper {
+                exe_path: PathBuf::from("owned-test-process"),
+                child: Some(child),
+            };
+            ready.send(pending.child.as_ref().unwrap().id()).unwrap();
+            std::future::pending::<()>().await;
+            drop(pending);
+        });
+        let pid = started.await.unwrap();
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.unwrap();
+        task.abort();
+        let _ = task.await;
+        let stopped = unsafe { WaitForSingleObject(handle, 2000) };
+        unsafe {
+            CloseHandle(handle).unwrap();
+        }
+        assert_eq!(stopped, WAIT_OBJECT_0);
+    }
+
+    #[test]
+    fn pending_hostlist_cleanup_keeps_a_successful_handover() {
+        let path =
+            std::env::temp_dir().join(format!("swift-hostlist-{:016x}.txt", rand::random::<u64>()));
+        fs::write(&path, b"test only").unwrap();
+        drop(PendingHostlist(Some(path.clone())));
+        assert!(!path.exists());
+        fs::write(&path, b"test only").unwrap();
+        let mut pending = PendingHostlist(Some(path.clone()));
+        let owned = pending.0.take().unwrap();
+        drop(pending);
+        assert!(owned.exists());
+        fs::remove_file(owned).unwrap();
+    }
 
     #[test]
     fn goodbyedpi_args_use_requested_mode_and_blacklist() {
