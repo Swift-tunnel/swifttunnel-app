@@ -359,7 +359,7 @@ impl SecureStorage {
         let path = self.session_file_path();
         let blob = self.encode_session(session)?;
 
-        std::fs::write(&path, &blob).map_err(|e| {
+        crate::atomic_file::replace(&path, &blob).map_err(|e| {
             error!("Failed to write session file: {}", e);
             AuthError::StorageError(format!("Failed to write session file: {}", e))
         })?;
@@ -661,6 +661,37 @@ impl Default for SecureStorage {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_session_refresh_save_preserves_the_previous_login_and_can_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let storage = SecureStorage::with_isolated_data_dir();
+        let original = make_session("before");
+        storage.store_to_file(&original).unwrap();
+        let path = storage.session_file_path();
+        let bytes = std::fs::read(&path).unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        assert!(storage.store_to_file(&make_session("after")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            storage.load_from_file().unwrap().unwrap().refresh_token,
+            original.refresh_token
+        );
+        assert_eq!(std::fs::read_dir(&storage.data_dir).unwrap().count(), 1);
+        drop(lock);
+        storage.store_to_file(&make_session("after")).unwrap();
+        assert_eq!(
+            storage.load_from_file().unwrap().unwrap().refresh_token,
+            "test_refresh_token_after"
+        );
+        storage.clear_session().unwrap();
+        std::fs::remove_dir(storage.data_dir).unwrap();
+    }
 
     #[cfg(windows)]
     #[test]
