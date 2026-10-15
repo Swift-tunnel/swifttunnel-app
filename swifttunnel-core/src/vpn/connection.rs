@@ -75,6 +75,27 @@ const ADAPTER_RESET_ROLLBACK_REASON: &str = "adapter_reset_rollback";
 const ADAPTER_RESET_ROLLBACK_MESSAGE: &str = "SwiftTunnel rolled back the connection because your network adapter went offline during setup. This usually clears up on its own — please try connecting again.";
 const ETW_CONNECTION_READY_TIMEOUT_MS: u64 = 150;
 const ETW_CONNECTION_READY_POLL_MS: u64 = 5;
+const ETW_EVENT_QUEUE_CAPACITY: usize = 100;
+const ETW_EVENT_BATCH_SIZE: usize = 16;
+
+fn take_process_event_batch(
+    first: ProcessStartEvent,
+    receiver: Option<&mut tokio::sync::mpsc::Receiver<ProcessStartEvent>>,
+) -> Vec<ProcessStartEvent> {
+    let mut events = Vec::with_capacity(ETW_EVENT_BATCH_SIZE);
+    events.push(first);
+    if let Some(receiver) = receiver {
+        // A producer can keep filling a bounded queue while we drain it.
+        // Limit the batch too, so health and stop checks get another turn.
+        for _ in 1..ETW_EVENT_BATCH_SIZE {
+            match receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(_) => break,
+            }
+        }
+    }
+    events
+}
 /// Once the UDP relay health reaches `Dead`, keep the session alive briefly
 /// before teardown. Real dead relays still fail, but short NAT/ISP return-path
 /// stalls get a chance to recover instead of kicking users mid-game.
@@ -2794,15 +2815,17 @@ impl VpnConnection {
 
         // Bridge ETW (crossbeam) receiver into a tokio channel so the async monitor can
         // `select!` without repeatedly spawning blocking tasks.
-        let mut etw_tokio_rx: Option<tokio::sync::mpsc::UnboundedReceiver<ProcessStartEvent>> =
-            None;
+        let mut etw_tokio_rx: Option<tokio::sync::mpsc::Receiver<ProcessStartEvent>> = None;
         if let Some(receiver) = etw_receiver {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ProcessStartEvent>();
+            let (tx, rx) =
+                tokio::sync::mpsc::channel::<ProcessStartEvent>(ETW_EVENT_QUEUE_CAPACITY);
             match std::thread::Builder::new()
                 .name("v3-etw-forwarder".to_string())
                 .spawn(move || {
                     while let Ok(event) = receiver.recv() {
-                        if tx.send(event).is_err() {
+                        // Backpressure this dedicated bridge, never the ETW
+                        // callback (which already uses a bounded try_send).
+                        if tx.blocking_send(event).is_err() {
                             break;
                         }
                     }
@@ -2872,14 +2895,7 @@ impl VpnConnection {
                                 let mut blocked_events: Vec<ProcessStartEvent> = Vec::new();
                                 let mut blocked_paths: Vec<String> = Vec::new();
 
-                                // Process the first event (if any) and drain remaining queued events.
-                                let mut pending_events: Vec<ProcessStartEvent> = Vec::new();
-                                pending_events.push(first_event);
-                                if let Some(ref mut rx) = etw_rx {
-                                    while let Ok(event) = rx.try_recv() {
-                                        pending_events.push(event);
-                                    }
-                                }
+                                let pending_events = take_process_event_batch(first_event, etw_rx.as_mut());
 
                                 for event in &pending_events {
                                     log::info!(
@@ -3798,6 +3814,48 @@ impl Drop for VpnConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_event_bursts_are_bounded_and_preserve_later_batches() {
+        fn event(pid: u32) -> ProcessStartEvent {
+            ProcessStartEvent {
+                pid,
+                name: "OwnedTest.exe".into(),
+                image_path: String::new(),
+                parent_pid: 0,
+            }
+        }
+        let (tx, mut rx) = tokio::sync::mpsc::channel(ETW_EVENT_QUEUE_CAPACITY);
+        for pid in 0..ETW_EVENT_QUEUE_CAPACITY as u32 {
+            tx.try_send(event(pid)).unwrap();
+        }
+        assert!(matches!(
+            tx.try_send(event(999)),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        let first = rx.try_recv().unwrap();
+        let batch = take_process_event_batch(first, Some(&mut rx));
+        assert_eq!(batch.len(), ETW_EVENT_BATCH_SIZE);
+        assert_eq!(
+            batch.iter().map(|event| event.pid).collect::<Vec<_>>(),
+            (0..ETW_EVENT_BATCH_SIZE as u32).collect::<Vec<_>>()
+        );
+        assert_eq!(rx.len(), ETW_EVENT_QUEUE_CAPACITY - ETW_EVENT_BATCH_SIZE);
+        tx.try_send(event(999)).unwrap();
+        let mut rest = Vec::new();
+        while let Ok(first) = rx.try_recv() {
+            let batch = take_process_event_batch(first, Some(&mut rx));
+            assert!(batch.len() <= ETW_EVENT_BATCH_SIZE);
+            rest.extend(batch.into_iter().map(|event| event.pid));
+        }
+        assert_eq!(
+            rest,
+            (ETW_EVENT_BATCH_SIZE as u32..ETW_EVENT_QUEUE_CAPACITY as u32)
+                .chain([999])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(take_process_event_batch(event(123), None).len(), 1);
+    }
 
     #[test]
     fn lease_retries_honor_service_cooldowns_with_bounded_delays() {
