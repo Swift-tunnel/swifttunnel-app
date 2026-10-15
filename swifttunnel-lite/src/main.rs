@@ -29,6 +29,7 @@ mod clipboard;
 mod engine;
 mod fonts;
 mod gdi;
+mod installer_cli;
 mod picker;
 mod preview;
 mod screens;
@@ -100,11 +101,11 @@ fn main() {
     // routes, the firewall rules, the hosts entries and both clients Run
     // entries go with it rather than being left on the machine.
     if std::env::args().any(|a| a == "--cleanup") {
-        match swifttunnel_core::network_booster::cleanup_all_system_state() {
-            Ok(()) => log::info!("cleanup finished"),
-            Err(error) => log::error!("cleanup failed: {error}"),
-        }
-        return;
+        installer_cli::finish(
+            "cleanup",
+            swifttunnel_core::network_booster::cleanup_all_system_state()
+                .map_err(|error| error.to_string()),
+        );
     }
 
     // --install-driver: put the split tunnel driver in place and exit.
@@ -144,16 +145,13 @@ fn main() {
             || std::env::args().any(|a| a == "--force");
         log::info!("driver helper: force={force}");
 
-        match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
+        let result = swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
             None,
             exe_dir.as_deref(),
             &program_files,
             force,
-        ) {
-            Ok(()) => log::info!("driver installed by the Lite installer"),
-            Err(error) => log::error!("Lite installer driver install failed: {error}"),
-        }
-        return;
+        );
+        installer_cli::finish("Lite installer driver install", result);
     }
 
     // Before the engine, which starts threads and opens the settings file:
