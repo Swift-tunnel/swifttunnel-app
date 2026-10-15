@@ -139,7 +139,7 @@ pub async fn fetch() -> Vec<ReferenceSample> {
     });
     let started = Instant::now();
     let result = async {
-        let mut response = client
+        let response = client
             .get("https://www.swifttunnel.net/api/vpn/route-measurements/preview")
             .send()
             .await
@@ -161,14 +161,10 @@ pub async fn fetch() -> Vec<ReferenceSample> {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
             .and_then(|value| u64::try_from(value.timestamp_millis()).ok());
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.ok()? {
-            if bytes.len() + chunk.len() > 524_288 {
-                return None;
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let mut body: Response = serde_json::from_slice(&bytes).ok()?;
+        let mut body: Response =
+            crate::http_body::read_json_bounded(response, 524_288, "route preview")
+                .await
+                .ok()?;
         if body.method != "icmp_reference_matrix"
             || body.routes.len() > 2048
             || body.targets.is_empty()

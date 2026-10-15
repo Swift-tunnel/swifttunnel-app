@@ -122,7 +122,7 @@ pub(crate) async fn measure(ip: Ipv4Addr, access_token: &str) -> Vec<RouteSample
     });
     let started = Instant::now();
     let result = async {
-        let mut response = client
+        let response = client
             .post("https://www.swifttunnel.net/api/vpn/route-measurements")
             .json(&serde_json::json!({ "ip": ip.to_string() }))
             .bearer_auth(access_token)
@@ -132,14 +132,10 @@ pub(crate) async fn measure(ip: Ipv4Addr, access_token: &str) -> Vec<RouteSample
         if !response.status().is_success() {
             return None;
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.ok()? {
-            if bytes.len() + chunk.len() > 65_536 {
-                return None;
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        let mut body: Response = serde_json::from_slice(&bytes).ok()?;
+        let mut body: Response =
+            crate::http_body::read_json_bounded(response, 65_536, "route measurement")
+                .await
+                .ok()?;
         if body.ip != ip || body.method != "icmp_two_leg" || body.routes.len() > 128 {
             return None;
         }

@@ -1,5 +1,15 @@
 //! Bound downloaded bodies before parsing or signature verification.
 
+pub async fn read_json_bounded<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    max_bytes: usize,
+    what: &str,
+) -> Result<T, String> {
+    let bytes = read_bounded(response, max_bytes, what).await?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| format!("Could not read the {what}. Please try again."))
+}
+
 pub async fn read_bounded(
     mut response: reqwest::Response,
     max_bytes: usize,
@@ -30,6 +40,40 @@ pub async fn read_bounded(
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[tokio::test]
+    async fn json_reader_accepts_valid_json_and_rejects_malformed_or_oversized_bodies() {
+        for (body, limit, expected) in [
+            (r#"{"ok":true}"#, 32, Some(serde_json::json!({"ok":true}))),
+            (r#"{"ok":"#, 32, None),
+            (r#"{"ok":true}"#, 4, None),
+        ] {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let address = server.server_addr().to_ip().unwrap();
+            let worker = std::thread::spawn(move || {
+                let request = server
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap()
+                    .unwrap();
+                let _ = request.respond(tiny_http::Response::from_string(body));
+            });
+            let response = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(2))
+                .build()
+                .unwrap()
+                .get(format!("http://{address}"))
+                .send()
+                .await
+                .unwrap();
+            let result = read_json_bounded::<serde_json::Value>(response, limit, "test JSON").await;
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap(), expected),
+                None => assert!(result.is_err()),
+            }
+            worker.join().unwrap();
+        }
+    }
 
     async fn serve_and_read(wire: &'static [u8], limit: usize) -> Result<Vec<u8>, String> {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

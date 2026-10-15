@@ -9,11 +9,13 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Path of the server list endpoint. The host comes from `API_HOSTS`.
 const SERVERS_API_PATH: &str = "/api/vpn/servers";
+const SERVER_RESPONSE_LIMIT: usize = 1024 * 1024;
+const SERVER_CACHE_LIMIT: usize = 4 * 1024 * 1024;
 
 /// Cache TTL in seconds (1 hour)
 const CACHE_TTL_SECONDS: i64 = 3600;
@@ -240,7 +242,7 @@ pub fn load_cached_servers() -> Option<CachedServerList> {
         return None;
     }
 
-    match crate::utils::read_text_file_bounded(&cache_path, 4 * 1024 * 1024, "Server cache") {
+    match crate::utils::read_text_file_bounded(&cache_path, SERVER_CACHE_LIMIT, "Server cache") {
         Ok(content) => match serde_json::from_str::<CachedServerList>(&content) {
             Ok(cached) => {
                 log::info!(
@@ -276,6 +278,13 @@ pub fn save_servers_to_cache(data: &ServerListResponse) -> Result<(), std::io::E
         }
     };
 
+    save_servers_to_cache_at(data, &cache_path)
+}
+
+fn save_servers_to_cache_at(
+    data: &ServerListResponse,
+    cache_path: &Path,
+) -> Result<(), std::io::Error> {
     // Create directory if it doesn't exist
     if let Some(parent) = cache_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -289,7 +298,13 @@ pub fn save_servers_to_cache(data: &ServerListResponse) -> Result<(), std::io::E
     let content = serde_json::to_string_pretty(&cached)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-    std::fs::write(&cache_path, content)?;
+    if content.len() > SERVER_CACHE_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Server cache is too large",
+        ));
+    }
+    crate::atomic_file::replace(cache_path, content.as_bytes())?;
     log::info!("Saved server list to cache: {:?}", cache_path);
 
     Ok(())
@@ -359,10 +374,8 @@ pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
         return Err(format!("API returned error status: {}", response.status()));
     }
 
-    let data: ServerListResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse server list JSON: {}", e))?;
+    let data: ServerListResponse =
+        crate::http_body::read_json_bounded(response, SERVER_RESPONSE_LIMIT, "server list").await?;
 
     log::info!(
         "Fetched {} servers and {} regions from API (version: {})",
@@ -873,6 +886,44 @@ impl DynamicServerList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_cache_replacement_preserves_the_last_usable_list() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("swift-server-cache-{:016x}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("servers.json");
+        let data = ServerListResponse {
+            servers: vec![make_server("owned-01", "192.0.2.1")],
+            regions: vec![make_region("owned", vec!["owned-01"])],
+            version: "test".into(),
+        };
+        save_servers_to_cache_at(&data, &path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let guard = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        let mut next = data.clone();
+        next.version = "new".into();
+        assert!(save_servers_to_cache_at(&next, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        drop(guard);
+        save_servers_to_cache_at(&next, &path).unwrap();
+        let cached: CachedServerList =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(cached.data.version, "new");
+        next.version = "x".repeat(SERVER_CACHE_LIMIT + 1);
+        assert!(save_servers_to_cache_at(&next, &path).is_err());
+        let cached: CachedServerList =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(cached.data.version, "new");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn fleet_replacement_invalidates_old_endpoints_and_late_probes() {

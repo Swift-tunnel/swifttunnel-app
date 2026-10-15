@@ -517,7 +517,9 @@ async fn resolve_game_server_region_from_api(ip: Ipv4Addr) -> Option<GameServerR
         );
         return None;
     }
-    response.json().await.ok()
+    crate::http_body::read_json_bounded(response, 64 * 1024, "server location")
+        .await
+        .ok()
 }
 
 fn resolve_api_response(
