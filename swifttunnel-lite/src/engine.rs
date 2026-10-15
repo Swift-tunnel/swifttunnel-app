@@ -906,7 +906,14 @@ impl Engine {
     /// The same core call the full app's auth_login makes, so the two clients
     /// cannot drift on what counts as a valid sign-in.
     fn submit_login(&self, state: &mut State) {
-        if state.login.busy {
+        if state.login.busy
+            || self
+                .shared
+                .snapshot
+                .read()
+                .map(|s| s.login_busy)
+                .unwrap_or(true)
+        {
             return;
         }
         let email = state.login.email.text.trim().to_string();
@@ -969,51 +976,75 @@ impl Engine {
     }
 
     fn sign_in(&self) {
+        // Share the email form's busy state. A second poller must not consume
+        // the first attempt's callback or cancel its replacement at timeout.
+        if self.shared.edit(|s| {
+            if s.login_busy {
+                return false;
+            }
+            s.login_busy = true;
+            s.login_error = None;
+            true
+        }) != Some(true)
+        {
+            return;
+        }
+        self.shared.notify();
         let shared = self.shared.clone();
         shared.runtime.spawn({
             let shared = shared.clone();
             async move {
-                let url = {
-                    let auth = shared.auth.lock().await;
-                    match auth.start_google_sign_in() {
-                        Ok(url) => url,
-                        Err(error) => {
-                            log::warn!("could not start sign-in: {error}");
-                            return;
-                        }
-                    }
-                };
-                open_in_browser(&url);
-
-                // The loopback server is already listening; this waits for it.
-                // Ten minutes matches the expiry core enforces on the flow.
-                let deadline = Instant::now() + Duration::from_secs(600);
-                let callback = loop {
-                    if Instant::now() > deadline || shared.stop.load(Ordering::Relaxed) {
-                        let auth = shared.auth.lock().await;
-                        auth.cancel_oauth();
-                        log::warn!("sign-in was not completed in time");
-                        return;
-                    }
-                    let found = {
-                        let auth = shared.auth.lock().await;
-                        auth.poll_oauth_callback()
-                    };
-                    if let Some(data) = found {
-                        break data;
-                    }
-                    tokio::time::sleep(Duration::from_millis(400)).await;
-                };
-
-                let auth = shared.auth.lock().await;
-                if let Err(error) = auth
-                    .complete_oauth_callback(&callback.token, &callback.state)
+                use swifttunnel_core::auth::AuthError;
+                let result: Result<(), AuthError> = async {
+                    let manager = shared.auth.clone();
+                    let expected_state = tokio::task::spawn_blocking(move || {
+                        manager.blocking_lock().start_google_sign_in()
+                    })
                     .await
-                {
-                    log::warn!("sign-in failed: {error}");
-                    return;
+                    .map_err(|_| {
+                        AuthError::ApiError("Could not open browser sign-in. Try again.".into())
+                    })??;
+                    // Core already opened the browser. Its return value is the
+                    // random state, not another URL to pass to ShellExecute.
+                    let deadline = Instant::now() + Duration::from_secs(600);
+                    let callback = loop {
+                        if Instant::now() >= deadline || shared.stop.load(Ordering::Relaxed) {
+                            if let Ok(auth) = shared.auth.try_lock()
+                                && auth.get_pending_oauth_state().as_deref()
+                                    == Some(expected_state.as_str())
+                            {
+                                auth.cancel_oauth();
+                            }
+                            return Err(AuthError::ApiError(
+                                "Sign-in timed out. Try again.".into(),
+                            ));
+                        }
+                        // A profile refresh can hold this mutex during HTTP.
+                        // Keep the deadline running instead of queuing on it.
+                        if let Ok(auth) = shared.auth.try_lock() {
+                            if auth.get_pending_oauth_state().as_deref()
+                                != Some(expected_state.as_str())
+                            {
+                                return Ok(());
+                            }
+                            if let Some(callback) = auth.poll_oauth_callback() {
+                                break callback;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                    };
+                    let auth = shared.auth.lock().await;
+                    if auth.get_pending_oauth_state().as_deref() != Some(expected_state.as_str()) {
+                        return Ok(());
+                    }
+                    auth.complete_oauth_callback(&callback.token, &callback.state)
+                        .await
                 }
-                drop(auth);
+                .await;
+                shared.edit(|s| {
+                    s.login_busy = false;
+                    s.login_error = result.as_ref().err().map(friendly_auth_error);
+                });
                 refresh_auth(&shared).await;
                 shared.notify();
             }
@@ -2177,25 +2208,6 @@ fn open_logs() {
     let _ = std::process::Command::new("explorer")
         .arg(format!("/select,{}", path.display()))
         .spawn();
-}
-
-/// Hand a URL to the default browser.
-///
-/// ShellExecuteW rather than `cmd /C start`: cmd.exe is a console program, so
-/// spawning it flashes a console window on screen every time sign-in opens the
-/// browser. This is the same thing without the window.
-fn open_in_browser(url: &str) {
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-    use windows::core::HSTRING;
-
-    let verb = HSTRING::from("open");
-    let target = HSTRING::from(url);
-    // SAFETY: both strings outlive the call, and a null hwnd/parameters/dir is
-    // what the API expects for "just open this".
-    unsafe {
-        ShellExecuteW(None, &verb, &target, None, None, SW_SHOWNORMAL);
-    }
 }
 
 #[cfg(test)]

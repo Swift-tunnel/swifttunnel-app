@@ -13,7 +13,7 @@ use windows::Win32::UI::Controls::Dialogs::{
 /// is in memory. Somebody picking a multi-gigabyte file, by accident or not,
 /// should not get that far. The gap between the two leaves room for whitespace
 /// and formatting in a file that is otherwise within the real limit.
-const MAX_BYTES: u64 = 64 * 1024;
+const MAX_BYTES: usize = 64 * 1024;
 
 /// The only extensions accepted, checked again after the dialog returns.
 ///
@@ -31,6 +31,10 @@ pub fn read_fflag_file(owner: HWND) -> Result<Option<String>, String> {
         return Ok(None);
     };
 
+    read_fflag_path(&path).map(Some)
+}
+
+fn read_fflag_path(path: &std::path::Path) -> Result<String, String> {
     let extension = path
         .extension()
         .and_then(|e| e.to_str())
@@ -40,23 +44,74 @@ pub fn read_fflag_file(owner: HWND) -> Result<Option<String>, String> {
         return Err("Pick a .json or .txt file.".to_string());
     }
 
-    let size = std::fs::metadata(&path)
-        .map_err(|e| format!("Could not read that file: {e}"))?
-        .len();
-    if size == 0 {
+    // Open once and limit the read itself, not just an earlier path metadata
+    // check: an exporter can replace/grow a selected file while it is read.
+    let text = swifttunnel_core::utils::read_text_file_bounded(path, MAX_BYTES, "FFlag file")
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                "Choose a JSON or text file under 64 KB.".to_string()
+            } else {
+                format!("Could not read that file: {error}")
+            }
+        })?;
+    if text.is_empty() {
         return Err("That file is empty.".to_string());
     }
-    if size > MAX_BYTES {
-        return Err("That file is too big to be a list of FFlags.".to_string());
-    }
-
-    let bytes = std::fs::read(&path).map_err(|e| format!("Could not read that file: {e}"))?;
-    let text = String::from_utf8(bytes)
-        .map_err(|_| "That file is not text. Export the flags as JSON.".to_string())?;
 
     // Notepad and plenty of exporters write a byte order mark, and a JSON
     // parser treats it as a stray character before the opening brace.
-    Ok(Some(text.trim_start_matches('﻿').to_string()))
+    Ok(text.trim_start_matches('\u{feff}').to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "swift-lite-flag-read-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn selected_flag_files_are_bounded_text_with_an_allowed_extension() {
+        let dir = Fixture::new();
+        let path = dir.0.join("flags.JSON");
+        std::fs::write(&path, "\u{feff}{\"FFlagDebugSkyGray\":true}").unwrap();
+        assert_eq!(
+            read_fflag_path(&path).unwrap(),
+            "{\"FFlagDebugSkyGray\":true}"
+        );
+        std::fs::write(&path, []).unwrap();
+        assert!(read_fflag_path(&path).unwrap_err().contains("empty"));
+        std::fs::write(&path, [0xff]).unwrap();
+        assert!(read_fflag_path(&path).is_err());
+        let other = dir.0.join("flags.exe");
+        std::fs::write(&other, b"{}").unwrap();
+        assert!(
+            read_fflag_path(&other)
+                .unwrap_err()
+                .contains(".json or .txt")
+        );
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_BYTES as u64 + 1).unwrap();
+        drop(file);
+        assert!(read_fflag_path(&path).unwrap_err().contains("64 KB"));
+    }
 }
 
 fn pick(owner: HWND) -> Option<std::path::PathBuf> {
