@@ -3453,109 +3453,34 @@ impl ParallelInterceptor {
         Ok(())
     }
 
-    /// Run a command with a timeout and capture output.
-    ///
-    /// Uses spawn + try_wait loop to implement timeout without extra dependencies.
+    /// Use the shared collector: drain both pipes while the helper runs and
+    /// bound inherited streams as well as the process itself.
     fn run_command_with_timeout_capture(
         program: &str,
         args: &[&str],
         timeout_secs: u64,
     ) -> CommandRunOutput {
-        use std::io::Read;
-        use std::time::{Duration, Instant};
-
-        fn read_pipe_to_string<R: Read>(pipe: Option<R>) -> String {
-            let mut out = String::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_string(&mut out);
-            }
-            out
-        }
-
-        let mut child = match crate::hidden_command(program)
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(e) => {
-                return CommandRunOutput {
-                    success: false,
-                    timed_out: false,
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: format!("Failed to spawn {program}: {e}"),
-                };
-            }
-        };
-
-        let start = Instant::now();
-        let timeout = Duration::from_secs(timeout_secs);
-
-        // Poll for completion with timeout
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    // Process finished - drain pipes
-                    let stdout = read_pipe_to_string(child.stdout.take());
-                    let stderr = read_pipe_to_string(child.stderr.take());
-                    return CommandRunOutput {
-                        success: status.success(),
-                        timed_out: false,
-                        exit_code: status.code(),
-                        stdout,
-                        stderr,
-                    };
-                }
-                Ok(None) => {
-                    // Still running - check timeout
-                    if start.elapsed() >= timeout {
-                        log::warn!(
-                            "{} timed out after {}s, killing process",
-                            program,
-                            timeout_secs
-                        );
-                        let _ = child.kill();
-                        let _ = child.wait(); // Reap the process
-                        let stdout = read_pipe_to_string(child.stdout.take());
-                        let stderr = read_pipe_to_string(child.stderr.take());
-                        return CommandRunOutput {
-                            success: false,
-                            timed_out: true,
-                            exit_code: None,
-                            stdout,
-                            stderr,
-                        };
-                    }
-                    // Sleep briefly before next poll (50ms)
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(e) => {
-                    log::warn!("Error waiting for {}: {}", program, e);
-                    let _ = child.kill();
-                    let _ = child.wait(); // Reap the process
-                    let stdout = read_pipe_to_string(child.stdout.take());
-                    let stderr = read_pipe_to_string(child.stderr.take());
-                    return CommandRunOutput {
-                        success: false,
-                        timed_out: false,
-                        exit_code: None,
-                        stdout,
-                        stderr: if stderr.trim().is_empty() {
-                            format!("Error waiting for {program}: {e}")
-                        } else {
-                            stderr
-                        },
-                    };
-                }
-            }
+        let output = crate::run_hidden_command_with_timeout(
+            program,
+            args,
+            Duration::from_secs(timeout_secs),
+        );
+        CommandRunOutput {
+            success: output.success,
+            timed_out: output.timed_out,
+            exit_code: output.exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
         }
     }
 
     /// Run a PowerShell command with a timeout and capture output.
     fn run_powershell_with_timeout_capture(script: &str, timeout_secs: u64) -> CommandRunOutput {
-        Self::run_command_with_timeout_capture("powershell", &["-Command", script], timeout_secs)
+        Self::run_command_with_timeout_capture(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", script],
+            timeout_secs,
+        )
     }
 
     /// Run a PowerShell command with a timeout.
@@ -9678,6 +9603,36 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn binding_command_drains_chatty_output_before_waiting_for_exit() {
+        let output = super::ParallelInterceptor::run_powershell_with_timeout_capture(
+            "1..3000 | ForEach-Object { [Console]::Out.WriteLine(('x' * 80)); [Console]::Error.WriteLine(('e' * 20)) }",
+            20,
+        );
+        assert!(output.success, "{}", output.stderr);
+        assert!(!output.timed_out);
+        assert!(output.stdout.len() > 200_000);
+        assert!(output.stderr.len() > 50_000);
+    }
+
+    #[test]
+    fn binding_command_deadline_returns_a_timeout_and_preserves_exit_codes() {
+        let stalled = super::ParallelInterceptor::run_powershell_with_timeout_capture(
+            "Start-Sleep -Seconds 8",
+            1,
+        );
+        assert!(stalled.timed_out);
+        assert!(!stalled.success);
+        assert_eq!(stalled.exit_code, None);
+        let exited = super::ParallelInterceptor::run_command_with_timeout_capture(
+            "cmd",
+            &["/C", "exit /b 42"],
+            5,
+        );
+        assert_eq!(exited.exit_code, Some(42));
+        assert!(!exited.success);
+        assert!(!exited.timed_out);
+    }
     #[test]
     fn relay_support_logs_transitions_without_repeating_unchanged_health() {
         use crate::vpn::udp_relay::RelayHealthState::{Dead, Healthy, Stale};
