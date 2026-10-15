@@ -3128,6 +3128,54 @@ mod tests {
         assert!(parse_resolve_response(truncated, truncated.len()).is_none());
     }
 
+    #[test]
+    fn dns_response_parser_handles_seeded_counts_lengths_and_truncations() {
+        use rand::{Rng, RngCore, SeedableRng};
+        let mut random = rand::rngs::StdRng::seed_from_u64(0x5357494654444e53);
+        let ips = [std::net::Ipv4Addr::new(128, 116, 47, 3)];
+        let seed = build_resolve_response_frame(
+            &[7; SESSION_ID_LEN],
+            12,
+            &[("clientsettings.roblox.com", &ips)],
+        );
+        for case in 0..8192 {
+            let mut frame = if case % 2 == 0 {
+                seed.clone()
+            } else {
+                let mut bytes = vec![0; random.gen_range(0..=2048)];
+                random.fill_bytes(&mut bytes);
+                bytes
+            };
+            for _ in 0..4 {
+                if !frame.is_empty() {
+                    let index = random.gen_range(0..frame.len());
+                    frame[index] = random.r#gen();
+                }
+            }
+            let length = random.gen_range(0..=frame.len());
+            if let Some((request, answers)) = parse_resolve_response(&frame, length) {
+                let borrowed = answers
+                    .iter()
+                    .map(|(host, ips)| (host.as_str(), ips.as_slice()))
+                    .collect::<Vec<_>>();
+                let rebuilt = build_resolve_response_frame(
+                    &frame[..SESSION_ID_LEN].try_into().unwrap(),
+                    request,
+                    &borrowed,
+                );
+                assert!(
+                    rebuilt.len() <= length,
+                    "case {case} read beyond the received bytes"
+                );
+                assert_eq!(
+                    &rebuilt[SESSION_ID_LEN + 1..],
+                    &frame[SESSION_ID_LEN + 1..rebuilt.len()],
+                    "case {case} did not preserve the parsed wire fields"
+                );
+            }
+        }
+    }
+
     fn relay_loopback_addr(relay: &UdpRelay) -> SocketAddr {
         let local_port = relay
             .try_clone_socket()

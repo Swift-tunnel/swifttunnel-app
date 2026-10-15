@@ -11085,6 +11085,60 @@ mod tests {
     }
 
     #[test]
+    fn packet_parsers_and_checksum_helpers_tolerate_seeded_header_mutations() {
+        use rand::{Rng, RngCore, SeedableRng};
+        let mut random = rand::rngs::StdRng::seed_from_u64(0x5357494654504143);
+        let udp = build_ipv4_frame(
+            17,
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(128, 116, 47, 33),
+            50001,
+            55000,
+        );
+        let tcp = build_ipv4_tcp_frame_with_flags(
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(128, 116, 47, 33),
+            50001,
+            443,
+            0x02,
+        );
+        for case in 0..8192 {
+            let mut frame = match case % 3 {
+                0 => {
+                    let mut bytes = vec![0; random.gen_range(0..=1600)];
+                    random.fill_bytes(&mut bytes);
+                    bytes
+                }
+                1 => udp.clone(),
+                _ => tcp.clone(),
+            };
+            for _ in 0..4 {
+                if !frame.is_empty() {
+                    let index = random.gen_range(0..frame.len());
+                    frame[index] = random.r#gen();
+                }
+            }
+            if case % 5 == 0 {
+                frame.truncate(random.gen_range(0..=frame.len()));
+            }
+            let _ = parse_ipv4_header_offset(&frame);
+            let _ = parse_ipv4_dst_ip(&frame);
+            let _ = parse_ports(&frame);
+            let _ = parse_non_initial_fragment_hash(&frame);
+            for workers in [0, 1, 4, 16] {
+                if let Some(worker) = select_worker_id_for_outbound_packet(&frame, workers) {
+                    assert!(worker < workers, "case {case}");
+                }
+            }
+            let mut packet = parse_ipv4_header_offset(&frame)
+                .map(|offset| frame[offset..].to_vec())
+                .unwrap_or(frame);
+            let _ = clamp_tcp_mss_for_relay(&mut packet, 576);
+            let _ = fix_packet_checksums(&mut packet);
+        }
+    }
+
+    #[test]
     fn test_parse_ports_vlan_tagged_frame() {
         let frame = build_vlan_ipv4_frame(
             17,
