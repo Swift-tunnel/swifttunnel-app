@@ -12,17 +12,29 @@
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFY_ICON_MESSAGE,
+    NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, DestroyMenu, GetCursorPos, HICON,
-    LR_DEFAULTCOLOR, LookupIconIdFromDirectoryEx, MF_SEPARATOR, MF_STRING, SetForegroundWindow,
+    AppendMenuW, ChangeWindowMessageFilterEx, CreateIconFromResourceEx, CreatePopupMenu,
+    DestroyIcon, DestroyMenu, GetCursorPos, HICON, LR_DEFAULTCOLOR, LookupIconIdFromDirectoryEx,
+    MF_SEPARATOR, MF_STRING, MSGFLT_ALLOW, RegisterWindowMessageW, SetForegroundWindow,
     TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTALIGN, TrackPopupMenu, WM_APP,
 };
 use windows::core::w;
 
 /// Posted by the shell when the icon is clicked.
 pub const WM_TRAY: u32 = WM_APP + 2;
+
+fn taskbar_message() -> u32 {
+    static MESSAGE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MESSAGE.get_or_init(|| unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) })
+}
+
+pub fn taskbar_recreated(message: u32) -> bool {
+    let registered = taskbar_message();
+    registered != 0 && message == registered
+}
 
 /// Menu command ids, returned by `TrackPopupMenu`.
 pub const CMD_SHOW: usize = 1;
@@ -34,6 +46,7 @@ const ICON: &[u8] = include_bytes!("../resources/icon.ico");
 pub struct Tray {
     hwnd: HWND,
     added: bool,
+    icon: HICON,
 }
 
 impl Tray {
@@ -43,13 +56,43 @@ impl Tray {
     /// to the tray, and `close_to_tray` checks [`Tray::present`] before
     /// promising otherwise.
     pub fn new(hwnd: HWND) -> Self {
+        let message = taskbar_message();
+        if message != 0 {
+            // Explorer runs unelevated, while Lite runs elevated. Allow this
+            // parameter-free notification for this window only.
+            if let Err(error) =
+                unsafe { ChangeWindowMessageFilterEx(hwnd, message, MSGFLT_ALLOW, None) }
+            {
+                log::warn!("could not allow taskbar recovery notifications: {error}");
+            }
+        }
+        let mut tray = Self {
+            hwnd,
+            added: false,
+            icon: load_icon(),
+        };
+        tray.restore();
+        tray
+    }
+
+    pub fn restore(&mut self) {
+        self.restore_with(|message, data| unsafe { Shell_NotifyIconW(message, data).as_bool() });
+        if !self.added {
+            log::warn!("could not add the tray icon; closing will quit instead");
+        }
+    }
+
+    fn restore_with(
+        &mut self,
+        mut notify: impl FnMut(NOTIFY_ICON_MESSAGE, &NOTIFYICONDATAW) -> bool,
+    ) {
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: hwnd,
+            hWnd: self.hwnd,
             uID: 1,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: WM_TRAY,
-            hIcon: load_icon(),
+            hIcon: self.icon,
             ..Default::default()
         };
 
@@ -63,13 +106,9 @@ impl Tray {
             *slot = ch;
         }
 
-        // SAFETY: `data` is fully initialised above and outlives the call.
-        let added = unsafe { Shell_NotifyIconW(NIM_ADD, &data).as_bool() };
-        if !added {
-            log::warn!("could not add the tray icon; closing will quit instead");
-        }
-
-        Self { hwnd, added }
+        // TaskbarCreated may also accompany a DPI change. If the icon still
+        // exists, refresh it instead of marking a usable icon as absent.
+        self.added = notify(NIM_ADD, &data) || notify(NIM_MODIFY, &data);
     }
 
     /// Whether the icon is actually there.
@@ -112,9 +151,6 @@ impl Tray {
 
 impl Drop for Tray {
     fn drop(&mut self) {
-        if !self.added {
-            return;
-        }
         let data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: self.hwnd,
@@ -123,7 +159,14 @@ impl Drop for Tray {
         };
         // SAFETY: removing an icon this process added.
         unsafe {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+            if self.added && !self.hwnd.is_invalid() {
+                let _ = Shell_NotifyIconW(NIM_DELETE, &data);
+            }
+            // Both icon-loading paths create a private HICON. Release it even
+            // if adding to the notification area failed.
+            if !self.icon.is_invalid() {
+                let _ = DestroyIcon(self.icon);
+            }
         }
     }
 }
@@ -197,4 +240,52 @@ pub fn app_icon(cx: i32, cy: i32) -> HICON {
 /// Which mouse message the shell packed into a `WM_TRAY` notification.
 pub fn tray_event(lparam: LPARAM) -> u32 {
     lparam.0 as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // No real shell icon or window is created by these recovery fixtures.
+    fn fixture(added: bool) -> Tray {
+        Tray {
+            hwnd: HWND::default(),
+            icon: HICON::default(),
+            added,
+        }
+    }
+
+    #[test]
+    fn failed_recovery_revokes_close_to_tray_eligibility() {
+        let mut tray = fixture(true);
+        tray.restore_with(|_, _| false);
+        assert!(!tray.present());
+    }
+
+    #[test]
+    fn recreated_taskbar_gets_a_new_icon_and_restores_presence() {
+        let mut tray = fixture(false);
+        let mut calls = 0;
+        tray.restore_with(|message, data| {
+            calls += 1;
+            assert_eq!(message, NIM_ADD);
+            assert_eq!(data.uCallbackMessage, WM_TRAY);
+            assert_eq!(data.uID, 1);
+            true
+        });
+        assert!(tray.present());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn an_existing_icon_is_refreshed_instead_of_marked_absent() {
+        let mut tray = fixture(true);
+        let mut calls = Vec::new();
+        tray.restore_with(|message, _| {
+            calls.push(message);
+            message == NIM_MODIFY
+        });
+        assert!(tray.present());
+        assert_eq!(calls, vec![NIM_ADD, NIM_MODIFY]);
+    }
 }

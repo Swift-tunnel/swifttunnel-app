@@ -1033,6 +1033,19 @@ fn sync_timer(hwnd: HWND, app: &mut App, visible: bool) {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
+        if crate::tray::taskbar_recreated(msg) {
+            if let Some(app) = app_of(hwnd)
+                && let Some(tray) = app.tray.as_mut()
+            {
+                tray.restore();
+                if !tray.present() {
+                    // Keep the user able to reach Quit/reconnect if Explorer
+                    // still cannot accept an icon after recreating its tray.
+                    let _ = ShowWindow(hwnd, SW_SHOW);
+                }
+            }
+            return LRESULT(0);
+        }
         match msg {
             WM_CREATE => {
                 let cs = lparam.0 as *const CREATESTRUCTW;
