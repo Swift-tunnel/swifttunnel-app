@@ -617,16 +617,7 @@ fn download_winpkfilter_msi(
 
     validate_winpkfilter_payload(&data, pkg)?;
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| {
-            format!(
-                "Failed to create driver cache directory {}: {}",
-                parent.display(),
-                e
-            )
-        })?;
-    }
-
+    // The shared cache writer checks for redirection before creating folders.
     swifttunnel_core::vpn::winpkfilter::save_msi_cache(path, &data, pkg)?;
 
     Ok(())
