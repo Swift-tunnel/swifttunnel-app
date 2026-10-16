@@ -3,6 +3,7 @@
 //! Shows VPN connection status and game activity in Discord.
 //! Enabled by default, can be disabled in Settings.
 
+mod mailbox;
 mod manager;
 mod state;
 

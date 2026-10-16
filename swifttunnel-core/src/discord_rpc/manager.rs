@@ -3,13 +3,14 @@
 //! Runs a background thread that maintains the Discord IPC connection
 //! and updates presence based on VPN state.
 
+use super::mailbox::ActivityMailbox;
 use super::state::{
     DISCORD_BRAND_IMAGE_KEY, DiscordActivity, DiscordState, game_display_name, game_icon_key,
     region_display_label, region_flag_key,
 };
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use log::{debug, info, warn};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -21,10 +22,8 @@ const RECONNECT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Manages Discord Rich Presence in a background thread
 pub struct DiscordManager {
-    /// Channel to send activity updates
-    tx: Sender<DiscordActivity>,
-    /// Stored receiver for lazy thread spawn (only used when starting disabled)
-    pending_rx: Option<Receiver<DiscordActivity>>,
+    /// Latest pending state, coalesced while the Discord pipe is busy.
+    mailbox: Arc<ActivityMailbox>,
     /// Handle to the background thread
     thread_handle: Option<JoinHandle<()>>,
     /// Whether RPC is enabled (user setting)
@@ -38,18 +37,17 @@ pub struct DiscordManager {
 impl DiscordManager {
     /// Create a new Discord manager. Only spawns the background thread when enabled.
     pub fn new(enabled: bool) -> Self {
-        let (tx, rx) = mpsc::channel::<DiscordActivity>();
+        let mailbox = Arc::new(ActivityMailbox::default());
 
         // Only spawn thread if enabled — saves one thread + IPC connection attempts when disabled
-        let (thread_handle, pending_rx) = if enabled {
-            (Self::spawn_rpc_thread(rx), None)
+        let thread_handle = if enabled {
+            Self::spawn_rpc_thread(Arc::clone(&mailbox))
         } else {
-            (None, Some(rx))
+            None
         };
 
         Self {
-            tx,
-            pending_rx,
+            mailbox,
             thread_handle,
             enabled,
             current_state: None,
@@ -58,11 +56,11 @@ impl DiscordManager {
     }
 
     /// Spawn the background thread that handles Discord IPC
-    fn spawn_rpc_thread(rx: Receiver<DiscordActivity>) -> Option<JoinHandle<()>> {
+    fn spawn_rpc_thread(mailbox: Arc<ActivityMailbox>) -> Option<JoinHandle<()>> {
         match thread::Builder::new()
             .name("discord-rpc".to_string())
             .spawn(move || {
-                Self::rpc_thread_main(rx);
+                Self::rpc_thread_main(mailbox);
             }) {
             Ok(handle) => Some(handle),
             Err(error) => {
@@ -73,7 +71,7 @@ impl DiscordManager {
     }
 
     /// Main loop for the Discord RPC background thread
-    fn rpc_thread_main(rx: Receiver<DiscordActivity>) {
+    fn rpc_thread_main(mailbox: Arc<ActivityMailbox>) {
         info!("Discord RPC thread started");
 
         let mut client: Option<DiscordIpcClient> = None;
@@ -83,75 +81,57 @@ impl DiscordManager {
         loop {
             // Unchanged GUI state no longer floods the pipe. A low-frequency
             // refresh still reconnects if Discord starts/restarts later.
-            let message = if let Some(state) = &latest_state {
-                match rx.recv_timeout(RECONNECT_INTERVAL) {
-                    Ok(activity) => Ok(activity),
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        Ok(DiscordActivity::SetActivity(state.clone()))
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => Err(mpsc::RecvError),
-                }
-            } else {
-                rx.recv()
-            };
-            match message {
-                Ok(activity) => {
-                    // Shutdown must not start a fresh pipe connection first.
-                    if matches!(activity, DiscordActivity::Shutdown) {
-                        if let Some(ref mut c) = client {
-                            let _ = c.clear_activity();
-                            let _ = c.close();
-                        }
-                        return;
-                    }
-                    // Clearing a disabled/unavailable presence must not open
-                    // a new Discord pipe just to clear it again.
-                    if matches!(activity, DiscordActivity::Clear) {
-                        latest_state = None;
-                        if let Some(ref mut c) = client
-                            && c.clear_activity().is_err()
-                        {
-                            client = None;
-                        }
-                        continue;
-                    }
-                    if let DiscordActivity::SetActivity(state) = &activity {
-                        latest_state = Some(state.clone());
-                    }
-                    // Try to connect if not connected and enough time has passed
-                    if client.is_none() && last_connect_attempt.elapsed() >= RECONNECT_INTERVAL {
-                        last_connect_attempt = Instant::now();
-                        match Self::try_connect() {
-                            Ok(c) => {
-                                info!("Connected to Discord IPC");
-                                client = Some(c);
-                            }
-                            Err(e) => {
-                                debug!("Discord not available: {}", e);
-                            }
-                        }
-                    }
-
-                    match activity {
-                        DiscordActivity::Shutdown => unreachable!("handled before connecting"),
-                        DiscordActivity::Clear => unreachable!("handled before connecting"),
-                        DiscordActivity::SetActivity(state) => {
-                            if let Some(ref mut c) = client
-                                && let Err(e) = Self::set_activity(c, &state)
-                            {
-                                warn!("Failed to set Discord activity: {}", e);
-                                client = None;
-                            }
-                        }
-                    }
-                }
-                Err(mpsc::RecvError) => {
-                    info!("Discord RPC channel closed, shutting down");
+            let activity = mailbox
+                .receive(latest_state.as_ref().map(|_| RECONNECT_INTERVAL))
+                .or_else(|| latest_state.clone().map(DiscordActivity::SetActivity));
+            if let Some(activity) = activity {
+                // Shutdown must not start a fresh pipe connection first.
+                if matches!(activity, DiscordActivity::Shutdown) {
                     if let Some(ref mut c) = client {
                         let _ = c.clear_activity();
                         let _ = c.close();
                     }
                     return;
+                }
+                // Clearing a disabled/unavailable presence must not open
+                // a new Discord pipe just to clear it again.
+                if matches!(activity, DiscordActivity::Clear) {
+                    latest_state = None;
+                    if let Some(ref mut c) = client
+                        && c.clear_activity().is_err()
+                    {
+                        client = None;
+                    }
+                    continue;
+                }
+                if let DiscordActivity::SetActivity(state) = &activity {
+                    latest_state = Some(state.clone());
+                }
+                // Try to connect if not connected and enough time has passed
+                if client.is_none() && last_connect_attempt.elapsed() >= RECONNECT_INTERVAL {
+                    last_connect_attempt = Instant::now();
+                    match Self::try_connect() {
+                        Ok(c) => {
+                            info!("Connected to Discord IPC");
+                            client = Some(c);
+                        }
+                        Err(e) => {
+                            debug!("Discord not available: {}", e);
+                        }
+                    }
+                }
+
+                match activity {
+                    DiscordActivity::Shutdown => unreachable!("handled before connecting"),
+                    DiscordActivity::Clear => unreachable!("handled before connecting"),
+                    DiscordActivity::SetActivity(state) => {
+                        if let Some(ref mut c) = client
+                            && let Err(e) = Self::set_activity(c, &state)
+                        {
+                            warn!("Failed to set Discord activity: {}", e);
+                            client = None;
+                        }
+                    }
                 }
             }
         }
@@ -302,7 +282,7 @@ impl DiscordManager {
 
         self.current_state = Some(state.clone());
         if self.enabled {
-            let _ = self.tx.send(DiscordActivity::SetActivity(state));
+            self.mailbox.publish(DiscordActivity::SetActivity(state));
         }
     }
 
@@ -345,7 +325,7 @@ impl DiscordManager {
 
         if !enabled && was_enabled {
             // Clear presence when disabled (but keep current_state for later restore)
-            let _ = self.tx.send(DiscordActivity::Clear);
+            self.mailbox.publish(DiscordActivity::Clear);
         } else if enabled
             && (!was_enabled || self.thread_handle.as_ref().is_none_or(|h| h.is_finished()))
         {
@@ -354,16 +334,11 @@ impl DiscordManager {
                 if let Some(handle) = self.thread_handle.take() {
                     let _ = handle.join();
                 }
-                let rx = self.pending_rx.take().unwrap_or_else(|| {
-                    let (tx, rx) = mpsc::channel();
-                    self.tx = tx;
-                    rx
-                });
-                self.thread_handle = Self::spawn_rpc_thread(rx);
+                self.thread_handle = Self::spawn_rpc_thread(Arc::clone(&self.mailbox));
             }
             // Restore state when re-enabled
             if let Some(state) = self.current_state.clone() {
-                let _ = self.tx.send(DiscordActivity::SetActivity(state));
+                self.mailbox.publish(DiscordActivity::SetActivity(state));
             } else {
                 self.set_idle();
             }
@@ -380,7 +355,7 @@ impl DiscordManager {
         self.current_state = None;
         self.connected_at = None;
         if self.thread_handle.is_some() {
-            let _ = self.tx.send(DiscordActivity::Clear);
+            self.mailbox.publish(DiscordActivity::Clear);
         }
     }
 }
@@ -388,7 +363,7 @@ impl DiscordManager {
 impl Drop for DiscordManager {
     fn drop(&mut self) {
         // Signal shutdown to the background thread
-        let _ = self.tx.send(DiscordActivity::Shutdown);
+        self.mailbox.publish(DiscordActivity::Shutdown);
 
         // A stalled Discord named pipe must not hang exit or a repair restart.
         if let Some(handle) = self.thread_handle.take() {
@@ -412,6 +387,7 @@ impl Drop for DiscordManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     #[test]
     fn drop_does_not_wait_forever_for_a_stalled_rpc_worker() {
@@ -445,9 +421,9 @@ mod tests {
     fn test_state_transitions() {
         let mut manager = DiscordManager::new(false);
         // Exercise the mailbox without connecting to the user's Discord.
-        let rx = manager.pending_rx.take().unwrap();
+        let mailbox = Arc::clone(&manager.mailbox);
         manager.thread_handle = Some(thread::spawn(move || {
-            while let Ok(message) = rx.recv() {
+            while let Some(message) = mailbox.receive(None) {
                 if matches!(message, DiscordActivity::Shutdown) {
                     break;
                 }
@@ -468,17 +444,22 @@ mod tests {
     #[test]
     fn duplicate_states_do_not_send_more_ipc_and_disabled_states_stay_current() {
         let mut manager = DiscordManager::new(false);
-        let (tx, rx) = mpsc::channel();
-        manager.tx = tx;
+        let mailbox = Arc::clone(&manager.mailbox);
         manager.enabled = true;
         manager.set_connected("mumbai");
         manager.set_connected("mumbai");
-        assert!(matches!(rx.try_recv(), Ok(DiscordActivity::SetActivity(_))));
-        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            mailbox.receive(Some(Duration::ZERO)),
+            Some(DiscordActivity::SetActivity(_))
+        ));
+        assert!(mailbox.receive(Some(Duration::ZERO)).is_none());
         manager.set_enabled(false);
-        assert!(matches!(rx.try_recv(), Ok(DiscordActivity::Clear)));
+        assert!(matches!(
+            mailbox.receive(Some(Duration::ZERO)),
+            Some(DiscordActivity::Clear)
+        ));
         manager.set_idle();
-        assert!(rx.try_recv().is_err());
+        assert!(mailbox.receive(Some(Duration::ZERO)).is_none());
         assert!(matches!(manager.current_state, Some(DiscordState::Idle)));
     }
 }
