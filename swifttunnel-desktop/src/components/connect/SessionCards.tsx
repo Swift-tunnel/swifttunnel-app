@@ -92,6 +92,8 @@ function Meter({ fraction }: { fraction: number }) {
 function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolean }) {
   const regions = useServerStore((s) => s.regions);
   const relay = useVpnStore((s) => s.region);
+  const running = useBoostStore((s) => s.robloxRunning);
+  const paused = live && !running;
   const region = stats ? findRegionForVpnRegion(regions, stats.region) : undefined;
   const avg = stats ? averagePing(stats) : null;
   const jit = stats ? jitter(stats) : null;
@@ -126,6 +128,7 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
         {live && relay ? (
           <>
             Relay <b className="ml-1 text-[15px] font-bold text-text-primary">{relay}</b>
+            {paused && <span className="ml-3 text-[11px] text-text-dimmed" title="Ping statistics pause while Roblox is closed.">Paused</span>}
           </>
         ) : stats ? (
           <>
@@ -141,10 +144,10 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
 
       {!stats || stats.samples === 0 ? (
         <p className="border-t pt-4 text-[12.5px] leading-relaxed text-text-muted" style={{ borderColor: "var(--color-border-subtle)" }}>
-          Ping stats show up here after the first few readings.
+          {paused ? "Start Roblox to collect ping statistics." : "Ping stats show up here after the first few readings."}
         </p>
       ) : (
-        <div className="mt-auto grid grid-cols-4 gap-3 border-t pt-4" style={{ borderColor: "var(--color-border-subtle)" }}>
+        <div className={`mt-auto grid grid-cols-4 gap-3 border-t pt-4 ${paused ? "opacity-50" : ""}`} aria-label={paused ? "Paused ping statistics" : "Session ping statistics"} style={{ borderColor: "var(--color-border-subtle)" }}>
           <Stat label="Lowest ping" value={stats.lowest} unit="ms" />
           <Stat label="Average ping" value={avg} unit="ms" />
           <Stat label="Jitter" value={jit ?? "Measuring"} unit={jit !== null ? "ms" : undefined} />
