@@ -93,14 +93,14 @@ fn resolve_windows_command_path(program: &str) -> PathBuf {
 }
 
 #[cfg(windows)]
-fn trusted_windows_root() -> Option<PathBuf> {
+pub(crate) fn trusted_windows_root() -> Option<PathBuf> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 
     let mut buffer = [0u16; 260];
     let len = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
-    if len == 0 || len > buffer.len() {
+    if len == 0 || len >= buffer.len() {
         return None;
     }
 

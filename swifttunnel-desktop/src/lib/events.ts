@@ -80,7 +80,7 @@ export async function initEventListeners() {
     await register<void>(EVENT_COUNTRY_BAN_BYPASS_UNAVAILABLE, () => {
       useToastStore.getState().addToast({
         type: "warning",
-        message: "Country ban bypass unavailable on this network",
+        message: "Country ban bypass could not be set up. Check Diagnostics.",
       });
     });
   } catch (error) {

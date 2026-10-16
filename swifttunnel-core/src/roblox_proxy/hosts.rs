@@ -255,8 +255,26 @@ pub const ROBLOX_BOOTSTRAP_DOMAINS: &[&str] = &[
     "verify.arkoselabs.com",
 ];
 
-fn hosts_path() -> PathBuf {
-    PathBuf::from(r"C:\Windows\System32\drivers\etc\hosts")
+fn hosts_path() -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    let root = crate::utils::trusted_windows_root();
+    #[cfg(not(windows))]
+    let root = None;
+    hosts_path_from_windows_root(root.as_deref())
+}
+
+fn hosts_path_from_windows_root(root: Option<&std::path::Path>) -> Result<PathBuf, String> {
+    // All write, cleanup and inspection paths must use the same real Windows
+    // installation. Do not fall back to C: or an environment-controlled root:
+    // the app writes this file with administrator privileges.
+    let root = root.ok_or(
+        "Windows' network settings folder could not be found. Restart Windows and try again.",
+    )?;
+    Ok(root
+        .join("System32")
+        .join("drivers")
+        .join("etc")
+        .join("hosts"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -824,7 +842,7 @@ async fn probe_tcp_reachable(ip: Ipv4Addr, port: u16) -> bool {
 /// symptom is a feature that writes to it failing for no visible reason.
 /// Antivirus, malware cleaners and PC tidying tools all remove it.
 pub fn ensure_exists() -> Result<bool, String> {
-    let path = hosts_path();
+    let path = hosts_path()?;
     let created = ensure_exists_at(&path)?;
     if created {
         info!("Created a missing hosts file at {}", path.display());
@@ -836,8 +854,12 @@ fn ensure_exists_at(path: &std::path::Path) -> Result<bool, String> {
     if let Some(parent) = path.parent()
         && !parent.exists()
     {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("could not create the hosts directory: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "could not create the hosts directory '{}': {e}",
+                parent.display()
+            )
+        })?;
     }
 
     // Another application can recreate it between our check and open.
@@ -849,7 +871,10 @@ fn ensure_exists_at(path: &std::path::Path) -> Result<bool, String> {
     {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-        Err(e) => Err(format!("could not create the hosts file: {e}")),
+        Err(e) => Err(format!(
+            "could not create the hosts file '{}': {e}",
+            path.display()
+        )),
     }
 }
 
@@ -864,7 +889,10 @@ fn read_hosts_or_empty(path: &std::path::Path) -> Result<String, String> {
     match crate::utils::read_text_file_bounded(path, 16 * 1024 * 1024, "Hosts file") {
         Ok(text) => Ok(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!("Failed to read hosts file: {e}")),
+        Err(e) => Err(format!(
+            "Failed to read hosts file '{}': {e}",
+            path.display()
+        )),
     }
 }
 
@@ -873,14 +901,18 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
         return Err("No hosts overrides to write".to_string());
     }
 
-    let path = hosts_path();
+    let path = hosts_path()?;
 
     // The directory can be missing too on a machine where the file was removed.
     if let Some(parent) = path.parent()
         && !parent.exists()
     {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create the hosts directory: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create the hosts directory '{}': {e}",
+                parent.display()
+            )
+        })?;
     }
 
     let content = read_hosts_or_empty(&path)?;
@@ -894,11 +926,13 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
     }
     out.push_str(&block);
 
-    fs::write(&path, &out).map_err(|e| format!("Failed to write hosts file: {e}"))?;
+    fs::write(&path, &out)
+        .map_err(|e| format!("Failed to write hosts file '{}': {e}", path.display()))?;
 
     info!(
-        "Applied {} Roblox bootstrap DNS override(s) to hosts file",
-        overrides.len()
+        "Applied {} Roblox bootstrap DNS override(s) to hosts file at {}",
+        overrides.len(),
+        path.display()
     );
 
     flush_dns_cache();
@@ -914,7 +948,7 @@ pub fn remove_overrides() -> Result<(), String> {
 }
 
 fn remove_overrides_inner() -> Result<(), String> {
-    let path = hosts_path();
+    let path = hosts_path()?;
 
     // No file means nothing of ours is in it. Tearing down cleanly is the whole
     // point of this function, so it must not fail on an absent file.
@@ -927,7 +961,8 @@ fn remove_overrides_inner() -> Result<(), String> {
     let clean = remove_marker_block(&content);
 
     if clean != content {
-        fs::write(&path, &clean).map_err(|e| format!("Failed to write hosts file: {e}"))?;
+        fs::write(&path, &clean)
+            .map_err(|e| format!("Failed to write hosts file '{}': {e}", path.display()))?;
         info!("Removed Roblox proxy overrides from hosts file");
         flush_dns_cache();
     }
@@ -1212,7 +1247,9 @@ pub fn recover_stale() {
 
 /// Returns `true` if the hosts file currently contains SwiftTunnel entries.
 pub fn has_overrides() -> bool {
-    let path = hosts_path();
+    let Ok(path) = hosts_path() else {
+        return false;
+    };
     match read_hosts_or_empty(&path) {
         Ok(content) => content.contains(MARKER_START),
         Err(_) => false,
@@ -1343,6 +1380,36 @@ fn flush_dns_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosts_path_uses_the_detected_windows_installation_without_a_c_drive_fallback() {
+        for root in [r"C:\Windows", r"E:\Windows", r"D:\System Root\Windows"] {
+            let root = std::path::Path::new(root);
+            assert_eq!(
+                hosts_path_from_windows_root(Some(root)).unwrap(),
+                root.join("System32/drivers/etc/hosts")
+            );
+        }
+        assert!(hosts_path_from_windows_root(None).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detected_hosts_path_agrees_with_windows_without_reading_or_writing_it() {
+        use std::os::windows::ffi::OsStringExt;
+        // Check against a different Windows API, not a process environment
+        // variable or a presumed drive. This does not access the hosts file.
+        let mut buffer = [0u16; 260];
+        let length = unsafe {
+            windows::Win32::System::SystemInformation::GetWindowsDirectoryW(Some(&mut buffer))
+        } as usize;
+        assert!(length > 0 && length < buffer.len());
+        let root = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..length]));
+        assert_eq!(
+            hosts_path().unwrap(),
+            root.join("System32/drivers/etc/hosts")
+        );
+    }
 
     struct HostsFixture(PathBuf);
     impl HostsFixture {
