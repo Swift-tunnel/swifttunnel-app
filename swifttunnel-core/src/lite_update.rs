@@ -45,6 +45,7 @@ const PUBLIC_KEY_PLACEHOLDER: &str = "REPLACE_WITH_UPDATE_MANIFEST_PUBLIC_KEY_B6
 const MAX_INSTALLER_BYTES: u64 = 128 * 1024 * 1024;
 
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const INSTALLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Debug, Deserialize)]
 struct SignedManifest {
@@ -124,9 +125,13 @@ fn asset_for_this_build(assets: &LiteAssets) -> Option<&LiteAsset> {
     }
 }
 
-fn http_client() -> Result<reqwest::Client, String> {
+fn http_client(timeout: std::time::Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(30))
+        .timeout(timeout)
         .user_agent(concat!("SwiftTunnel-Lite/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("could not build an HTTP client: {e}"))
@@ -141,7 +146,7 @@ pub async fn check_for_update(current_version: &str) -> Result<Option<AvailableU
         .map_err(|e| format!("this build has an unreadable version '{current_version}': {e}"))?;
 
     let public_key = base64_decode(&manifest_public_key_b64()?)?;
-    let client = http_client()?;
+    let client = http_client(REQUEST_TIMEOUT)?;
 
     let manifest_bytes = fetch(&client, MANIFEST_URL, "update manifest", 1024 * 1024).await?;
     let signature =
@@ -192,7 +197,7 @@ pub async fn check_for_update(current_version: &str) -> Result<Option<AvailableU
 pub async fn download_verified(
     update: &AvailableUpdate,
 ) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
-    let client = http_client()?;
+    let client = http_client(INSTALLER_TIMEOUT)?;
     let bytes = fetch(
         &client,
         &update.url,
