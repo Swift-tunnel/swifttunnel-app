@@ -206,12 +206,12 @@ fn note_server_served_us() {
 
 /// HTTP client for authentication API calls
 pub struct AuthClient {
-    client: Client,
-    direct_client: Client,
+    client: Result<Client, String>,
+    direct_client: Result<Client, String>,
     device_hwid: Option<String>,
 }
 
-fn build_http_client(use_system_proxy: bool) -> Client {
+fn build_http_client(use_system_proxy: bool) -> Result<Client, String> {
     let mut builder = Client::builder()
         // Real build version (set at startup) so server logs/WAF can tell
         // client versions apart instead of the old hardcoded "0.1.0".
@@ -223,7 +223,31 @@ fn build_http_client(use_system_proxy: bool) -> Client {
         builder = builder.no_proxy();
     }
 
-    builder.build().expect("Failed to create HTTP client")
+    finish_http_client(builder)
+}
+
+fn finish_http_client(builder: reqwest::ClientBuilder) -> Result<Client, String> {
+    builder.build().map_err(|error| {
+        format!(
+            "Could not prepare a secure connection. Restart SwiftTunnel and try again. ({})",
+            crate::utils::describe_error_chain(&error)
+        )
+    })
+}
+
+async fn send_using_client<F>(
+    client: &Result<Client, String>,
+    base: &str,
+    build_request: &F,
+) -> Result<reqwest::Response, String>
+where
+    F: Fn(&Client, &str) -> reqwest::RequestBuilder,
+{
+    let client = client.as_ref().map_err(Clone::clone)?;
+    build_request(client, base)
+        .send()
+        .await
+        .map_err(|error| crate::utils::describe_error_chain(&error))
 }
 
 impl AuthClient {
@@ -338,7 +362,7 @@ impl AuthClient {
     where
         F: Fn(&Client, &str) -> reqwest::RequestBuilder,
     {
-        match build_request(&self.client, base).send().await {
+        match send_using_client(&self.client, base, build_request).await {
             Ok(response) => {
                 if response.status().is_success() {
                     note_server_served_us();
@@ -351,15 +375,13 @@ impl AuthClient {
                 // knows. See `describe_error_chain`.
                 warn!(
                     "{} request failed through the system network path: {}. Retrying direct.",
-                    label,
-                    crate::utils::describe_error_chain(&primary_error)
+                    label, primary_error
                 );
 
                 // Same treatment on the fallback path. A machine behind a proxy
                 // reaches the API only this way, so leaving it out would mean
                 // the update gate could never lift for those users.
-                build_request(&self.direct_client, base)
-                    .send()
+                send_using_client(&self.direct_client, base, build_request)
                     .await
                     .inspect(|response| {
                         if response.status().is_success() {
@@ -369,8 +391,7 @@ impl AuthClient {
                     .map_err(|direct_error| {
                         format!(
                             "{}. Direct retry also failed: {}",
-                            crate::utils::describe_error_chain(&primary_error),
-                            crate::utils::describe_error_chain(&direct_error)
+                            primary_error, direct_error
                         )
                     })
             }
@@ -1119,6 +1140,93 @@ fn ban_reason_suffix(reason: Option<String>) -> String {
         .filter(|value| !value.is_empty())
         .map(|value| format!(": {}", value))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod client_initialization_tests {
+    use super::*;
+
+    fn failed_client() -> Result<Client, String> {
+        // Exercise reqwest's real builder-error path without changing Windows TLS.
+        finish_http_client(Client::builder().user_agent("invalid\nheader"))
+    }
+
+    #[test]
+    fn client_initialization_failure_is_an_error_instead_of_a_panic() {
+        let error = failed_client().unwrap_err();
+        assert!(error.contains("Could not prepare a secure connection"));
+        assert!(error.contains("Restart SwiftTunnel"));
+    }
+
+    #[tokio::test]
+    async fn unavailable_clients_report_failure_without_starting_a_request() {
+        let client = AuthClient {
+            client: failed_client(),
+            direct_client: failed_client(),
+            device_hwid: None,
+        };
+        let result = client
+            .send_to_fixed_url("owned test", |_| panic!("must not build a network request"))
+            .await;
+        let error = result.unwrap_err();
+        assert!(matches!(error, AuthError::NetworkError(_)));
+        assert!(error.to_string().contains("Direct retry also failed"));
+    }
+
+    async fn response_with_primary(primary_failed: bool, status: &str) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let wire = format!("HTTP/1.1 {status}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        let server = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 2048];
+                stream.read(&mut request).await.unwrap();
+                stream.write_all(wire.as_bytes()).await.unwrap();
+            })
+            .await
+        });
+        let working = || {
+            Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap()
+        };
+        let client = AuthClient {
+            client: if primary_failed {
+                failed_client()
+            } else {
+                Ok(working())
+            },
+            direct_client: if primary_failed {
+                Ok(working())
+            } else {
+                failed_client()
+            },
+            device_hwid: None,
+        };
+        let result = client
+            .send_to_fixed_url("owned loopback test", |client| client.get(&url))
+            .await;
+        // Both sides have deadlines, so a regression cannot strand an owned listener.
+        server.await.unwrap().unwrap();
+        result.unwrap()
+    }
+
+    #[tokio::test]
+    async fn direct_path_still_works_if_system_client_initialization_failed() {
+        assert_eq!(response_with_primary(true, "200 OK").await.status(), 200);
+    }
+
+    #[tokio::test]
+    async fn a_real_http_policy_response_does_not_try_an_unavailable_fallback() {
+        assert_eq!(
+            response_with_primary(false, "403 Forbidden").await.status(),
+            403
+        );
+    }
 }
 
 #[cfg(test)]
