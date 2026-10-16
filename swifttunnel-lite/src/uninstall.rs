@@ -44,47 +44,6 @@ fn registered_product() -> Result<Option<String>, String> {
     swifttunnel_core::msi_uninstall::lite_product_code(folder)
 }
 
-pub async fn after_disconnect(
-    disconnect: impl std::future::Future<Output = Result<(), String>>,
-    uninstall: impl FnOnce() -> Result<(), String> + Send + 'static,
-) -> Result<(), String> {
-    disconnect.await?;
-    tokio::task::spawn_blocking(uninstall).await.map_err(|_| {
-        "Uninstall preparation failed. Retry or use Windows Settings > Apps.".to_string()
-    })?
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn disconnect_finishes_before_uninstall_starts() {
-        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let check = finished.clone();
-        after_disconnect(
-            async {
-                tokio::task::yield_now().await;
-                finished.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            },
-            move || {
-                assert!(check.load(std::sync::atomic::Ordering::SeqCst));
-                Ok(())
-            },
-        )
-        .await
-        .unwrap();
-    }
-    #[tokio::test]
-    async fn failed_disconnect_prevents_cleanup_and_uninstall() {
-        let result = after_disconnect(async { Err("disconnect failed".into()) }, || {
-            panic!("must not uninstall")
-        })
-        .await;
-        assert_eq!(result.unwrap_err(), "disconnect failed");
-    }
-}
-
 /// Undo every system change, then hand over to the uninstaller.
 ///
 /// The cleanup runs here rather than from a custom action inside the MSI, for

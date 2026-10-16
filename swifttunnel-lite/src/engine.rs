@@ -815,15 +815,6 @@ impl Engine {
             self.shared.notify();
             return;
         };
-        if !self.shared.connection_is_idle() {
-            self.shared.edit(|s| {
-                s.update =
-                    UpdateState::Failed("Disconnect before updating SwiftTunnel Lite.".into())
-            });
-            self.shared.notify();
-            return;
-        }
-
         let shared = self.shared.clone();
         shared.edit(|s| s.update = UpdateState::Working("Checking...".to_string()));
         shared.notify();
@@ -869,15 +860,37 @@ impl Engine {
                     shared.notify();
 
                     let path = swifttunnel_core::lite_update::download_verified(&update).await?;
-                    shared.edit(|s| {
-                        s.update = UpdateState::Working("Starting installer...".to_string())
-                    });
-                    shared.notify();
-
                     if shared.stop.load(Ordering::Relaxed) {
                         return Err("Update cancelled because SwiftTunnel Lite closed.".into());
                     }
-                    swifttunnel_core::lite_update::launch_installer(&path)
+                    // The forced-update screen has no separate Disconnect
+                    // button. An explicit update must clean up an active
+                    // tunnel before exiting, rather than trap that screen or
+                    // kill the process with networking still configured.
+                    let launch_shared = Arc::clone(&shared);
+                    crate::operation_gate::after_disconnect(
+                        async {
+                            if !shared.connection_is_idle() {
+                                shared.edit(|s| s.update = UpdateState::Working("Disconnecting...".into()));
+                                shared.notify();
+                                shared.intentional_disconnect.store(true, Ordering::Relaxed);
+                                shared.vpn.lock().await.disconnect().await.map_err(|_| {
+                                    "Could not disconnect safely. Retry updating SwiftTunnel Lite.".to_string()
+                                })?;
+                            }
+                            Ok(())
+                        },
+                        move || {
+                            if launch_shared.stop.load(Ordering::Relaxed) {
+                                return Err("Update cancelled because SwiftTunnel Lite closed.".into());
+                            }
+                            launch_shared.edit(|s| {
+                                s.update = UpdateState::Working("Starting installer...".to_string())
+                            });
+                            launch_shared.notify();
+                            swifttunnel_core::lite_update::launch_installer(&path)
+                        },
+                    ).await
                 });
 
                 match outcome {
@@ -2211,7 +2224,7 @@ impl Engine {
             let shared = shared.clone();
             async move {
                 let operation = operation;
-                let result = crate::uninstall::after_disconnect(
+                let result = crate::operation_gate::after_disconnect(
                     async {
                         shared.vpn.lock().await.disconnect().await.map_err(|_| {
                             "Could not disconnect safely. Retry disconnecting before uninstalling."

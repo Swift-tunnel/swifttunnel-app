@@ -29,9 +29,61 @@ impl Drop for OperationGuard {
     }
 }
 
+/// Installer work must wait for successful network cleanup and run off the
+/// async worker that disconnects VPN.
+pub async fn after_disconnect(
+    disconnect: impl std::future::Future<Output = Result<(), String>>,
+    installer: impl FnOnce() -> Result<(), String> + Send + 'static,
+) -> Result<(), String> {
+    disconnect.await?;
+    tokio::task::spawn_blocking(installer)
+        .await
+        .map_err(|_| "Could not prepare the installer. Try again.".to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disconnect_finishes_before_the_installer_starts() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let check = finished.clone();
+        after_disconnect(
+            async {
+                tokio::task::yield_now().await;
+                finished.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+            move || {
+                assert!(check.load(Ordering::SeqCst));
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_disconnect_prevents_installer_work() {
+        let result = after_disconnect(async { Err("disconnect failed".into()) }, || {
+            panic!("must not start installer work")
+        })
+        .await;
+        assert_eq!(result.unwrap_err(), "disconnect failed");
+    }
+
+    #[tokio::test]
+    async fn an_installer_worker_failure_returns_an_actionable_error() {
+        let result = after_disconnect(async { Ok(()) }, || {
+            panic!("owned simulated installer failure")
+        })
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "Could not prepare the installer. Try again."
+        );
+    }
 
     #[test]
     fn an_installer_reservation_excludes_connect_and_reconnect_until_it_finishes() {
