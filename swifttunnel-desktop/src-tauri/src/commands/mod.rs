@@ -10,5 +10,6 @@ pub mod optimizer;
 pub mod overlay;
 pub mod settings;
 pub mod system;
+mod update_download;
 pub mod updater;
 pub mod vpn;

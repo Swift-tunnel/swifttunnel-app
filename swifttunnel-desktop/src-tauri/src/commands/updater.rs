@@ -1,12 +1,9 @@
+use super::update_download::Package;
 use base64::Engine as _;
 use reqwest::header::{ACCEPT, USER_AGENT};
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_updater::UpdaterExt;
-use url::Url;
 
 const UPDATER_PROGRESS_EVENT: &str = "updater://progress";
 const UPDATER_DONE_EVENT: &str = "updater://done";
@@ -88,7 +85,7 @@ struct SelectedRelease {
 #[derive(Debug)]
 struct PreparedUpdate {
     selected_release: SelectedRelease,
-    manifest: SignedUpdateManifest,
+    package: Package,
 }
 
 /// Runtime override of the manifest verification key. Debug builds only.
@@ -131,10 +128,14 @@ fn update_manifest_public_key_b64() -> Result<String, String> {
 }
 
 fn legacy_tauri_updater_public_key() -> Option<String> {
+    #[cfg(debug_assertions)]
     let runtime_key = std::env::var("TAURI_UPDATER_LEGACY_PUBLIC_KEY")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+
+    #[cfg(not(debug_assertions))]
+    let runtime_key: Option<String> = None;
 
     let key = runtime_key.unwrap_or_else(|| {
         option_env!("TAURI_UPDATER_LEGACY_PUBLIC_KEY")
@@ -275,6 +276,8 @@ fn verify_manifest_payload(
 
 async fn github_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::limited(5))
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -365,10 +368,10 @@ async fn fetch_manifest_with_verification(
     Ok(manifest)
 }
 
-async fn verify_latest_json_hash(
+async fn fetch_verified_latest_json(
     client: &reqwest::Client,
     manifest: &SignedUpdateManifest,
-) -> Result<(), String> {
+) -> Result<Vec<u8>, String> {
     let latest_response = client
         .get(&manifest.latest_json_url)
         .header(USER_AGENT, GITHUB_API_USER_AGENT)
@@ -388,7 +391,8 @@ async fn verify_latest_json_hash(
         swifttunnel_core::http_body::read_bounded(latest_response, 1024 * 1024, "latest.json")
             .await?;
 
-    verify_bytes_sha256(&latest_json_bytes, &manifest.latest_json_sha256)
+    verify_bytes_sha256(&latest_json_bytes, &manifest.latest_json_sha256)?;
+    Ok(latest_json_bytes)
 }
 
 async fn prepare_channel_update(
@@ -404,125 +408,18 @@ async fn prepare_channel_update(
     };
 
     let manifest = fetch_manifest_with_verification(&client, &selected_release).await?;
-    verify_latest_json_hash(&client, &manifest).await?;
+    let latest_json = fetch_verified_latest_json(&client, &manifest).await?;
+    let package = Package::from_metadata(
+        &latest_json,
+        &selected_release.version,
+        &selected_release.tag_name,
+        std::env::consts::ARCH,
+    )?;
 
     Ok(Some(PreparedUpdate {
         selected_release,
-        manifest,
+        package,
     }))
-}
-
-async fn check_update_for_manifest(
-    app: &AppHandle,
-    manifest: &SignedUpdateManifest,
-) -> Result<Option<tauri_plugin_updater::Update>, String> {
-    match check_update_for_manifest_with_pubkey(app, manifest, None).await {
-        Ok(update) => Ok(update),
-        Err(primary_error) => {
-            // Only try the legacy pubkey when the primary failure is
-            // specifically a signature mismatch — not on transient network
-            // errors, parse errors, or anything else. The previous heuristic
-            // was too broad and risked silent fallbacks for unrelated bugs.
-            if !is_signature_mismatch(&primary_error) {
-                return Err(primary_error.into_string());
-            }
-            let Some(legacy_pubkey) = legacy_tauri_updater_public_key() else {
-                return Err(primary_error.into_string());
-            };
-
-            check_update_for_manifest_with_pubkey(app, manifest, Some(&legacy_pubkey))
-                .await
-                .map_err(|legacy_error| {
-                    format!(
-                        "Updater check failed with the configured key ({primary}) and the legacy key fallback also failed ({legacy})",
-                        primary = primary_error.into_string(),
-                        legacy = legacy_error.into_string(),
-                    )
-                })
-        }
-    }
-}
-
-/// Internal updater error wrapper that preserves enough provenance for the
-/// signature-mismatch fallback decision while still flattening to a String for
-/// the public command surface.
-enum UpdaterCheckError {
-    /// Signature verification rejected the manifest. Caller may want to retry
-    /// with the legacy public key.
-    Signature(String),
-    /// Anything else (network, parse, IO, configuration). NOT eligible for the
-    /// legacy-pubkey fallback.
-    Other(String),
-}
-
-impl UpdaterCheckError {
-    fn into_string(self) -> String {
-        match self {
-            UpdaterCheckError::Signature(msg) | UpdaterCheckError::Other(msg) => msg,
-        }
-    }
-}
-
-fn is_signature_mismatch(error: &UpdaterCheckError) -> bool {
-    matches!(error, UpdaterCheckError::Signature(_))
-}
-
-/// Classify a `tauri_plugin_updater::Error` Display string. The plugin
-/// currently exposes errors as strings, so we match on the exact upstream
-/// prefixes — anything outside this allow-list is treated as a non-signature
-/// failure.
-fn classify_updater_error(message: String) -> UpdaterCheckError {
-    // Phrases drawn from tauri_plugin_updater's signature/key error variants.
-    // Exact prefixes only — substring matches like "signature" alone caught
-    // unrelated errors and triggered spurious legacy-pubkey retries.
-    const SIGNATURE_PHRASES: &[&str] = &[
-        "Signature error",
-        "signature does not match",
-        "signature verification",
-        "different key than the one provided",
-        "Failed to parse public key",
-        "PublicKeyDecode",
-        "InvalidSignature",
-    ];
-    if SIGNATURE_PHRASES.iter().any(|p| {
-        message
-            .to_ascii_lowercase()
-            .contains(&p.to_ascii_lowercase())
-    }) {
-        UpdaterCheckError::Signature(message)
-    } else {
-        UpdaterCheckError::Other(message)
-    }
-}
-
-async fn check_update_for_manifest_with_pubkey(
-    app: &AppHandle,
-    manifest: &SignedUpdateManifest,
-    pubkey: Option<&str>,
-) -> Result<Option<tauri_plugin_updater::Update>, UpdaterCheckError> {
-    let endpoint = Url::parse(&manifest.latest_json_url).map_err(|e| {
-        UpdaterCheckError::Other(format!("Invalid latest.json endpoint URL: {}", e))
-    })?;
-
-    let mut builder = app
-        .updater_builder()
-        .endpoints(vec![endpoint])
-        .map_err(|e| {
-            UpdaterCheckError::Other(format!("Failed to configure updater endpoint: {}", e))
-        })?;
-
-    if let Some(pubkey) = pubkey {
-        builder = builder.pubkey(pubkey.to_string());
-    }
-
-    let updater = builder
-        .build()
-        .map_err(|e| UpdaterCheckError::Other(format!("Failed to initialize updater: {}", e)))?;
-
-    updater
-        .check()
-        .await
-        .map_err(|e| classify_updater_error(format!("Updater check failed: {}", e)))
 }
 
 #[tauri::command]
@@ -543,27 +440,9 @@ pub async fn updater_check_channel(
         });
     };
 
-    let maybe_update = check_update_for_manifest(&app, &prepared.manifest).await?;
-    let Some(update) = maybe_update else {
-        return Ok(UpdaterCheckResponse {
-            current_version: current_version.to_string(),
-            available_version: None,
-            release_tag: None,
-            release_notes: None,
-            channel: channel_name(channel).to_string(),
-        });
-    };
-
-    if update.version != prepared.selected_release.version.to_string() {
-        return Err(format!(
-            "Updater version mismatch: expected '{}', got '{}'",
-            prepared.selected_release.version, update.version
-        ));
-    }
-
     Ok(UpdaterCheckResponse {
-        current_version: update.current_version,
-        available_version: Some(update.version),
+        current_version: current_version.to_string(),
+        available_version: Some(prepared.selected_release.version.to_string()),
         release_tag: Some(prepared.selected_release.tag_name),
         release_notes: prepared.selected_release.release_notes,
         channel: channel_name(channel).to_string(),
@@ -646,39 +525,28 @@ pub async fn updater_install_channel(
         ));
     }
 
-    let maybe_update = check_update_for_manifest(&app, &prepared.manifest).await?;
-    let Some(update) = maybe_update else {
-        return Err("No installable update found after channel verification".to_string());
-    };
-
-    if update.version != normalized_expected_version.to_string() {
-        return Err(format!(
-            "Updater returned version '{}' but expected '{}'",
-            update.version, normalized_expected_version
-        ));
-    }
-
-    let downloaded = Arc::new(AtomicU64::new(0));
+    let primary_key = app
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|config| config.get("pubkey"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            "This app's update key is missing. Download the official installer.".to_string()
+        })?
+        .to_string();
+    let legacy_key = legacy_tauri_updater_public_key();
     let app_for_progress = app.clone();
-    let downloaded_for_progress = Arc::clone(&downloaded);
-
-    let package = update
-        .download(
-            move |chunk_len, total| {
-                let so_far = downloaded_for_progress.fetch_add(chunk_len as u64, Ordering::Relaxed)
-                    + chunk_len as u64;
-                let _ = app_for_progress.emit(
-                    UPDATER_PROGRESS_EVENT,
-                    UpdaterProgressPayload {
-                        downloaded: so_far,
-                        total,
-                    },
-                );
-            },
-            || {},
-        )
-        .await
-        .map_err(|e| format!("Failed to download update: {}", e))?;
+    let package = prepared
+        .package
+        .download(move |downloaded, total| {
+            let _ = app_for_progress.emit(
+                UPDATER_PROGRESS_EVENT,
+                UpdaterProgressPayload { downloaded, total },
+            );
+        })
+        .await?;
 
     // Install from a directory that survives, not the temp folder the plugin
     // would otherwise use. Windows records the path msiexec ran from as the
@@ -686,11 +554,13 @@ pub async fn updater_install_channel(
     // then cannot find the package it needs to remove the old version and
     // dies on "the feature you are trying to use is on a network resource
     // that is unavailable", leaving the machine unable to upgrade or
-    // uninstall. download() above performed the same signature verification
-    // the plugin does, so nothing about trust changes here.
-    let install_version = update.version.clone();
+    // uninstall. Verify the package before any staging or installer work.
+    let install_version = prepared.selected_release.version.to_string();
     let reboot_required = tauri::async_runtime::spawn_blocking(move || {
         let _install_permit = install_permit;
+        prepared
+            .package
+            .verify(&package, &primary_key, legacy_key.as_deref())?;
         let installer_path = stage_installer(&install_version, &package)?;
 
         // Clear a registration whose cached package has gone before handing over to
@@ -726,13 +596,12 @@ pub async fn updater_install_channel(
     .await
     .map_err(|error| format!("Could not complete the update installer task: {error}"))??;
 
-    // Emit `done` only after signature verification + install actually
-    // succeeded. The `on_download_finish` callback fires before the await
-    // resolves, so listeners would otherwise see "done" for failed installs.
+    // Download completion alone is not an installed update. Emit `done` only
+    // after signature verification and a successful installer result.
     let _ = app.emit(UPDATER_DONE_EVENT, ());
 
     Ok(UpdaterInstallResponse {
-        installed_version: update.version,
+        installed_version: normalized_expected_version.to_string(),
         reboot_required,
         release_tag: prepared.selected_release.tag_name,
     })
@@ -914,25 +783,6 @@ mod tests {
         );
 
         assert!(selected.is_none());
-    }
-
-    #[test]
-    fn classify_updater_error_only_matches_signature_failures() {
-        assert!(is_signature_mismatch(&classify_updater_error(
-            "Updater check failed: Signature error".to_string()
-        )));
-        assert!(is_signature_mismatch(&classify_updater_error(
-            "signature does not match".to_string()
-        )));
-        assert!(is_signature_mismatch(&classify_updater_error(
-            "PublicKeyDecode: bad key".to_string()
-        )));
-        assert!(is_signature_mismatch(&classify_updater_error(
-            "Updater check failed: The signature was created with a different key than the one provided".to_string()
-        )));
-        assert!(!is_signature_mismatch(&classify_updater_error(
-            "Updater check failed: network timeout".to_string()
-        )));
     }
 
     #[test]

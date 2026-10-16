@@ -4545,6 +4545,7 @@ dependencies = [
  "dirs 5.0.1",
  "env_logger",
  "log",
+ "minisign-verify",
  "parking_lot",
  "reqwest 0.12.28",
  "ring",
