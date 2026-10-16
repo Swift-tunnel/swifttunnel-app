@@ -1161,17 +1161,22 @@ pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<Late
             .find(|row| entry.server_id.as_deref() == Some(&row.estimate.relay))
             .cloned();
     }
-    sync_auto_router_available_servers(&state, available_servers).await;
+    sync_auto_router_available_servers(&state.vpn_connection, available_servers);
 
     Ok(entries)
 }
 
-async fn sync_auto_router_available_servers(
-    state: &AppState,
+fn sync_auto_router_available_servers(
+    connection: &tokio::sync::Mutex<swifttunnel_core::vpn::VpnConnection>,
     available_servers: Vec<(String, SocketAddr, Option<u32>)>,
 ) {
     let auto_router = {
-        let vpn = state.vpn_connection.lock().await;
+        // Connecting owns this lock for up to 90 seconds. Returning measured
+        // pings must not wait for it. The cache is already updated; the next
+        // refresh can hand those readings to the live router after setup.
+        let Ok(vpn) = connection.try_lock() else {
+            return;
+        };
         vpn.auto_router().cloned()
     };
 
@@ -1187,6 +1192,15 @@ mod tests {
     use swifttunnel_core::vpn::servers::{
         DynamicGamingRegion, DynamicServerInfo, DynamicServerList, ServerListSource,
     };
+
+    #[tokio::test]
+    async fn latency_handoff_does_not_wait_for_connection_setup() {
+        let connection = tokio::sync::Mutex::new(swifttunnel_core::vpn::VpnConnection::new());
+        let connecting = connection.lock().await;
+        sync_auto_router_available_servers(&connection, vec![]);
+        drop(connecting);
+        sync_auto_router_available_servers(&connection, vec![]);
+    }
 
     fn make_server(region: &str, ip: &str) -> DynamicServerInfo {
         make_server_with_port(region, ip, 51821)
@@ -1584,7 +1598,7 @@ pub async fn server_refresh(state: State<'_, AppState>, app: AppHandle) -> Resul
         sl.update(servers, regions, source.clone());
         build_available_servers(&sl)
     };
-    sync_auto_router_available_servers(&state, available_servers).await;
+    sync_auto_router_available_servers(&state.vpn_connection, available_servers);
 
     let _ = app.emit(SERVER_LIST_UPDATED, source.to_string());
 

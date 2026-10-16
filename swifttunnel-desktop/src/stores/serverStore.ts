@@ -8,7 +8,7 @@ import {
 } from "../lib/commands";
 import { formatErrorMessage, reportError } from "../lib/errors";
 
-// A scan probes every relay and can wait behind connection setup. Timer ticks,
+// A scan probes every relay. Timer ticks,
 // focus changes and refresh clicks must share it instead of queuing more scans.
 let pendingLatencies: Promise<void> | null = null;
 
