@@ -285,10 +285,11 @@ pub async fn boost_sync_effective_config(
     let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let mut current_config = {
+        let observed = {
             let s = settings.lock();
             s.config.clone()
         };
+        let mut current_config = observed.clone();
         current_config
             .network_settings
             .normalize_legacy_master_boost();
@@ -299,48 +300,63 @@ pub async fn boost_sync_effective_config(
         };
         // Reflect the Roblox client's real state — FFlags/FPS wiped by a Roblox
         // update or the user should show as off on the Optimize page.
-        let effective_roblox_config = {
-            let ro = roblox_optimizer.lock();
-            ro.effective_roblox_config(&current_config.roblox_settings)
-        };
+        // Launch preparation, recovery and the flag editor use this same
+        // lock. Keep it until the reconciled settings have been committed.
+        let ro = roblox_optimizer.lock();
+        let effective_roblox_config = ro.effective_roblox_config(&current_config.roblox_settings);
 
         let mut applied_config = current_config.clone();
         applied_config.network_settings = effective_network_config;
         applied_config.roblox_settings = effective_roblox_config;
 
-        let mut warnings = Vec::new();
-        if current_config.network_settings.disable_nagle
-            && !applied_config.network_settings.disable_nagle
-        {
-            warnings.push(
-                "Network booster: Disable Nagle's algorithm was not active on Windows".to_string(),
-            );
-        }
-        if current_config.network_settings.disable_network_throttling
-            && !applied_config.network_settings.disable_network_throttling
-        {
-            warnings.push(
-                "Network booster: Disable network throttling was not active on Windows".to_string(),
-            );
-        }
-        let network_changed = applied_config.network_settings.disable_nagle
-            != current_config.network_settings.disable_nagle
-            || applied_config.network_settings.disable_network_throttling
-                != current_config.network_settings.disable_network_throttling;
-        let roblox_changed = applied_config.roblox_settings != current_config.roblox_settings;
-        if network_changed || roblox_changed {
-            let mut s = settings.lock();
-            s.config = applied_config.clone();
-            swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
-        }
-
-        Ok(BoostUpdateResult {
-            warnings,
-            applied_config,
-        })
+        persist_effective_config(
+            &mut settings.lock(),
+            &observed,
+            &applied_config,
+            swifttunnel_core::settings::save_settings,
+        )
     })
     .await
     .map_err(|e| format!("Boost config sync task failed: {}", e))?
+}
+
+fn persist_effective_config(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+    observed: &swifttunnel_core::structs::Config,
+    effective: &swifttunnel_core::structs::Config,
+    persist: impl FnOnce(&swifttunnel_core::settings::AppSettings) -> Result<(), String>,
+) -> Result<BoostUpdateResult, String> {
+    let mut next = settings.clone();
+    // Windows probes can be slow. Never replace a newer editor save with
+    // the config captured before those probes started, or touch other sections.
+    if next.config.network_settings == observed.network_settings {
+        next.config.network_settings = effective.network_settings.clone();
+    }
+    if next.config.roblox_settings == observed.roblox_settings {
+        next.config.roblox_settings = effective.roblox_settings.clone();
+    }
+    let mut warnings = Vec::new();
+    if settings.config.network_settings.disable_nagle && !next.config.network_settings.disable_nagle
+    {
+        warnings
+            .push("Network booster: Disable Nagle's algorithm was not active on Windows".into());
+    }
+    if settings.config.network_settings.disable_network_throttling
+        && !next.config.network_settings.disable_network_throttling
+    {
+        warnings
+            .push("Network booster: Disable network throttling was not active on Windows".into());
+    }
+    if next.config.network_settings != settings.config.network_settings
+        || next.config.roblox_settings != settings.config.roblox_settings
+    {
+        persist(&next)?;
+        *settings = next;
+    }
+    Ok(BoostUpdateResult {
+        warnings,
+        applied_config: settings.config.clone(),
+    })
 }
 
 fn persist_roblox_reset(
@@ -567,6 +583,62 @@ pub async fn boost_close_roblox(state: State<'_, AppState>) -> Result<(), String
 mod tests {
     use super::*;
     use swifttunnel_core::settings::AppSettings;
+
+    #[test]
+    fn slow_reconciliation_keeps_newer_flags_network_and_unrelated_settings() {
+        let mut settings = AppSettings::default();
+        let observed = settings.config.clone();
+        let mut measured = observed.clone();
+        measured.roblox_settings.unlock_fps = false;
+        measured.network_settings.disable_nagle = false;
+        settings.config.roblox_settings.custom_fflags_enabled = true;
+        settings.config.roblox_settings.custom_fflags_json = r#"{"FFlagDebugSkyGray":true}"#.into();
+        settings.config.network_settings.disable_nagle = true;
+        settings.config.overlay.enabled = !observed.overlay.enabled;
+        settings.config.profile = swifttunnel_core::structs::OptimizationProfile::HighEnd;
+        let expected = serde_json::to_value(&settings).unwrap();
+        let result = persist_effective_config(&mut settings, &observed, &measured, |_| {
+            panic!("a stale read must not write any part of newer settings")
+        })
+        .unwrap();
+        assert!(result.warnings.is_empty());
+        assert_eq!(serde_json::to_value(&settings).unwrap(), expected);
+        assert_eq!(
+            serde_json::to_value(result.applied_config).unwrap(),
+            expected["config"]
+        );
+    }
+
+    #[test]
+    fn reconciliation_persists_only_unchanged_observations_and_keeps_memory_on_failure() {
+        let mut settings = AppSettings::default();
+        settings.config.network_settings.disable_nagle = true;
+        let observed = settings.config.clone();
+        let mut measured = observed.clone();
+        measured.network_settings.disable_nagle = false;
+        measured.roblox_settings.unlock_fps = false;
+        settings.config.overlay.enabled = !observed.overlay.enabled;
+        let before = serde_json::to_value(&settings).unwrap();
+        assert!(
+            persist_effective_config(&mut settings, &observed, &measured, |_| Err(
+                "disk full".into()
+            ))
+            .is_err()
+        );
+        assert_eq!(serde_json::to_value(&settings).unwrap(), before);
+        let result = persist_effective_config(&mut settings, &observed, &measured, |candidate| {
+            assert!(!candidate.config.roblox_settings.unlock_fps);
+            assert!(!candidate.config.network_settings.disable_nagle);
+            assert_eq!(
+                candidate.config.overlay.enabled,
+                before["config"]["overlay"]["enabled"].as_bool().unwrap()
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(result.warnings.len(), 1);
+        assert!(!settings.config.roblox_settings.unlock_fps);
+    }
 
     #[test]
     fn failed_reset_save_keeps_the_previous_preferences_for_retry() {

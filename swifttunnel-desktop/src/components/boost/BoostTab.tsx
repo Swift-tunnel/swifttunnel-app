@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, type ReactNode } from "react";
+import { useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -29,6 +29,7 @@ import { FpsSlider } from "./FpsSlider";
 import {
   PROFILES,
   configsEqual,
+  mergeConfigChanges,
   getPresetConfig,
   parseWindowDimensionInput,
   robloxSettingsChanged,
@@ -105,9 +106,12 @@ export function BoostTab() {
 
   const savedConfig = settings.config;
   const [draft, setDraft] = useState<Config>(savedConfig);
+  const previousSavedConfig = useRef(savedConfig);
 
   useEffect(() => {
-    setDraft(savedConfig);
+    const previous = previousSavedConfig.current;
+    previousSavedConfig.current = savedConfig;
+    setDraft(current => mergeConfigChanges(current, previous, savedConfig));
   }, [savedConfig]);
 
   const savedGPP = settings.game_process_performance;
@@ -201,18 +205,16 @@ export function BoostTab() {
   }, [addToast, boost, enableFullBanDraft]);
   useEffect(() => {
     let canceled = false;
+    const observed = useSettingsStore.getState().settings.config;
     void boost.syncEffectiveConfig().then((appliedConfig) => {
       if (canceled || !appliedConfig) return;
-      if (
-        !configsEqual(
-          appliedConfig,
-          useSettingsStore.getState().settings.config,
-        )
-      ) {
-        updateSettings({ config: appliedConfig });
-        void useSettingsStore.getState().save();
+      const current = useSettingsStore.getState().settings.config;
+      const merged = mergeConfigChanges(current, observed, appliedConfig);
+      if (!configsEqual(merged, current)) {
+        // The native sync already saved its changes. A second full settings
+        // save here can overwrite a newer FastFlags or overlay edit.
+        updateSettings({ config: merged });
       }
-      setDraft(appliedConfig);
     });
     return () => {
       canceled = true;

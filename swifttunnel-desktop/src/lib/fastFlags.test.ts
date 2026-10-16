@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { FLAG_KEYS, flagPreset, parseFlags, patchFlags, rendererPatch, validateCustomFflags } from "./fastFlags";
+import { FLAG_KEYS, flagBool, flagBoolean, flagPreset, parseFlags, patchFlags, rendererPatch, validateCustomFflags } from "./fastFlags";
 describe("FastFlags editor validation", () => {
+  it("uses the backend's signed decimal syntax for integer text", () => {
+    for (const value of ["1e2", "1.0", "0x10", "0b10", "1_000", "+", "Infinity"]) {
+      expect(validateCustomFflags(true, JSON.stringify({ FIntGrassMovementReducedMotionFactor: value }))).toMatch(/integer/);
+    }
+    for (const value of [" -10 ", "+10", "0001", 100, 1e2]) {
+      expect(validateCustomFflags(true, JSON.stringify({ FIntGrassMovementReducedMotionFactor: value }))).toBeNull();
+    }
+  });
+  it("displays accepted boolean text exactly as the backend applies it", () => {
+    for (const value of [true, " True ", "\tTRUE\n"]) {
+      const flags = { FFlagDebugSkyGray: value };
+      expect(validateCustomFflags(true, JSON.stringify(flags))).toBeNull();
+      expect(flagBool(flags, "FFlagDebugSkyGray")).toBe(true);
+      expect(flagBoolean(value)).toBe(true);
+    }
+    for (const value of [false, " False ", "FALSE"]) expect(flagBoolean(value)).toBe(false);
+    for (const value of [null, {}, 1, "true-ish"]) expect(flagBoolean(value)).toBeNull();
+  });
   it("does not expand oversized drafts into editable rows", () => {
     for (const raw of [
       JSON.stringify({ FFlagDebugSkyGray: "x".repeat(2 * 1024 * 1024) }),

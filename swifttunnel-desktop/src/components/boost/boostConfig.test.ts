@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../../lib/settings";
 import {
   getPresetConfig,
+  mergeConfigChanges,
   rememberedPowerPlanForSwiftTunnel,
   nextPowerPlanForSwiftTunnelToggle,
   parseWindowDimensionInput,
@@ -10,6 +11,35 @@ import {
 } from "./boostConfig";
 
 describe("boost config helpers", () => {
+  it("rebases saved flags without losing a game-settings draft edited while a read ran", () => {
+    const previous = structuredClone(DEFAULT_SETTINGS.config);
+    const draft = structuredClone(previous);
+    draft.roblox_settings.target_fps = 650;
+    const incoming = structuredClone(previous);
+    incoming.roblox_settings.custom_fflags_enabled = true;
+    incoming.roblox_settings.custom_fflags_json = '{"FFlagDebugSkyGray":true}';
+    const merged = mergeConfigChanges(draft, previous, incoming);
+    expect(merged.roblox_settings.target_fps).toBe(650);
+    expect(merged.roblox_settings.custom_fflags_json).toBe(incoming.roblox_settings.custom_fflags_json);
+    expect(draft.roblox_settings.custom_fflags_enabled).toBe(false);
+  });
+
+  it("does not let an old sync undo newer FPS, flags or overlay edits", () => {
+    const previous = structuredClone(DEFAULT_SETTINGS.config);
+    const current = structuredClone(previous);
+    current.roblox_settings.target_fps = 650;
+    current.roblox_settings.custom_fflags_enabled = true;
+    current.overlay.metrics = ["cpu"];
+    const late = structuredClone(previous);
+    late.roblox_settings.target_fps = 144;
+    late.network_settings.disable_nagle = true;
+    const merged = mergeConfigChanges(current, previous, late);
+    expect(merged.roblox_settings.target_fps).toBe(650);
+    expect(merged.roblox_settings.custom_fflags_enabled).toBe(true);
+    expect(merged.overlay.metrics).toEqual(["cpu"]);
+    expect(merged.network_settings.disable_nagle).toBe(true);
+  });
+
   it("applies the low-end preset without dropping unrelated fields", () => {
     const result = getPresetConfig("LowEnd", DEFAULT_SETTINGS.config);
 

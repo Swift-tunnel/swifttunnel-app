@@ -1332,8 +1332,21 @@ impl RobloxOptimizer {
     /// update or the user wiping the FFlags / FPS cap). Defensive: only turns
     /// things off when it can confirm they're gone, and only for FFlags + FPS.
     pub fn effective_roblox_config(&self, config: &RobloxSettingsConfig) -> RobloxSettingsConfig {
+        self.reconcile_roblox_config(
+            config,
+            crate::roblox_game_profile::pending() || crate::roblox_launch_flags::pending(),
+        )
+    }
+
+    fn reconcile_roblox_config(
+        &self,
+        config: &RobloxSettingsConfig,
+        temporary_settings_pending: bool,
+    ) -> RobloxSettingsConfig {
         let mut effective = config.clone();
-        if !self.is_roblox_installed() {
+        // The live files can hold this game's temporary FPS or safe-launch
+        // flags until recovery completes. They are not a new global choice.
+        if temporary_settings_pending || !self.is_roblox_installed() {
             return effective;
         }
 
@@ -1768,6 +1781,10 @@ impl RobloxOptimizer {
             Some(v)
         } else if let Some(v) = value.as_u64() {
             i64::try_from(v).ok()
+        } else if let Some(v) = value.as_f64() {
+            // JSON numbers such as 100.0 and 1e2 are also whole numbers to
+            // the editor. The range check below keeps accepted values exact.
+            (v.is_finite() && v.fract() == 0.0).then_some(v as i64)
         } else if let Some(v) = value.as_str() {
             v.trim().parse::<i64>().ok()
         } else {
@@ -3493,6 +3510,35 @@ mod tests {
     // ── read_current_settings ───────────────────────────────────────
 
     #[test]
+    fn temporary_game_caps_do_not_become_global_preferences_during_reconciliation() {
+        let dir =
+            std::env::temp_dir().join(format!("swift-reconcile-profile-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.xml");
+        let opt = optimizer_with_path(path.clone());
+        let saved = RobloxSettingsConfig {
+            unlock_fps: true,
+            target_fps: 300,
+            ..Default::default()
+        };
+        for fps in [60, 144] {
+            fs::write(
+                &path,
+                format!("<roblox><int name=\"FramerateCap\">{fps}</int></roblox>"),
+            )
+            .unwrap();
+            assert_eq!(opt.reconcile_roblox_config(&saved, true), saved);
+            let external = opt.reconcile_roblox_config(&saved, false);
+            if fps == 60 {
+                assert!(!external.unlock_fps);
+            } else {
+                assert_eq!(external.target_fps, fps);
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn read_current_settings_parses_xml() {
         let dir = std::env::temp_dir().join("roblox_opt_test_read");
         let _ = fs::remove_dir_all(&dir);
@@ -3771,6 +3817,45 @@ mod tests {
         // reads as "your flag is bad" for a flag that plainly works.
         assert!(message.contains("frame rate controls"), "{message}");
         assert!(!message.contains("allowlist"), "{message}");
+    }
+
+    #[test]
+    fn custom_flag_json_numbers_and_boolean_text_match_the_editor() {
+        for raw in ["100.0", "1e2", "-1000000.0"] {
+            let config = RobloxSettingsConfig {
+                custom_fflags_enabled: true,
+                custom_fflags_json: format!(
+                    r#"{{"FIntGrassMovementReducedMotionFactor":{raw},"FFlagDebugSkyGray":" True "}}"#
+                ),
+                ..Default::default()
+            };
+            let flags = RobloxOptimizer::native_launch_flags(&config).unwrap();
+            assert_eq!(flags["FFlagDebugSkyGray"], "True");
+            assert_eq!(
+                flags["FIntGrassMovementReducedMotionFactor"],
+                if raw == "-1000000.0" {
+                    "-1000000"
+                } else {
+                    "100"
+                }
+            );
+        }
+        for raw in [
+            r#""1.0""#,
+            r#""1e2""#,
+            r#""0x10""#,
+            "1.5",
+            "1e30",
+            "-1000001.0",
+        ] {
+            assert!(
+                RobloxOptimizer::validate_custom_fflags(&format!(
+                    r#"{{"FIntGrassMovementReducedMotionFactor":{raw}}}"#
+                ))
+                .is_err(),
+                "{raw}"
+            );
+        }
     }
 
     #[test]
