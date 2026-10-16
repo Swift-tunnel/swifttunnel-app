@@ -33,6 +33,7 @@ mod installer_cli;
 mod operation_gate;
 mod picker;
 mod preview;
+mod roblox_changes;
 mod screens;
 mod settings_writer;
 mod single_client;

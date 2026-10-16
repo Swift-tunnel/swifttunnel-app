@@ -113,6 +113,7 @@ struct Shared {
     busy: OperationGate,
     /// One update check/download at a time, whether manual or automatic.
     update_busy: OperationGate,
+    roblox_edits: OperationGate,
     /// Set when the user pressed Disconnect, so auto-reconnect knows the
     /// tunnel went down on purpose and leaves it down.
     intentional_disconnect: AtomicBool,
@@ -233,6 +234,7 @@ impl Engine {
             stop: AtomicBool::new(false),
             busy: OperationGate::default(),
             update_busy: OperationGate::default(),
+            roblox_edits: OperationGate::default(),
             intentional_disconnect: AtomicBool::new(false),
             was_connected: AtomicBool::new(false),
         });
@@ -350,6 +352,7 @@ impl Engine {
                 );
             }
         }
+        state.sync_roblox_busy(self.shared.roblox_edits.is_busy());
     }
 
     pub fn refresh_regions(&self) {
@@ -662,72 +665,127 @@ impl Engine {
             }
             ResetState::Armed => {}
         }
+        let Some(operation) = self.shared.busy.try_enter() else {
+            self.shared.edit(|s| {
+                s.roblox_reset_note =
+                    Some("Wait for the current operation to finish, then retry the reset.".into())
+            });
+            return;
+        };
+        let Some(edit) = self.shared.roblox_edits.try_enter() else {
+            return;
+        };
+        state.roblox_busy = true;
 
         self.shared.edit(|s| {
             s.roblox_reset = ResetState::Running;
             s.roblox_reset_note = None;
         });
         // Pending edits describe a client that is about to stop existing.
-        state.roblox_draft = None;
         state.focus = None;
 
         let shared = self.shared.clone();
-        std::thread::spawn(move || {
-            let report = RobloxOptimizer::new().reset_client_to_default();
+        let spawned = std::thread::Builder::new()
+            .name("lite-roblox-reset".into())
+            .spawn(move || {
+                let report = match crate::roblox_changes::run_edit(|| {
+                    Ok(RobloxOptimizer::new().reset_client_to_default())
+                }) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        shared.edit(|s| {
+                            s.roblox_reset = ResetState::Idle;
+                            s.roblox_reset_note = Some(error);
+                        });
+                        drop(edit);
+                        drop(operation);
+                        shared.notify();
+                        return;
+                    }
+                };
 
-            // The saved intent has to follow the client, or the switches come
-            // straight back on over a Roblox with no flags left in it.
-            if let Ok(mut guard) = shared.settings.write() {
-                guard.config.roblox_settings = RobloxSettingsConfig::default();
-                drop(guard);
-                let _ = shared.settings_save_signal.try_send(());
-            }
+                // The saved intent has to follow the client, or the switches come
+                // straight back on over a Roblox with no flags left in it.
+                if let Ok(mut guard) = shared.settings.write() {
+                    let changed = crate::roblox_changes::reset_saved_intent(
+                        &report,
+                        &mut guard.config.roblox_settings,
+                    );
+                    drop(guard);
+                    if changed {
+                        let _ = shared.settings_save_signal.try_send(());
+                    }
+                }
 
-            // Roblox usually outlives its own window, so somebody who believes
-            // they closed it long ago still had it running. Saying it was
-            // closed stops a deliberate kill reading as a crash.
-            let closed = if report.roblox_was_running {
-                "Roblox closed. "
-            } else {
-                ""
-            };
-            let note = if !report.failures.is_empty() {
-                "Some files were locked. Try again.".to_string()
-            } else if report.flag_files_removed == 0 {
-                format!("{closed}Roblox was already clean, nothing to remove.")
-            } else {
-                format!(
-                    "{closed}Removed {} flag file{} from {}.",
-                    report.flag_files_removed,
-                    if report.flag_files_removed == 1 {
-                        ""
-                    } else {
-                        "s"
-                    },
-                    report.sources.join(", ")
-                )
-            };
+                // Roblox usually outlives its own window, so somebody who believes
+                // they closed it long ago still had it running. Saying it was
+                // closed stops a deliberate kill reading as a crash.
+                let closed = if report.roblox_was_running {
+                    "Roblox closed. "
+                } else {
+                    ""
+                };
+                let note = if !report.failures.is_empty() {
+                    "Some files were locked. Try again.".to_string()
+                } else if report.flag_files_removed == 0 {
+                    format!("{closed}Roblox was already clean, nothing to remove.")
+                } else {
+                    format!(
+                        "{closed}Removed {} flag file{} from {}.",
+                        report.flag_files_removed,
+                        if report.flag_files_removed == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
+                        report.sources.join(", ")
+                    )
+                };
 
-            let intent = shared
-                .settings
-                .read()
-                .map(|s| s.config.roblox_settings.clone())
-                .unwrap_or_default();
-            shared.edit(|s| {
-                s.roblox = read_roblox(&intent);
-                s.roblox_reset = ResetState::Idle;
-                s.roblox_reset_note = Some(note);
+                let intent = shared
+                    .settings
+                    .read()
+                    .map(|s| s.config.roblox_settings.clone())
+                    .unwrap_or_default();
+                shared.edit(|s| {
+                    s.roblox = read_roblox(&intent);
+                    s.roblox_reset = ResetState::Idle;
+                    s.roblox_reset_note = Some(note);
+                });
+                drop(edit);
+                drop(operation);
+                shared.notify();
             });
-            shared.notify();
-        });
+        match spawned {
+            Ok(_) => state.roblox_draft = None,
+            Err(error) => {
+                log::warn!("Lite Roblox reset worker could not start: {error}");
+                self.shared.edit(|s| {
+                    s.roblox_reset = ResetState::Idle;
+                    s.roblox_reset_note = Some("Could not start the reset. Try again.".into());
+                });
+                self.shared.notify();
+            }
+        }
     }
 
     fn apply_roblox(&self, state: &mut State) {
         let draft = state.roblox_view();
-        if !draft.ready() {
+        if !draft.ready() || !state.roblox_dirty() {
             return;
         }
-        state.roblox_draft = None;
+        let Some(operation) = self.shared.busy.try_enter() else {
+            self.shared.edit(|s| {
+                s.roblox.error = Some(
+                    "Wait for the current operation to finish, then apply your changes.".into(),
+                )
+            });
+            return;
+        };
+        let Some(edit) = self.shared.roblox_edits.try_enter() else {
+            return;
+        };
+        state.roblox_busy = true;
         state.focus = None;
 
         let config = RobloxSettingsConfig {
@@ -743,32 +801,39 @@ impl Engine {
         let restart = state.roblox.running;
         let shared = self.shared.clone();
 
-        std::thread::spawn(move || {
+        let spawned = std::thread::Builder::new().name("lite-roblox-apply".into()).spawn(move || {
             let optimizer = RobloxOptimizer::new();
-            let mut error = optimizer
-                .apply_optimizations(&config)
-                .err()
-                .map(|e| e.to_string());
-
-            // The intent for both FFlag paths is kept in the shared settings
-            // file, because neither can be read back off Roblox's own config
-            // in full: all core can tell is whether the flags are present.
-            if error.is_none()
-                && let Ok(mut guard) = shared.settings.write()
-            {
-                let roblox = &mut guard.config.roblox_settings;
-                roblox.ultraboost = config.ultraboost;
-                roblox.custom_fflags_enabled = config.custom_fflags_enabled;
-                roblox
-                    .custom_fflags_json
-                    .clone_from(&config.custom_fflags_json);
-                drop(guard);
-                let _ = shared.settings_save_signal.try_send(());
-            }
-
-            if error.is_none() && restart {
-                error = restart_roblox().err();
-            }
+            let result = crate::roblox_changes::run_edit(|| crate::roblox_changes::apply_in_order(
+                || {
+                    if restart {
+                        close_roblox_for_changes(&optimizer).map(Some)
+                    } else if optimizer.is_roblox_running() {
+                        Err("Roblox opened while you were editing. Close it, then apply your changes.".into())
+                    } else {
+                        Ok(None)
+                    }
+                },
+                || {
+                    let mut warnings = optimizer.apply_optimizations(&config).map_err(|e| e.to_string())?;
+                    if let Ok(mut guard) = shared.settings.write() {
+                        let roblox = &mut guard.config.roblox_settings;
+                        roblox.ultraboost = config.ultraboost;
+                        roblox.custom_fflags_enabled = config.custom_fflags_enabled;
+                        roblox.custom_fflags_json.clone_from(&config.custom_fflags_json);
+                        drop(guard);
+                        let _ = shared.settings_save_signal.try_send(());
+                    } else {
+                        warnings.push("Roblox changed, but SwiftTunnel could not remember these settings. Try again.".into());
+                    }
+                    Ok(warnings)
+                },
+                |player| optimizer.reopen_client(&player).map_err(|e| e.to_string()),
+            ));
+            let error = match result {
+                Ok(warnings) if warnings.is_empty() => None,
+                Ok(warnings) => Some(warnings.join("\n")),
+                Err(error) => Some(error),
+            };
 
             let intent = shared
                 .settings
@@ -779,8 +844,17 @@ impl Engine {
                 s.roblox = read_roblox(&intent);
                 s.roblox.error = error;
             });
+            drop(edit);
+            drop(operation);
             shared.notify();
         });
+        if let Err(error) = spawned {
+            log::warn!("Lite Roblox apply worker could not start: {error}");
+            self.shared.edit(|s| {
+                s.roblox.error = Some("Could not start applying your changes. Try again.".into())
+            });
+            self.shared.notify();
+        }
     }
 
     /// Reinstall the split tunnel driver.
@@ -2117,12 +2191,11 @@ fn level_of(quality: i32) -> u32 {
     }
 }
 
-/// Close Roblox, wait for it to actually go, and start it again.
+/// Resolve the player's executable, close it, and wait before settings writes.
 ///
 /// The same sequence the full app runs. Roblox reads its settings once at
 /// launch, so a change made while it is open does nothing until it restarts.
-fn restart_roblox() -> Result<(), String> {
-    let roblox = RobloxOptimizer::new();
+fn close_roblox_for_changes(roblox: &RobloxOptimizer) -> Result<std::path::PathBuf, String> {
     let client = swifttunnel_core::roblox_native_launch::running_client()?.unwrap_or_default();
     let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
     roblox
@@ -2140,9 +2213,7 @@ fn restart_roblox() -> Result<(), String> {
         return Err("Roblox did not exit in time. Try again.".into());
     }
 
-    roblox
-        .reopen_client(&player)
-        .map_err(|e| format!("Could not relaunch Roblox: {e}"))
+    Ok(player)
 }
 
 /// Read Roblox's own settings rather than remembering them, so the switches

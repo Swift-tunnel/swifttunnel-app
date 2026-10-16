@@ -352,6 +352,7 @@ pub struct State {
     pub regions: Vec<RegionRow>,
     pub adapters: Vec<AdapterRow>,
     pub roblox: Roblox,
+    pub roblox_busy: bool,
     /// Pending Roblox edits. `None` means the screen mirrors the disk.
     pub roblox_draft: Option<RobloxDraft>,
     /// The reset row's flow, kept out of `roblox` because that is replaced
@@ -501,12 +502,32 @@ impl State {
     pub fn roblox_dirty(&self) -> bool {
         match &self.roblox_draft {
             None => false,
-            Some(draft) => *draft != RobloxDraft::from_truth(&self.roblox),
+            Some(draft) => !draft.same_settings(&RobloxDraft::from_truth(&self.roblox)),
+        }
+    }
+
+    pub fn sync_roblox_busy(&mut self, busy: bool) {
+        let finished = self.roblox_busy && !busy;
+        self.roblox_busy = busy;
+        // Keep failed or newer edits available to retry. Only discard a
+        // completed draft once the read-back actually matches its settings.
+        if finished && !self.roblox_dirty() {
+            self.roblox_draft = None;
         }
     }
 }
 
 impl RobloxDraft {
+    fn same_settings(&self, other: &Self) -> bool {
+        self.unlock_fps == other.unlock_fps
+            && self.fps_text == other.fps_text
+            && self.quality == other.quality
+            && self.fullscreen == other.fullscreen
+            && self.ultraboost == other.ultraboost
+            && self.custom_fflags == other.custom_fflags
+            && self.custom_json == other.custom_json
+    }
+
     /// Whether this draft can be written at all.
     ///
     /// A cap that is not a number, or a custom payload that failed its check,
@@ -520,6 +541,62 @@ impl RobloxDraft {
             return false;
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod roblox_draft_tests {
+    use super::*;
+
+    fn editing() -> State {
+        let mut state = State::default();
+        state.roblox.target_fps = 60;
+        state.edit_roblox(|draft| {
+            draft.unlock_fps = true;
+            draft.fps_text = "120".into();
+        });
+        state.roblox_busy = true;
+        state
+    }
+
+    #[test]
+    fn failed_settings_writes_leave_the_draft_available_to_retry() {
+        let mut state = editing();
+        let expected = state.roblox_draft.clone();
+        state.sync_roblox_busy(false);
+        assert!(state.roblox_dirty());
+        assert_eq!(state.roblox_draft, expected);
+    }
+
+    #[test]
+    fn successful_readback_retires_the_applied_draft() {
+        let mut state = editing();
+        state.roblox.unlock_fps = true;
+        state.roblox.target_fps = 120;
+        state.sync_roblox_busy(false);
+        assert!(state.roblox_draft.is_none());
+        assert!(!state.roblox_dirty());
+    }
+
+    #[test]
+    fn edits_made_during_a_write_are_kept_for_the_next_apply() {
+        let mut state = editing();
+        state.edit_roblox(|draft| draft.fps_text = "144".into());
+        state.roblox.unlock_fps = true;
+        state.roblox.target_fps = 120;
+        state.sync_roblox_busy(false);
+        assert!(state.roblox_dirty());
+        assert_eq!(state.roblox_draft.unwrap().fps_text, "144");
+    }
+
+    #[test]
+    fn validation_notes_are_not_unsaved_roblox_settings() {
+        let mut state = State::default();
+        state.edit_roblox(|draft| draft.fflag_note = Some("Flags are valid.".into()));
+        assert!(!state.roblox_dirty());
+        state.roblox_busy = true;
+        state.sync_roblox_busy(false);
+        assert!(state.roblox_draft.is_none());
     }
 }
 

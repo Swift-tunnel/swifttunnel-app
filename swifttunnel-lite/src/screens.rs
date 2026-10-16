@@ -541,7 +541,7 @@ fn roblox(state: &State) -> Vec<Item> {
 /// read that they are about to lose them, and reading it is the only chance
 /// they get.
 fn reset_row(state: &State) -> Row {
-    match state.roblox_reset {
+    let row = match state.roblox_reset {
         ResetState::Running => Row::new("Resetting...")
             .sub("Clearing every FFlag file on this PC")
             .disabled(true),
@@ -554,7 +554,8 @@ fn reset_row(state: &State) -> Row {
             .sub("Close Roblox and remove every FFlag on this PC")
             .right(Right::Chevron)
             .action(Action::ResetRoblox),
-    }
+    };
+    row.disabled(state.roblox_busy || state.roblox_reset == ResetState::Running)
 }
 
 /// The control pinned to the bottom of a screen, outside the scroll.
@@ -577,7 +578,14 @@ pub fn footer(state: &State) -> Option<Item> {
     // Roblox reads its settings once at launch, so applying while it is open
     // does nothing until it restarts. The label says which is about to happen.
     Some(Item::Button {
-        label: if !dirty {
+        label: if state.roblox_busy {
+            if state.roblox_reset == ResetState::Running {
+                "Resetting..."
+            } else {
+                "Applying..."
+            }
+            .into()
+        } else if !dirty {
             "No changes to apply".into()
         } else if state.roblox.running {
             "Restart Roblox to apply".into()
@@ -590,7 +598,7 @@ pub fn footer(state: &State) -> Option<Item> {
         } else {
             Variant::Outline
         },
-        disabled: !dirty || !draft.ready(),
+        disabled: state.roblox_busy || !dirty || !draft.ready(),
     })
 }
 
