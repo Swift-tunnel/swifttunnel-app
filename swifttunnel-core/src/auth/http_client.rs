@@ -187,9 +187,12 @@ pub fn update_required_message() -> Option<String> {
 
 /// Note that the server just served this build, so any lockout is stale.
 ///
-/// A success is unambiguous: whatever the server thought of our version a
-/// moment ago, it is answering us now.
-fn note_server_served_us() {
+/// Only our API enforces the minimum app version. A successful Supabase
+/// sign-in/refresh says nothing about whether our server accepts this build.
+fn note_server_served_us(base: &str) {
+    if !API_HOSTS.contains(&base) {
+        return;
+    }
     // Cheap read first. This runs on every successful request and the lock is
     // almost always already empty.
     if UPDATE_REQUIRED_MESSAGE
@@ -365,7 +368,7 @@ impl AuthClient {
         match send_using_client(&self.client, base, build_request).await {
             Ok(response) => {
                 if response.status().is_success() {
-                    note_server_served_us();
+                    note_server_served_us(base);
                 }
                 Ok(response)
             }
@@ -385,7 +388,7 @@ impl AuthClient {
                     .await
                     .inspect(|response| {
                         if response.status().is_success() {
-                            note_server_served_us();
+                            note_server_served_us(base);
                         }
                     })
                     .map_err(|direct_error| {
@@ -1559,7 +1562,7 @@ mod tests {
         );
         assert_eq!(update_required_message().as_deref(), Some("Please update."));
 
-        note_server_served_us();
+        note_server_served_us(API_HOSTS[0]);
         assert_eq!(
             update_required_message(),
             None,
@@ -1574,7 +1577,7 @@ mod tests {
         if let Ok(mut held) = UPDATE_REQUIRED_MESSAGE.write() {
             *held = None;
         }
-        note_server_served_us();
+        note_server_served_us(API_HOSTS[0]);
         assert_eq!(update_required_message(), None);
     }
 
@@ -1597,6 +1600,21 @@ mod tests {
         UPDATE_GATE_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn another_provider_cannot_clear_our_minimum_version_gate() {
+        let _guard = gate_lock();
+        let _ = update_required_error(
+            reqwest::StatusCode::UPGRADE_REQUIRED,
+            r#"{"code":"update_required","error":"Please update."}"#,
+        );
+        // Fixed-provider requests pass an empty base rather than an API host.
+        note_server_served_us("");
+        note_server_served_us(SUPABASE_URL);
+        assert_eq!(update_required_message().as_deref(), Some("Please update."));
+        note_server_served_us(API_HOSTS[0]);
+        assert!(update_required_message().is_none());
     }
 
     /// This one had lost its `#[test]` to a stray duplicate attribute on the
