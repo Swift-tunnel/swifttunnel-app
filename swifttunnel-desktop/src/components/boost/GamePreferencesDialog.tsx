@@ -76,7 +76,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
         <Setting label="Skip Matchmaker" desc="Always let Roblox pick the server for this game.">
           <Toggle enabled={!!preferences.skip_matchmaker} disabled={busy} ariaLabel="Skip Matchmaker for this game" onChange={skip_matchmaker => patch({ skip_matchmaker })} />
         </Setting>
-        <Setting label="Connect SwiftTunnel before playing" desc="Uses the relay for this location.">
+        <Setting label="Connect SwiftTunnel before playing" desc={preferences.datacenter_id && !preferences.skip_matchmaker ? "Connects to a relay in your preferred location." : "Uses your selected relay. Enable Auto Route on Connect to choose the route automatically."}>
           <Toggle enabled={preferences.use_tunnel} disabled={busy} ariaLabel="Connect SwiftTunnel before playing" onChange={use_tunnel => patch({ use_tunnel })} />
         </Setting>
       </Group>

@@ -1,8 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
-import { executeGameLaunch } from "./gameLaunchFlow";
+import { executeGameLaunch, verifyGameLaunchLocation } from "./gameLaunchFlow";
 import type { GameLaunchPlan } from "./types";
 const plan: GameLaunchPlan = { job_id: null, datacenter: null, availability: "unknown", needs_close: true, relay_region: "mumbai", preferences: { datacenter_id: null, fps_cap: 240, graphics_quality: null, use_tunnel: true } };
 describe("game launch connection", () => {
+  const center = { id: 7, city: "Mumbai", country: "IN", datacenter_ids: [26120], relay_region: "mumbai" };
+
+  it("rejects a dropped preferred location but preserves explicit fallback and rejoin", () => {
+    const dropped = { ...plan, relay_region: null, preferences: { ...plan.preferences, datacenter_id: 7 } };
+    expect(() => verifyGameLaunchLocation(dropped, null, null, true)).toThrow("chosen location wasn't applied");
+    expect(() => verifyGameLaunchLocation(dropped, null, null, false)).not.toThrow();
+    expect(() => verifyGameLaunchLocation(dropped, "saved-job", null, false)).not.toThrow();
+    expect(() => verifyGameLaunchLocation({ ...dropped, preferences: { ...dropped.preferences, skip_matchmaker: true } }, null, null, true)).not.toThrow();
+    expect(() => verifyGameLaunchLocation({ ...dropped, datacenter: center }, null, null, true)).not.toThrow();
+  });
+
+  it("keeps an explicit server location even when a different preference was saved", () => {
+    const explicit = { ...plan, datacenter: center, preferences: { ...plan.preferences, datacenter_id: 10 } };
+    expect(() => verifyGameLaunchLocation(explicit, "job", 7, false)).not.toThrow();
+    expect(() => verifyGameLaunchLocation({ ...explicit, datacenter: null }, "job", 7, false)).toThrow("chosen location wasn't applied");
+  });
+
+  it.each([null, "singapore"])("does not connect or launch a Mumbai plan with relay %s", async relay_region => {
+    const connect = vi.fn();
+    const launch = vi.fn();
+    await expect(executeGameLaunch({ ...plan, datacenter: center, relay_region }, { connect, launch }))
+      .rejects.toThrow("relay doesn't match the chosen location");
+    expect(connect).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
   it("waits for the requested connection before launching", async () => {
     let ready!: () => void;
     const connection = new Promise<void>(resolve => { ready = resolve; });

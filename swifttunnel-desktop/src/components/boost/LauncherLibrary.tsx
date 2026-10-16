@@ -2,13 +2,11 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Dialog, EmptyState, ErrorBanner, Icon, Row, Segmented, Toggle, Watermark, fieldClass } from "../ui";
 import { useGameLibraryStore } from "../../stores/gameLibraryStore";
 import { useVpnStore } from "../../stores/vpnStore";
-import { useSettingsStore } from "../../stores/settingsStore";
-import { useServerStore } from "../../stores/serverStore";
 import { boostCloseRoblox, boostGetMetrics, gamesAddFavourite, gamesForget, gamesLaunch, gamesLaunchPlan, gamesRefreshMetadata, gamesSetNotifications, gamesDismissRecovery, gamesCreateShortcut, gamesSuggestServer } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
 import { gameEntryKey, gameLibraryEntries, gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "../../lib/robloxGames";
-import { defaultGamePreferences, executeGameLaunch } from "../../lib/gameLaunchFlow";
-import { findRegionForVpnRegion } from "../../lib/regionMatch";
+import { defaultGamePreferences, executeGameLaunch, verifyGameLaunchLocation } from "../../lib/gameLaunchFlow";
+import { prepareGameConnection } from "../../lib/gameConnection";
 import type { GameLaunchPlan, RobloxClient, RobloxGameEntry } from "../../lib/types";
 import { GamePreferencesDialog } from "./GamePreferencesDialog";
 import { GameServerDialog } from "./GameServerDialog";
@@ -107,22 +105,9 @@ export function GameLibraryPanel() {
         if ((await boostGetMetrics()).roblox_running) throw new Error("Roblox is still closing. Wait a moment, then try Play again.");
       }
       await executeGameLaunch(plan, {
-        connect: async requested => {
-          const vpn = useVpnStore.getState();
-          const existing = vpn.state === "connected";
-          const family = findRegionForVpnRegion(useServerStore.getState().regions, vpn.region)?.id;
-          if (existing && (!requested || family === requested)) return;
-          setProgress("Preparing your SwiftTunnel connection...");
-          if (existing) await vpn.disconnect();
-          const settings = useSettingsStore.getState().settings;
-          const presets=settings.selected_game_presets.includes("roblox")?settings.selected_game_presets:[...settings.selected_game_presets,"roblox"];
-          await useVpnStore.getState().connect(requested ?? settings.selected_region, presets, requested !== null);
-          const connected = useVpnStore.getState();
-          if (connected.state !== "connected") throw new Error(connected.error ?? "Finish connecting in Connect, then try Play again.");
-          if (requested && findRegionForVpnRegion(useServerStore.getState().regions, connected.region)?.id !== requested) throw new Error("Couldn't connect to the relay for this location. Check Connect, then try again.");
-        },
+        connect: requested => prepareGameConnection(requested, () => setProgress(plan.datacenter ? `Connecting SwiftTunnel to ${plan.datacenter.city}...` : "Preparing your SwiftTunnel connection...")),
         launch: async allowUnverified => {
-          setProgress("Opening Roblox...");
+          setProgress(plan.datacenter ? `Opening Roblox in ${plan.datacenter.city}...` : "Opening Roblox...");
           await gamesLaunch(plan.place_id ?? entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, allowUnverified, safe);
         },
       });
@@ -133,6 +118,7 @@ export function GameLibraryPanel() {
     setBusy(true); setError(null); setNotice(null); setProgress("Checking the game and server...");
     try {
       const [plan, metrics] = await Promise.all([gamesLaunchPlan(entry.place_id, entry.client, job, center, preferred), boostGetMetrics()]);
+      verifyGameLaunchLocation(plan, job, center, preferred);
       const blocked = plan.availability === "full" || plan.availability === "unavailable";
       if (blocked || plan.job_id && plan.availability === "unknown" || metrics.roblox_running) setReview({ entry, plan, running: metrics.roblox_running, blocked, safe });
       else await launch(entry, plan, false, safe);
@@ -147,7 +133,7 @@ export function GameLibraryPanel() {
 
   return <div className="flex flex-col gap-4">
     {(error || loadError || library?.warning) && <ErrorBanner tone="error">{error || loadError || library?.warning}</ErrorBanner>}
-    {failedEntry && <Button size="sm" variant="secondary" className="self-start" disabled={busy} onClick={() => void prepare(failedEntry, null, null, false)}>Play normally without a preferred server</Button>}
+    {failedEntry && <Button size="sm" variant="secondary" className="self-start" title="Ignores this game's preferred location." disabled={busy} onClick={() => void prepare(failedEntry, null, null, false)}>Play in any location</Button>}
     {(notice || progress) && <Notice busy={!!progress}>{progress ?? notice}</Notice>}
     {library?.status && <Notice>{library.status}</Notice>}
     {current && <section className="instrument relative isolate flex items-center gap-3.5 px-4 py-3.5"><Watermark icon="games" at="right" size={124} rotate={-14} opacity={.05} />
@@ -174,7 +160,7 @@ export function GameLibraryPanel() {
           <span className="flex-1" />
           <button type="button" title="Game settings" aria-label={`Settings for ${entry.name}`} disabled={locked} className={iconButtonClass} onClick={() => setProfile(entry)}><Icon name="settings" size={15} /></button>
           <ActionMenu label={`More actions for ${entry.name}`}>
-            <button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void prepare(entry,null,null,false,true)}>Safe launch (no FastFlags)</button>
+            <button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void prepare(entry,null,null,true,true)}>Safe launch (no FastFlags)</button>
             {entry.client === "standard" && <button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary`} onClick={()=>void run(async()=>{const path=await gamesCreateShortcut(entry.place_id,entry.name);setNotice(`Game shortcut saved: ${path}`);})}>Create game shortcut</button>}
             <button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary hover:text-text-primary`} onClick={() => setServers(entry)}>Find server</button><button type="button" disabled={locked} className={`${menuItemClass} text-text-secondary hover:text-text-primary`} onClick={() => void run(() => navigator.clipboard.writeText(gameShareUrl(entry.place_id, entry.job_id, entry.client)), "Join link copied.")}>Copy link</button>
             <button type="button" disabled={locked || !!loadError} className={`${menuItemClass} text-status-error`} onClick={() => setRemove(entry)}>Forget game</button>
@@ -193,9 +179,9 @@ export function GameLibraryPanel() {
         <input autoFocus aria-label="Roblox game link or place ID" value={input} onChange={e => { setInput(e.target.value); const client=gameLinkClient(e.target.value); if(client) setAddClient(client); }} maxLength={2048} placeholder="https://www.roblox.com/games/..." disabled={busy} className={fieldClass} /><div className="flex justify-end gap-2"><Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => setAdding(false)}>Cancel</Button><Button type="submit" size="sm" loading={busy} disabled={!input.trim()}>Add favourite</Button></div></form>
     </Dialog>
     <Dialog open={!!review} onClose={() => { if (!busy) setReview(null); }} title={review?.blocked ? "That server is unavailable" : review?.running ? "Ready to change games?" : "Join this server?"}
-      description={review?.blocked ? "It's full or gone. You can still join the game normally." : review?.running ? review.plan.needs_close ? "Roblox will close first so this game's settings can be applied." : "This may leave your current game." : "Couldn't check whether this server still has room. Roblox may say it's full."}>
+      description={review?.blocked ? "It's full or gone. You can let Roblox pick another location." : review?.running ? review.plan.needs_close ? "Roblox will close first so this game's settings can be applied." : "This may leave your current game." : "Couldn't check whether this server still has room. Roblox may say it's full."}>
       <div className="flex flex-col gap-4"><div className="rounded-[10px] bg-bg-base px-3.5 py-3"><p className="text-[12.5px] font-semibold text-text-primary">{review?.entry.name}</p>{review?.plan.datacenter && <p className="mt-1 text-[11px] text-text-muted">{review.plan.datacenter.city}, {review.plan.datacenter.country}</p>}</div>{error && <ErrorBanner tone="error">{error}</ErrorBanner>}<div className="flex flex-wrap justify-end gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => setReview(null)}>Cancel</Button>
-        <Button size="sm" variant={review?.blocked ? "primary" : "secondary"} disabled={busy} onClick={() => { if (review) { const entry = review.entry; setReview(null); void prepare(entry, null, null, false); } }}>Play normally</Button>
+        <Button size="sm" variant={review?.blocked ? "primary" : "secondary"} title="Ignores this game's preferred location." disabled={busy} onClick={() => { if (review) { const entry = review.entry; setReview(null); void prepare(entry, null, null, false); } }}>Play in any location</Button>
         {!review?.blocked && <Button size="sm" loading={busy} onClick={() => { if (review) void launch(review.entry, review.plan, review.running && review.plan.needs_close, review.safe); }}>{review?.running && review.plan.needs_close ? "Close Roblox & play" : "Join server"}</Button>}</div></div>
     </Dialog>
     <Dialog open={!!remove} onClose={() => { if (!busy) setRemove(null); }} title="Forget this game?" description="Removes it from your library, along with its settings."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={() => setRemove(null)}>Cancel</Button><Button size="sm" variant="destructive" loading={busy} onClick={() => { if (remove) void run(async () => { await gamesForget(remove.place_id, remove.client); setRemove(null); }); }}>Forget</Button></div></Dialog>
