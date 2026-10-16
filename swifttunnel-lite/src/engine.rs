@@ -12,7 +12,7 @@
 //! so a region picked here is picked in both.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,7 @@ const DEFAULT_FRAME_CAP: u32 = 60;
 
 /// What the background threads have found.
 struct Snapshot {
+    installation: Option<crate::uninstall::Installed>,
     uninstall_note: Option<String>,
     uninstall_busy: bool,
     regions: Vec<RegionRow>,
@@ -114,6 +115,7 @@ struct Shared {
     /// One update check/download at a time, whether manual or automatic.
     update_busy: OperationGate,
     roblox_edits: OperationGate,
+    roblox_revision: AtomicU64,
     /// Set when the user pressed Disconnect, so auto-reconnect knows the
     /// tunnel went down on purpose and leaves it down.
     intentional_disconnect: AtomicBool,
@@ -211,6 +213,7 @@ impl Engine {
             settings,
             settings_save_signal,
             snapshot: RwLock::new(Snapshot {
+                installation: None,
                 uninstall_note: None,
                 uninstall_busy: false,
                 signed_in,
@@ -235,6 +238,7 @@ impl Engine {
             busy: OperationGate::default(),
             update_busy: OperationGate::default(),
             roblox_edits: OperationGate::default(),
+            roblox_revision: AtomicU64::new(0),
             intentional_disconnect: AtomicBool::new(false),
             was_connected: AtomicBool::new(false),
         });
@@ -243,6 +247,7 @@ impl Engine {
         spawn_game_logs(shared.clone());
         spawn_poller(shared.clone());
         spawn_auto_update(shared.clone());
+        spawn_installation_lookup(shared.clone());
 
         // The profile is re-fetched once at startup, because a ban applied
         // since the last session is only visible on the server until
@@ -291,6 +296,24 @@ impl Engine {
     pub fn fill(&self, state: &mut State) {
         if let Ok(snapshot) = self.shared.snapshot.read() {
             state.uninstall_note = snapshot.uninstall_note.clone();
+            state.standalone = matches!(
+                snapshot.installation,
+                Some(crate::uninstall::Installed::Standalone(_))
+            );
+            state.installation_unknown = snapshot.installation.is_none()
+                || matches!(
+                    snapshot.installation,
+                    Some(crate::uninstall::Installed::Unknown(_))
+                );
+            if state.uninstall_note.is_none() {
+                match &snapshot.installation {
+                    None => state.uninstall_note = Some("Checking installation...".into()),
+                    Some(crate::uninstall::Installed::Unknown(message)) => {
+                        state.uninstall_note = Some(message.clone())
+                    }
+                    _ => {}
+                }
+            }
             state.uninstall_busy = snapshot.uninstall_busy;
             state.regions = snapshot.regions.clone();
             state.adapters = snapshot.adapters.clone();
@@ -322,18 +345,6 @@ impl Engine {
             state.auto_reconnect = s.auto_reconnect;
             state.adapter_guid = s.preferred_physical_adapter_guid.clone();
             state.discord_rpc = s.enable_discord_rpc;
-            state.standalone = matches!(
-                crate::uninstall::how_installed(),
-                crate::uninstall::Installed::Standalone(_)
-            );
-            state.installation_unknown = matches!(
-                crate::uninstall::how_installed(),
-                crate::uninstall::Installed::Unknown(_)
-            );
-            if let crate::uninstall::Installed::Unknown(message) = crate::uninstall::how_installed()
-            {
-                state.uninstall_note = Some(message.clone());
-            }
         }
         // A removed saved city must not remain the picker label while core
         // chooses a surviving location for the next connection.
@@ -675,6 +686,7 @@ impl Engine {
         let Some(edit) = self.shared.roblox_edits.try_enter() else {
             return;
         };
+        self.shared.roblox_revision.fetch_add(1, Ordering::AcqRel);
         state.roblox_busy = true;
 
         self.shared.edit(|s| {
@@ -747,8 +759,9 @@ impl Engine {
                     .read()
                     .map(|s| s.config.roblox_settings.clone())
                     .unwrap_or_default();
+                let roblox = read_roblox(&intent);
                 shared.edit(|s| {
-                    s.roblox = read_roblox(&intent);
+                    s.roblox = roblox;
                     s.roblox_reset = ResetState::Idle;
                     s.roblox_reset_note = Some(note);
                 });
@@ -785,6 +798,7 @@ impl Engine {
         let Some(edit) = self.shared.roblox_edits.try_enter() else {
             return;
         };
+        self.shared.roblox_revision.fetch_add(1, Ordering::AcqRel);
         state.roblox_busy = true;
         state.focus = None;
 
@@ -840,8 +854,9 @@ impl Engine {
                 .read()
                 .map(|s| s.config.roblox_settings.clone())
                 .unwrap_or_default();
-            shared.edit(|s| {
-                s.roblox = read_roblox(&intent);
+                let roblox = read_roblox(&intent);
+                shared.edit(|s| {
+                    s.roblox = roblox;
                 s.roblox.error = error;
             });
             drop(edit);
@@ -1345,17 +1360,28 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
 
 // ── Background threads ──────────────────────────────────────────────────────
 
-/// Keep Lite current on its own, and never in the middle of a game.
-///
-/// Lite is used while playing, and an installer cannot replace files this
-/// process is holding, so applying an update means closing. Doing that during
-/// a session would drop somebody's tunnel mid-match to save them a click,
-/// which is a worse bargain than being a version behind for another hour. So
-/// the rule is simple: only ever while disconnected.
-///
-/// This runs whether or not the server has refused the build. The forced
-/// update screen is the recovery path for a client that is already locked out;
-/// this is what stops most people reaching it at all.
+/// MSI enumeration can stall, so discover installation identity off the window thread.
+fn spawn_installation_lookup(shared: Arc<Shared>) {
+    let failure_shared = shared.clone();
+    let spawned = std::thread::Builder::new()
+        .name("lite-installation-lookup".into())
+        .spawn(move || {
+            let installation = crate::uninstall::how_installed().clone();
+            shared.edit(|s| s.installation = Some(installation));
+            shared.notify();
+        });
+    if let Err(error) = spawned {
+        log::warn!("Lite installation lookup worker could not start: {error}");
+        failure_shared.edit(|s| {
+            s.installation = Some(crate::uninstall::Installed::Unknown(
+                "Could not check this installation. Use Windows Settings > Apps.".into(),
+            ))
+        });
+        failure_shared.notify();
+    }
+}
+
+/// Check for automatic updates in the background and hand off only while idle.
 fn spawn_auto_update(shared: Arc<Shared>) {
     // Long enough that a launch is not competing with a download, short enough
     // that somebody who opens Lite, updates, and plays is covered.
@@ -1842,6 +1868,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                 // another VPN installs its own copy of the same driver.
                 let driver = (roblox_tick % 20 == 0).then(read_driver);
 
+                let read_revision = shared.roblox_revision.load(Ordering::Acquire);
                 let roblox_intent = shared
                     .settings
                     .read()
@@ -1857,6 +1884,10 @@ fn spawn_poller(shared: Arc<Shared>) {
                     running = RobloxOptimizer::new().is_roblox_running();
                 }
                 let refresh = roblox_tick % 20 == 0;
+                // File/process reads can stall. Never hold the snapshot lock
+                // the Win32 thread needs while performing those reads.
+                let refreshed_roblox = (refresh && !shared.roblox_edits.is_busy())
+                    .then(|| read_roblox(&roblox_intent));
 
                 let changed = shared
                     .edit(|s| {
@@ -1891,8 +1922,10 @@ fn spawn_poller(shared: Arc<Shared>) {
                         }
                         s.free_tier_spent = spent;
                         s.roblox.running = running;
-                        if refresh {
-                            let fresh = read_roblox(&roblox_intent);
+                        if let Some(fresh) = refreshed_roblox
+                            && !shared.roblox_edits.is_busy()
+                            && read_revision == shared.roblox_revision.load(Ordering::Acquire)
+                        {
                             s.roblox = Roblox {
                                 running,
                                 error: s.roblox.error.clone(),

@@ -8,6 +8,7 @@
 //! quietly does nothing.
 
 /// How Lite got here, and what can be done about it.
+#[derive(Clone)]
 pub enum Installed {
     Unknown(String),
     /// Its own product, with this product code.
