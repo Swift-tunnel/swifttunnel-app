@@ -30,6 +30,7 @@ mod engine;
 mod fonts;
 mod gdi;
 mod installer_cli;
+mod operation_gate;
 mod picker;
 mod preview;
 mod screens;

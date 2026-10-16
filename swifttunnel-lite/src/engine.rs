@@ -35,6 +35,7 @@ use swifttunnel_core::vpn::servers::{self, DynamicServerList, ServerListSource};
 use swifttunnel_core::vpn::split_tunnel::{GamePreset, get_apps_for_preset_set};
 use swifttunnel_core::vpn::{ConnectionState, SplitTunnelDriver, VpnConnection};
 
+use crate::operation_gate::OperationGate;
 use crate::state::{
     AdapterRow, Driver, Lockout, RegionRow, ResetState, Roblox, State, Status, Tunnel, UpdateState,
 };
@@ -108,8 +109,10 @@ struct Shared {
     /// Set once the window exists. Stored as an isize because HWND is not Send.
     hwnd: AtomicIsize,
     stop: AtomicBool,
-    /// Guards against a second connect being started while one is in flight.
-    busy: AtomicBool,
+    /// Serializes connect, disconnect, uninstall and installer handoff.
+    busy: OperationGate,
+    /// One update check/download at a time, whether manual or automatic.
+    update_busy: OperationGate,
     /// Set when the user pressed Disconnect, so auto-reconnect knows the
     /// tunnel went down on purpose and leaves it down.
     intentional_disconnect: AtomicBool,
@@ -148,6 +151,17 @@ impl Shared {
 
     fn edit<T>(&self, f: impl FnOnce(&mut Snapshot) -> T) -> Option<T> {
         self.snapshot.write().ok().map(|mut s| f(&mut s))
+    }
+
+    // Called after reserving busy, so a new connect cannot race this check.
+    fn connection_is_idle(&self) -> bool {
+        !self.stop.load(Ordering::Relaxed)
+            && self.vpn.try_lock().is_ok_and(|vpn| {
+                matches!(
+                    &*vpn.state_handle().borrow(),
+                    ConnectionState::Disconnected | ConnectionState::Error(_)
+                )
+            })
     }
 }
 
@@ -217,7 +231,8 @@ impl Engine {
             }),
             hwnd: AtomicIsize::new(0),
             stop: AtomicBool::new(false),
-            busy: AtomicBool::new(false),
+            busy: OperationGate::default(),
+            update_busy: OperationGate::default(),
             intentional_disconnect: AtomicBool::new(false),
             was_connected: AtomicBool::new(false),
         });
@@ -502,12 +517,14 @@ impl Engine {
     fn primary(&self, state: &State) {
         // A cached zero can outlive an admin reset or a window refill. A fresh
         // explicit attempt must reach the authoritative server quota check.
-        if self.shared.busy.load(Ordering::Relaxed) || state.lockout.is_some() {
+        if state.lockout.is_some() {
             return;
         }
+        let Some(operation) = self.shared.busy.try_enter() else {
+            return;
+        };
         let connected = state.tunnel.status == Status::Connected;
         let shared = self.shared.clone();
-        shared.busy.store(true, Ordering::Relaxed);
         shared
             .intentional_disconnect
             .store(connected, Ordering::Relaxed);
@@ -525,6 +542,7 @@ impl Engine {
         shared.runtime.spawn({
             let shared = shared.clone();
             async move {
+                let operation = operation;
                 let outcome = if connected {
                     let mut vpn = shared.vpn.lock().await;
                     vpn.disconnect()
@@ -540,7 +558,7 @@ impl Engine {
                         s.tunnel.detail = error;
                     });
                 }
-                shared.busy.store(false, Ordering::Relaxed);
+                drop(operation);
                 shared.notify();
             }
         });
@@ -785,13 +803,24 @@ impl Engine {
     /// signed manifest and then the installer's hash against it, and returns an
     /// error if either fails; this only reports what happened.
     fn update_now(&self) {
-        let already_working = self
-            .shared
-            .snapshot
-            .read()
-            .map(|s| matches!(s.update, UpdateState::Working(_)))
-            .unwrap_or(false);
-        if already_working {
+        let Some(update_job) = self.shared.update_busy.try_enter() else {
+            return;
+        };
+        let Some(operation) = self.shared.busy.try_enter() else {
+            self.shared.edit(|s| {
+                s.update = UpdateState::Failed(
+                    "Wait for the current operation to finish, then retry updating.".into(),
+                )
+            });
+            self.shared.notify();
+            return;
+        };
+        if !self.shared.connection_is_idle() {
+            self.shared.edit(|s| {
+                s.update =
+                    UpdateState::Failed("Disconnect before updating SwiftTunnel Lite.".into())
+            });
+            self.shared.notify();
             return;
         }
 
@@ -799,63 +828,81 @@ impl Engine {
         shared.edit(|s| s.update = UpdateState::Working("Checking...".to_string()));
         shared.notify();
 
-        std::thread::spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(error) => {
-                    log::error!("update: could not start a runtime: {error}");
+        let spawned = std::thread::Builder::new()
+            .name("lite-manual-update".into())
+            .spawn(move || {
+                let _update_job = update_job;
+                let _operation = operation;
+                let runtime = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        log::error!("update: could not start a runtime: {error}");
+                        shared.edit(|s| {
+                            s.update =
+                                UpdateState::Failed("Could not start the update.".to_string())
+                        });
+                        shared.notify();
+                        return;
+                    }
+                };
+
+                let outcome = runtime.block_on(async {
+                    let update =
+                        swifttunnel_core::lite_update::check_for_update(env!("CARGO_PKG_VERSION"))
+                            .await?
+                            .ok_or_else(|| {
+                                // The server refused this build but the newest release is
+                                // not newer than it. Nothing here can fix that, and saying
+                                // so is better than a spinner that never resolves.
+                                "This is already the newest SwiftTunnel Lite.".to_string()
+                            })?;
+
+                    log::info!(
+                        "update: {} available ({} bytes)",
+                        update.version,
+                        update.size()
+                    );
+                    shared.edit(|s| s.update = UpdateState::Working("Downloading...".to_string()));
+                    shared.notify();
+
+                    let path = swifttunnel_core::lite_update::download_verified(&update).await?;
                     shared.edit(|s| {
-                        s.update = UpdateState::Failed("Could not start the update.".to_string())
+                        s.update = UpdateState::Working("Starting installer...".to_string())
                     });
                     shared.notify();
-                    return;
+
+                    if shared.stop.load(Ordering::Relaxed) {
+                        return Err("Update cancelled because SwiftTunnel Lite closed.".into());
+                    }
+                    swifttunnel_core::lite_update::launch_installer(&path)
+                });
+
+                match outcome {
+                    Ok(()) => {
+                        // msiexec cannot replace files this process is holding
+                        // open, so it has to be the last thing we do.
+                        log::info!(
+                            "update: installer started, closing so it can replace this build"
+                        );
+                        std::process::exit(0);
+                    }
+                    Err(error) => {
+                        log::error!("update failed: {error}");
+                        shared.edit(|s| s.update = UpdateState::Failed(error));
+                        shared.notify();
+                    }
                 }
-            };
-
-            let outcome = runtime.block_on(async {
-                let update =
-                    swifttunnel_core::lite_update::check_for_update(env!("CARGO_PKG_VERSION"))
-                        .await?
-                        .ok_or_else(|| {
-                            // The server refused this build but the newest release is
-                            // not newer than it. Nothing here can fix that, and saying
-                            // so is better than a spinner that never resolves.
-                            "This is already the newest SwiftTunnel Lite.".to_string()
-                        })?;
-
-                log::info!(
-                    "update: {} available ({} bytes)",
-                    update.version,
-                    update.size()
-                );
-                shared.edit(|s| s.update = UpdateState::Working("Downloading...".to_string()));
-                shared.notify();
-
-                let path = swifttunnel_core::lite_update::download_verified(&update).await?;
-                shared
-                    .edit(|s| s.update = UpdateState::Working("Starting installer...".to_string()));
-                shared.notify();
-
-                swifttunnel_core::lite_update::launch_installer(&path)
             });
-
-            match outcome {
-                Ok(()) => {
-                    // msiexec cannot replace files this process is holding
-                    // open, so it has to be the last thing we do.
-                    log::info!("update: installer started, closing so it can replace this build");
-                    std::process::exit(0);
-                }
-                Err(error) => {
-                    log::error!("update failed: {error}");
-                    shared.edit(|s| s.update = UpdateState::Failed(error));
-                    shared.notify();
-                }
-            }
-        });
+        if let Err(error) = spawned {
+            log::warn!("Lite update worker could not start: {error}");
+            self.shared.edit(|s| {
+                s.update = UpdateState::Failed("Could not start the update. Try again.".into())
+            });
+            self.shared.notify();
+        }
     }
 
     fn repair_driver(&self) {
@@ -1212,20 +1259,14 @@ fn spawn_auto_update(shared: Arc<Shared>) {
                 .read()
                 .map(|s| s.tunnel.status != Status::Disconnected)
                 .unwrap_or(true);
-            if in_use || shared.busy.load(Ordering::Relaxed) {
+            if in_use || shared.busy.is_busy() {
                 log::debug!("auto-update: in use, deferring");
                 continue;
             }
 
-            // Someone is already updating by hand from the block screen.
-            let already = shared
-                .snapshot
-                .read()
-                .map(|s| matches!(s.update, UpdateState::Working(_)))
-                .unwrap_or(false);
-            if already {
+            let Some(_update_job) = shared.update_busy.try_enter() else {
                 continue;
-            }
+            };
 
             let found = shared.runtime.block_on(async {
                 swifttunnel_core::lite_update::check_for_update(env!("CARGO_PKG_VERSION")).await
@@ -1283,12 +1324,12 @@ fn spawn_auto_update(shared: Arc<Shared>) {
             // Re-check rather than trusting the state from before the
             // download: a connect can start while several megabytes are in
             // flight, and closing then is exactly what this avoids.
-            let started_playing = shared
-                .snapshot
-                .read()
-                .map(|s| s.tunnel.status != Status::Disconnected)
-                .unwrap_or(true);
-            if started_playing || shared.busy.load(Ordering::Relaxed) {
+            let Some(_operation) = shared.busy.try_enter() else {
+                shared.edit(|s| s.update = UpdateState::Idle);
+                shared.notify();
+                continue;
+            };
+            if !shared.connection_is_idle() {
                 log::info!("auto-update: connected while downloading, leaving it for next time");
                 shared.edit(|s| s.update = UpdateState::Idle);
                 shared.notify();
@@ -1697,7 +1738,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                         // watch still says Disconnected for the first second
                         // or two, and letting it overwrite "Connecting" makes
                         // the button flick.
-                        if !shared.busy.load(Ordering::Relaxed) {
+                        if !shared.busy.is_busy() {
                             s.tunnel = tunnel;
                         } else {
                             s.tunnel.bytes_up = tunnel.bytes_up;
@@ -1841,7 +1882,7 @@ fn update_discord(shared: &Arc<Shared>) {
 /// per poll: core's own candidate rotation handles a relay that is refusing,
 /// so hammering it from here would add nothing but load.
 fn maybe_reconnect(shared: &Arc<Shared>) {
-    if shared.busy.load(Ordering::Relaxed)
+    if shared.busy.is_busy()
         || shared.intentional_disconnect.load(Ordering::Relaxed)
         || !shared.was_connected.load(Ordering::Relaxed)
     {
@@ -1876,8 +1917,14 @@ fn maybe_reconnect(shared: &Arc<Shared>) {
         return;
     }
 
+    let Some(operation) = shared.busy.try_enter() else {
+        return;
+    };
+    // A user action may have finished while the eligibility checks above ran.
+    if shared.intentional_disconnect.load(Ordering::Relaxed) || !shared.connection_is_idle() {
+        return;
+    }
     log::info!("tunnel dropped on its own; reconnecting");
-    shared.busy.store(true, Ordering::Relaxed);
     shared.edit(|s| {
         s.tunnel.status = Status::Working;
         s.tunnel.detail = "Reconnecting".into();
@@ -1888,13 +1935,14 @@ fn maybe_reconnect(shared: &Arc<Shared>) {
     shared.runtime.spawn({
         let shared = shared.clone();
         async move {
+            let operation = operation;
             if let Err(error) = connect(&shared).await {
                 shared.edit(|s| {
                     s.tunnel.status = Status::Error;
                     s.tunnel.detail = error;
                 });
             }
-            shared.busy.store(false, Ordering::Relaxed);
+            drop(operation);
             shared.notify();
         }
     });
@@ -2143,13 +2191,13 @@ impl Engine {
             });
             return;
         };
-        if self.shared.busy.swap(true, Ordering::SeqCst) {
+        let Some(operation) = self.shared.busy.try_enter() else {
             self.shared.edit(|s| {
                 s.uninstall_note =
                     Some("Wait for the current operation to finish, then retry uninstall.".into())
             });
             return;
-        }
+        };
         let product_code = product_code.clone();
         self.shared
             .intentional_disconnect
@@ -2162,6 +2210,7 @@ impl Engine {
         shared.runtime.spawn({
             let shared = shared.clone();
             async move {
+                let operation = operation;
                 let result = crate::uninstall::after_disconnect(
                     async {
                         shared.vpn.lock().await.disconnect().await.map_err(|_| {
@@ -2179,7 +2228,7 @@ impl Engine {
                         Err(error) => error,
                     });
                 });
-                shared.busy.store(false, Ordering::SeqCst);
+                drop(operation);
                 shared.notify();
             }
         });
