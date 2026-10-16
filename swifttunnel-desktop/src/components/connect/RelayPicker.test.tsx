@@ -16,7 +16,7 @@ it("renders a single ms value before connecting and keeps the target in the tool
   expect(html).not.toContain("20 ms");
   expect(html).not.toContain("ms game");
   expect(html).not.toContain("ms relay");
-  expect(html).toContain("Estimate to Mumbai Roblox datacenter");
+  expect(html).toContain("Estimated network ping: you → relay → Roblox Mumbai datacenter");
   expect(html).not.toContain("shared by every relay");
   expect(html).not.toContain("Game estimates appear when connected");
 });
@@ -34,6 +34,6 @@ it("keeps Singapore's datacenter estimate when the active game is in Mumbai", ()
     value={null} disabled={false} onChange={() => {}} />);
   expect(html).toContain("~42 ms");
   expect(html).not.toContain("99 ms");
-  expect(html).toContain("Estimate to Singapore Roblox datacenter");
+  expect(html).toContain("Estimated network ping: you → relay → Roblox Singapore datacenter");
   expect(html).not.toContain("Mumbai");
 });

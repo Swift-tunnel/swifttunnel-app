@@ -27,7 +27,7 @@ export function RelayPicker({ region, servers, latencies, value, disabled, onCha
           const estimate = relayReferenceEstimate(server, previews);
           return <RelayOption key={id} label={id}
             detail={!server?.relay_available ? "Unavailable" : estimate ? `~${estimate.estimated_game_ms} ms` : ms == null ? "Unavailable" : `${ms} ms`}
-            title={estimate && "location" in estimate ? `Estimate to ${estimate.location} Roblox datacenter` : "Datacenter estimate unavailable; showing relay latency when measured"}
+            title={estimate && "location" in estimate ? `Estimated network ping: you → relay → Roblox ${estimate.location} datacenter` : "Ping from you to the relay; datacenter estimate unavailable"}
             active={!!server && matches(server)} disabled={disabled || !server?.relay_available}
             onClick={() => { if (server?.relay_available) onChange({ region: region.id,
               server_id: id, ip: server.ip, port: server.relay_port ?? 51821 }); }} />;
