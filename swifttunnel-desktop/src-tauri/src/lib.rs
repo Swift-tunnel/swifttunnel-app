@@ -542,6 +542,9 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                                 let state = app.state::<AppState>();
                                 let mut games = state.games.lock();
                                 if games.record_leave(job_id.as_deref()) {
+                                    if let Some(job) = job_id.as_deref() {
+                                        swifttunnel_core::vpn::game_destination::clear_for_session(job);
+                                    }
                                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                                 } else if games.current.is_none() && games.launch_player_seen
                                     && !state.performance_monitor.lock().is_roblox_running()
