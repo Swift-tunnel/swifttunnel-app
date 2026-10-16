@@ -661,10 +661,14 @@ fn settings(state: &State) -> Vec<Item> {
             } else {
                 "Reinstall driver"
             })
-            .sub("Use if the tunnel will not start")
+            .sub(if state.tunnel.status == Status::Connected {
+                "Disconnects SwiftTunnel before reinstalling"
+            } else {
+                "Use if the tunnel will not start"
+            })
             .right(Right::Chevron)
             .action(Action::RepairDriver)
-            .disabled(state.driver.repairing),
+            .disabled(state.driver.repairing || state.tunnel.status == Status::Working),
             // Lite has always written a log; nothing told anyone where. The
             // first thing asked for in a support thread is the log file, and
             // hunting through AppData for it is not a reasonable ask.

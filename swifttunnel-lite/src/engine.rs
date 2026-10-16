@@ -928,6 +928,14 @@ impl Engine {
         {
             return;
         }
+        let Some(operation) = self.shared.busy.try_enter() else {
+            self.shared.edit(|s| {
+                s.driver.note =
+                    Some("Wait for the current operation to finish, then retry the repair.".into())
+            });
+            self.shared.notify();
+            return;
+        };
 
         let shared = self.shared.clone();
         shared.edit(|s| {
@@ -936,29 +944,63 @@ impl Engine {
         });
         shared.notify();
 
-        std::thread::spawn(move || {
-            let exe_dir = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-            let program_files = std::path::PathBuf::from(
-                std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
-            );
-
-            let note = match SplitTunnelDriver::install_driver_from_bundled_package(
-                None,
-                exe_dir.as_deref(),
-                &program_files,
-                true,
-            ) {
-                Ok(()) => "Driver reinstalled. Try connecting again.".to_string(),
-                Err(error) => error,
-            };
-
-            let mut driver = read_driver();
-            driver.note = Some(note);
-            shared.edit(|s| s.driver = driver);
-            shared.notify();
-        });
+        let spawned = std::thread::Builder::new()
+            .name("lite-driver-repair".into())
+            .spawn(move || {
+                let operation = operation;
+                let repair_shared = shared.clone();
+                let result = shared
+                    .runtime
+                    .block_on(crate::operation_gate::after_disconnect(
+                        async {
+                            if shared.stop.load(Ordering::Relaxed) {
+                                return Err(
+                                    "Repair cancelled because SwiftTunnel Lite closed.".into()
+                                );
+                            }
+                            shared.intentional_disconnect.store(true, Ordering::Relaxed);
+                            shared.vpn.lock().await.disconnect().await.map_err(|_| {
+                                "Could not disconnect safely. Retry the driver repair.".to_string()
+                            })
+                        },
+                        move || {
+                            if repair_shared.stop.load(Ordering::Relaxed) {
+                                return Err(
+                                    "Repair cancelled because SwiftTunnel Lite closed.".into()
+                                );
+                            }
+                            let exe_dir = std::env::current_exe()
+                                .ok()
+                                .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+                            let program_files = std::path::PathBuf::from(
+                                std::env::var("ProgramFiles")
+                                    .unwrap_or_else(|_| "C:\\Program Files".to_string()),
+                            );
+                            SplitTunnelDriver::install_driver_from_bundled_package(
+                                None,
+                                exe_dir.as_deref(),
+                                &program_files,
+                                true,
+                            )
+                        },
+                    ));
+                let mut driver = read_driver();
+                driver.note = Some(match result {
+                    Ok(()) => "Driver reinstalled. Try connecting again.".into(),
+                    Err(error) => error,
+                });
+                shared.edit(|s| s.driver = driver);
+                drop(operation);
+                shared.notify();
+            });
+        if let Err(error) = spawned {
+            log::warn!("Lite driver repair worker could not start: {error}");
+            self.shared.edit(|s| {
+                s.driver.repairing = false;
+                s.driver.note = Some("Could not start the driver repair. Try again.".into());
+            });
+            self.shared.notify();
+        }
     }
 
     /// Google sign-in, start to finish.
@@ -1480,9 +1522,13 @@ fn spawn_game_logs(shared: Arc<Shared>) {
                                 });
                             }
                         }
-                        RobloxEvent::GameLeft { .. } => {
-                            game_started = None;
-                            game_destination::clear();
+                        RobloxEvent::GameLeft { job_id } => {
+                            if job_id
+                                .as_deref()
+                                .is_some_and(game_destination::clear_for_session)
+                            {
+                                game_started = None;
+                            }
                         }
                         RobloxEvent::PlayerOpened | RobloxEvent::GameServerDetected { .. } => {}
                     }
