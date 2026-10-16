@@ -113,13 +113,18 @@ pub(crate) fn choose_path_with_margin(
 /// No per-packet HTTP, process spawning, DNS target input, or unbounded body.
 pub(crate) async fn measure(ip: Ipv4Addr, access_token: &str) -> Vec<RouteSample> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
+    let client = crate::http_client::cached_client(&CLIENT, || {
         reqwest::Client::builder()
             .timeout(Duration::from_millis(1200))
             .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("route measurement HTTP client")
     });
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            log::warn!("Could not initialize the route measurement client: {error}");
+            return Vec::new();
+        }
+    };
     let started = Instant::now();
     let result = async {
         let response = client

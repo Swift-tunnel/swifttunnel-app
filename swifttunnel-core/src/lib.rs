@@ -15,6 +15,7 @@ pub mod geolocation;
 #[cfg(windows)]
 mod gpu_recovery;
 pub mod http_body;
+mod http_client;
 pub mod installed_clients;
 pub mod lite_update;
 #[cfg(windows)]

@@ -88,19 +88,21 @@ struct PublicServer {
     capacity: u32,
 }
 
-fn client() -> &'static reqwest::Client {
+fn client() -> Result<&'static reqwest::Client, reqwest::Error> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
+    crate::http_client::cached_client(&CLIENT, || {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(4))
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("SwiftTunnel/server-directory")
-            .build()
-            .expect("server-directory HTTP client")
     })
 }
 async fn json<T: serde::de::DeserializeOwned>(url: reqwest::Url) -> Result<T, String> {
     let response = client()
+        .map_err(|error| {
+            log::warn!("Could not initialize the server-directory client: {error}");
+            "Could not prepare the server search. Restart SwiftTunnel and try again.".to_string()
+        })?
         .get(url)
         .send()
         .await

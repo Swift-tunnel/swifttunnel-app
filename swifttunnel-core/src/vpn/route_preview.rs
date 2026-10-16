@@ -130,13 +130,18 @@ pub fn estimates(
 
 pub async fn fetch() -> Vec<ReferenceSample> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
+    let client = crate::http_client::cached_client(&CLIENT, || {
         reqwest::Client::builder()
             .timeout(Duration::from_millis(2500))
             .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("reference measurement client")
     });
+    let client = match client {
+        Ok(client) => client,
+        Err(error) => {
+            log::warn!("Could not initialize the reference measurement client: {error}");
+            return Vec::new();
+        }
+    };
     let started = Instant::now();
     let result = async {
         let response = client

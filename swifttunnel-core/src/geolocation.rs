@@ -15,13 +15,10 @@ use tokio::sync::Semaphore;
 const GAME_SERVER_REGION_API_URL: &str = "https://www.swifttunnel.net/api/vpn/game-server-region";
 
 /// Shared HTTP client with a short timeout for geolocation lookups
-fn geo_http_client() -> &'static reqwest::Client {
+fn geo_http_client() -> Result<&'static reqwest::Client, reqwest::Error> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
-            .build()
-            .expect("Failed to build geolocation HTTP client")
+    crate::http_client::cached_client(&CLIENT, || {
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(2))
     })
 }
 
@@ -246,7 +243,13 @@ fn roblox_region_from_swifttunnel_region_id(id: &str) -> Option<RobloxRegion> {
 
 async fn resolve_game_server_region_from_api(ip: Ipv4Addr) -> Option<GameServerRegionResponse> {
     let _permit = get_semaphore().acquire().await.ok()?;
-    let client = geo_http_client();
+    let client = match geo_http_client() {
+        Ok(client) => client,
+        Err(error) => {
+            log::warn!("Could not initialize the game-server location client: {error}");
+            return None;
+        }
+    };
     let response = client
         .post(GAME_SERVER_REGION_API_URL)
         .json(&GameServerRegionRequest { ip: ip.to_string() })
