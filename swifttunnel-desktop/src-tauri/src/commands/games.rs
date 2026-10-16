@@ -191,11 +191,29 @@ pub struct GamesState {
     pub game_traffic_seen: bool,
 }
 
+#[derive(Clone)]
 pub struct ServerSearch {
     pub place_id: String,
     pub center: swifttunnel_core::roblox_directory::Datacenter,
     pub servers: Vec<swifttunnel_core::roblox_directory::GameServer>,
     pub fetched: std::time::Instant,
+}
+
+impl ServerSearch {
+    pub(crate) fn append_servers(
+        &mut self,
+        servers: &[swifttunnel_core::roblox_directory::GameServer],
+    ) {
+        for server in servers {
+            if let Some(previous) = self.servers.iter_mut().find(|s| s.job_id == server.job_id) {
+                *previous = server.clone();
+            } else if self.servers.len() < 200 {
+                self.servers.push(server.clone());
+            }
+        }
+        // This page did not recheck all earlier rows. Preserve their original
+        // age so a later join refreshes availability instead of trusting them.
+    }
 }
 
 #[derive(Serialize)]
@@ -550,6 +568,42 @@ pub async fn games_add_favourite(
 mod launch_activity_tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn loading_more_updates_duplicate_status_without_refreshing_earlier_rows_or_growing_the_cap() {
+        use swifttunnel_core::roblox_directory::{Availability, Datacenter, GameServer};
+        let row = |id: u32| GameServer {
+            job_id: id.to_string(),
+            datacenter_id: 1,
+            ip: None,
+            first_seen: String::new(),
+            playing: Some(1),
+            capacity: Some(10),
+            availability: Availability::Available,
+        };
+        let original_age = Instant::now() - Duration::from_secs(31);
+        let mut search = ServerSearch {
+            place_id: "1818".into(),
+            center: Datacenter {
+                id: 1,
+                city: "Mumbai".into(),
+                country: "IN".into(),
+                datacenter_ids: vec![1],
+                relay_region: None,
+            },
+            servers: (1..=200).map(row).collect(),
+            fetched: original_age,
+        };
+        let mut full = row(1);
+        full.availability = Availability::Full;
+        full.playing = Some(10);
+        search.append_servers(&[row(201), full]);
+        assert_eq!(search.servers.len(), 200);
+        assert_eq!(search.servers[0].availability, Availability::Full);
+        assert_eq!(search.servers[0].playing, Some(10));
+        assert!(!search.servers.iter().any(|s| s.job_id == "201"));
+        assert_eq!(search.fetched, original_age);
+    }
 
     fn launch(at: Instant) -> GamesState {
         GamesState {

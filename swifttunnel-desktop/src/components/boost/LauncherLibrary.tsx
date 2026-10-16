@@ -121,9 +121,9 @@ export function GameLibraryPanel() {
           if (connected.state !== "connected") throw new Error(connected.error ?? "Finish connecting in Connect, then try Play again.");
           if (requested && findRegionForVpnRegion(useServerStore.getState().regions, connected.region)?.id !== requested) throw new Error("Couldn't connect to the relay for this location. Check Connect, then try again.");
         },
-        launch: async () => {
+        launch: async allowUnverified => {
           setProgress("Opening Roblox...");
-          await gamesLaunch(plan.place_id ?? entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, true, safe);
+          await gamesLaunch(plan.place_id ?? entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, allowUnverified, safe);
         },
       });
     });
@@ -167,7 +167,7 @@ export function GameLibraryPanel() {
     {!!shown.length && <div data-search-anchor="games_cards" className="grid grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3">{shown.map(entry => {
       const preferences = defaultGamePreferences(entry);
       return <article key={gameEntryKey(entry)} className="instrument flex flex-col gap-3.5 p-4">
-        <div className="flex items-start gap-3"><Artwork entry={entry} /><div className="min-w-0 flex-1"><h3 className="line-clamp-2 text-[13.5px] font-semibold leading-snug text-text-primary" title={entry.name}>{entry.name}</h3><p className="mt-1 text-[11px] text-text-muted">{entry.client === "vng" ? "Roblox VNG" : "Roblox"}{entry.last_played ? ` · ${new Date(entry.last_played * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : " · Saved"}</p><p className="mt-1 text-[10.5px] text-text-dimmed">{preferences.fps_cap ? `${preferences.fps_cap === 99999 ? "Uncapped" : `${preferences.fps_cap} FPS`} · ` : ""}{preferences.datacenter_id ? "Preferred region" : preferences.use_tunnel ? "Automatic connection" : "Use current connection"}</p></div>
+        <div className="flex items-start gap-3"><Artwork entry={entry} /><div className="min-w-0 flex-1"><h3 className="line-clamp-2 text-[13.5px] font-semibold leading-snug text-text-primary" title={entry.name}>{entry.name}</h3><p className="mt-1 text-[11px] text-text-muted">{entry.client === "vng" ? "Roblox VNG" : "Roblox"}{entry.last_played ? ` · ${new Date(entry.last_played * 1000).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : " · Saved"}</p><p className="mt-1 text-[10.5px] text-text-dimmed">{preferences.fps_cap ? `${preferences.fps_cap === 99999 ? "Uncapped" : `${preferences.fps_cap} FPS`} · ` : ""}{preferences.datacenter_id && !preferences.skip_matchmaker ? "Preferred region" : preferences.use_tunnel ? "Automatic connection" : "Use current connection"}</p></div>
           <button type="button" aria-label={`${entry.favourite ? "Remove" : "Add"} ${entry.name} ${entry.favourite ? "from" : "to"} favourites`} aria-pressed={entry.favourite} disabled={locked || !!loadError} className={`${iconButtonClass} -mt-1 ${entry.favourite ? "!text-text-primary" : ""}`} onClick={() => void useGameLibraryStore.getState().setFavourite(entry.place_id, entry.client, !entry.favourite).catch(error => setError(formatErrorMessage(error)))}><Star filled={entry.favourite} /></button></div>
         <div className="flex items-center gap-1.5"><Button size="sm" className="min-w-[92px]" disabled={locked} onClick={() => void prepare(entry)}>Play</Button>
           {entry.job_id && <Button size="sm" variant="secondary" disabled={locked} onClick={() => void prepare(entry, entry.job_id, null, false)}>Rejoin</Button>}

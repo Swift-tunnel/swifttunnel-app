@@ -14,6 +14,9 @@ use swifttunnel_core::{
 };
 use tauri::{Emitter, State};
 
+mod matchmaking;
+mod selection;
+
 #[derive(Serialize)]
 pub struct LaunchPlan {
     pub place_id: String,
@@ -131,14 +134,7 @@ pub async fn games_search_servers(
                 && search.center.id == datacenter_id
                 && cursor.is_some() =>
         {
-            for server in &page.servers {
-                if !search.servers.iter().any(|s| s.job_id == server.job_id)
-                    && search.servers.len() < 200
-                {
-                    search.servers.push(server.clone());
-                }
-            }
-            search.fetched = Instant::now();
+            search.append_servers(&page.servers);
         }
         _ => {
             games.search = Some(ServerSearch {
@@ -279,7 +275,10 @@ async fn matchmake(
     config: &swifttunnel_core::roblox_launcher::Matchmaker,
     tunnel: bool,
 ) -> Result<(u32, String), String> {
-    use swifttunnel_core::roblox_launcher::{MatchMode, qualifies};
+    static SEARCH: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _search = SEARCH
+        .try_acquire()
+        .map_err(|_| "Matchmaker is already searching. Wait a moment and try again.".to_string())?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let catalog = tokio::time::timeout_at(deadline, roblox_directory::datacenters())
         .await
@@ -348,57 +347,20 @@ async fn matchmake(
         return Err("Matchmaker has no ping readings yet. Wait a moment, pick a preferred location, or Play normally.".into());
     }
     let mut lookup = roblox_directory::ServerLookup::new(place)?;
-    let mut remaining = config.search_limit as usize;
-    let mut best: Option<(
-        u32,
-        u32,
-        Datacenter,
-        Vec<roblox_directory::GameServer>,
-        String,
-    )> = None;
-    for (_, score, center) in measured.into_iter().take(4) {
-        if remaining == 0 || tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        let page = match tokio::time::timeout_at(deadline, lookup.servers(center.id, None)).await {
-            Ok(Ok(p)) => p,
-            _ => continue,
-        };
-        let rows = page
-            .servers
+    let matchmaking::Candidate {
+        center,
+        servers,
+        job,
+    } = matchmaking::find_server(
+        &mut lookup,
+        measured
             .into_iter()
-            .take(remaining.min(50))
-            .collect::<Vec<_>>();
-        remaining = remaining.saturating_sub(rows.len().max(1));
-        let candidate = rows
-            .iter()
-            .filter(|s| qualifies(s, config.minimum_free_slots))
-            .min_by_key(|s| s.playing.unwrap_or(u32::MAX));
-        if let Some(candidate) = candidate {
-            let population = candidate.playing.unwrap_or(u32::MAX);
-            let job = candidate.job_id.clone();
-            let better =
-                best.as_ref()
-                    .is_none_or(|(old_score, old_population, ..)| match config.mode {
-                        MatchMode::Closest => score < *old_score,
-                        MatchMode::FewerPlayers => {
-                            (population, score) < (*old_population, *old_score)
-                        }
-                    });
-            if better {
-                best = Some((score, population, center, rows, job));
-            }
-            if config.mode == MatchMode::Closest {
-                break;
-            }
-        }
-    }
-    let Some((_, _, center, servers, job)) = best else {
-        return Err(
-            "No server matched your Matchmaker settings. Try another location or Play normally."
-                .into(),
-        );
-    };
+            .map(|(_, score, center)| (score, center))
+            .collect(),
+        config,
+        deadline,
+    )
+    .await?;
     let id = center.id;
     state.games.lock().search = Some(ServerSearch {
         place_id: place.into(),
@@ -446,11 +408,12 @@ pub async fn games_launch_plan(
     preferences.graphics_quality = preferences
         .graphics_quality
         .or(Some(global.graphics_quality));
-    let mut target = datacenter_id.or(if use_preferred_region {
-        preferences.datacenter_id
-    } else {
-        None
-    });
+    let mut target = launch_datacenter(
+        &preferences,
+        datacenter_id,
+        use_preferred_region,
+        job_id.is_some(),
+    );
     let mut automatic_job = None;
     if target.is_none()
         && job_id.is_none()
@@ -479,57 +442,15 @@ pub async fn games_launch_plan(
     let mut job_id = job_id.or(automatic_job);
     let mut availability = Availability::Unknown;
     if let Some(center) = &center {
-        let cached = state.games.lock().search.as_ref().is_some_and(|s| {
-            s.place_id == place_id
-                && s.center.id == center.id
-                && s.fetched.elapsed() < Duration::from_secs(30)
-        });
-        if !cached {
-            games_search_servers(state.clone(), place_id.clone(), center.id, None).await?;
+        let cached = state.games.lock().search.clone();
+        let mut directory = roblox_directory::ServerLookup::new(&place_id)?;
+        let selected =
+            selection::select_server(&mut directory, &place_id, center, job_id, cached).await?;
+        job_id = Some(selected.job);
+        availability = selected.availability;
+        if let Some(search) = selected.search {
+            state.games.lock().search = Some(search);
         }
-        let games = state.games.lock();
-        let search = games
-            .search
-            .as_ref()
-            .filter(|s| s.place_id == place_id && s.center.id == center.id)
-            .ok_or("The server search changed. Refresh this game's server list.")?;
-        if job_id.is_none() {
-            job_id = search
-                .servers
-                .iter()
-                .filter(|s| {
-                    matches!(
-                        s.availability,
-                        Availability::Available | Availability::Unknown
-                    )
-                })
-                .min_by_key(|s| {
-                    (
-                        s.availability != Availability::Available,
-                        s.playing.unwrap_or(u32::MAX),
-                    )
-                })
-                .map(|s| s.job_id.clone());
-            if job_id.is_none() {
-                return Err(if search.servers.is_empty() {
-                    format!(
-                        "No {} servers are listed for this game. Try another location or Play normally.",
-                        center.city
-                    )
-                } else {
-                    format!(
-                        "No joinable {} server was found in this search. Refresh, choose another location or Play normally.",
-                        center.city
-                    )
-                });
-            }
-        }
-        let server = search
-            .servers
-            .iter()
-            .find(|s| Some(&s.job_id) == job_id.as_ref())
-            .ok_or("This server is no longer in the current search. Refresh the list.")?;
-        availability = server.availability;
     } else if let Some(job) = &job_id {
         availability = roblox_directory::availability(&place_id, job)
             .await
@@ -566,6 +487,46 @@ pub async fn games_launch_plan(
     })
 }
 
+fn launch_datacenter(
+    preferences: &GamePreferences,
+    explicit: Option<u32>,
+    use_preferred: bool,
+    specific_server: bool,
+) -> Option<u32> {
+    // Skip affects normal Play. An explicit server selection or Rejoin must
+    // still go to the server the player chose, without applying a saved city.
+    explicit.or_else(|| {
+        if use_preferred && !preferences.skip_matchmaker && !specific_server {
+            preferences.datacenter_id
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+mod launch_location_tests {
+    use super::*;
+
+    #[test]
+    fn skipped_games_join_normally_but_explicit_server_choices_are_preserved() {
+        let mut preferences = GamePreferences {
+            datacenter_id: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(launch_datacenter(&preferences, None, true, false), Some(7));
+        preferences.skip_matchmaker = true;
+        assert_eq!(launch_datacenter(&preferences, None, true, false), None);
+        assert_eq!(
+            launch_datacenter(&preferences, Some(8), false, true),
+            Some(8)
+        );
+        preferences.skip_matchmaker = false;
+        assert_eq!(launch_datacenter(&preferences, None, false, false), None);
+        assert_eq!(launch_datacenter(&preferences, None, true, true), None);
+    }
+}
+
 #[tauri::command]
 pub async fn games_launch(
     state: State<'_, AppState>,
@@ -597,7 +558,8 @@ pub async fn games_launch(
     }
     if plan.job_id.is_some() && plan.availability == Availability::Unknown && !allow_unverified {
         return Err(
-            "Server availability could not be verified. Review the warning before joining.".into(),
+            "Could not verify whether this server still has room. Try Play again to review it."
+                .into(),
         );
     }
     // Native FastFlags preparation always requires a stopped player, even

@@ -1,4 +1,17 @@
-import type { GameRouteStatus, RobloxClient, RobloxGameSession, RobloxGameEntry } from "./types";
+import type { GameRouteStatus, RobloxClient, RobloxGameSession, RobloxGameEntry, RobloxServerPage } from "./types";
+
+export function appendServerPage(previous: RobloxServerPage, incoming: RobloxServerPage): RobloxServerPage {
+  const servers = new Map(previous.servers.map(server => [server.job_id, server]));
+  for (const server of incoming.servers) {
+    if (servers.has(server.job_id) || servers.size < 200) servers.set(server.job_id, server);
+  }
+  return {
+    ...incoming,
+    // A repeated cursor would keep offering the very same page forever.
+    next_cursor: incoming.next_cursor === previous.next_cursor ? null : incoming.next_cursor,
+    servers: [...servers.values()],
+  };
+}
 
 export const gameEntryKey = (entry: RobloxGameEntry): string =>
   `${entry.client}:${entry.universe_id ? `universe:${entry.universe_id}` : `place:${entry.place_id}`}`;

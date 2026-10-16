@@ -67,7 +67,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
       <Group title="Server">
         <Setting label="Preferred location">
           <Select width={COLUMN} aria-label="Preferred datacenter" value={preferences.datacenter_id ?? ""}
-            disabled={busy} onChange={e => patch({ datacenter_id: e.target.value ? Number(e.target.value) : null })}>
+            disabled={busy || !!preferences.skip_matchmaker} onChange={e => patch({ datacenter_id: e.target.value ? Number(e.target.value) : null })}>
             <option value="">Default matchmaking</option>
             {preferences.datacenter_id && !centers.some(c => c.id === preferences.datacenter_id) && <option value={preferences.datacenter_id}>Saved location unavailable</option>}
             {centers.map(c => <option key={c.id} value={c.id}>{c.city}, {c.country}</option>)}

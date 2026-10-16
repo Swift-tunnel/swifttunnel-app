@@ -1,10 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { gamePlayPlace, gameLibraryEntries, gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "./robloxGames";
-import type { GameRouteStatus, RobloxGameSession, RobloxGameEntry } from "./types";
+import { appendServerPage, gamePlayPlace, gameLibraryEntries, gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "./robloxGames";
+import type { GameRouteStatus, RobloxGameSession, RobloxGameEntry, RobloxServerPage, RobloxDirectoryServer } from "./types";
 
 const session: RobloxGameSession = { place_id: "1818", job_id: "550e8400-e29b-41d4-a716-446655440000", ip: "128.116.47.33", client: "standard", fresh_join: true, observed_at: 1 };
 const route: GameRouteStatus = { game_location: "Mumbai", game_server_ip: session.ip, relay: "mumbai-01", estimated_path_ms: 26, bypassed: false };
 describe("game library", () => {
+  it("replaces stale server status on later pages without moving existing rows or exceeding 200", () => {
+    const server = (id: number): RobloxDirectoryServer => ({ job_id: String(id), datacenter_id: 1, ip: null, first_seen: "", playing: 1, capacity: 10, availability: "available" });
+    const previous: RobloxServerPage = { servers: Array.from({ length: 200 }, (_, i) => server(i)), next_cursor: 1, warning: null };
+    const full: RobloxDirectoryServer = { ...server(0), playing: 10, availability: "full" };
+    const next = appendServerPage(previous, { servers: [server(201), full], next_cursor: 2, warning: null });
+    expect(next.servers).toHaveLength(200);
+    expect(next.servers[0]).toEqual(full);
+    expect(next.servers[1].job_id).toBe("1");
+    expect(next.servers.some(s => s.job_id === "201")).toBe(false);
+    expect(previous.servers[0].availability).toBe("available");
+    expect(next.next_cursor).toBe(2);
+  });
+  it("stops offering a repeated server page instead of keeping Load more active forever", () => {
+    const previous: RobloxServerPage = { servers: [], next_cursor: 1, warning: null };
+    expect(appendServerPage(previous, { ...previous, next_cursor: 1 }).next_cursor).toBeNull();
+    expect(appendServerPage(previous, { ...previous, next_cursor: 2 }).next_cursor).toBe(2);
+  });
   it("uses the start place for normal Play and server browsing while preserving the last place for Rejoin", () => {
     const entry: RobloxGameEntry = { place_id: "6839171747", root_place_id: "6516141723", client: "standard", name: "DOORS", favourite: true, last_played: 20, job_id: session.job_id };
     expect(gamePlayPlace(entry)).toBe("6516141723");

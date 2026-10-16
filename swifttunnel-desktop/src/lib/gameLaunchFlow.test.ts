@@ -22,6 +22,21 @@ describe("game launch connection", () => {
     })).rejects.toThrow("Launcher unavailable");
     expect(connected).toBe(true);
   });
+  it("does not preapprove an unknown server after connecting from a verified plan", async () => {
+    const job = "550e8400-e29b-41d4-a716-446655440000";
+    const sequence: string[] = [];
+    await expect(executeGameLaunch({ ...plan, job_id: job, availability: "available" }, {
+      connect: async () => { sequence.push("connected"); },
+      launch: async allowUnverified => {
+        sequence.push("checked again");
+        if (!allowUnverified) throw new Error("Review the unverified server before joining");
+      },
+    })).rejects.toThrow("Review the unverified server");
+    expect(sequence).toEqual(["connected", "checked again"]);
+    const launch = vi.fn().mockResolvedValue(undefined);
+    await executeGameLaunch({ ...plan, job_id: job, availability: "unknown" }, { connect: async () => {}, launch });
+    expect(launch).toHaveBeenCalledWith(true);
+  });
   it("does not start Roblox when connecting fails", async () => {
     const launch = vi.fn();
     await expect(executeGameLaunch(plan, {
@@ -33,6 +48,6 @@ describe("game launch connection", () => {
     const connect = vi.fn(); const launch = vi.fn();
     await executeGameLaunch({ ...plan, preferences: { ...plan.preferences, use_tunnel: false } }, { connect, launch });
     expect(connect).not.toHaveBeenCalled();
-    expect(launch).toHaveBeenCalledWith();
+    expect(launch).toHaveBeenCalledWith(false);
   });
 });

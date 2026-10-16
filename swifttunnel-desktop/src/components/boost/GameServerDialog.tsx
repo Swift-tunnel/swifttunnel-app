@@ -5,7 +5,7 @@ import { Flag } from "../ui/Flag";
 import { gamesDatacenters, gamesSearchServers } from "../../lib/commands";
 import { defaultGamePreferences } from "../../lib/gameLaunchFlow";
 import { formatErrorMessage } from "../../lib/errors";
-import { gamePlayPlace } from "../../lib/robloxGames";
+import { appendServerPage, gamePlayPlace } from "../../lib/robloxGames";
 import type { RobloxDatacenter, RobloxDirectoryServer, RobloxGameEntry, RobloxServerPage } from "../../lib/types";
 
 export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGameEntry | null; onClose: () => void; onJoin: (entry: RobloxGameEntry, server: RobloxDirectoryServer, center: RobloxDatacenter) => void }) {
@@ -34,7 +34,7 @@ export function GameServerDialog({ entry, onClose, onJoin }: { entry: RobloxGame
     try {
       const next = await gamesSearchServers(gamePlayPlace(entry), id, more ? page?.next_cursor ?? null : null);
       if (current !== generation.current) return;
-      setPage(prev => ({ ...next, servers: more && prev ? [...prev.servers, ...next.servers.filter(row => !prev.servers.some(old => old.job_id === row.job_id))].slice(0, 200) : next.servers }));
+      setPage(prev => more && prev ? appendServerPage(prev, next) : next);
     } catch (error) { if (current === generation.current) setError(formatErrorMessage(error)); }
     finally { if (current === generation.current) setBusy(false); }
   }
