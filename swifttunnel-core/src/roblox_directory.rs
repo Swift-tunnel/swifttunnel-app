@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::Ipv4Addr,
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
@@ -97,7 +98,65 @@ fn client() -> Result<&'static reqwest::Client, reqwest::Error> {
             .user_agent("SwiftTunnel/server-directory")
     })
 }
+/// RoValra's API terms: their responses stay the same for at least 60 seconds,
+/// and apps must cache on their side instead of repeating identical requests.
+/// Only RoValra's location data is kept. Roblox availability is always fresh.
+const ROVALRA_CACHE_TTL: Duration = Duration::from_secs(60);
+const ROVALRA_CACHE_ENTRIES: usize = 32;
+
+#[derive(Default)]
+struct ResponseCache {
+    entries: HashMap<String, (Instant, Arc<[u8]>)>,
+}
+impl ResponseCache {
+    fn get(&mut self, key: &str, now: Instant) -> Option<Arc<[u8]>> {
+        match self.entries.get(key) {
+            Some((at, body)) if now.duration_since(*at) < ROVALRA_CACHE_TTL => Some(body.clone()),
+            Some(_) => {
+                self.entries.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+    fn put(&mut self, key: String, body: Arc<[u8]>, now: Instant) {
+        self.entries
+            .retain(|_, (at, _)| now.duration_since(*at) < ROVALRA_CACHE_TTL);
+        if self.entries.len() >= ROVALRA_CACHE_ENTRIES
+            && !self.entries.contains_key(&key)
+            && let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(key, _)| key.clone())
+        {
+            self.entries.remove(&oldest);
+        }
+        self.entries.insert(key, (now, body));
+    }
+}
+static ROVALRA_RESPONSES: LazyLock<Mutex<ResponseCache>> = LazyLock::new(Default::default);
+
+fn rovalra_cacheable(url: &reqwest::Url) -> bool {
+    url.host_str() == Some("apis.rovalra.com")
+}
+
+fn parse_body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
+    serde_json::from_slice(bytes)
+        .map_err(|_| "The server directory returned an unexpected response.".into())
+}
+
 async fn json<T: serde::de::DeserializeOwned>(url: reqwest::Url) -> Result<T, String> {
+    let cache_key = rovalra_cacheable(&url).then(|| url.as_str().to_string());
+    if let Some(key) = &cache_key {
+        let cached = ROVALRA_RESPONSES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key, Instant::now());
+        if let Some(body) = cached {
+            return parse_body(&body);
+        }
+    }
     let response = client()
         .map_err(|error| {
             log::warn!("Could not initialize the server-directory client: {error}");
@@ -114,8 +173,15 @@ async fn json<T: serde::de::DeserializeOwned>(url: reqwest::Url) -> Result<T, St
         .error_for_status()
         .map_err(|_| "Server information is temporarily unavailable.".to_string())?;
     let bytes = read_bounded(response, 512 * 1024, "server directory").await?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| "The server directory returned an unexpected response.".into())
+    // Parse before keeping it, so a broken answer is never reused.
+    let value = parse_body(&bytes)?;
+    if let Some(key) = cache_key {
+        ROVALRA_RESPONSES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .put(key, Arc::from(&bytes[..]), Instant::now());
+    }
+    Ok(value)
 }
 fn relay_region(city: &str, country: &str) -> Option<&'static str> {
     match (city, country) {
@@ -418,6 +484,59 @@ pub async fn resolve_session(place: &str, job: &str, ip: Ipv4Addr) -> Option<Dat
 
 #[cfg(test)]
 mod tests {
+    use super::{ROVALRA_CACHE_ENTRIES, ResponseCache, rovalra_cacheable};
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn rovalra_responses_are_reused_for_sixty_seconds_then_fetched_again() {
+        let start = Instant::now();
+        let mut cache = ResponseCache::default();
+        cache.put("page".into(), Arc::from(&b"one"[..]), start);
+        assert_eq!(
+            cache
+                .get("page", start + Duration::from_secs(59))
+                .as_deref(),
+            Some(&b"one"[..])
+        );
+        assert!(cache.get("page", start + Duration::from_secs(60)).is_none());
+        assert!(
+            cache.entries.is_empty(),
+            "an expired answer must be dropped"
+        );
+    }
+
+    #[test]
+    fn rovalra_cache_stays_bounded_by_dropping_the_oldest_answer() {
+        let start = Instant::now();
+        let mut cache = ResponseCache::default();
+        for index in 0..=ROVALRA_CACHE_ENTRIES {
+            cache.put(
+                format!("page-{index}"),
+                Arc::from(&b"x"[..]),
+                start + Duration::from_millis(index as u64),
+            );
+        }
+        assert_eq!(cache.entries.len(), ROVALRA_CACHE_ENTRIES);
+        assert!(!cache.entries.contains_key("page-0"));
+        assert!(
+            cache
+                .entries
+                .contains_key(&format!("page-{ROVALRA_CACHE_ENTRIES}"))
+        );
+    }
+
+    #[test]
+    fn only_rovalra_location_data_is_cached_never_roblox_availability() {
+        let rovalra =
+            reqwest::Url::parse("https://apis.rovalra.com/v1/servers/region?place_id=1").unwrap();
+        let roblox =
+            reqwest::Url::parse("https://games.roblox.com/v1/games/1/servers/Public").unwrap();
+        assert!(rovalra_cacheable(&rovalra));
+        assert!(!rovalra_cacheable(&roblox));
+    }
     use super::*;
     const JOB: &str = "550e8400-e29b-41d4-a716-446655440000";
     fn center() -> Datacenter {
