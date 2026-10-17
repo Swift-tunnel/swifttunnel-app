@@ -285,6 +285,13 @@ fn classify_relay_health(
     }
 
     if health == RelayHealthState::Dead {
+        // Give transient outages the same recovery window regardless of the
+        // Windows connectivity hint. It can lag behind a recovering link.
+        if !relay_dead_grace_elapsed {
+            return RelayHealthAction::Continue {
+                relay_status: Some("dead".to_string()),
+            };
+        }
         // The relay-dead heuristic also fires when the user's own machine
         // loses internet (Wi-Fi blip, sleep/resume, ISP outage): keepalives
         // appear "unanswered" purely because nothing leaves the NIC. Asking
@@ -296,11 +303,6 @@ fn classify_relay_health(
                 error_message: "Internet connection lost - SwiftTunnel stopped the session because your device went offline. Reconnect to your network and try again."
                     .to_string(),
                 cleanup_reason: "internet_lost_recovery",
-            };
-        }
-        if !relay_dead_grace_elapsed {
-            return RelayHealthAction::Continue {
-                relay_status: Some("dead".to_string()),
             };
         }
         return RelayHealthAction::Fatal {
@@ -4543,12 +4545,51 @@ mod tests {
     }
 
     #[test]
-    fn test_dead_relay_with_internet_offline_blames_local_network() {
+    fn test_offline_hint_during_relay_grace_allows_recovery() {
+        use super::super::udp_relay::RelayHealthState;
+
+        assert_eq!(
+            classify_relay_health(
+                RelayHealthState::Dead,
+                false,
+                LocalConnectivity::Offline,
+                false
+            ),
+            RelayHealthAction::Continue {
+                relay_status: Some("dead".to_string()),
+            }
+        );
+        // A recovered relay clears the warning, even if Windows' hint lags behind.
+        assert_eq!(
+            classify_relay_health(
+                RelayHealthState::Healthy,
+                false,
+                LocalConnectivity::Offline,
+                false
+            ),
+            RelayHealthAction::Continue { relay_status: None }
+        );
+        assert!(matches!(
+            classify_relay_health(
+                RelayHealthState::Dead,
+                true,
+                LocalConnectivity::Offline,
+                false
+            ),
+            RelayHealthAction::Fatal {
+                cleanup_reason: "relay_sender_panicked",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_dead_relay_with_internet_offline_after_grace_blames_local_network() {
         let action = classify_relay_health(
             super::super::udp_relay::RelayHealthState::Dead,
             false,
             LocalConnectivity::Offline,
-            false,
+            true,
         );
 
         match action {

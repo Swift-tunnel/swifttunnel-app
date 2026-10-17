@@ -356,14 +356,24 @@ impl LogDirectory {
     }
 }
 
-/// Find the newest log file in the directory
+fn is_player_log_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let Some(stem) = name.strip_suffix(".log") else {
+        return false;
+    };
+    // Player is a filename component in both the standard and VNG logs.
+    // A substring also matches RobloxPlayerInstaller and RobloxPlayerLauncher.
+    stem.split('_').any(|part| part == "player") && !stem.contains("crashhandler")
+}
+
+/// Find the newest player log file in the directory.
 fn find_newest_log_file(dir: &Path) -> Option<PathBuf> {
     fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok())
         .filter(|e| {
-            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
-            name.ends_with(".log") && name.contains("player") && !name.contains("crashhandler")
+            e.file_type().is_ok_and(|kind| kind.is_file())
+                && is_player_log_name(&e.file_name().to_string_lossy())
         })
         .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
         .map(|e| e.path())
@@ -674,17 +684,56 @@ mod tests {
     }
     #[test]
     fn player_log_selection_never_uses_studio_or_installer_logs() {
-        let dir = std::env::temp_dir().join(format!("swift-log-selection-{}", std::process::id()));
+        let dir = crate::test_support::recovery_directory().join("player-log-selection");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("roblox_Player.log"), "player").unwrap();
-        fs::write(dir.join("roblox_Studio.log"), "studio").unwrap();
-        fs::write(dir.join("roblox_Installer.log"), "installer").unwrap();
-        fs::write(dir.join("roblox_Player_CrashHandler_last.log"), "crash").unwrap();
-        assert_eq!(
-            find_newest_log_file(&dir).unwrap(),
-            dir.join("roblox_Player.log")
-        );
+        let player = "0.743.0.7431134_20261016T064733Z_Player_DFD0B_last.log";
+        let file = File::create(dir.join(player)).unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+        )
+        .unwrap();
+        drop(file);
+        for (index, name) in [
+            "0.743.0.7431134_20261016T064733Z_Studio_DFD0B_last.log",
+            "RobloxPlayerInstaller_33871.log",
+            "RobloxPlayerLauncher_20676.log",
+            "0.743.0.7431134_20261016T064734Z_Player_DD466_CrashHandler_last.log",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let file = File::create(dir.join(name)).unwrap();
+            // Make each unrelated file definitively newer than the real player log.
+            file.set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_001 + index as u64),
+            ))
+            .unwrap();
+        }
+        fs::create_dir(dir.join("new_Player.log")).unwrap();
+        assert_eq!(find_newest_log_file(&dir).unwrap(), dir.join(player));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn player_log_names_accept_legacy_and_vng_formats_case_insensitively() {
+        for name in [
+            "Player.log",
+            "roblox_Player.log",
+            "0.743.0.7431134_20261016T064733Z_Player_DFD0B_last.log",
+            "0.743.0.7431134_20261016T064733Z_PLAYER_DFD0B_last.LOG",
+        ] {
+            assert!(is_player_log_name(name), "{name}");
+        }
+        for name in [
+            "RobloxPlayerInstaller_33871.log",
+            "RobloxPlayerLauncher_20676.log",
+            "roblox_Studio.log",
+            "roblox_Player_CrashHandler_last.log",
+            "roblox_Player.log.bak",
+        ] {
+            assert!(!is_player_log_name(name), "{name}");
+        }
     }
     use std::fs;
     use std::net::Ipv4Addr;

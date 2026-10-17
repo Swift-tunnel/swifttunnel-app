@@ -34,6 +34,7 @@ interface BoostStore {
   ramTotal: number;
   ping: number;
   robloxRunning: boolean;
+  hasLoadedMetrics: boolean;
   robloxForeground: boolean;
   processId: number | null;
 
@@ -75,6 +76,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
   ramTotal: 0,
   ping: 0,
   robloxRunning: false,
+  hasLoadedMetrics: false,
   robloxForeground: false,
   processId: null,
   systemMem: null,
@@ -111,6 +113,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
           ramTotal: m.ram_total,
           ping: m.ping,
           robloxRunning: m.roblox_running,
+          hasLoadedMetrics: true,
           robloxForeground: m.roblox_foreground,
           processId: m.process_id,
         });

@@ -45,6 +45,18 @@ describe("stores/boostStore", () => {
 
   const metrics = { fps: 60, cpu_usage: 10, ram_usage: 100, ram_total: 1000, ping: 20, roblox_running: true, roblox_foreground: true, process_id: 123 };
 
+  it("marks process state ready only after a successful native sample", async () => {
+    const store = await loadStore();
+    expect(store.getState().hasLoadedMetrics).toBe(false);
+    boostGetMetrics.mockRejectedValueOnce(new Error("Sampler unavailable"));
+    expect(await store.getState().fetchMetrics()).toBe(false);
+    expect(store.getState().hasLoadedMetrics).toBe(false);
+    boostGetMetrics.mockResolvedValueOnce(metrics);
+    expect(await store.getState().fetchMetrics()).toBe(true);
+    expect(store.getState().hasLoadedMetrics).toBe(true);
+    expect(store.getState().robloxRunning).toBe(true);
+  });
+
   it("coalesces overlapping memory reads and permits a fresh read after completion", async () => {
     let finish!: (value: object) => void;
     const snapshot = { total_mb: 16000, used_mb: 9000, available_mb: 7000, load_pct: 56, standby_mb: null, modified_mb: null };

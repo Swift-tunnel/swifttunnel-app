@@ -10,6 +10,7 @@ import {
 import { formatConnectedServerLabel } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
+import { useRelayLatencyPolling } from "../../lib/useRelayLatencyPolling";
 import { useLiveUpdates } from "../../lib/useLiveUpdates";
 import { useTrafficSamples } from "../../lib/useTrafficSamples";
 import { RouteDiagram } from "./RouteDiagram";
@@ -73,7 +74,6 @@ export function ConnectTab() {
   const serversError = useServerStore((s) => s.error);
   const getLatency = useServerStore((s) => s.getLatency);
   const previews = useServerStore((s) => s.previews);
-  const fetchLatencies = useServerStore((s) => s.fetchLatencies);
   const refreshServers = useServerStore((s) => s.refresh);
 
   const connectedRegion = findRegionForVpnRegion(regions, vpnRegion);
@@ -129,10 +129,7 @@ export function ConnectTab() {
     enabled: isConnected || isTransitioning,
   });
 
-  useEffect(() => {
-    void fetchLatencies();
-  }, [fetchLatencies]);
-  useFocusAwareInterval(() => void fetchLatencies(), 15000, { idleMs: 60_000 });
+  useRelayLatencyPolling();
 
   useEffect(() => {
     if (!isConnected) return;
