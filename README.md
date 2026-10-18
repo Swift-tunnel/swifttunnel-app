@@ -1,239 +1,304 @@
+> [!CAUTION]
+> The only official places to download SwiftTunnel are this GitHub repository and [swifttunnel.net](https://www.swifttunnel.net/download). Any other website offering downloads or claiming to be us is not ours.
+
 <p align="center">
-  <img src="https://swifttunnel.net/logo.png" alt="SwiftTunnel" width="120" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/logo-dark.png">
+    <img src="docs/readme/logo-light.png" alt="SwiftTunnel" width="110">
+  </picture>
 </p>
 
 <h1 align="center">SwiftTunnel</h1>
 
-<p align="center">
-  <strong>Game faster. Lag less.</strong>
-</p>
+<p align="center"><strong>Lower ping. Pure signal.</strong><br>A performance app built only for Roblox.</p>
+
+<div align="center">
+
+[![Version][badge-release]][latest]
+[![Downloads][badge-downloads]][releases]
+[![Platform][badge-platform]][download]
+[![Discord][badge-discord]][discord]
+[![License][badge-license]](LICENSE)
+
+[Download][download] · [Test your ping][ping] · [Server status][status] · [Tutorials][tutorials] · [Discord][discord]
+
+</div>
 
 <p align="center">
-  A lightweight game connection optimizer with split tunneling — route only your game through our low-latency servers while everything else stays on your normal connection.
+  <img src="docs/readme/screen-hero.png" alt="SwiftTunnel connected through a Singapore relay at 5 ms, in a game with an estimated game ping of 7 ms" width="100%">
 </p>
+
+SwiftTunnel sends your Roblox traffic through a relay right next to the Roblox server you're playing on, so it takes a cleaner path than your internet provider's default route. Everything else on your PC stays on your normal connection.
+
+Around that, it covers the rest of playing Roblox well: choosing servers by location, FPS and graphics per game, a FastFlags editor, a live in-game overlay, and Windows tuning you can always undo.
+
+> [!NOTE]
+> SwiftTunnel runs on **Windows 10 and 11**, on both x64 and ARM64 PCs.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/diagram-route-dark.png">
+  <img src="docs/readme/diagram-route-light.png" alt="Without SwiftTunnel your provider picks the path. With SwiftTunnel, Roblox goes through a relay next to the Roblox datacenter, and everything else stays on your normal internet." width="100%">
+</picture>
+
+## Frequently asked questions
+
+<details>
+<summary><b>Is it safe?</b></summary>
+<br>
+
+Yes. The source code is public, every installer is built by our GitHub release workflow and carries a build attestation you can verify yourself (see [Security](#security)), and the app only installs updates with a valid signature. Just make sure you download it from an official source.
+</details>
+
+<details>
+<summary><b>Can using this get me banned?</b></summary>
+<br>
+
+SwiftTunnel doesn't inject anything into Roblox or touch the game while it runs. It changes the network route your Roblox traffic takes, and it edits Roblox's own settings files: the same files the in-game settings menu and launchers like Bloxstrap write. The FastFlags editor only allows flags Roblox itself supports.
+</details>
+
+<details>
+<summary><b>Is it a VPN?</b></summary>
+<br>
+
+No. A VPN sends all of your traffic through someone else's server. SwiftTunnel only moves Roblox, and only to give it a better route. It doesn't hide your IP from websites.
+</details>
+
+<details>
+<summary><b>Will it lower my ping?</b></summary>
+<br>
+
+For most players, yes, but it depends on your internet provider's routes. The [ping test][ping] shows your own numbers to every relay before you install anything.
+</details>
+
+<details>
+<summary><b>Does it work with Bloxstrap, Fishstrap or Voidstrap?</b></summary>
+<br>
+
+Yes, keep using your launcher. SwiftTunnel can import your supported settings from it.
+</details>
+
+<details>
+<summary><b>Why does it need administrator rights?</b></summary>
+<br>
+
+Keeping Roblox separate from the rest of your traffic needs a network driver, and the optimizations change Windows settings. Both need administrator rights.
+</details>
+
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/banner-routing-dark.png">
+  <img src="docs/readme/banner-routing-light.png" alt="01 Routing: Shorter route. Lower ping." width="100%">
+</picture>
+
+- **Automatic relay choice.** SwiftTunnel spots which Roblox server you joined and switches to the relay with the best route to it.
+- **Pick your own** relay whenever you prefer, and SwiftTunnel keeps it.
+- **Ping before you connect.** Every location shows an estimated ping up front, and you always see which relay you're on.
+- **Split tunneling.** Only Roblox goes through the relay. Discord, your browser and your downloads stay on your normal internet.
+- **Country-ban bypass.** If Roblox is blocked on your network or in your country, SwiftTunnel can carry it through a relay so you can still sign in and play.
+
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/banner-games-dark.png">
+  <img src="docs/readme/banner-games-light.png" alt="02 Games: Press Play. Routed first." width="100%">
+</picture>
 
 <p align="center">
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases/latest">
-    <img src="https://img.shields.io/github/v/release/Swift-tunnel/swifttunnel-app?display_name=tag&style=flat-square&color=blue" alt="Latest Release" />
-  </a>
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases">
-    <img src="https://img.shields.io/badge/downloads-GitHub-green?style=flat-square" alt="Downloads" />
-  </a>
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/Swift-tunnel/swifttunnel-app?style=flat-square" alt="License" />
-  </a>
+  <img src="docs/readme/screen-games.png" alt="The Games library with favourites, Play and Rejoin" width="100%">
 </p>
+
+- Your Roblox games in one place, with favourites, shortcuts, rejoin and the last four games you played.
+- **One-press Play.** SwiftTunnel connects the right relay first, then launches Roblox straight into the game.
+- Keep a preferred location for each game, or choose **Play in any location** for the fastest join.
+- **Roblox VNG** is supported too.
+
+What happens when you press Play:
+
+```text
+  ┌───────────────────┐
+  │  Press Play       │   on any game in your library
+  └─────────┬─────────┘
+            ▼
+  ┌───────────────────┐
+  │  Matchmaker       │   picks a public server in a city you allow (optional)
+  └─────────┬─────────┘
+            ▼
+  ┌───────────────────┐
+  │  SwiftTunnel      │   connects the relay for that server
+  └─────────┬─────────┘
+            ▼
+  ┌───────────────────┐
+  │  Roblox           │   opens straight into the game
+  └───────────────────┘
+```
+
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/banner-matchmaker-dark.png">
+  <img src="docs/readme/banner-matchmaker-light.png" alt="03 Matchmaker: Pick the city. Pick the server." width="100%">
+</picture>
 
 <p align="center">
-  <a href="#features">Features</a> •
-  <a href="#download">Download</a> •
-  <a href="#how-it-works">How It Works</a> •
-  <a href="https://status.swifttunnel.net">Servers</a> •
-  <a href="#building">Building</a>
+  <img src="docs/readme/screen-matchmaker.png" alt="Matchmaker settings" width="100%">
 </p>
 
----
+- Choose the Roblox datacenter cities you're happy to play in.
+- Let Matchmaker pick the **closest** server by ping, or the one with the **fewest players**.
+- Ask for free slots so your friends can join, and browse public servers by location before you join.
 
-## Features
+<br>
 
-### 🎯 Smart Split Tunneling
-Only game traffic is optimized through SwiftTunnel. Discord, Spotify, Chrome — everything else uses your normal internet. No bandwidth wasted.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/banner-roblox-dark.png">
+  <img src="docs/readme/banner-roblox-light.png" alt="04 Roblox settings: Maximize your FPS." width="100%">
+</picture>
 
-### 🧭 Roblox Route Assist
-Optional Roblox login/API HTTP(S) routing helps users bypass network bans and gives Roblox a better chance of placing sessions near the SwiftTunnel region they picked. Browser traffic is still scoped to Roblox destinations only; unrelated websites keep using the normal connection. TCP flows are routed only when SwiftTunnel captures the Roblox/bootstrap HTTPS handshake, so existing browser or Roblox connections are not moved into the relay halfway through. The launch-critical Roblox settings hosts (`clientsettings*`, `versioncompatibility`) always stay on the direct connection: their addresses are pinned at connect time with a bounded retry, and if a pin is still missing, SwiftTunnel recognizes those hosts from the TLS SNI of a relayed flow and routes subsequent connections to them directly (country-ban bypass mode deliberately relays them instead).
+<table>
+  <tr>
+    <td width="50%"><img src="docs/readme/screen-roblox-settings.png" alt="Roblox settings with FPS unlocked and the target FPS slider" width="100%"></td>
+    <td width="50%"><img src="docs/readme/screen-fastflags.png" alt="FastFlags with renderer, textures, anti-aliasing and more" width="100%"></td>
+  </tr>
+</table>
 
-### ⚡ Low Latency Gaming Servers
-27 gaming-optimized relays across 12 gaming regions. Each relay runs:
-- **BBR** congestion control for faster throughput
-- **fq_codel** queue management to eliminate bufferbloat
-- **V3 UDP relay** protocol for minimal overhead (~0.5-1ms)
+<p align="center">
+  <img src="docs/readme/screen-fastflags-advanced.png" alt="The FastFlags advanced editor with an override list" width="100%">
+</p>
 
-### 🚀 PC Boosts
-Built-in performance optimizations:
-- **FPS Unlocker** — Remove the 60 FPS cap
-- **Network Tweaks** — Optimize TCP/UDP settings, DNS, and adapter config
-- **System Boosts** — Process priority, timer resolution, memory management
-- **Roblox Ultraboost** — writes every valid Roblox `version-*` folder with curated allowlisted FPS flags, cleans up retired SwiftTunnel flags such as high-DPI sharpness overrides, re-applies saved flags on startup so Roblox updates do not drop the settings, and adds a reversible NVIDIA-only Profile Inspector potato graphics profile when an NVIDIA GPU is detected.
+- **FPS unlock** with a cap you choose, plus graphics, window size and fullscreen.
+- **Per-game profiles.** Give each game its own FPS cap and graphics. Your normal settings come back when Roblox closes.
+- **FastFlags editor** with simple switches and choices instead of raw JSON, plus an **advanced editor** to add any flag Roblox allows by name or edit the JSON directly.
+- **NVIDIA profile** for the Roblox player on compatible NVIDIA GPUs.
+- **Ultraboost** for maximum FPS at the lowest detail.
+- **Reset Roblox to default** in one press, and **import** settings from other launchers.
 
-### 🔒 Lightweight & Safe
-- No kernel drivers required for basic operation
-- Anti-cheat friendly — uses standard Windows APIs
-- Minimal resource usage (~20MB RAM)
-- All optimizations are reversible
-- Banned accounts are blocked in-app and trigger best-effort cleanup of saved VPN, Roblox, network, and system boosts.
+<br>
 
-### 🌍 Auto Region Detection
-Starts on the lowest-latency region from the in-app ping test, then resolves detected Roblox game-server IPs through SwiftTunnel's IPinfo-backed web resolver. Manual server pins stay respected and still complete the relay-ticket handshake, drained relays are excluded through `/api/vpn/servers`, stale lookups cannot switch after a newer game-server IP, and live ping-test refreshes keep Auto Route's server choices current while connected.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/banner-overlay-dark.png">
+  <img src="docs/readme/banner-overlay-light.png" alt="05 Overlay: Every stat. In game." width="100%">
+</picture>
 
----
+<p align="center">
+  <img src="docs/readme/screen-overlay.png" alt="Overlay settings with a live preview" width="100%">
+</p>
+
+- Live stats on top of Roblox: **FPS, game ping, relay, play time, Roblox's CPU and RAM, GPU, temperatures, upload, download and the time.**
+- Straight or layered, three sizes, six accent colors, and nine positions on screen.
+- Toggle it any time with **Ctrl+Shift+O**. It hides itself when you switch to another app.
+
+<br>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/readme/banner-optimize-dark.png">
+  <img src="docs/readme/banner-optimize-light.png" alt="06 Optimize: Tune Windows. Undo anytime." width="100%">
+</picture>
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/readme/screen-optimize.png" alt="Game Boost tweaks" width="100%"></td>
+    <td width="50%"><img src="docs/readme/screen-speedup.png" alt="Speed Up tweaks by category" width="100%"></td>
+  </tr>
+</table>
+
+- **Game Boost** presets in four levels: Beginner, Intermediate, Advanced and Expert.
+- **Speed Up** tweaks for System, Performance, System Response, Network, Input, File System, Memory and Cache, Windows Services, Startup and Shutdown, and Privacy.
+- **Every tweak can be undone,** individually or all at once.
+
+<br>
+
+## More
+
+- **SwiftTunnel Lite.** A tiny version built natively for Windows, with no browser engine inside. Same relays, the Roblox essentials. Get it from the [download page][download].
+- **Updates.** The app keeps itself up to date. Choose **Stable** for vetted releases or **Live** for early builds.
 
 ## Download
 
-<p align="center">
-  <a href="https://github.com/Swift-tunnel/swifttunnel-app/releases/latest">
-    <img src="https://img.shields.io/badge/Download-Windows%20x64-blue?style=for-the-badge&logo=windows" alt="Download for Windows" />
-  </a>
-</p>
+| Package | Where to get it |
+| --- | --- |
+| **SwiftTunnel** (recommended) | [swifttunnel.net/download][download], or `SwiftTunnel-Setup-<version>.exe` from the [latest release][latest] |
+| **SwiftTunnel Lite** | `SwiftTunnelLite-Setup-<version>.exe` from the same places |
+| **MSI packages** | `SwiftTunnel_<version>_x64_en-US.msi` and the `arm64` version, for managed installs |
 
-**Requirements:**
-- Windows 10/11 (64-bit)
-- Administrator privileges (for network optimization)
+Run the installer, then sign in with a free SwiftTunnel account.
 
-**Installation:**
-1. Download the Windows installer (`*.exe`) from [Releases](https://github.com/Swift-tunnel/swifttunnel-app/releases/latest)
-2. Run the installer
-3. SwiftTunnel launches automatically after installation
-4. Sign in with your SwiftTunnel account
+## Security
 
----
+- **Signed updates.** The updater only installs releases whose signatures check out.
+- **Verifiable builds.** Every installer and update file is built by our GitHub release workflow and carries a build attestation. Check any download with the [GitHub CLI](https://cli.github.com/):
 
-## How It Works
+  ```bash
+  gh attestation verify SwiftTunnel-Setup-<version>.exe --repo Swift-tunnel/swifttunnel-app
+  ```
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Your PC                                  │
-│  ┌─────────────┐    ┌─────────────────────────────────────────┐ │
-│  │   Roblox    │───▶│  SwiftTunnel Route Optimizer            │ │
-│  └─────────────┘    │  ┌─────────────────────────────────────┐│ │
-│                     │  │ Optimized Route → Gaming Server     ││ │
-│  ┌─────────────┐    │  └─────────────────────────────────────┘│ │
-│  │   Discord   │───▶│           (bypassed)                    │ │
-│  └─────────────┘    └──────────────────────────────────────── ┘ │
-│                              │                                  │
-│  ┌─────────────┐             │                                  │
-│  │   Chrome    │─────────────┘ (normal internet)                │
-│  └─────────────┘                                                │
-└─────────────────────────────────────────────────────────────────┘
-```
+- **Reversible changes.** Optimizations and Roblox settings can all be undone, and uninstalling puts Roblox back the way it was.
 
-SwiftTunnel intercepts game traffic at the network layer. Only packets from your game are optimized and routed through our servers. DNS normally stays on the local connection; when Roblox Route Assist is enabled, SwiftTunnel also repairs exact Roblox launch/API hostnames with temporary hosts-file entries resolved over HTTPS DNS and routes Roblox login/API HTTP(S), including browser-owned Roblox auth traffic and the temporary CDN IPs resolved for those bootstrap hostnames, through the selected relay. Route Assist TCP routing is handshake-gated so SwiftTunnel can clamp relay-owned flows before large HTTPS packets are exchanged; non-Roblox browser traffic and already-established TCP connections still bypass SwiftTunnel.
+To report a vulnerability, follow [SECURITY.md](SECURITY.md). See also the [privacy policy](https://www.swifttunnel.net/privacy), [terms](https://www.swifttunnel.net/terms) and [trust and safety](https://www.swifttunnel.net/trust) pages.
 
-On Windows, the V3 relay client marks SwiftTunnel relay UDP traffic with DSCP EF (46) best-effort for lower jitter on networks that honor DSCP. When latency network throttling boost is enabled, SwiftTunnel also installs the Windows QoS policy needed for deterministic DSCP handling, scoped to SwiftTunnel's relay socket/process; the old broad Gaming QoS policies for Roblox executables and the generic Microsoft Store `Windows10Universal.exe` host stay removed.
+## Building from source
 
-Roblox detection covers the standard Win32 player/studio executables by exact process stem or known Roblox alias only. Microsoft Store/UWP Roblox is intentionally not tunnel-eligible because it runs under the generic `Windows10Universal.exe` host used by unrelated Store apps.
-
-
-## Building
-
-### Prerequisites
-- [Rust](https://rustup.rs/) 1.70 or later
-- [Node.js](https://nodejs.org/) 20 or later
-- Windows 10/11 SDK (for native builds)
-- Visual Studio Build Tools (MSVC)
-
-### Build Desktop App (Tauri + React)
+You'll need Windows 10 or 11, the latest stable [Rust](https://rustup.rs/), [Node.js](https://nodejs.org/) LTS, and Visual Studio Build Tools with the "Desktop development with C++" workload.
 
 ```bash
-# Clone the repo
 git clone https://github.com/Swift-tunnel/swifttunnel-app.git
-# Or: git clone git@github.com:Swift-tunnel/swifttunnel-app.git
 cd swifttunnel-app/swifttunnel-desktop
-
-# Install frontend + Tauri CLI dependencies
 npm ci
-
-# Frontend production build
-npm run build
-
-# Desktop dev mode
-npm run tauri:dev
+npm run tauri:dev     # run the app (from an Administrator terminal)
+npm run tauri:build   # build the MSI installer
+npm test              # interface tests
+cargo test -p swifttunnel-core   # engine tests, from the repo root
 ```
 
-### Build MSI Installer
+| Folder | Contents |
+| --- | --- |
+| `swifttunnel-desktop` | The app: React interface and the Tauri shell |
+| `swifttunnel-core` | The Rust engine: tunnel, split tunneling, Roblox tools and optimizations |
+| `swifttunnel-lite` | SwiftTunnel Lite |
+| `swifttunnel-setup` | The installer you download from the website |
+| `release-notes` | What changed in each release |
 
-```bash
-cd swifttunnel-desktop
-npm run tauri:build
+How the pieces fit together:
+
+```text
+  ┌──────────────────────┐      ┌──────────────────────┐
+  │ swifttunnel-desktop  │      │ swifttunnel-lite     │
+  │ React + Tauri app    │      │ tiny native app      │
+  └──────────┬───────────┘      └──────────┬───────────┘
+             └──────────────┬──────────────┘
+                            ▼
+              ┌───────────────────────────┐
+              │ swifttunnel-core (Rust)   │
+              │ tunnel · split tunneling  │
+              │ Roblox tools · optimize   │
+              └─────────────┬─────────────┘
+                            ▼
+    Windows Packet Filter ──► SwiftTunnel relay ──► Roblox
 ```
 
-Installer output:
-- `swifttunnel-desktop/src-tauri/target/release/bundle/msi/*.msi`
-- Updater artifacts and signatures are generated when signing keys are configured.
+The relay server is open source too: [Swift-tunnel/swifttunnel-relay](https://github.com/Swift-tunnel/swifttunnel-relay).
 
-### Release Pipeline
+**Built with** [Tauri 2](https://tauri.app/), [React 19](https://react.dev/) and TypeScript for the app, Rust for the engine, [Windows Packet Filter](https://www.ntkernel.com/windows-packet-filter/) for split tunneling, SwiftTunnel's own UDP relay, and WiX for the MSI installer.
 
-The release workflow requires these CI/CD variables:
-- `TAURI_SIGNING_PRIVATE_KEY`
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
-- `TAURI_UPDATER_PUBLIC_KEY`
-- `TAURI_SIGNING_LEGACY_PRIVATE_KEY` (required only for a legacy bridge tag)
-- `TAURI_SIGNING_LEGACY_PRIVATE_KEY_PASSWORD` (required only for a legacy bridge tag)
-- `TAURI_UPDATER_LEGACY_PUBLIC_KEY` (required only for a legacy bridge tag)
-- `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY`
-- `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64`
-- `DISCORD_RELEASE_WEBHOOK_URL` (optional; posts a Discord announcement after the GitHub release and signed manifest are published)
+## Credits
 
-Notes:
-- Releases are tag-driven from `main` only (`v*` tags).
-- `vX.Y.Z-*` publishes as prerelease (`Live` channel).
-- `vX.Y.Z` publishes as stable release (`Stable` channel).
-- Any tag listed in `release-signing.toml` under `legacy_bridge.tags` is signed with the legacy Tauri private key instead of the current key, and the workflow verifies that the configured updater public keys match the expected key ids recorded in that file.
-- `TAURI_UPDATER_PUBLIC_KEY` is the base64-encoded contents of the minisign updater public key file, and it is injected into `swifttunnel-desktop/src-tauri/tauri.conf.json` during CI.
-- If `TAURI_UPDATER_LEGACY_PUBLIC_KEY` is configured, shipped apps can retry updater verification with the legacy Tauri key during a staged migration.
-- `node scripts/check-desktop-version-sync.mjs` verifies `swifttunnel-desktop/src-tauri/Cargo.toml` and `swifttunnel-desktop/src-tauri/tauri.conf.json` stay on the same version, and CI now enforces it on pushes and PRs.
-- x64 and ARM64 WinpkFilter MSIs are fetched in CI, SHA-256 checked, and extracted into signed INF/SYS/CAT driver packages under `swifttunnel-desktop/src-tauri/resources/drivers/winpkfilter/<arch>/win10`.
-- MSI install runs `SwiftTunnel.exe --install-driver` after files land; the helper installs the extracted native driver package with `pnputil`, repairs/starts `NDISRD`, and writes `%ProgramData%\SwiftTunnel\logs\driver-install.log`.
-- Runtime driver repair remains available in-app and uses structured health status to install, reset, reinstall, or request reboot without repeatedly offering the same install action.
-- The desktop connect flow bounds split tunnel preflight and backend VPN connect waits, so a hung connect attempt surfaces a retryable error instead of leaving the UI indefinitely in a connecting state.
-- `wintun.dll` and driver assets are bundled from `swifttunnel-desktop/src-tauri/resources/drivers`.
-- `swifttunnel-update-manifest.json` and `swifttunnel-update-manifest.sig` are generated and uploaded per release for updater pre-verification.
-- Add user-facing release notes at `release-notes/vX.Y.Z.md` before tagging; the release workflow uses that body first, falls back to generated notes only when no file exists, and includes the changelog plus a separate release URL field in the Discord announcement.
-- If `DISCORD_RELEASE_WEBHOOK_URL` is configured, the release workflow posts a Discord embed and pings the configured release role.
-- The manual `Announce Release` workflow can resend the Discord announcement for an existing tag without rebuilding or republishing the app.
-- `SWIFTTUNNEL_UPDATE_MANIFEST_PRIVATE_KEY` should be an Ed25519 private key (PEM), and `SWIFTTUNNEL_UPDATE_MANIFEST_PUBLIC_KEY_B64` should be the matching raw 32-byte public key encoded in base64.
-- Windows CI and release packaging run on the self-hosted `testbench` GitHub runner with the `swifttunnel-app` label so GitHub uses the same Windows environment we already trust for real builds.
-- Release packaging does not use GitHub-backed npm or Rust caches. Tag-scoped release runs would miss those caches; instead, the self-hosted runner keeps npm's local download cache and preserves Cargo compiler outputs between runs while removing stale packaged bundles and cleaning the rest of the workspace.
-- A scheduled GitHub reconciliation workflow dispatches the normal GitHub `Release` workflow if the newest GitHub semver tag is missing its release entry.
-
-### GitHub Cutover Notes
-
-- GitHub is the canonical source for releases and updater assets.
-- GitHub is the only supported release publishing path.
-- The existing GitHub updater secret currently matches the legacy GitHub trust root used by `v1.20.18` (`A943D352BDA748D5`), while GitLab `1.21.16` uses key id `436B4C95C608A09A`.
-- Before enabling GitHub releases, move the current GitHub Tauri secrets into the `*_LEGACY_*` slots and replace the primary slots with the GitLab-era current keypair.
-- If older installed builds still trust a legacy GitHub-era Tauri key, add the bridge tag to `release-signing.toml` before cutting it so the GitHub release workflow signs that one tag with the legacy private key while still embedding the current updater public key in the app.
-- Do not publish a higher stable GitHub version signed only with the current key until that bridge window is complete, or legacy clients will select the newer tag and fail signature verification.
-
-### Installer Validation Checklist (Clean Windows 10/11)
-
-1. Install using the generated MSI installer on a clean VM.
-2. Launch app and confirm login flow works.
-3. Confirm `%APPDATA%\SwiftTunnel\settings.json` is read/written correctly.
-4. Click Connect once on a clean machine and confirm SwiftTunnel auto-installs the Windows Packet Filter driver (UAC prompt expected) before connecting.
-5. Connect/disconnect VPN at least once (ensures `wintun.dll` staging and split tunnel checks are healthy).
-6. Run in-app updater check from Settings.
-
-Settings migration status: no schema migration required. The Tauri app continues using `%APPDATA%\SwiftTunnel\settings.json`.
-
-### Automated Validation
-
-On Windows test environments, run:
-
-```powershell
-.\scripts\validate-revamp.ps1
-```
-
-This runs formatter checks, region resolver tests, updater channel/security tests, and frontend build validation.
-
----
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| GUI | [Tauri v2](https://tauri.app/) + [React 19](https://react.dev/) + TypeScript |
-| Tunnel | V3 UDP Relay (custom, ~0.5-1ms overhead) |
-| Split Tunnel | ndisapi (Windows Packet Filter) |
-| Installer | MSI (Tauri/WiX bundler) |
-
----
+- Server locations in Matchmaker and the server browser are powered by [RoValra](https://www.rovalra.com).
+- Split tunneling runs on [Windows Packet Filter](https://www.ntkernel.com/windows-packet-filter/) by NT KERNEL.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+SwiftTunnel is released under the [MIT License](LICENSE).
 
----
+[latest]: https://github.com/Swift-tunnel/swifttunnel-app/releases/latest
+[releases]: https://github.com/Swift-tunnel/swifttunnel-app/releases
+[download]: https://www.swifttunnel.net/download
+[ping]: https://www.swifttunnel.net/ping
+[status]: https://status.swifttunnel.net
+[tutorials]: https://www.swifttunnel.net/tutorials
+[discord]: https://discord.gg/8FjPxk92Tf
 
-<p align="center">
-  <sub>Built for gamers who hate lag.</sub>
-</p>
+[badge-release]: https://img.shields.io/github/v/release/Swift-tunnel/swifttunnel-app?style=flat-square&label=version&color=0a0b14
+[badge-downloads]: https://img.shields.io/github/downloads/Swift-tunnel/swifttunnel-app/total?style=flat-square&color=0a0b14
+[badge-platform]: https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0a0b14?style=flat-square&logo=windows&logoColor=white
+[badge-discord]: https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white
+[badge-license]: https://img.shields.io/github/license/Swift-tunnel/swifttunnel-app?style=flat-square&color=0a0b14
