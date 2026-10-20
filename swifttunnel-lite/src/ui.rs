@@ -92,6 +92,7 @@ pub struct App {
     tray: Option<Tray>,
     /// Set by the tray's Quit item, so WM_CLOSE stops hiding and closes.
     quitting: bool,
+    quit_pending: bool,
 }
 
 impl App {
@@ -829,6 +830,7 @@ fn new_app(engine: Option<Engine>, dpi: i32) -> Box<App> {
         buffer: crate::surface::Buffer::new(),
         tray: None,
         quitting: false,
+        quit_pending: false,
         content_area: RECT::default(),
         hot_rect: None,
         focus_rect: None,
@@ -1132,8 +1134,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // Closing the window is not quitting.
             //
             // The tunnel lives in this process, so destroying the window drops
-            // the engine and tears the tunnel down. Doing that because someone
-            // clicked the X mid-game is the wrong answer, and Settings has
+            // the engine. Doing that on an X click mid-game is the wrong
+            // answer, and Settings has
             // promised otherwise since the day that switch was added.
             WM_CLOSE => {
                 if let Some(app) = app_of(hwnd)
@@ -1144,7 +1146,45 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     let _ = ShowWindow(hwnd, SW_HIDE);
                     return LRESULT(0);
                 }
+                if let Some(app) = app_of(hwnd) {
+                    if app.quit_pending {
+                        return LRESULT(0);
+                    }
+                    if let Some(engine) = &app.engine {
+                        match engine.request_quit() {
+                            Ok(()) => {
+                                app.quitting = true;
+                                app.quit_pending = true;
+                                app.state.tunnel.status = Status::Working;
+                                app.state.tunnel.detail = "Closing SwiftTunnel...".into();
+                            }
+                            Err(error) => {
+                                app.state.tunnel.status = Status::Error;
+                                app.state.tunnel.detail = error;
+                            }
+                        }
+                        app.rebuild(client_of(hwnd));
+                        repaint(hwnd);
+                        return LRESULT(0);
+                    }
+                }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+
+            crate::engine::WM_ENGINE_QUIT_READY => {
+                if app_of(hwnd).is_some_and(|app| app.quit_pending) {
+                    if wparam.0 != 0 {
+                        let _ = DestroyWindow(hwnd);
+                    } else if let Some(app) = app_of(hwnd) {
+                        app.quit_pending = false;
+                        app.state.tunnel.status = Status::Error;
+                        app.state.tunnel.detail =
+                            "Could not finish closing. Try Quit again.".into();
+                        app.rebuild(client_of(hwnd));
+                        repaint(hwnd);
+                    }
+                }
+                LRESULT(0)
             }
 
             WM_TRAY => {
@@ -1473,6 +1513,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_TIMER => {
                 if wparam.0 == TICK_TIMER
                     && let Some(app) = app_of(hwnd)
+                    && !app.quit_pending
                 {
                     app.refresh_from_engine();
                     app.rebuild(client_of(hwnd));
@@ -1485,7 +1526,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // Posted by the engine when a background job lands, so a finished
             // connect or a fresh ping shows up without waiting for a tick.
             crate::engine::WM_ENGINE_UPDATE => {
-                if let Some(app) = app_of(hwnd) {
+                if let Some(app) = app_of(hwnd)
+                    && !app.quit_pending
+                {
                     app.refresh_from_engine();
                     app.rebuild(client_of(hwnd));
                     sync_timer(hwnd, app, on_screen(hwnd));
@@ -1569,6 +1612,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 /// Anything that could block goes to the engine, which owns the background
 /// threads; the message loop never waits on the network or the driver.
 fn dispatch(hwnd: HWND, app: &mut App, action: Action) {
+    if app.quit_pending && !matches!(action, Action::Minimise | Action::Close) {
+        return;
+    }
     match action {
         Action::Minimise => {
             // SAFETY: a live window.

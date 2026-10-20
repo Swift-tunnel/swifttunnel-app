@@ -44,6 +44,7 @@ use crate::view::{Action, FieldId, Flag};
 /// Posted when a background job lands, so a finished connect or a fresh ping
 /// shows up without waiting for the one-second heartbeat.
 pub const WM_ENGINE_UPDATE: u32 = WM_APP + 1;
+pub const WM_ENGINE_QUIT_READY: u32 = WM_APP + 3;
 
 /// How often the relays are re-pinged.
 ///
@@ -135,6 +136,9 @@ impl Shared {
 
     /// Nudge the window to re-read the snapshot.
     fn notify(&self) {
+        if self.stop.load(Ordering::Relaxed) {
+            return;
+        }
         let raw = self.hwnd.load(Ordering::Relaxed);
         if raw == 0 {
             return;
@@ -383,6 +387,9 @@ impl Engine {
 
     /// Carry out one action from the window.
     pub fn dispatch(&self, action: Action, state: &mut State) {
+        if self.shared.stop.load(Ordering::Relaxed) {
+            return;
+        }
         // Doing anything else disarms the reset row. A half-pressed destructive
         // control must not sit there waiting behind a screen change, so that
         // coming back to Roblox and tapping the row once wipes the flags.
@@ -1271,6 +1278,76 @@ impl Drop for Engine {
     }
 }
 
+impl Engine {
+    /// Quit only after the same network cleanup as Disconnect. The window's
+    /// message loop stays responsive while an in-flight connect finishes and
+    /// the driver restores its state. Do not rely on process exit to run Drop
+    /// for Arc-owned background resources.
+    pub fn request_quit(&self) -> Result<(), String> {
+        let shared = self.shared.clone();
+        let hwnd = shared.hwnd.load(Ordering::Relaxed);
+        spawn_exit_cleanup(
+            move || {
+                shared.stop.store(true, Ordering::Relaxed);
+                shared.intentional_disconnect.store(true, Ordering::Relaxed);
+                shared.was_connected.store(false, Ordering::Relaxed);
+                // Repair/install may be past its disconnect phase while still
+                // changing the shared driver. Do not exit underneath it.
+                let _operation = shared.busy.enter_for_shutdown();
+                let result = shared.runtime.block_on(async {
+                    let mut vpn = shared.vpn.lock().await;
+                    let idle =
+                        matches!(*vpn.state_handle().borrow(), ConnectionState::Disconnected)
+                            && vpn.split_tunnel_handle().is_none();
+                    if !idle {
+                        vpn.disconnect().await.map_err(|error| error.to_string())?;
+                    }
+                    Ok(())
+                });
+                // The GUI still owns Engine here. Release the worker's Arc before
+                // posting the message that destroys it, keeping final runtime
+                // destruction out of this cleanup worker.
+                drop(shared);
+                result
+            },
+            move |success| unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(hwnd as *mut std::ffi::c_void)),
+                    WM_ENGINE_QUIT_READY,
+                    WPARAM(usize::from(success)),
+                    LPARAM(0),
+                );
+            },
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            format!("Could not start exit cleanup. Try closing SwiftTunnel again. ({error})")
+        })
+    }
+}
+
+fn spawn_exit_cleanup(
+    cleanup: impl FnOnce() -> Result<(), String> + Send + 'static,
+    completed: impl FnOnce(bool) + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("lite-exit-cleanup".into())
+        .spawn(move || {
+            let success = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(cleanup)) {
+                Ok(Ok(())) => true,
+                Ok(Err(error)) => {
+                    log::warn!("Could not finish Lite exit cleanup: {error}");
+                    false
+                }
+                Err(_) => {
+                    log::error!("Lite exit cleanup panicked; keeping the window open for retry");
+                    false
+                }
+            };
+            completed(success);
+        })
+}
+
 // ── Connecting ──────────────────────────────────────────────────────────────
 
 /// Bring the tunnel up, with the same arguments the full app passes.
@@ -1278,6 +1355,9 @@ impl Drop for Engine {
 /// The one thing Lite decides differently is the app list: it is always the
 /// Roblox preset, because that is the only thing this client is for.
 async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
+    if shared.stop.load(Ordering::Relaxed) {
+        return Err("SwiftTunnel is closing.".into());
+    }
     let mut settings = shared
         .settings
         .read()
@@ -1336,6 +1416,11 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
     let auto_routing = settings.auto_routing_enabled && custom_relay.is_none();
 
     let mut vpn = shared.vpn.lock().await;
+    // Auth/fleet reads above can finish after Quit already checked the idle
+    // connection. Recheck under this lock so no late connect starts afterward.
+    if shared.stop.load(Ordering::Relaxed) {
+        return Err("SwiftTunnel is closing.".into());
+    }
     vpn.set_auth_manager(shared.auth.clone());
     vpn.set_regional_auto_scope(swifttunnel_core::vpn::connect_policy::regional_auto_scope(
         &settings,
@@ -2446,6 +2531,58 @@ fn open_logs() {
 #[cfg(test)]
 mod tests {
     use super::split_message;
+
+    #[test]
+    fn quit_waits_for_cleanup_without_blocking_the_requesting_thread() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let (started, ready) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let (notify, notified) = mpsc::channel();
+        let worker = super::spawn_exit_cleanup(
+            move || {
+                started.send(()).unwrap();
+                resume.recv_timeout(Duration::from_secs(3)).unwrap();
+                Ok(())
+            },
+            move |success| {
+                notify.send(success).unwrap();
+            },
+        )
+        .unwrap();
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let before_cleanup = notified.try_recv();
+        release.send(()).unwrap();
+        let after_cleanup = notified.recv_timeout(Duration::from_secs(2));
+        worker.join().unwrap();
+        assert!(
+            before_cleanup.is_err(),
+            "must not destroy the window during cleanup"
+        );
+        assert!(after_cleanup.unwrap());
+    }
+
+    #[test]
+    fn failed_or_panicking_quit_cleanup_never_requests_window_destruction() {
+        use std::sync::mpsc;
+        for panic in [false, true] {
+            let (notify, notified) = mpsc::channel();
+            let worker = super::spawn_exit_cleanup(
+                move || {
+                    if panic {
+                        panic!("owned simulated cleanup failure");
+                    }
+                    Err("cleanup failed".into())
+                },
+                move |success| {
+                    notify.send(success).unwrap();
+                },
+            )
+            .unwrap();
+            worker.join().unwrap();
+            assert!(!notified.recv().unwrap());
+        }
+    }
 
     #[test]
     fn picker_wait_pauses_during_play_and_wakes_on_exit_or_shutdown() {

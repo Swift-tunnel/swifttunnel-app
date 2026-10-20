@@ -19,6 +19,17 @@ impl OperationGate {
             .ok()
             .map(|_| OperationGuard(Arc::clone(&self.0)))
     }
+
+    /// Exit cleanup runs on its own thread and must wait for installation or
+    /// driver repair to finish. Never call this from the window message loop.
+    pub fn enter_for_shutdown(&self) -> OperationGuard {
+        loop {
+            if let Some(guard) = self.try_enter() {
+                return guard;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
 }
 
 pub struct OperationGuard(Arc<AtomicBool>);
@@ -44,6 +55,30 @@ pub async fn after_disconnect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exit_cannot_skip_an_in_flight_driver_or_installer_operation() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let gate = Arc::new(OperationGate::default());
+        let operation = gate.try_enter().unwrap();
+        let (ready, waiting) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        let worker_gate = gate.clone();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            let _exit = worker_gate.enter_for_shutdown();
+            done.send(()).unwrap();
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let before = finished.recv_timeout(Duration::from_millis(50));
+        drop(operation);
+        let after = finished.recv_timeout(Duration::from_secs(2));
+        worker.join().unwrap();
+        assert!(before.is_err());
+        assert!(after.is_ok());
+        assert!(!gate.is_busy());
+    }
 
     #[tokio::test]
     async fn disconnect_finishes_before_the_installer_starts() {
