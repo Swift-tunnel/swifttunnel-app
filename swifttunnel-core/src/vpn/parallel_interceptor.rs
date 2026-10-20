@@ -8017,9 +8017,9 @@ where
     let packet_id = u16::from_be_bytes([data[ip_start + 4], data[ip_start + 5]]);
     let fragment_key = (src_ip, dst_ip, packet_id, protocol);
 
-    // Non-initial UDP fragments do not carry transport ports. Reuse the first
+    // Non-initial TCP/UDP fragments do not carry transport ports. Reuse the first
     // fragment decision when available to keep the whole datagram consistent.
-    if protocol == Protocol::Udp && fragment_offset > 0 {
+    if fragment_offset > 0 {
         let cached = FRAGMENT_DECISIONS.with(|cache| {
             let mut cache = cache.borrow_mut();
             let decision = cache.get(&fragment_key).copied();
@@ -8095,7 +8095,7 @@ where
         } else {
             super::process_cache::is_likely_game_traffic(dst_port, protocol, api_tunneling)
         };
-        if protocol == Protocol::Udp && more_fragments {
+        if more_fragments {
             FRAGMENT_DECISIONS.with(|cache| {
                 let mut cache = cache.borrow_mut();
                 if cache.len() >= 4096 {
@@ -8159,7 +8159,7 @@ where
             if evict_after_route || (protocol == Protocol::Tcp && api_tunneling && !result) {
                 inline_cache.remove(&cache_key);
             }
-            if protocol == Protocol::Udp && more_fragments {
+            if more_fragments {
                 FRAGMENT_DECISIONS.with(|cache| {
                     let mut cache = cache.borrow_mut();
                     if cache.len() >= 4096 {
@@ -8400,7 +8400,7 @@ where
         inline_cache.insert(cache_key, InlineCacheEntry::Active);
     }
 
-    if protocol == Protocol::Udp && more_fragments {
+    if more_fragments {
         FRAGMENT_DECISIONS.with(|cache| {
             let mut cache = cache.borrow_mut();
             if cache.len() >= 4096 {
@@ -11766,6 +11766,59 @@ mod tests {
             &mut inline_cache,
             false,
         ));
+    }
+
+    #[test]
+    fn tcp_fragment_tails_reuse_the_datagrams_route_instead_of_payload_ports() {
+        let decisions = {
+            let _lock = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+            struct ResetPins;
+            impl Drop for ResetPins {
+                fn drop(&mut self) {
+                    crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+                }
+            }
+            let _reset = ResetPins;
+            let src = Ipv4Addr::new(192, 168, 1, 149);
+            let dst = Ipv4Addr::new(128, 116, 47, 33);
+            crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst]);
+            let snapshot = ProcessSnapshot::empty(HashSet::new());
+            let mut decisions = Vec::new();
+            for (id, first_port, payload_port) in
+                [(0x5a01_u16, 55000_u16, 56000_u16), (0x5a02, 56000, 55000)]
+            {
+                // Only port 55000 belongs to an established relayed flow. The
+                // other flow goes direct. Tail payload must never be treated
+                // as a new TCP header, even when it resembles that port.
+                let mut cache =
+                    HashMap::from([((src, 55000, Protocol::Tcp), InlineCacheEntry::Active)]);
+                let mut first =
+                    build_ipv4_tcp_frame_with_payload(src, dst, first_port, 443, &[0; 4]);
+                first[18..20].copy_from_slice(&id.to_be_bytes());
+                first[20..22].copy_from_slice(&0x2000_u16.to_be_bytes());
+                let mut tail = build_ipv4_udp_fragment_frame(src, dst, 0, 0, id, 3, false);
+                tail[23] = 6; // TCP, with no transport header in this fragment
+                tail[34..36].copy_from_slice(&payload_port.to_be_bytes());
+                tail[36..38].copy_from_slice(&443_u16.to_be_bytes());
+                let first_route = should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+                    &first,
+                    &snapshot,
+                    &mut cache,
+                    true,
+                    |_, _| None,
+                );
+                let tail_route = should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+                    &tail,
+                    &snapshot,
+                    &mut cache,
+                    true,
+                    |_, _| panic!("tail has no TCP owner"),
+                );
+                decisions.push((first_route, tail_route));
+            }
+            decisions
+        };
+        assert_eq!(decisions, [(true, true), (false, false)]);
     }
 
     #[test]
