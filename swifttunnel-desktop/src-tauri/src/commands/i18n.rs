@@ -26,18 +26,19 @@ pub async fn i18n_translate(text: String, target_lang: String) -> Result<String,
         return Ok(text);
     }
 
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
-        std::sync::OnceLock::new();
-    let client = CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|e| format!("translate client: {e}"))
-        })
-        .as_ref()
-        .map_err(Clone::clone)?;
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = if let Some(client) = CLIENT.get() {
+        client
+    } else {
+        // Reuse successful pools, but leave initialization failures retryable.
+        // Otherwise even Reset translations cannot recover without app exit.
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| format!("translate client: {e}"))?;
+        CLIENT.get_or_init(|| client)
+    };
 
     let response = client
         .get(TRANSLATE_ENDPOINT)

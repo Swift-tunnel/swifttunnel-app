@@ -178,19 +178,24 @@ function collectTextNodes(): Text[] {
 
 async function translatePerItem(chunk: string[], lang: string, cache: TranslationCache, passEpoch: number, failed: Set<string>) {
   for (const orig of chunk) {
-    if (epoch !== passEpoch) return;
+    if (epoch !== passEpoch) return false;
     if (cache.has(orig)) continue;
     try {
       const t = await invoke<string>("i18n_translate", { text: orig, targetLang: lang });
-      if (epoch !== passEpoch) return;
+      if (epoch !== passEpoch) return false;
       cache.set(orig, t.trim() || orig);
     } catch {
-      if (epoch !== passEpoch) return;
+      if (epoch !== passEpoch) return false;
       // Don't retry this one for the rest of the session.
       rememberFailure(lang, orig);
       failed.add(orig);
+      // A per-label fallback uses the same service. If it has gone offline
+      // or is rate-limiting us, another forty sequential requests cannot fix
+      // the batch and can keep translation busy for minutes.
+      return false;
     }
   }
+  return true;
 }
 
 async function fetchTranslations(strings: string[], lang: string) {
@@ -201,6 +206,13 @@ async function fetchTranslations(strings: string[], lang: string) {
     (s) => s && !cache.has(s) && !failedStrings.has(`${lang}\u0000${s}`),
   );
   if (!need.length) return failed;
+  const stopUnavailable = () => {
+    if (epoch !== passEpoch) return;
+    need.forEach(orig => {
+      if (!cache.has(orig)) { rememberFailure(lang, orig); failed.add(orig); }
+    });
+    persistCache(lang);
+  };
 
   // Multi-line strings can't be safely batched (newline is the delimiter).
   const oneLine = need.filter((s) => !s.includes("\n"));
@@ -230,19 +242,24 @@ async function fetchTranslations(strings: string[], lang: string) {
         chunk.forEach((orig, idx) => cache.set(orig, lines[idx].trim() || orig));
       } else {
         // Segment count drifted, fall back to per-item for guaranteed alignment.
-        await translatePerItem(chunk, lang, cache, passEpoch, failed);
+        if (!(await translatePerItem(chunk, lang, cache, passEpoch, failed))) {
+          stopUnavailable();
+          return failed;
+        }
       }
     } catch {
       if (epoch !== passEpoch) return failed;
       // An unavailable/rate-limited service cannot be fixed by retrying every
       // individual label. Keep English this session; reset/restart retries.
-      need.forEach(orig => { rememberFailure(lang, orig); failed.add(orig); });
-      persistCache(lang);
+      stopUnavailable();
       return failed;
     }
   }
 
-  await translatePerItem(multiLine, lang, cache, passEpoch, failed).catch(() => {});
+  if (!(await translatePerItem(multiLine, lang, cache, passEpoch, failed))) {
+    stopUnavailable();
+    return failed;
+  }
   if (epoch === passEpoch) persistCache(lang);
   return failed;
 }

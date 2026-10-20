@@ -188,6 +188,29 @@ describe("runtime translation lifecycle", () => {
     expect(nodes[0].nodeValue).toBe("Setting number 0");
   });
 
+  it("stops a misaligned batch's individual fallback when the service becomes unavailable", async () => {
+    nodes.push(...Array.from({ length: 60 }, (_, i) => text(`Setting number ${i}`)));
+    invoke.mockResolvedValueOnce("Wrong number of translated lines")
+      .mockRejectedValue(new Error("Network unavailable"));
+    const i18n = await import("./i18n");
+    await i18n.applyLanguage("fr");
+    await i18n.applyLanguage("fr");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(nodes.every((node, i) => node.nodeValue === `Setting number ${i}`)).toBe(true);
+  });
+
+  it("stops multiline individual requests after the first service failure", async () => {
+    nodes.push(text("Connection\nready"), text("Pick a\nlocation"), text("Start the\ngame"));
+    invoke.mockRejectedValue(new Error("Network unavailable"));
+    const i18n = await import("./i18n");
+    await i18n.applyLanguage("fr");
+    await i18n.applyLanguage("fr");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(nodes[0].nodeValue).toBe("Connection\nready");
+  });
+
   it("stops the per-item fallback when a language request becomes obsolete", async () => {
     nodes.push(text("Connected"), text("Play normally"));
     let finish!: (value: string) => void;
