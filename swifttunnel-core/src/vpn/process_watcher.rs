@@ -175,10 +175,16 @@ impl ProcessWatcher {
 
     /// Stop the watcher
     pub fn stop(&mut self) {
+        self.stop_with(stop_existing_session);
+    }
+
+    fn stop_with(&mut self, stop_session: impl FnOnce()) {
         self.stop_flag.store(true, Ordering::SeqCst);
-        // Stop the ETW session to unblock ProcessTrace (it's a blocking call)
-        stop_existing_session();
         if let Some(handle) = self.thread_handle.take() {
+            // Stop once to unblock ProcessTrace. After joining, this watcher
+            // no longer owns a session; Drop or a repeated stop must not send
+            // another name-based stop at a newly started watcher.
+            stop_session();
             // join() blocks until the worker exits — no need to sleep first.
             let _ = handle.join();
         }
@@ -622,6 +628,30 @@ fn get_process_image_path_by_pid(pid: u32) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn stopping_a_retired_watcher_cannot_stop_a_replacement_session() {
+        let (_sender, receiver) = bounded(1);
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut watcher = ProcessWatcher {
+            receiver,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            thread_handle: Some(std::thread::spawn(move || {
+                wait.recv().unwrap();
+            })),
+        };
+        watcher.stop_with(|| release.send(()).unwrap());
+        assert!(watcher.stop_flag.load(Ordering::SeqCst));
+        assert!(watcher.thread_handle.is_none());
+        // Another watcher may now own the native session name. Repeating stop,
+        // including the implicit call from Drop, must not touch that session.
+        let mut replacement_stopped = false;
+        watcher.stop_with(|| replacement_stopped = true);
+        // Keep this regression safe even on the old implementation, whose Drop
+        // would otherwise stop the real, globally named application session.
+        std::mem::forget(watcher);
+        assert!(!replacement_stopped);
+    }
 
     // Microsoft-Windows-Kernel-Process event 1 templates, also available from
     // (Get-WinEvent -ListProvider Microsoft-Windows-Kernel-Process).Events.
