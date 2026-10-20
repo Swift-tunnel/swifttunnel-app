@@ -1,17 +1,9 @@
-//! ETW Process Watcher - Instant Process Detection
+//! Event-driven process detection using Windows ETW.
 //!
-//! Uses Windows Event Tracing (ETW) to detect process creation INSTANTLY,
-//! before the process makes any network connections.
-//!
-//! This solves the race condition where:
-//! 1. Browser launches RobloxPlayerBeta.exe via roblox-player:// protocol
-//! 2. Roblox immediately tries to connect to game server
-//! 3. Our 50ms polling hasn't detected the process yet
-//! 4. First packets bypass VPN → Error 279
-//!
-//! With ETW, we get notified within microseconds of process creation,
-//! allowing us to add the process to the tunnel list BEFORE it makes
-//! any network connections.
+//! Process-start events let the connection monitor register watched games
+//! without waiting for its next process-table poll. Delivery is asynchronous;
+//! this reduces the launch race but cannot guarantee arrival before a game's
+//! first packet. The driver cache and polling fallback are still required.
 //!
 //! ## Provider
 //! Microsoft-Windows-Kernel-Process (GUID: 22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716)
@@ -410,13 +402,17 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
         }
 
         // Parse the event data
-        if let Some(event) = parse_process_start_event(record) {
+        if let Some(mut event) = parse_process_start_event(record) {
             // Check if this process is in our watch list
             let name_lower = event.name.to_lowercase();
             let watch_list = ctx.watch_list.read();
             let should_notify = should_watch_process(&name_lower, &watch_list);
 
             if should_notify {
+                // Only watched starts need an OS image-path query. The event
+                // already supplies the name, so unrelated process creation
+                // should not open process handles on the ETW consumer thread.
+                event.image_path = get_process_image_path_by_pid(event.pid).unwrap_or_default();
                 log::info!(
                     "ETW detected watched process: {} (PID: {}, Parent: {})",
                     event.name,
@@ -436,89 +432,70 @@ fn should_watch_process(process_name_lower: &str, watch_list: &HashSet<String>) 
 /// Parse process start event from EVENT_RECORD
 unsafe fn parse_process_start_event(record: &EVENT_RECORD) -> Option<ProcessStartEvent> {
     unsafe {
-        let _pid = record.EventHeader.ProcessId;
-
-        // The UserData contains the event-specific data
-        // For process start events, the structure varies by Windows version
-        // We need to carefully parse it
-
         let user_data = record.UserData;
         let user_data_len = record.UserDataLength as usize;
-
-        if user_data.is_null() || user_data_len < 16 {
+        if user_data.is_null() {
             return None;
         }
-
         let data = std::slice::from_raw_parts(user_data as *const u8, user_data_len);
-
-        // Try to extract process information
-        // The layout for ProcessStart event (Version 4, Windows 10+):
-        // Offset 0: UniqueProcessKey (8 bytes, pointer)
-        // Offset 8: ProcessId (4 bytes)
-        // Offset 12: ParentId (4 bytes)
-        // Offset 16: SessionId (4 bytes)
-        // Offset 20: ExitStatus (4 bytes)
-        // Offset 24: DirectoryTableBase (8 bytes)
-        // Offset 32: Flags (4 bytes)
-        // Offset 36: UserSID (variable, starts with SID length)
-        // After SID: ImageFileName (null-terminated ANSI string)
-
-        if data.len() < 36 {
-            return None;
-        }
-
-        // Read ProcessId and ParentId from the event data
-        let event_pid = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-        let parent_pid = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-
-        // Find the image filename - it's an ANSI string after the variable-length SID
-        // Skip to offset 36 and then skip the SID
-        let mut offset = 36usize;
-
-        // SID structure: first byte is revision, second is sub-authority count
-        // Total SID size = 8 + (4 * sub_authority_count)
-        // Bounds check: ensure we can read at least offset + 1 for sub_auth_count
-        if offset + 1 < data.len() {
-            let sub_auth_count = data[offset + 1] as usize;
-            let sid_size = 8 + (4 * sub_auth_count);
-            offset += sid_size;
-        }
-
-        // Now we should be at the ImageFileName (ANSI null-terminated)
-        let mut name = String::new();
-        if offset < data.len() {
-            // Read ANSI string until null terminator
-            for &byte in &data[offset..] {
-                if byte == 0 {
-                    break;
-                }
-                name.push(byte as char);
-            }
-        }
-
-        // Try to get the full image path from the OS (more reliable than event data).
-        // This must remain a full NT path because the WFP blocker converts it to a DOS path.
-        let image_path = get_process_image_path_by_pid(event_pid).unwrap_or_default();
-
-        // If we couldn't get the name from event data, extract from full path
-        if name.is_empty() {
-            name = image_path
-                .rsplit('\\')
-                .next()
-                .unwrap_or("unknown")
-                .to_string();
-        }
-
-        // Extract just the filename from path if the event data gave us a full path
-        let short_name = name.rsplit('\\').next().unwrap_or(&name).to_string();
-
-        Some(ProcessStartEvent {
-            pid: event_pid,
-            name: short_name,
-            image_path,
-            parent_pid,
-        })
+        parse_process_start_payload(data, record.EventHeader.EventDescriptor.Version)
     }
+}
+
+fn parse_process_start_payload(data: &[u8], version: u8) -> Option<ProcessStartEvent> {
+    // This provider uses manifest fields, not the classic kernel process
+    // event's pointer/SID/ANSI layout. The installed event-1 templates and
+    // microsoft/Tx's Generated/Microsoft_Windows_Kernel_Process.cs agree on
+    // versions 0..2; versions 3..4 insert process sequence numbers and a SID.
+    // All integers are packed little endian, independent of pointer width.
+    let parent_offset = match version {
+        0..=2 => 12,
+        3..=4 => 20,
+        _ => return None,
+    };
+    let read_u32 = |offset| {
+        Some(u32::from_le_bytes(
+            data.get(offset..offset + 4)?.try_into().ok()?,
+        ))
+    };
+    let pid = read_u32(0)?;
+    let parent_pid = read_u32(parent_offset)?;
+    if pid == 0 {
+        return None;
+    }
+    let name_offset = match version {
+        0 => 20,
+        1..=2 => 24,
+        3..=4 => {
+            let sid = data.get(48..)?;
+            let subauthorities = *sid.get(1)? as usize;
+            if sid.first() != Some(&1) || subauthorities > 15 {
+                return None;
+            }
+            let sid_len = 8 + 4 * subauthorities;
+            sid.get(..sid_len)?;
+            48 + sid_len
+        }
+        _ => unreachable!(),
+    };
+    let name_bytes = data.get(name_offset..)?;
+    let end = name_bytes.chunks_exact(2).position(|unit| unit == [0, 0])?;
+    let name_units: Vec<u16> = name_bytes[..end * 2]
+        .chunks_exact(2)
+        .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
+        .collect();
+    let image_name = String::from_utf16_lossy(&name_units);
+    let name = image_name.rsplit(['\\', '/']).next()?;
+    if name.is_empty() {
+        return None;
+    }
+    Some(ProcessStartEvent {
+        pid,
+        name: name.to_string(),
+        // Resolve the authoritative NT image path only after watch-list filtering.
+        image_path: String::new(),
+        parent_pid,
+    })
 }
 
 /// One-shot scan of currently running processes at watcher startup. Emits synthetic
@@ -645,6 +622,123 @@ fn get_process_image_path_by_pid(pid: u32) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    // Microsoft-Windows-Kernel-Process event 1 templates, also available from
+    // (Get-WinEvent -ListProvider Microsoft-Windows-Kernel-Process).Events.
+    // This is not the classic NT Kernel Logger Process_TypeGroup1 layout.
+    fn start_payload(version: u8, image: &str) -> Vec<u8> {
+        let mut data = u32::MAX.to_le_bytes().to_vec();
+        if version >= 3 {
+            data.extend_from_slice(&123_u64.to_le_bytes()); // ProcessSequenceNumber
+        }
+        data.extend_from_slice(&0x01dc_1234_5678_9abc_u64.to_le_bytes()); // CreateTime
+        data.extend_from_slice(&4567_u32.to_le_bytes()); // ParentProcessID
+        if version >= 3 {
+            data.extend_from_slice(&456_u64.to_le_bytes()); // ParentProcessSequenceNumber
+        }
+        data.extend_from_slice(&1_u32.to_le_bytes()); // SessionID
+        if version >= 1 {
+            data.extend_from_slice(&0_u32.to_le_bytes()); // Flags
+        }
+        if version >= 3 {
+            data.extend_from_slice(&2_u32.to_le_bytes()); // ProcessTokenElevationType
+            data.extend_from_slice(&0_u32.to_le_bytes()); // ProcessTokenIsElevated
+            data.extend_from_slice(&[1, 1, 0, 0, 0, 0, 0, 16]); // MandatoryLabel SID
+            data.extend_from_slice(&0x2000_u32.to_le_bytes());
+        }
+        for unit in image.encode_utf16().chain(Some(0)) {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+        if version >= 2 {
+            data.extend_from_slice(&0x1234_u32.to_le_bytes()); // ImageChecksum
+            data.extend_from_slice(&0x5678_u32.to_le_bytes()); // TimeDateStamp
+            data.extend_from_slice(&[0; 4]); // PackageFullName, PackageRelativeAppId
+        }
+        if version >= 4 {
+            data.extend_from_slice(&0_u32.to_le_bytes()); // SecurityMitigations
+        }
+        data
+    }
+
+    fn parse_fixture(version: u8, data: &[u8]) -> Option<ProcessStartEvent> {
+        let mut record = EVENT_RECORD::default();
+        record.EventHeader.ProviderId = KERNEL_PROCESS_GUID;
+        record.EventHeader.EventDescriptor.Id = EVENT_ID_PROCESS_START;
+        record.EventHeader.EventDescriptor.Version = version;
+        // Header ProcessId identifies the event writer, not the new process.
+        record.EventHeader.ProcessId = 123;
+        record.UserData = data.as_ptr().cast_mut().cast();
+        record.UserDataLength = data.len().try_into().unwrap();
+        unsafe { parse_process_start_event(&record) }
+    }
+
+    #[test]
+    fn kernel_process_start_uses_the_manifest_layout_for_every_supported_version() {
+        for version in 0..=4 {
+            let data = start_payload(
+                version,
+                r"C:\Users\玩家\Roblox\Versions\version-player\RobloxPlayerBeta.exe",
+            );
+            let event = parse_fixture(version, &data).expect("valid manifest payload");
+            assert_eq!(event.pid, u32::MAX, "version {version}");
+            assert_eq!(event.parent_pid, 4567, "version {version}");
+            assert_eq!(event.name, "RobloxPlayerBeta.exe", "version {version}");
+            assert!(event.image_path.is_empty(), "fixture PID cannot exist");
+        }
+    }
+
+    #[test]
+    fn kernel_process_start_rejects_unknown_truncated_or_unterminated_payloads() {
+        let data = start_payload(0, "RobloxPlayerBeta.exe");
+        assert!(parse_fixture(99, &data).is_none());
+        for length in 0..data.len() {
+            assert!(
+                parse_fixture(0, &data[..length]).is_none(),
+                "length {length}"
+            );
+        }
+        for version in 1..=4 {
+            let data = start_payload(version, "RobloxPlayerBeta.exe");
+            let prefix = if version < 3 { 24 } else { 60 };
+            for length in 0..prefix {
+                assert!(parse_fixture(version, &data[..length]).is_none());
+            }
+        }
+        let mut invalid_sid = start_payload(4, "RobloxPlayerBeta.exe");
+        invalid_sid[49] = 255;
+        assert!(parse_fixture(4, &invalid_sid).is_none());
+    }
+
+    #[test]
+    fn process_callback_emits_the_new_pid_and_resolves_its_nt_image_path() {
+        let executable = std::env::current_exe().unwrap();
+        let name = executable.file_name().unwrap().to_string_lossy();
+        for version in 0..=4 {
+            let (sender, receiver) = bounded(1);
+            let mut context = CallbackContext {
+                sender,
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                watch_list: Arc::new(RwLock::new(HashSet::from([name.to_ascii_lowercase()]))),
+            };
+            let mut data = start_payload(version, &name);
+            data[..4].copy_from_slice(&std::process::id().to_le_bytes());
+            let mut record = EVENT_RECORD::default();
+            record.EventHeader.ProviderId = KERNEL_PROCESS_GUID;
+            record.EventHeader.EventDescriptor.Id = EVENT_ID_PROCESS_START;
+            record.EventHeader.EventDescriptor.Version = version;
+            record.EventHeader.ProcessId = 4;
+            record.UserData = data.as_mut_ptr().cast();
+            record.UserDataLength = data.len().try_into().unwrap();
+            record.UserContext = (&mut context as *mut CallbackContext).cast();
+            unsafe { event_record_callback(&mut record) };
+            let event = receiver.try_recv().expect("watched process was detected");
+            assert_eq!(event.pid, std::process::id());
+            assert_eq!(event.name, name);
+            assert_eq!(event.parent_pid, 4567);
+            assert!(event.image_path.starts_with(r"\Device\"));
+            assert!(event.image_path.ends_with(name.as_ref()));
+        }
+    }
 
     #[test]
     fn test_process_start_event() {
