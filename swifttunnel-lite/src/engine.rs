@@ -1663,8 +1663,17 @@ fn spawn_regions(shared: Arc<Shared>) {
                 return;
             };
 
+            let game_running = || {
+                shared
+                    .snapshot
+                    .read()
+                    .map(|s| s.roblox.running)
+                    .unwrap_or(true)
+            };
             let mut next_refresh = Instant::now();
-            while !shared.stop.load(Ordering::Relaxed) {
+            let mut until_round = Duration::ZERO;
+            while wait_for_picker_round(&shared.stop, &game_running, until_round) {
+                until_round = PING_INTERVAL;
                 if Instant::now() >= next_refresh {
                     match runtime.block_on(refresh_fleet(&shared)) {
                         Ok(()) => next_refresh = Instant::now() + Duration::from_secs(5 * 60),
@@ -1693,7 +1702,7 @@ fn spawn_regions(shared: Arc<Shared>) {
                     let mut tasks = tokio::task::JoinSet::new();
                     let mut measured = Vec::new();
                     for (id, ip, port) in targets {
-                        if shared.stop.load(Ordering::Relaxed) {
+                        if shared.stop.load(Ordering::Relaxed) || game_running() {
                             break;
                         }
                         if tasks.len() >= 8 {
@@ -1713,6 +1722,13 @@ fn spawn_regions(shared: Arc<Shared>) {
                     }
                     measured
                 });
+                if shared.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if game_running() {
+                    until_round = Duration::ZERO;
+                    continue;
+                }
                 let samples = runtime.block_on(swifttunnel_core::vpn::route_preview::fetch());
                 shared.edit(|s| {
                     for (id, ip, port, ping) in measured {
@@ -1740,17 +1756,31 @@ fn spawn_regions(shared: Arc<Shared>) {
                     }
                 }
                 shared.notify();
-
-                // Slept in slices so quitting does not wait out the interval.
-                let mut left = PING_INTERVAL;
-                while left > Duration::ZERO && !shared.stop.load(Ordering::Relaxed) {
-                    let nap = Duration::from_millis(250).min(left);
-                    std::thread::sleep(nap);
-                    left -= nap;
-                }
             }
         })
         .expect("region watcher thread");
+}
+
+/// Keep picker-only probes off the connection during play. A game opening
+/// interrupts the idle cadence; its exit starts a fresh round immediately.
+fn wait_for_picker_round(
+    stop: &AtomicBool,
+    game_running: impl Fn() -> bool,
+    interval: Duration,
+) -> bool {
+    let mut due = Instant::now() + interval;
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        let now = Instant::now();
+        if game_running() {
+            due = now;
+        } else if now >= due {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 /// Keep the tunnel readout and the Roblox switches honest.
@@ -2416,6 +2446,84 @@ fn open_logs() {
 #[cfg(test)]
 mod tests {
     use super::split_message;
+
+    #[test]
+    fn picker_wait_pauses_during_play_and_wakes_on_exit_or_shutdown() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+        for shutdown in [false, true] {
+            let stop = Arc::new(AtomicBool::new(false));
+            let game = Arc::new(AtomicBool::new(true));
+            let (checks, checked) = mpsc::sync_channel(1);
+            let (done, finished) = mpsc::channel();
+            let worker_stop = stop.clone();
+            let worker_game = game.clone();
+            let worker = std::thread::spawn(move || {
+                done.send(super::wait_for_picker_round(
+                    &worker_stop,
+                    || {
+                        let running = worker_game.load(Ordering::SeqCst);
+                        let _ = checks.try_send(running);
+                        running
+                    },
+                    Duration::from_secs(30),
+                ))
+                .unwrap();
+            });
+            assert!(checked.recv_timeout(Duration::from_secs(2)).unwrap());
+            assert!(finished.try_recv().is_err(), "no picker round during play");
+            if shutdown {
+                stop.store(true, Ordering::SeqCst);
+            } else {
+                game.store(false, Ordering::SeqCst);
+            }
+            let result = finished.recv_timeout(Duration::from_secs(2));
+            // Always retire an owned worker before asserting the deadline.
+            stop.store(true, Ordering::SeqCst);
+            worker.join().unwrap();
+            assert_eq!(result.unwrap(), !shutdown);
+        }
+    }
+
+    #[test]
+    fn a_game_opening_during_the_idle_wait_does_not_leave_a_thirty_second_delay_after_exit() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+        let stop = Arc::new(AtomicBool::new(false));
+        let game = Arc::new(AtomicBool::new(false));
+        let (checks, checked) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        let worker_stop = stop.clone();
+        let worker_game = game.clone();
+        let worker = std::thread::spawn(move || {
+            let result = super::wait_for_picker_round(
+                &worker_stop,
+                || {
+                    let running = worker_game.load(Ordering::SeqCst);
+                    let _ = checks.send(running);
+                    running
+                },
+                Duration::from_secs(30),
+            );
+            let _ = done.send(result);
+        });
+        assert!(!checked.recv_timeout(Duration::from_secs(2)).unwrap());
+        game.store(true, Ordering::SeqCst);
+        while !checked.recv_timeout(Duration::from_secs(2)).unwrap() {}
+        game.store(false, Ordering::SeqCst);
+        let result = finished.recv_timeout(Duration::from_secs(2));
+        stop.store(true, Ordering::SeqCst);
+        worker.join().unwrap();
+        assert!(result.unwrap());
+    }
 
     #[test]
     fn malformed_server_responses_are_not_reported_as_wrong_passwords() {
