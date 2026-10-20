@@ -3782,11 +3782,22 @@ impl Default for VpnConnection {
 impl Drop for VpnConnection {
     fn drop(&mut self) {
         super::quota_notice::set_active(false);
-        if let Some(handle) = self.quota_monitor_handle.take() {
-            handle.abort();
-        }
         self.process_monitor_stop.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.route_telemetry_handle.take() {
+        if let Some(router) = self.auto_router.take() {
+            router.reset();
+        }
+        // Dropping JoinHandles detaches tasks. The lookup and lease-renewal
+        // workers also retain session state/relay handles and must not survive
+        // destruction of their owning connection when the runtime stays up.
+        for handle in [
+            self.auto_lookup_handle.take(),
+            self.route_telemetry_handle.take(),
+            self.quota_monitor_handle.take(),
+            self.relay_lease_refresh_handle.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
             handle.abort();
         }
 
@@ -3828,6 +3839,51 @@ impl Drop for VpnConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_a_connection_cancels_all_owned_session_tasks() {
+        struct Finished(Arc<AtomicBool>);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let mut connection = VpnConnection::new();
+        let mut finished = Vec::new();
+        let mut rescue = Vec::new();
+        for slot in [
+            &mut connection.auto_lookup_handle,
+            &mut connection.route_telemetry_handle,
+            &mut connection.quota_monitor_handle,
+            &mut connection.relay_lease_refresh_handle,
+        ] {
+            let flag = Arc::new(AtomicBool::new(false));
+            let guard = Finished(flag.clone());
+            let (ready, started) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _guard = guard;
+                ready.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            rescue.push(task.abort_handle());
+            *slot = Some(task);
+            started.await.unwrap();
+            finished.push(flag);
+        }
+        drop(connection);
+        // No driver, native watcher or live network session was created.
+        tokio::task::yield_now().await;
+        let cancelled: Vec<_> = finished
+            .iter()
+            .map(|flag| flag.load(Ordering::SeqCst))
+            .collect();
+        // Clean up detached tasks even when testing an unfixed implementation.
+        for task in rescue {
+            task.abort();
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(cancelled, [true; 4]);
+    }
 
     #[test]
     fn process_event_bursts_are_bounded_and_preserve_later_batches() {
