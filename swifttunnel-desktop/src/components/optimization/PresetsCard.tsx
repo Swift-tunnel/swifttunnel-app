@@ -431,7 +431,7 @@ function ImportDialog({ open, onClose }: { open: boolean; onClose: () => void })
   }, [open]);
 
   const preview = useMemo<SwiftTunnelPreset | null>(() => {
-    if (!text.trim()) return null;
+    if (!text) return null;
     try {
       return decodePreset(text);
     } catch {
@@ -444,7 +444,7 @@ function ImportDialog({ open, onClose }: { open: boolean; onClose: () => void })
     try {
       preset = decodePreset(text);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatErrorMessage(e));
       return;
     }
     setBusy(true);

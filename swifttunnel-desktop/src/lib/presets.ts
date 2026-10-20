@@ -12,9 +12,11 @@
 
 import type { AppSettings, Config, OverlayMetric } from "./types";
 import { DEFAULT_SETTINGS } from "./settings";
+import { validateCustomFflags } from "./fastFlags";
 
 export const PRESET_PREFIX = "SWT1.";
 export const PRESET_VERSION = 1;
+export const MAX_PRESET_BYTES = 256 * 1024;
 
 /**
  * The machine-portable slice of system_optimization. We deliberately drop
@@ -180,23 +182,20 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
 
   const D = DEFAULT_SETTINGS.config;
 
-  // Never write un-parseable FastFlags text to Roblox, disable it if invalid.
+  // Use the editor's rules too. Merely parsing JSON accepts arrays, unsupported
+  // flags and oversized drafts which the native apply path will reject.
   let customEnabled = asBool(
     r.custom_fflags_enabled,
     D.roblox_settings.custom_fflags_enabled,
   );
-  const customJson = asStr(
+  let customJson = asStr(
     r.custom_fflags_json,
     20000,
     D.roblox_settings.custom_fflags_json,
   );
-  if (customEnabled) {
-    try {
-      const j = JSON.parse(customJson) as unknown;
-      if (!j || typeof j !== "object") throw new Error("not an object");
-    } catch {
-      customEnabled = false;
-    }
+  if (validateCustomFflags(customEnabled, customJson)) {
+    customEnabled = false;
+    customJson = D.roblox_settings.custom_fflags_json;
   }
 
   const metrics: OverlayMetric[] = Array.isArray(o.metrics)
@@ -329,11 +328,19 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
  * Throws a user-facing message on anything malformed.
  */
 export function decodePreset(code: string): SwiftTunnelPreset {
+  // Bound work before trimming, base64 decoding or synchronous JSON parsing.
+  // Check characters first so a huge paste does not allocate another UTF-8 copy.
+  if (code?.length > MAX_PRESET_BYTES || new TextEncoder().encode(code ?? "").length > MAX_PRESET_BYTES) {
+    throw new Error("This config is too large. Use a config under 256 KB.");
+  }
   const trimmed = (code ?? "").trim();
   if (!trimmed) throw new Error("Paste a config first.");
 
   let json: string | null = null;
-  const start = trimmed.indexOf("{");
+  // Our shared files put the JSON on its own line. A name such as "{fast}"
+  // in the human-readable header must not be mistaken for the JSON body.
+  const block = /(?:^|\n)[ \t]*\{/.exec(trimmed);
+  const start = trimmed.indexOf("{", block?.index ?? 0);
   const end = trimmed.lastIndexOf("}");
   if (start !== -1 && end > start) {
     json = trimmed.slice(start, end + 1);

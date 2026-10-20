@@ -1,11 +1,14 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   buildPreset,
   encodePreset,
   decodePreset,
   mergePresetIntoConfig,
   presetFileName,
+  presetFileContents,
+  MAX_PRESET_BYTES,
 } from "./presets";
+import { validateCustomFflags } from "./fastFlags";
 import { DEFAULT_SETTINGS } from "./settings";
 import type { AppSettings } from "./types";
 
@@ -14,6 +17,34 @@ function sampleSettings(): AppSettings {
 }
 
 describe("presets", () => {
+  it("rejects oversized JSON and legacy pastes before parsing them", () => {
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      for (const raw of [
+        " ".repeat(MAX_PRESET_BYTES + 1),
+        "SWT1." + "A".repeat(MAX_PRESET_BYTES),
+        "é".repeat(MAX_PRESET_BYTES / 2 + 1),
+      ]) expect(() => decodePreset(raw)).toThrow(/256 KB/);
+      expect(parse).not.toHaveBeenCalled();
+    } finally { parse.mockRestore(); }
+  });
+
+  it.each([
+    "not-json", "[]", '{"FFlagUnknownSetting":true}',
+    '{"FFlagDebugGraphicsPreferD3D11":"maybe"}', " ".repeat(8193),
+  ])("removes invalid FastFlags without invalidating the rest of an imported config: %s", flags => {
+    const legacy = buildPreset("Old config", sampleSettings(), []);
+    legacy.config.roblox_settings.custom_fflags_enabled = true;
+    legacy.config.roblox_settings.custom_fflags_json = flags;
+    legacy.config.roblox_settings.target_fps = 240;
+    const clean = decodePreset(encodePreset(legacy));
+    expect(clean.config.roblox_settings.custom_fflags_enabled).toBe(false);
+    expect(clean.config.roblox_settings.custom_fflags_json).toBe(DEFAULT_SETTINGS.config.roblox_settings.custom_fflags_json);
+    expect(clean.config.roblox_settings.target_fps).toBe(240);
+    expect(validateCustomFflags(clean.config.roblox_settings.custom_fflags_enabled,
+      clean.config.roblox_settings.custom_fflags_json)).toBeNull();
+  });
+
   it("drops retired settings from older presets while retaining FPS and overlay", () => {
     const legacy = JSON.parse(encodePreset(buildPreset("Old settings", sampleSettings(), [])));
     legacy.config.auto_start_with_roblox = true;
@@ -67,6 +98,12 @@ describe("presets", () => {
     expect(() => JSON.parse(code)).not.toThrow();
     // A human can read the field names, it clearly isn't a cookie/token.
     expect(code).toContain("roblox_settings");
+  });
+
+  it.each(["\n", "\r\n"])("imports its own shared file when the preset name contains braces (%j)", newline => {
+    const preset = buildPreset("My {fast} config", sampleSettings(), []);
+    const shared = presetFileContents(preset).replace(/\n/g, newline);
+    expect(decodePreset(shared)).toEqual(preset);
   });
 
   it("extracts the config even when wrapped in surrounding text", () => {
