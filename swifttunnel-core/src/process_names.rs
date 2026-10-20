@@ -96,18 +96,21 @@ pub fn process_name_matches_any_tunnel_app<'a>(
 }
 
 pub fn is_roblox_process_name(process_name: &str) -> bool {
-    ROBLOX_PROCESS_NAMES
-        .iter()
-        .any(|candidate| process_name_matches_alias(process_name, candidate))
+    // Process scans call this for every PID. Normalize once, rather than
+    // allocating both names again for every candidate in the known list.
+    let name = basename(process_name).to_ascii_lowercase();
+    is_roblox_process_name_lowercase(&name)
 }
 
 /// True only for the in-game Roblox player (see `ROBLOX_PLAYER_PROCESS_NAMES`).
 /// Use this for "is the user actually in a game" — not `is_roblox_process_name`,
 /// which also matches the launcher, Studio and installers.
 pub fn is_roblox_player_process_name(process_name: &str) -> bool {
+    let name = basename(process_name).to_ascii_lowercase();
+    let stem = process_stem(&name);
     ROBLOX_PLAYER_PROCESS_NAMES
         .iter()
-        .any(|candidate| process_name_matches_alias(process_name, candidate))
+        .any(|candidate| process_stem(candidate) == stem)
 }
 
 /// True for Roblox Studio and its launcher/installer (everything whose name
