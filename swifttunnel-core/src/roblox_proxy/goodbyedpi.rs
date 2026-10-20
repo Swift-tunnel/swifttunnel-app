@@ -31,9 +31,9 @@ const ROBLOX_REACHABILITY_URL: &str = "https://www.roblox.com/";
 const ROBLOX_ASSET_REACHABILITY_URL: &str = "https://assetdelivery.roblox.com/v1/assetId/1818";
 /// Per-mode wait for GoodbyeDPI/WinDivert to attach before probing.
 const GOODBYEDPI_MODE_STARTUP_WAIT: Duration = Duration::from_secs(2);
-/// Overall budget for the whole mode escalation. The relay is the primary
-/// bypass path now, so GoodbyeDPI is a best-effort fallback and must never
-/// stall connect for long (it used to burn up to ~27s trying all 9 modes).
+/// One async startup budget, including download, launch and mode probes. The
+/// relay is the primary bypass path, so a slow optional download must not
+/// consume the connection's deadline before relay fallback can proceed.
 const GOODBYEDPI_TOTAL_BUDGET: Duration = Duration::from_secs(8);
 const ROBLOX_REACHABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -119,6 +119,25 @@ impl Drop for PendingHostlist {
 }
 
 pub async fn start_for_roblox() -> Result<Option<GoodbyeDpiGuard>, String> {
+    startup_with_budget(GOODBYEDPI_TOTAL_BUDGET, start_for_roblox_inner()).await
+}
+
+async fn startup_with_budget<T>(
+    budget: Duration,
+    startup: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    // PendingHelper and PendingHostlist own cleanup before any await. Dropping
+    // startup on timeout stops its child and removes its temporary hostlist;
+    // a successful result transfers those resources to GoodbyeDpiGuard.
+    tokio::time::timeout(budget, startup).await.map_err(|_| {
+        format!(
+            "GoodbyeDPI startup exceeded its {} ms budget (download, launch or reachability check)",
+            budget.as_millis()
+        )
+    })?
+}
+
+async fn start_for_roblox_inner() -> Result<Option<GoodbyeDpiGuard>, String> {
     if !cfg!(windows) {
         debug!("GoodbyeDPI helper skipped: supported only on Windows");
         return Ok(None);
@@ -557,6 +576,51 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_optional_startup_times_out_and_cleans_owned_files() {
+        let path = std::env::temp_dir().join(format!(
+            "swift-startup-budget-{:016x}.txt",
+            rand::random::<u64>()
+        ));
+        fs::write(&path, b"test only").unwrap();
+        let result = startup_with_budget(Duration::from_millis(20), async {
+            let _hostlist = PendingHostlist(Some(path.clone()));
+            // The same deadline applies while acquiring/downloading the helper
+            // and while checking its mode, not only between mode attempts.
+            std::future::pending::<Result<(), String>>().await
+        })
+        .await;
+        assert!(result.unwrap_err().contains("startup exceeded"));
+        assert!(!path.exists(), "timeout must drop startup-owned resources");
+    }
+
+    #[tokio::test]
+    async fn startup_deadline_preserves_successful_handover_and_original_errors() {
+        let path = std::env::temp_dir().join(format!(
+            "swift-startup-handover-{:016x}.txt",
+            rand::random::<u64>()
+        ));
+        fs::write(&path, b"test only").unwrap();
+        let owned = startup_with_budget(Duration::from_secs(1), async {
+            Ok(PendingHostlist(Some(path.clone())))
+        })
+        .await
+        .unwrap();
+        assert!(
+            path.exists(),
+            "success must retain the running helper's files"
+        );
+        drop(owned);
+        assert!(!path.exists());
+        assert_eq!(
+            startup_with_budget(Duration::from_secs(1), async {
+                Err::<(), _>("Pinned component verification failed".into())
+            })
+            .await,
+            Err("Pinned component verification failed".into())
+        );
+    }
 
     #[cfg(windows)]
     #[tokio::test]
