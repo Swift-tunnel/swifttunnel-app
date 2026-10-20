@@ -11,7 +11,7 @@ const h = vi.hoisted(() => ({
   update: vi.fn(), save: vi.fn(),
   gameIp: "128.116.47.33",
   boostState: { robloxRunning: true, robloxForeground: true, processId: 1, fps: 60, ramTotal: 100, ramUsage: 50, cpuUsage: 10 },
-  vpnState: { state:"connected", region:"mumbai", bytesUp:100, bytesDown:200, ping:30, pingReadings:0, gameRoute:null as {game_server_ip:string;estimated_path_ms:number;bypassed:boolean}|null },
+  vpnState: { state:"connected", region:"mumbai", connectedAt:1, bytesUp:100, bytesDown:200, ping:30, pingReadings:0, gameRoute:null as {game_server_ip:string;estimated_path_ms:number;bypassed:boolean}|null },
   overlay: { enabled: true, metrics: ["ping", "upload"], size: "medium", color: "white", style: "solid", position: "top-left", custom_x: 0, custom_y: 0 },
 }));
 
@@ -65,7 +65,7 @@ describe("overlay polling under slow native calls", () => {
     h.effects.length = 0;
     h.overlay.enabled = true;
     h.overlay.metrics=["ping","upload"];
-    h.vpnState={state:"connected",region:"mumbai",bytesUp:100,bytesDown:200,ping:30,pingReadings:0,gameRoute:null};
+    h.vpnState={state:"connected",region:"mumbai",connectedAt:1,bytesUp:100,bytesDown:200,ping:30,pingReadings:0,gameRoute:null};
     h.gameIp="128.116.47.33";
     h.boostState={robloxRunning:true,robloxForeground:true,processId:1,fps:60,ramTotal:100,ramUsage:50,cpuUsage:10};
     h.invoke.mockResolvedValue(undefined);
@@ -262,6 +262,36 @@ describe("overlay polling under slow native calls", () => {
     h.throughput.mockResolvedValue(false);
     const stop=start(); await vi.advanceTimersByTimeAsync(1000); stop();
     expect(h.push.mock.calls[h.push.mock.calls.length-1]?.[0].values.upload).toBe("--");
+  });
+  it("starts a new traffic baseline and drops retained ping after reconnecting to the same relay", async () => {
+    h.ping.mockImplementationOnce(() => { h.vpnState.pingReadings++; return Promise.resolve(); });
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.push.mock.calls[0][0].values.ping).toBe("30 ms");
+    h.vpnState.connectedAt = 2;
+    h.vpnState.bytesUp = 2148;
+    h.vpnState.pingReadings = 0;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(h.push.mock.calls[1][0].values).toMatchObject({ upload: "--", ping: "--" });
+    h.vpnState.bytesUp += 1024;
+    await vi.advanceTimersByTimeAsync(1000);
+    stop();
+    expect(h.push.mock.calls[2][0].values.upload).toBe("1.0 KB/s");
+  });
+  it.each(["metrics", "monitor"] as const)("drops tunnel readings if the session changes during %s", async stage => {
+    const pending = deferred();
+    h.vpnState.gameRoute = { game_server_ip: h.gameIp, estimated_path_ms: 26, bypassed: false };
+    h.ping.mockImplementation(() => { h.vpnState.pingReadings++; return Promise.resolve(); });
+    if (stage === "metrics") h.metrics.mockReturnValueOnce(pending.promise.then(() => true));
+    else h.invoke.mockImplementation(command => command === "overlay_game_monitor" ? pending.promise : Promise.resolve());
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(0);
+    h.vpnState.connectedAt = 2;
+    h.vpnState.bytesUp += 2048;
+    pending.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(h.push.mock.calls[0][0].values).toMatchObject({ upload: "--", ping: "--", game_ping: "--" });
   });
   it("registers the hotkey after its listener and toggles the latest overlay preference",async()=>{
     useOverlayDriver(); const stop=h.effects[2]() as ()=>void;

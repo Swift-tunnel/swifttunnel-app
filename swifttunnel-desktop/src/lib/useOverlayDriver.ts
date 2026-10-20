@@ -27,6 +27,12 @@ import {
 
 const MAX_SAMPLE_AGE_MS = 5000;
 
+type TunnelSession = { state: string; region: string | null; connectedAt: number | null };
+function sameTunnelSession(current: TunnelSession, previous: TunnelSession | null): boolean {
+  return current.state === "connected" && previous?.state === "connected"
+    && current.region === previous.region && current.connectedAt === previous.connectedAt;
+}
+
 /**
  * Main-window driver for the in-game stats overlay. While enabled, polls metrics
  * and pushes a config+values snapshot to the "overlay-stats" window ~1x/sec. The
@@ -44,6 +50,7 @@ export function useOverlayDriver() {
     null,
   );
   const pingRef = useRef<{ value: number; at: number } | null>(null);
+  const tunnelRef = useRef<TunnelSession | null>(null);
   const trafficRef = useRef<{
     bytesUp: number;
     bytesDown: number;
@@ -137,9 +144,15 @@ export function useOverlayDriver() {
       };
       const sameTunnel =
         gameActive &&
-        vpn.state === "connected" &&
-        vpnBefore.state === "connected" &&
-        vpn.region === vpnBefore.region;
+        sameTunnelSession(vpn, vpnBefore);
+      // Reconnecting to the same relay is still a new counter/ping baseline.
+      // The new session can already have larger totals than the old one, so
+      // checking only for counter decreases cannot detect this transition.
+      if (!sameTunnelSession(vpn, tunnelRef.current)) {
+        trafficRef.current = null;
+        pingRef.current = null;
+      }
+      tunnelRef.current = { state: vpn.state, region: vpn.region, connectedAt: vpn.connectedAt };
       if (sameTunnel && trafficFresh) {
         const previous = trafficRef.current;
         trafficRef.current = {
@@ -200,6 +213,15 @@ export function useOverlayDriver() {
         trafficRef.current = null;
         pingRef.current = null;
       }
+      // Monitor lookup is another async boundary. A reconnect during it must
+      // not send the captured session's readings to the current overlay.
+      const tunnelCurrent = sameTunnel && sameTunnelSession(useVpnStore.getState(), vpn);
+      if (!tunnelCurrent) {
+        trafficRef.current = null;
+        pingRef.current = null;
+        tunnelRef.current = null;
+        tunnelRates = { uploadBps: null, downloadBps: null };
+      }
       const gate = sampleCurrent && latest.robloxRunning && latest.robloxForeground;
       const cfg = ovRef.current;
       await pushOverlayRender({
@@ -223,12 +245,12 @@ export function useOverlayDriver() {
                 latest,
                 sessionRef.current ? nowMs - sessionRef.current.startedAt : 0,
                 tunnelRates,
-                sameTunnel &&
+                tunnelCurrent &&
                   pingRef.current &&
                   nowMs - pingRef.current.at <= 5000
                   ? pingRef.current.value
                   : null,
-                sameTunnel &&
+                tunnelCurrent &&
                   !vpn.gameRoute?.bypassed &&
                   vpn.gameRoute?.game_server_ip ===
                     useGameLibraryStore.getState().library?.current?.ip
