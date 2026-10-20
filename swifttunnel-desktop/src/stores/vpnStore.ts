@@ -587,7 +587,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       });
     } catch (e) {
       if (!currentRead()) return;
-      set({ error: String(e), gameRoute: null });
+      set({ error: getErrorMessage(e), gameRoute: null });
     }
   },
 
@@ -1082,7 +1082,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       await notify("SwiftTunnel", "VPN disconnected.");
     } catch (e) {
       if (!isCurrentConnectAttempt(attempt)) return;
-      set({ state: "error", error: String(e) });
+      set({ state: "error", error: getErrorMessage(e) });
     }
   },
 

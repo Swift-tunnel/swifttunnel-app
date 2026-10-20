@@ -27,6 +27,7 @@ import { SupportToolsSection } from "../support/SupportToolsSection";
 import { LauncherImportPanel } from "./LauncherImportPanel";
 import type { AppSettings, UpdateChannel } from "../../lib/types";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
+import { formatErrorMessage } from "../../lib/errors";
 
 declare const __APP_VERSION__: string;
 
@@ -665,7 +666,7 @@ export function SettingsTab() {
                   setIsUninstalling(false);
                   setConfirmUninstallOpen(false);
                 } catch (e) {
-                  setUninstallError(String(e));
+                  setUninstallError(formatErrorMessage(e));
                   setIsUninstalling(false);
                   setConfirmUninstallOpen(false);
                 }

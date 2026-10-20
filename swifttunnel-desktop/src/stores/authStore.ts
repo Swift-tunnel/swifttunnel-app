@@ -10,7 +10,7 @@ import {
   authLogout,
   authRefreshProfile,
 } from "../lib/commands";
-import { reportError } from "../lib/errors";
+import { formatErrorMessage, reportError } from "../lib/errors";
 
 // Reads may complete after a newer native event or account action. Only the
 // latest read in the current revision may publish a snapshot or an error.
@@ -20,7 +20,7 @@ let authStateRevision = 0;
 let authActionRevision = 0;
 
 function formatAuthError(error: unknown): string {
-  const message = String(error);
+  const message = formatErrorMessage(error);
   const lower = message.toLowerCase();
 
   if (

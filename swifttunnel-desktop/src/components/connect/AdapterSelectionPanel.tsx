@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { vpnListNetworkAdapters } from "../../lib/commands";
+import { formatErrorMessage } from "../../lib/errors";
 import type { AppSettings, NetworkAdapterInfo } from "../../lib/types";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { InfoIcon, Segmented, Tooltip } from "../ui";
@@ -135,7 +136,7 @@ export function AdapterSelectionPanel({ disabled }: { disabled: boolean }) {
       .catch((e) => {
         if (cancelled) return;
         setNetworkAdapters(null);
-        setNetworkAdaptersError(String(e));
+        setNetworkAdaptersError(formatErrorMessage(e));
       })
       .finally(() => {
         if (cancelled) return;

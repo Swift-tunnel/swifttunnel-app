@@ -100,6 +100,18 @@ describe("stores/updaterStore", () => {
     expect(updaterInstallChannel).toHaveBeenCalledOnce();
   });
 
+  it("shows structured failures from update checks and installation", async () => {
+    updaterCheckChannel.mockRejectedValueOnce({ message: "Update service unavailable" });
+    const store = await loadStore();
+    await store.getState().checkForUpdates();
+    expect(store.getState().error).toBe("Update service unavailable");
+    updaterCheckChannel.mockResolvedValueOnce(available);
+    await store.getState().checkForUpdates();
+    updaterInstallChannel.mockRejectedValueOnce({ error: "Installer could not start" });
+    await store.getState().installUpdate();
+    expect(store.getState().error).toBe("Installer could not start");
+  });
+
   it("preserves preferences changed while an update check is pending", async () => {
     const check = deferred<typeof available>();
     updaterCheckChannel.mockReturnValue(check.promise);

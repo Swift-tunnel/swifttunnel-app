@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { notify } from "../lib/notifications";
+import { formatErrorMessage } from "../lib/errors";
 import { updaterCheckChannel, updaterInstallChannel } from "../lib/commands";
 import { useSettingsStore } from "./settingsStore";
 import type { UpdaterProgressEvent } from "../lib/types";
@@ -180,7 +181,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       if (channelChanged()) return;
       set({
         status: "error",
-        error: String(e),
+        error: formatErrorMessage(e),
       });
     }
   },
@@ -230,7 +231,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     } catch (e) {
       set({
         status: "error",
-        error: String(e),
+        error: formatErrorMessage(e),
       });
     }
   },

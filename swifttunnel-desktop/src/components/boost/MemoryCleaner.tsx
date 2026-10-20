@@ -4,6 +4,7 @@ import { useBoostStore } from "../../stores/boostStore";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { systemRestartAsAdmin } from "../../lib/commands";
 import { notify } from "../../lib/notifications";
+import { formatErrorMessage } from "../../lib/errors";
 import {
   deepCleanLabel,
   formatDeltaMb,
@@ -53,7 +54,7 @@ export function MemoryCleaner() {
       await systemRestartAsAdmin();
     } catch (e) {
       setRestartState("error");
-      setRestartError(String(e));
+      setRestartError(formatErrorMessage(e));
       await notify("Restart canceled", "Could not restart as Administrator.");
     }
   }

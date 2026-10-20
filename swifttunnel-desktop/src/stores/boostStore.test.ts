@@ -216,7 +216,7 @@ describe("stores/boostStore", () => {
       useBoostStore.getState().updateConfig("{\"profile\":\"Balanced\"}"),
     ).rejects.toThrow("boom");
 
-    expect(useBoostStore.getState().error).toBe("Error: boom");
+    expect(useBoostStore.getState().error).toBe("boom");
     expect(useBoostStore.getState().warning).toBeNull();
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith(
@@ -312,7 +312,7 @@ describe("stores/boostStore", () => {
     const useBoostStore = await loadStore();
     await useBoostStore.getState().cleanRam();
 
-    expect(useBoostStore.getState().error).toBe("Error: boom");
+    expect(useBoostStore.getState().error).toBe("boom");
     expect(useBoostStore.getState().warning).toBeNull();
     expect(useBoostStore.getState().isCleaningRam).toBe(false);
     expect(useBoostStore.getState().ramCleanStartSnapshot).toBeNull();
@@ -467,6 +467,14 @@ describe("stores/boostStore", () => {
       "Restart failed",
       "Could not restart Roblox.",
     );
+  });
+
+  it("keeps structured restart errors readable while preserving the rejection", async () => {
+    const error = { message: "Close Roblox and try again" };
+    boostRestartRoblox.mockRejectedValue(error);
+    const store = await loadStore();
+    await expect(store.getState().restartRoblox()).rejects.toBe(error);
+    expect(store.getState().error).toBe(error.message);
   });
 
   it("progresses through flushing_modified stage", async () => {

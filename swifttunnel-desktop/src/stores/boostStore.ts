@@ -15,7 +15,7 @@ import {
   boostRestartRoblox,
 } from "../lib/commands";
 import type { BoostMetricsOptions } from "../lib/commands";
-import { reportError } from "../lib/errors";
+import { formatErrorMessage, reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
 
 // Each option is boolean or absent, so at most nine native requests can be
@@ -177,7 +177,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
       }
       return result.applied_config ?? JSON.parse(configJson);
     } catch (e) {
-      const message = String(e);
+      const message = formatErrorMessage(e);
       set({ error: message, warning: null });
       await notify("Boost config failed", "Could not save optimization profile.");
       throw e;
@@ -237,7 +237,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
         ramCleanDoneSnapshot: state.ramCleanDoneSnapshot ?? result.after,
       }));
     } catch (e) {
-      const message = String(e);
+      const message = formatErrorMessage(e);
       set({
         error: message,
         warning: null,
@@ -254,7 +254,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
     try {
       await boostRestartRoblox();
     } catch (e) {
-      const message = String(e);
+      const message = formatErrorMessage(e);
       set({ error: message, warning: null });
       await notify("Restart failed", "Could not restart Roblox.");
       throw e;

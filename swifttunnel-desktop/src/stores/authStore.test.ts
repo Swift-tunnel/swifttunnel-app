@@ -13,7 +13,8 @@ const commands = vi.hoisted(() => ({
 
 vi.mock("../lib/commands", () => commands);
 
-vi.mock("../lib/errors", () => ({
+vi.mock("../lib/errors", async () => ({
+  ...await vi.importActual("../lib/errors"),
   reportError: vi.fn(),
 }));
 
@@ -31,6 +32,26 @@ describe("stores/authStore", () => {
     state: "logged_in" as const, email: "player@example.test", user_id: "player",
     is_tester: false, is_banned: false, banned_reason: null, banned_at: null,
   };
+
+  it.each([
+    [{ message: "Login service unavailable" }, "Login service unavailable"],
+    [{ error: "Please retry" }, "Please retry"],
+    [null, "Something went wrong. Please try again."],
+    [new Error("Bad password"), "Bad password"],
+  ])("shows readable sign-in failures for %s", async (failure, expected) => {
+    commands.authGetState.mockRejectedValueOnce(failure);
+    const store = await loadStore();
+    await store.getState().fetchState();
+    expect(store.getState().error).toBe(expected);
+    expect(store.getState().isLoading).toBe(false);
+  });
+
+  it("recognizes login-service connection failures from serialized errors", async () => {
+    commands.authGetState.mockRejectedValueOnce({ message: "Network error: https://auth.swifttunnel.net" });
+    const store = await loadStore();
+    await store.getState().fetchState();
+    expect(store.getState().error).toContain("Try browser sign-in");
+  });
 
   it("does not exchange a late callback after OAuth is cancelled", async () => {
     let finish!: (result: { completed: boolean; token: string; state: string }) => void;
@@ -216,7 +237,7 @@ describe("stores/authStore", () => {
     const useAuthStore = await loadStore();
 
     await useAuthStore.getState().refreshProfile();
-    expect(useAuthStore.getState().error).toBe("Error: network down");
+    expect(useAuthStore.getState().error).toBe("network down");
 
     await useAuthStore.getState().refreshProfile();
     expect(useAuthStore.getState().error).toBeNull();
