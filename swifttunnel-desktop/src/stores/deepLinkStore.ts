@@ -43,6 +43,9 @@ function flashAnchor(anchor: string, isCurrentTab: () => boolean, done: () => vo
   };
   const attempt = () => {
     if (cancelled) return;
+    // A target can be found on every attempt yet repeatedly unmount during
+    // the paging delay. Those retries must share the discovery deadline too.
+    if (performance.now() >= deadline) { done(); return; }
     const el = document.querySelector<HTMLElement>(selector);
     if (el) {
       // Give a paging carousel a beat to slide the card on-screen first.

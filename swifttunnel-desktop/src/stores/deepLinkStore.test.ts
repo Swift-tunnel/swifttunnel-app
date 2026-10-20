@@ -83,6 +83,21 @@ describe("search navigation lifetime", () => {
     expect(navigate.getState().anchor).toBeNull();
     expect(vi.getTimerCount()).toBe(0);
   });
+  it("stops chasing controls that repeatedly unmount before the scroll delay", () => {
+    // Each query finds a control, but React replaces it before the next frame.
+    query.mockImplementation(() => {
+      const target = element();
+      setTimeout(() => { target.isConnected = false; }, 1);
+      return target;
+    });
+    navigate.getState().navigateTo({ tab: "games", anchor: "changing" });
+    vi.advanceTimersByTime(10_000);
+    expect(navigate.getState().anchor).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    const calls = query.mock.calls.length;
+    vi.advanceTimersByTime(60_000);
+    expect(query).toHaveBeenCalledTimes(calls);
+  });
   it("does not clear a late-mounted target before its highlight ends", () => {
     navigate.getState().navigateTo({ tab: "games", anchor: "slow" });
     vi.advanceTimersByTime(4000);
