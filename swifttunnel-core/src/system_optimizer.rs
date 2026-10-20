@@ -3,7 +3,6 @@ use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Threading::*;
@@ -1552,7 +1551,7 @@ impl SystemOptimizer {
     pub fn open_system_restore() -> Result<()> {
         info!("Opening Windows System Restore");
 
-        let output = Command::new("rstrui.exe").spawn();
+        let output = crate::hidden_command("rstrui.exe").spawn();
 
         match output {
             Ok(_) => {

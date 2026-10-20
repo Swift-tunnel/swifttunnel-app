@@ -125,6 +125,16 @@ fn is_system32_program(program: &str) -> bool {
             | "powercfg.exe"
             | "sc"
             | "sc.exe"
+            | "cmd"
+            | "cmd.exe"
+            | "ping"
+            | "ping.exe"
+            | "route"
+            | "route.exe"
+            | "w32tm"
+            | "w32tm.exe"
+            | "rstrui"
+            | "rstrui.exe"
     )
 }
 
@@ -134,46 +144,30 @@ fn resolve_windows_command_path_with_root(
     system_root: Option<&std::path::Path>,
 ) -> PathBuf {
     if is_powershell_program(program) {
-        let mut candidates = Vec::new();
-        if let Some(root) = system_root {
-            candidates.push(
-                root.join("System32")
-                    .join("WindowsPowerShell")
-                    .join("v1.0")
-                    .join("powershell.exe"),
-            );
-            candidates.push(
-                root.join("Sysnative")
-                    .join("WindowsPowerShell")
-                    .join("v1.0")
-                    .join("powershell.exe"),
-            );
-            candidates.push(
-                root.join("SysWOW64")
-                    .join("WindowsPowerShell")
-                    .join("v1.0")
-                    .join("powershell.exe"),
-            );
-        }
-
+        let Some(root) = system_root else {
+            return PathBuf::new();
+        };
+        let canonical = root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let candidates = [
+            canonical.clone(),
+            root.join("Sysnative/WindowsPowerShell/v1.0/powershell.exe"),
+            root.join("SysWOW64/WindowsPowerShell/v1.0/powershell.exe"),
+        ];
         return candidates
             .into_iter()
             .find(|candidate| candidate.is_file())
-            .unwrap_or_else(|| PathBuf::from(program));
+            // A missing OS copy must fail there rather than run a same-named
+            // executable from the working directory or an inherited PATH.
+            .unwrap_or(canonical);
     }
 
-    if is_system32_program(program)
-        && let Some(root) = system_root
-    {
-        let exe_name = if program.ends_with(".exe") {
-            program.to_string()
-        } else {
-            format!("{program}.exe")
+    if is_system32_program(program) {
+        let Some(root) = system_root else {
+            return PathBuf::new();
         };
-        let candidate = root.join("System32").join(&exe_name);
-        if candidate.is_file() {
-            return candidate;
-        }
+        let name = program.to_ascii_lowercase();
+        let stem = name.strip_suffix(".exe").unwrap_or(&name);
+        return root.join("System32").join(format!("{stem}.exe"));
     }
 
     PathBuf::from(program)
@@ -1130,8 +1124,59 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn test_resolve_windows_command_path_leaves_other_programs_unchanged() {
-        let resolved = resolve_windows_command_path_with_root("cmd", None);
-        assert_eq!(resolved, PathBuf::from("cmd"));
+        let resolved = resolve_windows_command_path_with_root("custom-helper", None);
+        assert_eq!(resolved, PathBuf::from("custom-helper"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn known_windows_tools_never_fall_back_to_executable_search() {
+        let root = PathBuf::from(r"E:\Windows");
+        for (name, executable) in [
+            ("ipconfig", "ipconfig.exe"),
+            ("NETSH.EXE", "netsh.exe"),
+            ("PNPUTIL.EXE", "pnputil.exe"),
+            ("route", "route.exe"),
+            ("w32tm", "w32tm.exe"),
+            ("cmd", "cmd.exe"),
+            ("ping", "ping.exe"),
+            ("rstrui.exe", "rstrui.exe"),
+        ] {
+            // No actual E: directory or executable needs to exist. Missing
+            // OS files must fail at that path, not select an adjacent helper.
+            assert_eq!(
+                resolve_windows_command_path_with_root(name, Some(&root)),
+                root.join("System32").join(executable),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            resolve_windows_command_path_with_root("powershell", Some(&root)),
+            root.join("System32/WindowsPowerShell/v1.0/powershell.exe")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unavailable_windows_directory_refuses_system_tools_instead_of_searching_path() {
+        for name in [
+            "powershell",
+            "netsh",
+            "ipconfig",
+            "pnputil",
+            "route",
+            "w32tm",
+            "cmd",
+            "ping",
+            "rstrui.exe",
+        ] {
+            assert!(
+                resolve_windows_command_path_with_root(name, None)
+                    .as_os_str()
+                    .is_empty(),
+                "{name}"
+            );
+        }
     }
 
     #[cfg(windows)]
