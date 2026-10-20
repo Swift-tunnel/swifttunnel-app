@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, State};
 
@@ -485,6 +485,42 @@ fn compose_bundle_text(context: &BundleContext, command_sections: &[String]) -> 
     content
 }
 
+/// Exports belong to the user. Never truncate an existing file, including a
+/// pre-existing link. Create a separate file if the suggested name is taken.
+fn write_export(output_dir: &Path, file_name: &str, contents: &[u8]) -> Result<PathBuf, String> {
+    use std::io::Write;
+    let suggested = output_dir.join(file_name);
+    let stem = suggested
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("SwiftTunnel");
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..8 {
+        let path = if attempt == 0 {
+            suggested.clone()
+        } else {
+            output_dir.join(format!("{stem}-{nonce:x}-{attempt}.txt"))
+        };
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not create export file: {error}")),
+        };
+        file.write_all(contents)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("Could not finish writing {}: {error}", path.display()))?;
+        return Ok(path);
+    }
+    Err("Could not create a separate export file. Try again.".into())
+}
+
 #[tauri::command]
 pub async fn settings_generate_network_diagnostics_bundle(
     state: State<'_, AppState>,
@@ -521,9 +557,11 @@ pub async fn settings_generate_network_diagnostics_bundle(
         let bundle_text = compose_bundle_text(&bundle_context, &command_sections);
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| format!("Failed to create diagnostics output directory: {e}"))?;
-        let file_path = output_dir.join(build_diagnostics_filename());
-        std::fs::write(&file_path, bundle_text)
-            .map_err(|e| format!("Failed to write diagnostics bundle: {e}"))?;
+        let file_path = write_export(
+            &output_dir,
+            &build_diagnostics_filename(),
+            bundle_text.as_bytes(),
+        )?;
         Ok(NetworkDiagnosticsBundleResponse {
             file_path: file_path.to_string_lossy().to_string(),
             folder_path: output_dir.to_string_lossy().to_string(),
@@ -538,6 +576,7 @@ pub async fn settings_generate_network_diagnostics_bundle(
 fn sanitize_preset_filename(name: &str) -> String {
     let cleaned: String = name
         .chars()
+        .take(128)
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
                 c
@@ -567,14 +606,19 @@ pub async fn preset_save_to_downloads(
     file_name: String,
     contents: String,
 ) -> Result<NetworkDiagnosticsBundleResponse, String> {
+    if contents.len() > 256 * 1024 {
+        return Err("This config is too large to export. Use a config under 256 KB.".into());
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let output_dir = resolve_output_dir(&app);
         std::fs::create_dir_all(&output_dir)
             .map_err(|e| format!("Failed to create output directory: {e}"))?;
 
-        let file_path = output_dir.join(sanitize_preset_filename(&file_name));
-        std::fs::write(&file_path, contents)
-            .map_err(|e| format!("Failed to write preset file: {e}"))?;
+        let file_path = write_export(
+            &output_dir,
+            &sanitize_preset_filename(&file_name),
+            contents.as_bytes(),
+        )?;
 
         Ok(NetworkDiagnosticsBundleResponse {
             file_path: file_path.to_string_lossy().to_string(),
@@ -588,6 +632,59 @@ pub async fn preset_save_to_downloads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ExportDirectory(PathBuf);
+    impl ExportDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "swift-export-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for ExportDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn exports_preserve_existing_files_and_return_the_actual_new_path() {
+        let dir = ExportDirectory::new();
+        let previous = dir.0.join("preset.txt");
+        std::fs::write(&previous, b"previous export").unwrap();
+        let first = write_export(&dir.0, "preset.txt", b"new export").unwrap();
+        let second = write_export(&dir.0, "preset.txt", b"another export").unwrap();
+        assert_ne!(first, previous);
+        assert_ne!(second, first);
+        assert_eq!(std::fs::read(previous).unwrap(), b"previous export");
+        assert_eq!(std::fs::read(first).unwrap(), b"new export");
+        assert_eq!(std::fs::read(second).unwrap(), b"another export");
+    }
+
+    #[test]
+    fn exporting_does_not_overwrite_the_target_of_an_existing_hard_link() {
+        let dir = ExportDirectory::new();
+        let original = dir.0.join("keep.txt");
+        std::fs::write(&original, b"keep this").unwrap();
+        std::fs::hard_link(&original, dir.0.join("preset.txt")).unwrap();
+        let path = write_export(&dir.0, "preset.txt", b"export").unwrap();
+        assert_eq!(std::fs::read(original).unwrap(), b"keep this");
+        assert_eq!(std::fs::read(path).unwrap(), b"export");
+    }
+
+    #[test]
+    fn preset_export_filenames_remain_bounded_and_cannot_escape_the_folder() {
+        let name = sanitize_preset_filename(&"x".repeat(100_000));
+        assert!(name.len() <= 132);
+        assert!(name.ends_with(".txt"));
+        let name = sanitize_preset_filename("../../outside.txt");
+        assert!(!name.contains(['/', '\\']));
+        assert_eq!(Path::new(&name).components().count(), 1);
+    }
 
     #[cfg(windows)]
     #[test]
