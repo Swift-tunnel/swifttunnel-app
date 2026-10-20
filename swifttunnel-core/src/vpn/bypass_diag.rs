@@ -123,6 +123,25 @@ pub struct Decision<'a> {
 /// Record one decision, at most once per destination per thread.
 #[inline]
 pub fn record(decision: Decision<'_>) {
+    record_lazy(
+        decision.dst_ip,
+        decision.dst_port,
+        decision.protocol,
+        decision.relayed,
+        || decision,
+    );
+}
+
+/// Fill support-only metadata after deduplication and the line budget. Packet
+/// workers must not clone names or lock host-pin state for discarded records.
+#[inline]
+pub fn record_lazy<'a>(
+    dst_ip: Ipv4Addr,
+    dst_port: u16,
+    protocol: &'a str,
+    relayed: bool,
+    details: impl FnOnce() -> Decision<'a>,
+) {
     if !is_enabled() {
         return;
     }
@@ -130,12 +149,7 @@ pub fn record(decision: Decision<'_>) {
         return;
     }
 
-    let key = key_for(
-        decision.dst_ip,
-        decision.dst_port,
-        decision.protocol,
-        decision.relayed,
-    );
+    let key = key_for(dst_ip, dst_port, protocol, relayed);
 
     let is_new = SEEN.with(|seen| {
         let Ok(mut seen) = seen.try_borrow_mut() else {
@@ -151,10 +165,20 @@ pub fn record(decision: Decision<'_>) {
     }
 
     // Claim a line before writing so concurrent workers cannot overshoot.
-    if LINES_WRITTEN.fetch_add(1, Ordering::Relaxed) >= GLOBAL_LINE_BUDGET {
+    if LINES_WRITTEN
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |written| {
+            if written < GLOBAL_LINE_BUDGET {
+                Some(written + 1)
+            } else {
+                None
+            }
+        })
+        .is_err()
+    {
         return;
     }
 
+    let decision = details();
     log::info!(
         "[bypass-diag] {} {}:{} proto={} owner={} tunnel_app={} browser={} \
          pin_match={} roblox_range={} pinned_direct={}",
@@ -216,6 +240,70 @@ mod tests {
         record(sample(false));
 
         assert_eq!(LINES_WRITTEN.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn repeated_packets_never_build_discarded_diagnostic_metadata() {
+        let _guard = isolated();
+        ENABLED.store(true, Ordering::Relaxed);
+        let mut calls = 0;
+        for _ in 0..10_000 {
+            let d = sample(false);
+            record_lazy(d.dst_ip, d.dst_port, d.protocol, d.relayed, || {
+                calls += 1;
+                d
+            });
+        }
+        assert_eq!(calls, 1);
+        assert_eq!(LINES_WRITTEN.load(Ordering::Relaxed), 1);
+        ENABLED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn diagnostic_caps_and_disabled_logging_skip_metadata_entirely() {
+        let _guard = isolated();
+        let d = sample(false);
+        ENABLED.store(false, Ordering::Relaxed);
+        record_lazy(d.dst_ip, 80, "tcp", false, || panic!("disabled logging"));
+        ENABLED.store(true, Ordering::Relaxed);
+        LINES_WRITTEN.store(GLOBAL_LINE_BUDGET, Ordering::Relaxed);
+        record_lazy(d.dst_ip, 80, "tcp", false, || {
+            panic!("global budget exhausted")
+        });
+        LINES_WRITTEN.store(0, Ordering::Relaxed);
+        for port in 0..PER_THREAD_DESTINATIONS as u16 {
+            record_lazy(d.dst_ip, port, "tcp", false, || sample(false));
+        }
+        record_lazy(d.dst_ip, u16::MAX, "tcp", false, || {
+            panic!("thread budget exhausted")
+        });
+        assert_eq!(
+            LINES_WRITTEN.load(Ordering::Relaxed) as usize,
+            PER_THREAD_DESTINATIONS
+        );
+        ENABLED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn concurrent_workers_claim_exactly_the_shared_line_budget() {
+        let _guard = isolated();
+        ENABLED.store(true, Ordering::Relaxed);
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for port in 0..PER_THREAD_DESTINATIONS as u16 {
+                        let mut decision = sample(false);
+                        decision.dst_port = port;
+                        record(decision);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(LINES_WRITTEN.load(Ordering::Relaxed), GLOBAL_LINE_BUDGET);
+        ENABLED.store(false, Ordering::Relaxed);
     }
 
     #[test]

@@ -43,6 +43,9 @@ const GAME_TRAFFIC_UPDATE_GRANULARITY: Duration = Duration::from_millis(250);
 /// Cap on outstanding geolocation lookups. If the lookup backend stalls (API
 /// outage, network down) this keeps the pending set from growing without bound.
 const MAX_PENDING_LOOKUPS: usize = 1;
+/// A reset or scope toggle can invalidate queued work while the resolver is
+/// busy. Keep at most one waiting lookup and never block packet workers.
+pub(crate) const LOOKUP_QUEUE_CAPACITY: usize = 1;
 
 /// Cap on retained auto-routing events shown in the UI log.
 const MAX_EVENT_LOG_ENTRIES: usize = 20;
@@ -93,7 +96,7 @@ pub struct AutoRouter {
     /// Log of auto-routing events for UI display
     event_log: RwLock<VecDeque<AutoRoutingEvent>>,
     /// Channel to send game server IPs for async geolocation lookup
-    lookup_sender: RwLock<Option<tokio::sync::mpsc::UnboundedSender<(Ipv4Addr, u64, u64)>>>,
+    lookup_sender: RwLock<Option<tokio::sync::mpsc::Sender<(Ipv4Addr, u64, u64)>>>,
     /// Monotonic generation assigned to newly detected game-server lookups.
     latest_lookup_generation: AtomicU64,
     /// Session epoch copied into lookup messages so post-reset results cannot
@@ -138,11 +141,13 @@ pub struct GameRouteStatus {
 pub(crate) struct LookupRelease<'a> {
     router: &'a AutoRouter,
     ip: Ipv4Addr,
+    session_epoch: u64,
 }
 
 impl Drop for LookupRelease<'_> {
     fn drop(&mut self) {
-        self.router.clear_pending_lookup(self.ip);
+        self.router
+            .clear_pending_lookup_for_session(self.ip, self.session_epoch);
     }
 }
 
@@ -192,10 +197,7 @@ impl AutoRouter {
     }
 
     /// Set the channel for sending game server IPs to the background lookup task
-    pub fn set_lookup_channel(
-        &self,
-        sender: tokio::sync::mpsc::UnboundedSender<(Ipv4Addr, u64, u64)>,
-    ) {
+    pub fn set_lookup_channel(&self, sender: tokio::sync::mpsc::Sender<(Ipv4Addr, u64, u64)>) {
         *self.lookup_sender.write() = Some(sender);
     }
 
@@ -784,10 +786,14 @@ impl AutoRouter {
         // New IP detected — add to pending set and send to background lookup task.
         // While pending, packets to this IP will be held (dropped) by the interceptor
         // so the game server only ever sees traffic from the correct relay.
+        let session_epoch = self.lookup_session_epoch();
         {
             // Blocking write lock is OK here: this runs only once per new game server,
             // and the correctness requirement (holding packets) outweighs the tiny cost.
             let mut pending = self.pending_lookups.write();
+            if !self.is_enabled() || !self.is_current_lookup_session(session_epoch) {
+                return AutoRoutingAction::NoAction;
+            }
             // One join at a time. A second candidate goes through the current
             // relay and stays seen: holding it later would change its source
             // address after its connection has already established.
@@ -805,17 +811,12 @@ impl AutoRouter {
         }
 
         let generation = self.latest_lookup_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let session_epoch = self.lookup_session_epoch.load(Ordering::Acquire);
-
-        if sender
-            .send((game_server_ip, generation, session_epoch))
-            .is_err()
-        {
+        if let Err(error) = sender.try_send((game_server_ip, generation, session_epoch)) {
             log::warn!(
-                "Auto-routing: Lookup channel closed — releasing packets for {} and disabling holding behavior",
+                "Auto-routing: Lookup queue unavailable ({error}) - keeping packets for {} on the current relay",
                 game_server_ip
             );
-            self.clear_pending_lookup(game_server_ip);
+            self.clear_pending_lookup_for_session(game_server_ip, session_epoch);
             return AutoRoutingAction::NoAction;
         }
         log::info!(
@@ -837,13 +838,21 @@ impl AutoRouter {
         self.pending_lookups.read().contains(&ip)
     }
 
-    /// Clear a pending lookup (called when the ipinfo.io lookup completes).
+    /// Clear a pending lookup owned by the current session.
     /// Uses write() (blocking) because this runs in the async background task,
     /// not the packet processing hot path. Must not fail silently or packets
     /// to this IP would be dropped forever.
     pub fn clear_pending_lookup(&self, ip: Ipv4Addr) {
+        self.clear_pending_lookup_for_session(ip, self.lookup_session_epoch());
+    }
+
+    pub(crate) fn clear_pending_lookup_for_session(&self, ip: Ipv4Addr, session_epoch: u64) {
         let mut pending = self.pending_lookups.write();
-        pending.remove(&ip);
+        // Check while holding the same lock as insertion. An old lookup's
+        // timeout/Drop must never release a newer session's hold for this IP.
+        if !self.is_current_lookup_session(session_epoch) || !pending.remove(&ip) {
+            return;
+        }
         self.pending_any
             .store(!pending.is_empty(), Ordering::Release);
         log::info!(
@@ -852,8 +861,16 @@ impl AutoRouter {
         );
     }
 
-    pub(crate) fn release_lookup_on_drop(&self, ip: Ipv4Addr) -> LookupRelease<'_> {
-        LookupRelease { router: self, ip }
+    pub(crate) fn release_lookup_on_drop(
+        &self,
+        ip: Ipv4Addr,
+        session_epoch: u64,
+    ) -> LookupRelease<'_> {
+        LookupRelease {
+            router: self,
+            ip,
+            session_epoch,
+        }
     }
 
     /// Check whether a lookup result is still allowed to change relay state.
@@ -1265,7 +1282,7 @@ mod tests {
     #[test]
     fn saturated_lookup_does_not_retry_a_connection_already_released() {
         let router = AutoRouter::new(true, "mumbai");
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         router.set_lookup_channel(tx);
         let old = Ipv4Addr::new(128, 116, 1, 1);
         let next = Ipv4Addr::new(128, 116, 1, 2);
@@ -1286,18 +1303,73 @@ mod tests {
     #[tokio::test]
     async fn cancelling_lookup_work_releases_held_packets() {
         let router = AutoRouter::new(true, "mumbai");
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
         router.set_lookup_channel(tx);
         let ip = Ipv4Addr::new(128, 116, 1, 1);
         router.evaluate_game_server(ip);
         assert!(router.is_lookup_pending(ip));
         let result = tokio::time::timeout(Duration::from_millis(1), async {
-            let _release = router.release_lookup_on_drop(ip);
+            let _release = router.release_lookup_on_drop(ip, router.lookup_session_epoch());
             std::future::pending::<()>().await;
         })
         .await;
         assert!(result.is_err());
         assert!(!router.is_lookup_pending(ip));
+    }
+
+    #[test]
+    fn old_lookup_cleanup_cannot_release_a_new_sessions_hold_for_the_same_ip() {
+        let router = AutoRouter::new(true, "mumbai");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        router.set_lookup_channel(tx);
+        let ip = Ipv4Addr::new(128, 116, 1, 1);
+        router.evaluate_game_server(ip);
+        let (_, _, old_epoch) = rx.try_recv().unwrap();
+        let old_cleanup = router.release_lookup_on_drop(ip, old_epoch);
+
+        router.reset();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        router.set_lookup_channel(tx);
+        router.evaluate_game_server(ip);
+        let (_, _, new_epoch) = rx.try_recv().unwrap();
+        assert_ne!(old_epoch, new_epoch);
+        assert!(router.is_lookup_pending(ip));
+        drop(old_cleanup);
+        assert!(
+            router.is_lookup_pending(ip),
+            "old cleanup released a newer join's packets"
+        );
+        router.clear_pending_lookup_for_session(ip, old_epoch);
+        assert!(router.is_lookup_pending(ip));
+        router.clear_pending_lookup_for_session(ip, new_epoch);
+        assert!(!router.is_lookup_pending(ip));
+    }
+
+    #[test]
+    fn a_full_lookup_queue_releases_the_candidate_without_retrying_its_live_connection() {
+        let router = AutoRouter::new(true, "mumbai");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(LOOKUP_QUEUE_CAPACITY);
+        router.set_lookup_channel(tx);
+        let first = Ipv4Addr::new(128, 116, 1, 1);
+        let next = Ipv4Addr::new(128, 116, 1, 2);
+        router.evaluate_game_server(first);
+        assert!(router.is_lookup_pending(first));
+        // Invalidating pending work must not let new work build an unbounded
+        // backlog while the resolver's old request is still stalled.
+        router.set_enabled(false);
+        backdate_game_traffic(&router, first, GAME_TRAFFIC_QUIET_HANDOFF * 2);
+        router.set_enabled(true);
+        router.evaluate_game_server(next);
+        assert!(!router.is_lookup_pending(next));
+        let (queued_ip, _, epoch) = rx.try_recv().unwrap();
+        assert_eq!(queued_ip, first);
+        assert!(!router.is_current_lookup_session(epoch));
+        assert!(rx.try_recv().is_err());
+        router.evaluate_game_server(next);
+        assert!(
+            rx.try_recv().is_err(),
+            "a released flow cannot switch relay later"
+        );
     }
 
     #[test]
@@ -1512,7 +1584,7 @@ mod tests {
 
     #[test]
     fn test_auto_router_deduplicates_ips() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1550,7 +1622,7 @@ mod tests {
 
     #[test]
     fn test_lookup_generation_tracks_newest_game_server() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1580,7 +1652,7 @@ mod tests {
         // connection later goes quiet (its connection already established
         // through the current relay — a later switch would change the
         // game-visible source IP mid-session).
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1611,7 +1683,7 @@ mod tests {
 
     #[test]
     fn test_gone_quiet_handoff_replaces_pin_and_allows_new_lookup() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1646,7 +1718,7 @@ mod tests {
         // a new match whose server appears during the hand-off overlap is deferred
         // and marked seen; once the old match goes quiet it must re-route, not
         // stay stuck on the old relay until a full disconnect.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1693,7 +1765,7 @@ mod tests {
     fn live_pinned_server_does_not_expire_on_seen_repeat() {
         // The active game server's own packets keep arriving (it is in `seen`);
         // they must NOT expire the pin or trigger a re-route while it is live.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1714,7 +1786,7 @@ mod tests {
         // The quiet check is re-verified at lookup-processing time: if the
         // previous connection resumes while the handoff lookup is in flight,
         // the result must be discarded.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1740,7 +1812,7 @@ mod tests {
 
     #[test]
     fn test_reset_invalidates_inflight_lookup_session() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1761,7 +1833,7 @@ mod tests {
         // Disabling Auto Route while a lookup is in flight (queued, resolving,
         // or mid-auth-handshake) must cancel the switch at commit time, and
         // re-enabling must restore the live gate.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1831,7 +1903,7 @@ mod tests {
 
     #[test]
     fn test_pending_lookup_marked_and_cleared() {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -1907,7 +1979,7 @@ mod tests {
         // Toggling Auto Route off then back on while a lookup is in flight
         // must permanently kill that lookup: the later gates would otherwise
         // see the re-enabled value and let a stale switch commit.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -2013,7 +2085,7 @@ mod tests {
         // Disabling while a lookup is pending must release the held packets
         // right away, not when the dead lookup eventually unwinds in the
         // background task.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -2037,7 +2109,7 @@ mod tests {
         // A settings save with Auto Route still on must NOT release a live
         // lookup's held packets: the candidate would establish through the
         // current relay and then be switched mid-session at commit.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -2059,7 +2131,7 @@ mod tests {
         // game. Enabling from settings must not mistake the flowing
         // connection's next packet for a fresh join — that would hold its
         // packets and commit a mid-session relay switch.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(false, "singapore");
         router.set_lookup_channel(tx);
 
@@ -2092,7 +2164,7 @@ mod tests {
         // Negative control for the quarantine: traffic that already went
         // quiet while disabled is NOT quarantined — when the player joins
         // that server again it is a genuine fresh join and must re-route.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(false, "singapore");
         router.set_lookup_channel(tx);
 
@@ -2114,7 +2186,7 @@ mod tests {
     fn test_redundant_enable_does_not_quarantine() {
         // Settings saves call set_enabled(true) even when Auto Route was
         // already on; that must not quarantine anything.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = AutoRouter::new(true, "singapore");
         router.set_lookup_channel(tx);
 
@@ -2390,7 +2462,7 @@ mod estimate_tests {
     #[test]
     fn regional_telemetry_does_not_hold_or_reconsider_an_established_game() {
         let router = measured_router();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         router.set_lookup_channel(tx);
         let ip = "128.116.47.33".parse().unwrap();
         router.evaluate_game_server(ip);

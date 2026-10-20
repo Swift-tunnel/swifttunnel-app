@@ -2314,7 +2314,9 @@ impl VpnConnection {
         // the task: automatic relay replacement is disabled for them.
         if custom_relay_server.is_none() {
             let (lookup_tx, mut lookup_rx) =
-                tokio::sync::mpsc::unbounded_channel::<(std::net::Ipv4Addr, u64, u64)>();
+                tokio::sync::mpsc::channel::<(std::net::Ipv4Addr, u64, u64)>(
+                    super::auto_routing::LOOKUP_QUEUE_CAPACITY,
+                );
             auto_router.set_lookup_channel(lookup_tx);
 
             let router_for_lookup = Arc::clone(&auto_router);
@@ -2324,7 +2326,12 @@ impl VpnConnection {
                 use crate::geolocation::GameServerRegionLookup;
 
                 while let Some((ip, generation, session_epoch)) = lookup_rx.recv().await {
-                    let _release_lookup = router_for_lookup.release_lookup_on_drop(ip);
+                    if !router_for_lookup.is_current_lookup_session(session_epoch) {
+                        log::debug!("Auto-routing: Skipping stale queued lookup for {ip}");
+                        continue;
+                    }
+                    let _release_lookup =
+                        router_for_lookup.release_lookup_on_drop(ip, session_epoch);
                     // A slow resolver, token refresh, or auth lock must not hold a join indefinitely.
                     let work = async {
                         // Auto Route may have been disabled (settings save) after
@@ -2335,7 +2342,7 @@ impl VpnConnection {
                                 "Auto-routing: Dropping queued lookup for {} , auto-routing was disabled",
                                 ip
                             );
-                            router_for_lookup.clear_pending_lookup(ip);
+                            router_for_lookup.clear_pending_lookup_for_session(ip, session_epoch);
                             return;
                         }
 
@@ -2389,7 +2396,8 @@ impl VpnConnection {
                                     "Auto-routing: Resolver returned no structured region for {} , releasing packets on current relay",
                                     ip
                                 );
-                                router_for_lookup.clear_pending_lookup(ip);
+                                router_for_lookup
+                                    .clear_pending_lookup_for_session(ip, session_epoch);
                                 return;
                             }
                             GameServerRegionLookup::Failed => {
@@ -2397,7 +2405,8 @@ impl VpnConnection {
                                     "Auto-routing: Resolver lookup failed for {} (after retry) , releasing packets on current relay",
                                     ip
                                 );
-                                router_for_lookup.clear_pending_lookup(ip);
+                                router_for_lookup
+                                    .clear_pending_lookup_for_session(ip, session_epoch);
                                 return;
                             }
                         };
@@ -2410,7 +2419,7 @@ impl VpnConnection {
                                 "Auto-routing: Dropping resolved lookup for {} , auto-routing was disabled",
                                 ip
                             );
-                            router_for_lookup.clear_pending_lookup(ip);
+                            router_for_lookup.clear_pending_lookup_for_session(ip, session_epoch);
                             return;
                         }
                         if !router_for_lookup.is_current_lookup_session(session_epoch) {
@@ -2420,7 +2429,7 @@ impl VpnConnection {
                                 generation,
                                 session_epoch
                             );
-                            router_for_lookup.clear_pending_lookup(ip);
+                            router_for_lookup.clear_pending_lookup_for_session(ip, session_epoch);
                             return;
                         }
                         if !router_for_lookup.should_process_lookup_result(ip) {
@@ -2429,7 +2438,7 @@ impl VpnConnection {
                                 ip,
                                 generation
                             );
-                            router_for_lookup.clear_pending_lookup(ip);
+                            router_for_lookup.clear_pending_lookup_for_session(ip, session_epoch);
                             return;
                         }
                         if !router_for_lookup.pin_active_game_server_for_session(ip, session_epoch)
@@ -2439,7 +2448,7 @@ impl VpnConnection {
                                 ip,
                                 generation
                             );
-                            router_for_lookup.clear_pending_lookup(ip);
+                            router_for_lookup.clear_pending_lookup_for_session(ip, session_epoch);
                             return;
                         }
 
@@ -2637,7 +2646,7 @@ impl VpnConnection {
                                 router_for_lookup.mark_region_fallback();
                             }
                         }
-                        router_for_lookup.clear_pending_lookup(ip);
+                        router_for_lookup.clear_pending_lookup_for_session(ip, session_epoch);
                     };
                     if tokio::time::timeout(Duration::from_secs(7), work)
                         .await
@@ -2647,7 +2656,7 @@ impl VpnConnection {
                             "Auto-routing: Join deadline reached; keeping the established route"
                         );
                     }
-                    router_for_lookup.clear_pending_lookup(ip);
+                    router_for_lookup.clear_pending_lookup_for_session(ip, session_epoch);
                 }
                 log::debug!("Auto-routing: Lookup task exiting (channel closed)");
             });

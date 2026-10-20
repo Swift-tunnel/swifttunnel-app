@@ -8288,21 +8288,25 @@ where
         //
         // The logging further down only fires on the relay path, so a blocked
         // user's failing traffic — which by definition went direct — left no
-        // trace at all. Off unless a bypass session switched it on.
-        if crate::vpn::bypass_diag::is_enabled() {
-            let relayed = is_game_dst || tcp_api_bootstrap_allowed;
-            let owner_name =
-                tcp_api_bootstrap_owner.and_then(|pid| snapshot.pid_names.get(&pid).cloned());
-            crate::vpn::bypass_diag::record(crate::vpn::bypass_diag::Decision {
+        // trace at all. Build support metadata only for a new, budgeted record.
+        let diagnostic_protocol = if protocol == Protocol::Tcp {
+            "tcp"
+        } else {
+            "udp"
+        };
+        let diagnostic_relayed = is_game_dst || tcp_api_bootstrap_allowed;
+        crate::vpn::bypass_diag::record_lazy(
+            dst_ip,
+            dst_port,
+            diagnostic_protocol,
+            diagnostic_relayed,
+            || crate::vpn::bypass_diag::Decision {
                 dst_ip,
                 dst_port,
-                protocol: if protocol == Protocol::Tcp {
-                    "tcp"
-                } else {
-                    "udp"
-                },
-                relayed,
-                owner: owner_name.as_deref(),
+                protocol: diagnostic_protocol,
+                relayed: diagnostic_relayed,
+                owner: tcp_api_bootstrap_owner
+                    .and_then(|pid| snapshot.pid_names.get(&pid).map(String::as_str)),
                 owner_is_tunnel_app: tcp_api_bootstrap_owned_by_tunnel || snapshot_tunnel_hit,
                 owner_is_browser: tcp_api_bootstrap_owned_by_browser,
                 matched_bootstrap_pin: crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip),
@@ -8310,8 +8314,8 @@ where
                     dst_ip, dst_port, protocol, true,
                 ),
                 pinned_direct: dst_is_direct_tcp,
-            });
-        }
+            },
+        );
 
         if is_game_dst || tcp_api_bootstrap_allowed {
             // Log speculative tunneling for debugging (first 20 times only)
@@ -12092,7 +12096,7 @@ mod tests {
 
     #[test]
     fn test_auto_routing_packet_action_holds_new_game_server_packet() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
         router.set_lookup_channel(tx);
 
@@ -12112,7 +12116,7 @@ mod tests {
 
     #[test]
     fn test_auto_routing_packet_action_ignores_roblox_tcp_api_packet() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
         router.set_lookup_channel(tx);
 
@@ -12129,7 +12133,7 @@ mod tests {
 
     #[test]
     fn test_auto_routing_packet_action_ignores_low_port_udp_to_roblox_range() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
         router.set_lookup_channel(tx);
 
@@ -12146,7 +12150,7 @@ mod tests {
 
     #[test]
     fn test_auto_routing_packet_action_holds_pending_tail_fragment_without_evaluating() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
         router.set_lookup_channel(tx);
 
@@ -12183,7 +12187,7 @@ mod tests {
 
     #[test]
     fn test_auto_routing_packet_action_ignores_similar_non_roblox_destination() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
         router.set_lookup_channel(tx);
 
@@ -12200,7 +12204,7 @@ mod tests {
 
     #[test]
     fn test_auto_routing_packet_action_ignores_roblox_infrastructure_destination() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let router = Arc::new(crate::vpn::auto_routing::AutoRouter::new(true, "singapore"));
         router.set_lookup_channel(tx);
 
