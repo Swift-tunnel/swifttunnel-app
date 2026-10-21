@@ -47,6 +47,7 @@ pub mod roblox_watcher;
 pub mod roblox_window;
 pub mod rolling_log;
 pub mod settings;
+pub mod single_client;
 pub mod structs;
 pub mod system_optimizer;
 #[cfg(test)]
