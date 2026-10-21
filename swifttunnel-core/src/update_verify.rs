@@ -43,7 +43,10 @@ pub fn verify_manifest_signature_with_public_key(
 /// looking like a signature problem.
 pub fn normalize_sha256(value: &str) -> String {
     let trimmed = value.trim();
-    let without_prefix = if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("sha256:") {
+    let without_prefix = if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sha256:"))
+    {
         &trimmed[7..]
     } else {
         trimmed
@@ -146,6 +149,13 @@ mod tests {
     /// Tauri writes latest.json hashes as "sha256:abc...". Dropping that
     /// prefix step fails every desktop update, and it fails looking like a
     /// signature problem rather than a formatting one.
+    #[test]
+    fn malformed_unicode_hashes_are_rejected_without_panicking() {
+        for expected in ["éééé", "aaaaaaé", "123456🔒"] {
+            assert!(verify_bytes_sha256(b"installer", expected, "installer").is_err());
+        }
+    }
+
     #[test]
     fn the_sha256_prefix_is_stripped() {
         assert_eq!(normalize_sha256("SHA256:ABCDEF1234"), "abcdef1234");
