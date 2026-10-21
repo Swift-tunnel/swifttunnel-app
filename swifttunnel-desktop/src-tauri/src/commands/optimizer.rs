@@ -261,13 +261,26 @@ pub async fn boost_update_config(
         // A launch or watcher must not slip between applying the files and
         // publishing their matching config. Keep optimizer -> settings order.
         let ro = roblox_optimizer.lock();
-        if let Err(e) = ro.restore_settings() {
-            warnings.push(format!("Roblox optimizer restore: {}", e));
-        }
-        match ro.apply_optimizations(&config.roblox_settings) {
-            Ok(opt_warnings) => warnings.extend(opt_warnings),
-            Err(e) => warnings.push(format!("Roblox optimizer: {}", e)),
-        }
+        let saved_roblox = settings.lock().config.roblox_settings.clone();
+        let (roblox_settings, roblox_warnings) = apply_global_roblox_config(
+            &config.roblox_settings,
+            &saved_roblox,
+            swifttunnel_core::roblox_game_profile::pending()
+                || swifttunnel_core::roblox_launch_flags::pending(),
+            || {
+                let mut warnings = Vec::new();
+                if let Err(e) = ro.restore_settings() {
+                    warnings.push(format!("Roblox optimizer restore: {}", e));
+                }
+                match ro.apply_optimizations(&config.roblox_settings) {
+                    Ok(opt_warnings) => warnings.extend(opt_warnings),
+                    Err(e) => warnings.push(format!("Roblox optimizer: {}", e)),
+                }
+                warnings
+            },
+        );
+        applied_config.roblox_settings = roblox_settings;
+        warnings.extend(roblox_warnings);
 
         {
             let mut s = settings.lock();
@@ -375,6 +388,23 @@ fn persist_effective_config(
         warnings,
         applied_config: settings.config.clone(),
     })
+}
+
+fn apply_global_roblox_config(
+    requested: &swifttunnel_core::structs::RobloxSettingsConfig,
+    saved: &swifttunnel_core::structs::RobloxSettingsConfig,
+    temporary_pending: bool,
+    apply: impl FnOnce() -> Vec<String>,
+) -> (swifttunnel_core::structs::RobloxSettingsConfig, Vec<String>) {
+    if temporary_pending {
+        let warnings = if requested != saved {
+            vec!["Roblox's per-game settings are still active. Close Roblox, then apply your global Roblox changes again after recovery finishes.".into()]
+        } else {
+            Vec::new()
+        };
+        return (saved.clone(), warnings);
+    }
+    (requested.clone(), apply())
 }
 
 fn persist_applied_config(
@@ -613,6 +643,52 @@ pub async fn boost_close_roblox(state: State<'_, AppState>) -> Result<(), String
 mod tests {
     use super::*;
     use swifttunnel_core::settings::AppSettings;
+
+    #[test]
+    fn a_temporary_game_profile_is_not_overwritten_by_a_global_boost_apply() {
+        let saved = swifttunnel_core::structs::RobloxSettingsConfig::default();
+        let mut requested = saved.clone();
+        requested.target_fps = 400;
+        let mut touched = false;
+        let (applied, warnings) = apply_global_roblox_config(&requested, &saved, true, || {
+            touched = true;
+            Vec::new()
+        });
+        assert!(
+            !touched,
+            "Neither restore nor apply may touch the temporary game files"
+        );
+        assert_eq!(applied, saved);
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_network_only_apply_during_a_game_does_not_rewrite_roblox_or_warn() {
+        let saved = swifttunnel_core::structs::RobloxSettingsConfig::default();
+        let mut touched = false;
+        let (applied, warnings) = apply_global_roblox_config(&saved, &saved, true, || {
+            touched = true;
+            Vec::new()
+        });
+        assert!(!touched);
+        assert_eq!(applied, saved);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn global_roblox_apply_resumes_after_temporary_settings_are_restored() {
+        let saved = swifttunnel_core::structs::RobloxSettingsConfig::default();
+        let mut requested = saved.clone();
+        requested.target_fps = 400;
+        let mut touched = false;
+        let (applied, warnings) = apply_global_roblox_config(&requested, &saved, false, || {
+            touched = true;
+            vec!["existing apply warning".into()]
+        });
+        assert!(touched);
+        assert_eq!(applied, requested);
+        assert_eq!(warnings, ["existing apply warning"]);
+    }
 
     #[test]
     fn failed_boost_save_keeps_the_last_confirmed_config_in_memory() {
