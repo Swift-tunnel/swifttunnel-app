@@ -37,8 +37,8 @@ function releaseId(version: string, tag: string | null) {
 }
 
 function readDismissedRelease() {
-  if (typeof globalThis.localStorage === "undefined") return null;
   try {
+    if (typeof globalThis.localStorage === "undefined") return null;
     return globalThis.localStorage.getItem(WHATS_NEW_DISMISSED_KEY);
   } catch {
     return null;
@@ -46,8 +46,8 @@ function readDismissedRelease() {
 }
 
 function rememberDismissedRelease(version: string, tag: string | null) {
-  if (typeof globalThis.localStorage === "undefined") return;
   try {
+    if (typeof globalThis.localStorage === "undefined") return;
     globalThis.localStorage.setItem(
       WHATS_NEW_DISMISSED_KEY,
       releaseId(version, tag),

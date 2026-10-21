@@ -100,6 +100,27 @@ describe("stores/updaterStore", () => {
     expect(updaterInstallChannel).toHaveBeenCalledOnce();
   });
 
+  it("can offer, dismiss and install an update when the storage getter is blocked", async () => {
+    updaterCheckChannel.mockResolvedValue(available);
+    updaterInstallChannel.mockResolvedValue({ reboot_required: false });
+    const store = await loadStore();
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage")!;
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get: () => { throw new Error("Storage access denied"); },
+    });
+    try {
+      await store.getState().checkForUpdates();
+      expect(store.getState().status).toBe("update_available");
+      expect(() => store.getState().dismissWhatsNew()).not.toThrow();
+      await store.getState().installUpdate();
+      expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", available.available_version);
+      expect(store.getState().status).toBe("up_to_date");
+    } finally {
+      Object.defineProperty(globalThis, "localStorage", previous);
+    }
+  });
+
   it("shows structured failures from update checks and installation", async () => {
     updaterCheckChannel.mockRejectedValueOnce({ message: "Update service unavailable" });
     const store = await loadStore();
