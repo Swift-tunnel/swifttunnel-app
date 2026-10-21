@@ -17,6 +17,28 @@ use base64::Engine;
 use ring::signature::{ED25519, UnparsedPublicKey};
 use sha2::{Digest, Sha256};
 
+/// Select the signature on the same stable release as an unverified manifest.
+/// This only constructs a URL on the fixed repository. Callers must still
+/// authenticate the exact manifest bytes before trusting any payload fields.
+pub fn stable_manifest_signature_url(bytes: &[u8]) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Target {
+        version: String,
+        tag: String,
+    }
+    let target: Target = serde_json::from_slice(bytes)
+        .map_err(|_| "The release information is invalid.".to_string())?;
+    let version = semver::Version::parse(&target.version)
+        .map_err(|_| "The release version is invalid.".to_string())?;
+    if !version.pre.is_empty() || !version.build.is_empty() || target.tag != format!("v{version}") {
+        return Err("The latest release is not a stable version.".into());
+    }
+    Ok(format!(
+        "https://github.com/Swift-tunnel/swifttunnel-app/releases/download/{}/swifttunnel-update-manifest.sig",
+        target.tag
+    ))
+}
+
 /// Check an Ed25519 signature over the exact manifest bytes.
 ///
 /// The bytes must be the ones fetched, not a re-serialisation of a parsed
@@ -79,6 +101,26 @@ mod tests {
     use super::*;
     use ring::rand::SystemRandom;
     use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    #[test]
+    fn signature_selection_is_pinned_and_cannot_escape_the_release_repository() {
+        assert_eq!(
+            stable_manifest_signature_url(br#"{"version":"3.1.6","tag":"v3.1.6"}"#).unwrap(),
+            "https://github.com/Swift-tunnel/swifttunnel-app/releases/download/v3.1.6/swifttunnel-update-manifest.sig"
+        );
+        for (version, tag) in [
+            ("3.1.6", "../../other"),
+            ("3.1.6", "v3.1.7"),
+            ("3.1.6-beta.1", "v3.1.6-beta.1"),
+            ("3.1.6+other", "v3.1.6+other"),
+            ("invalid", "vinvalid"),
+        ] {
+            let bytes =
+                serde_json::to_vec(&serde_json::json!({"version": version, "tag": tag})).unwrap();
+            assert!(stable_manifest_signature_url(&bytes).is_err());
+        }
+        assert!(stable_manifest_signature_url(b"not json").is_err());
+    }
 
     fn sign_payload(payload: &[u8]) -> (Vec<u8>, String) {
         let rng = SystemRandom::new();

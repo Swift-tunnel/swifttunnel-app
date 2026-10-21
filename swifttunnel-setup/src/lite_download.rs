@@ -1,5 +1,8 @@
 //! Download a Lite MSI only after authenticating the published release manifest.
-use crate::update_verify::{verify_bytes_sha256, verify_manifest_signature_with_public_key};
+use crate::update_verify::{
+    stable_manifest_signature_url as manifest_signature_url, verify_bytes_sha256,
+    verify_manifest_signature_with_public_key,
+};
 use base64::Engine;
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -38,17 +41,6 @@ fn stable_manifest(bytes: &[u8]) -> Result<(Manifest, semver::Version), String> 
         return Err("The latest Lite release is not a stable version.".into());
     }
     Ok((manifest, version))
-}
-
-fn manifest_signature_url(bytes: &[u8]) -> Result<String, String> {
-    // This selects only a strictly formatted tag on our fixed repository.
-    // Its contents do not authorize a download until verify_asset authenticates
-    // these exact bytes against the returned signature and compiled public key.
-    let (manifest, _) = stable_manifest(bytes)?;
-    Ok(format!(
-        "{RELEASES}download/{}/swifttunnel-update-manifest.sig",
-        manifest.tag
-    ))
 }
 
 fn verify_asset(

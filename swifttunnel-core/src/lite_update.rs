@@ -31,10 +31,11 @@
 use semver::Version;
 use serde::Deserialize;
 
-use crate::update_verify::{verify_bytes_sha256, verify_manifest_signature_with_public_key};
+use crate::update_verify::{
+    stable_manifest_signature_url, verify_bytes_sha256, verify_manifest_signature_with_public_key,
+};
 
 const MANIFEST_URL: &str = "https://github.com/Swift-tunnel/swifttunnel-app/releases/latest/download/swifttunnel-update-manifest.json";
-const SIGNATURE_URL: &str = "https://github.com/Swift-tunnel/swifttunnel-app/releases/latest/download/swifttunnel-update-manifest.sig";
 
 /// Replaced at build time. A build that still carries this cannot verify
 /// anything and refuses to update rather than trusting a download.
@@ -149,8 +150,9 @@ pub async fn check_for_update(current_version: &str) -> Result<Option<AvailableU
     let client = http_client(REQUEST_TIMEOUT)?;
 
     let manifest_bytes = fetch(&client, MANIFEST_URL, "update manifest", 1024 * 1024).await?;
+    let signature_url = stable_manifest_signature_url(&manifest_bytes)?;
     let signature =
-        String::from_utf8(fetch(&client, SIGNATURE_URL, "manifest signature", 4096).await?)
+        String::from_utf8(fetch(&client, &signature_url, "manifest signature", 4096).await?)
             .map_err(|_| "the manifest signature was not text".to_string())?;
 
     // Against the bytes as fetched. Parsing and re-encoding would change the
