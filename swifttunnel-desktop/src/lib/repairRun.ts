@@ -1,4 +1,6 @@
 import {
+  MAX_SAVED_REPAIR_LENGTH,
+  REPAIR_ISSUE_IDS,
   parseSavedRepairResult,
   statusLabel,
   type RepairIssueId,
@@ -16,10 +18,11 @@ export interface RepairRun {
 }
 
 export function parseRepairRun(raw: string | null): RepairRun | null {
-  if (!raw) return null;
+  if (!raw || raw.length > MAX_SAVED_REPAIR_LENGTH) return null;
   try {
     const run = JSON.parse(raw);
-    if (!run || !Number.isFinite(run.ranAt) || !Array.isArray(run.items)) return null;
+    if (!run || !Number.isFinite(run.ranAt) || !Array.isArray(run.items)
+      || run.items.length > REPAIR_ISSUE_IDS.length) return null;
     const items: RepairItemResult[] = [];
     for (const item of run.items) {
       if (!item || typeof item.label !== "string") return null;

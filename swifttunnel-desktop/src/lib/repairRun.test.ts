@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { formatRunForSupport, parseRepairRun, summarizeRepairRun } from "./repairRun";
+import { parseSavedRepairResult } from "./repairResults";
 
 const legacy = {
   ranAt: 1234, overall: "healthy",
@@ -7,6 +8,24 @@ const legacy = {
 };
 
 describe("repair-all results", () => {
+  it.each([parseRepairRun, parseSavedRepairResult])("rejects oversized saved text before parsing it during startup: %s", (read) => {
+    const oversized = " ".repeat(1024 * 1024) + JSON.stringify(legacy);
+    const parse = vi.spyOn(JSON, "parse");
+    try {
+      expect(read(oversized)).toBeNull();
+      expect(parse).not.toHaveBeenCalled();
+    } finally { parse.mockRestore(); }
+  });
+
+  it("rejects an impossible check count before serializing each saved item", () => {
+    const raw = JSON.stringify({ ...legacy, items: Array(1000).fill(legacy.items[0]) });
+    const stringify = vi.spyOn(JSON, "stringify");
+    try {
+      expect(parseRepairRun(raw)).toBeNull();
+      expect(stringify).not.toHaveBeenCalled();
+    } finally { stringify.mockRestore(); }
+  });
+
   it("retains failure evidence and next steps after saving and reopening", () => {
     const run = parseRepairRun(JSON.stringify({ ...legacy, items: [{
       ...legacy.items[0], status: "failed", nextStep: "Restart Windows and retry.",

@@ -2,6 +2,10 @@
 
 import type { StartupRegistrationSnapshot } from "./commands";
 
+// Saved summaries are read synchronously at startup. Ignore damaged/oversized
+// cache values instead of parsing an arbitrarily large report on the UI thread.
+export const MAX_SAVED_REPAIR_LENGTH = 1024 * 1024;
+
 export const REPAIR_ISSUE_IDS = [
   "no_internet",
   "driver",
@@ -78,7 +82,7 @@ export type SavedRepairResult = {
 };
 
 export function parseSavedRepairResult(raw: string | null): SavedRepairResult | null {
-  if (!raw) return null;
+  if (!raw || raw.length > MAX_SAVED_REPAIR_LENGTH) return null;
 
   try {
     const parsed: unknown = JSON.parse(raw);
