@@ -7,6 +7,9 @@
 use std::path::Path;
 #[cfg(windows)]
 use tauri_winrt_notification::{Duration, IconCrop, Sound, Toast};
+#[cfg(windows)]
+#[path = "notification_queue.rs"]
+mod queue;
 
 /// SwiftTunnel's App User Model ID for Windows notifications.
 /// Registered on first use by `ensure_aumid_registered`, so it needs no
@@ -14,7 +17,7 @@ use tauri_winrt_notification::{Duration, IconCrop, Sound, Toast};
 const SWIFTTUNNEL_AUMID: &str = "SwiftTunnel.GameBooster";
 
 #[cfg(windows)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotificationIcon {
     App,
     Swifty,
@@ -135,12 +138,15 @@ fn get_icon_path(icon: NotificationIcon) -> Option<std::path::PathBuf> {
 
 #[cfg(windows)]
 fn show_notification_with_icon(title: &str, message: &str, icon: NotificationIcon) {
-    // Run on a background thread to avoid blocking the GUI thread
-    let title = title.to_string();
-    let message = message.to_string();
-    let result = std::thread::Builder::new()
-        .name("windows-toast".into())
-        .spawn(move || {
+    static QUEUE: std::sync::OnceLock<queue::ToastQueue> = std::sync::OnceLock::new();
+    let result = QUEUE.get_or_init(queue::ToastQueue::default).submit(
+        queue::Notice::new(title, message, icon),
+        |queue::Notice {
+             title,
+             message,
+             icon,
+             ..
+         }| {
             let aumid = get_aumid();
             let mut toast = Toast::new(aumid)
                 .title(&title)
@@ -156,7 +162,8 @@ fn show_notification_with_icon(title: &str, message: &str, icon: NotificationIco
                 Ok(_) => log::debug!("Notification shown: {} - {}", title, message),
                 Err(e) => log::warn!("Failed to show notification: {}", e),
             }
-        });
+        },
+    );
     if let Err(error) = result {
         log::warn!("Notification worker could not start: {error}");
     }
