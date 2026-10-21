@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 static PENDING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 static INITIAL_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub fn queue(place: String) {
@@ -39,9 +38,9 @@ pub fn create(place: &str, name: &str) -> Result<String, String> {
     if !swifttunnel_core::roblox_library::valid_place_id(place) {
         return Err("Choose a valid game.".into());
     }
-    let base =
-        std::env::var_os("USERPROFILE").ok_or("Windows could not find your Downloads folder.")?;
-    let directory = PathBuf::from(base).join("Downloads/SwiftTunnel shortcuts");
+    let directory = dirs::download_dir()
+        .ok_or("Windows could not find your Downloads folder.")?
+        .join("SwiftTunnel shortcuts");
     swifttunnel_core::roblox_native_launch::safe_path(&directory)?;
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let label: String = name
