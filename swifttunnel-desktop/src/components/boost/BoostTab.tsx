@@ -10,7 +10,6 @@ import { SettingsSaveNotice } from "../ui/SettingsSaveNotice";
 import {
   boostCloseRoblox,
   boostGetMetrics,
-  boostResetRobloxClient,
 } from "../../lib/commands";
 import { normalizeNetworkBoostConfig } from "../../lib/settings";
 import {
@@ -205,22 +204,8 @@ export function BoostTab() {
     }
   }, [addToast, boost, enableFullBanDraft]);
   useEffect(() => {
-    let canceled = false;
-    const observed = useSettingsStore.getState().settings.config;
-    void boost.syncEffectiveConfig().then((appliedConfig) => {
-      if (canceled || !appliedConfig) return;
-      const current = useSettingsStore.getState().settings.config;
-      const merged = mergeConfigChanges(current, observed, appliedConfig);
-      if (!configsEqual(merged, current)) {
-        // The native sync already saved its changes. A second full settings
-        // save here can overwrite a newer FastFlags or overlay edit.
-        updateSettings({ config: merged });
-      }
-    });
-    return () => {
-      canceled = true;
-    };
-  }, [boost.syncEffectiveConfig, updateSettings]);
+    void boost.syncEffectiveConfig();
+  }, [boost.syncEffectiveConfig]);
 
   const hasConfigChanges = !configsEqual(draft, savedConfig);
   const hasGPPChanges = JSON.stringify(draftGPP) !== JSON.stringify(savedGPP);
@@ -253,16 +238,14 @@ export function BoostTab() {
     if (validationError || isApplying || isRestarting) return;
     setIsApplying(true);
     try {
-      let appliedConfig = draft;
       if (hasConfigChanges) {
-        appliedConfig = await boost.updateConfig(JSON.stringify(draft));
+        await boost.updateConfig(JSON.stringify(draft));
       }
       updateSettings({
-        config: appliedConfig,
         game_process_performance: draftGPP,
         enable_country_ban: draftCountryBan,
       });
-      setDraft(appliedConfig);
+      setDraft(useSettingsStore.getState().settings.config);
       await saveSettings(true);
       const currentWarning = useBoostStore.getState().warning;
       if (currentWarning) {
@@ -293,16 +276,14 @@ export function BoostTab() {
     if (validationError || isRestarting || isApplying) return;
     setIsRestarting(true);
     try {
-      let appliedConfig = draft;
       if (hasConfigChanges) {
-        appliedConfig = await boost.updateConfig(JSON.stringify(draft));
+        await boost.updateConfig(JSON.stringify(draft));
       }
       updateSettings({
-        config: appliedConfig,
         game_process_performance: draftGPP,
         enable_country_ban: draftCountryBan,
       });
-      setDraft(appliedConfig);
+      setDraft(useSettingsStore.getState().settings.config);
       await saveSettings(true);
       await boost.restartRoblox();
     } catch (error) {
@@ -336,13 +317,8 @@ export function BoostTab() {
   const resetRobloxClient = useCallback(async () => {
     setIsResetting(true);
     try {
-      const report = await boostResetRobloxClient();
+      const report = await useSettingsStore.getState().resetRobloxClient();
       setResetDialogOpen(false);
-
-      // Reload rather than patch the draft: the command resets the saved
-      // Roblox config too, and anything still showing Ultraboost as on over a
-      // client with no flags left in it would be a lie.
-      await useSettingsStore.getState().load();
 
       if (report.failures.length > 0) {
         addToast({
@@ -385,29 +361,7 @@ export function BoostTab() {
     setDraftCountryBan(savedCountryBan);
   }, [savedConfig, savedGPP, savedCountryBan]);
 
-  /**
-   * Choosing a profile applies it.
-   *
-   * It used to only fill the draft, so the button lit up as selected while
-   * nothing had been written to the client. That is how someone ends up
-   * convinced they turned Ultraboost off: they pick Quality, see Quality
-   * selected, and close the app with the flags still on disk. A support ticket
-   * about permanently low render distance was exactly this, and the player
-   * uninstalled to escape a setting they had already tried to switch off.
-   *
-   * Staging is kept for the one case where applying is not possible: a config
-   * the validator rejects still lands in the draft, so the reason shows up in
-   * the bar the way it always did rather than being swallowed here.
-   */
-  /// Choosing a profile stages it, like every other control on this page.
-  ///
-  /// It briefly applied on selection instead, to stop somebody picking Quality
-  /// and walking away believing Ultraboost was off. That fixed the wrong thing.
-  /// Selecting a profile already raises the sticky bar with Apply and Discard,
-  /// so nothing was hidden, and applying on selection made one setting behave
-  /// two different ways: the Ultraboost toggle waits for Apply, while a profile
-  /// that sets Ultraboost would not have. Draft and commit is the model here,
-  /// and a preset is a draft like anything else.
+  // Profiles stage a draft, like the other controls, until Apply is pressed.
   function selectProfile(id: OptimizationProfile) {
     if (isApplying || isRestarting) return;
     setDraft(getPresetConfig(id, draft));
@@ -433,14 +387,11 @@ export function BoostTab() {
       };
       setNetworkApplying(true);
       try {
-        const appliedConfig = await boost.updateConfig(
-          JSON.stringify(nextDraft),
-        );
+        await boost.updateConfig(JSON.stringify(nextDraft));
         updateSettings({
-          config: appliedConfig,
           game_process_performance: draftGPP,
         });
-        setDraft(appliedConfig);
+        setDraft(useSettingsStore.getState().settings.config);
         await saveSettings(true);
 
         const currentWarning = useBoostStore.getState().warning;

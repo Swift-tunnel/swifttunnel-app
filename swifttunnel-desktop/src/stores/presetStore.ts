@@ -162,8 +162,8 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
         set({ activeId: null });
         const cur = useSettingsStore.getState().settings;
         const nextConfig = mergePresetIntoConfig(cur.config, preset);
-        const applied = await useBoostStore.getState().updateConfig(JSON.stringify(nextConfig));
-        useSettingsStore.getState().update({ config: applied, selected_game_presets: preset.game_presets });
+        await useBoostStore.getState().updateConfig(JSON.stringify(nextConfig));
+        useSettingsStore.getState().update({ selected_game_presets: preset.game_presets });
         await useSettingsStore.getState().save(true);
       });
       if (!result) {

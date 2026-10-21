@@ -10,13 +10,12 @@ import {
   boostGetSystemMemory,
   boostCleanRam,
   boostGetSystemInfo,
-  boostUpdateConfig,
-  boostSyncEffectiveConfig,
   boostRestartRoblox,
 } from "../lib/commands";
 import type { BoostMetricsOptions } from "../lib/commands";
 import { formatErrorMessage, reportError } from "../lib/errors";
 import { notify } from "../lib/notifications";
+import { useSettingsStore } from "./settingsStore";
 
 // Each option is boolean or absent, so at most nine native requests can be
 // pending in this window. Slow samplers must not queue another job every tick.
@@ -166,7 +165,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
   updateConfig: async (configJson) => {
     try {
       set({ error: null, warning: null });
-      const result = await boostUpdateConfig(configJson);
+      const result = await useSettingsStore.getState().applyBoostConfig(configJson);
       if (result.warnings.length > 0) {
         const message = result.warnings.join("; ");
         set({ warning: message });
@@ -187,7 +186,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
   syncEffectiveConfig: async () => {
     try {
       set({ error: null, warning: null });
-      const result = await boostSyncEffectiveConfig();
+      const result = await useSettingsStore.getState().syncBoostConfig();
       if (result.warnings.length > 0) {
         set({ warning: result.warnings.join("; ") });
       }

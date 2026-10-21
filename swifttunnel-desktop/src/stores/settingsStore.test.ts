@@ -2,18 +2,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../lib/settings";
 import type { AppSettings } from "../lib/types";
 
-const { settingsLoad, settingsSave, boostResetRobloxSettings, gamesSaveFlags } = vi.hoisted(() => ({
+const { settingsLoad, settingsSave, boostResetRobloxClient, boostResetRobloxSettings, gamesSaveFlags, boostUpdateConfig, boostSyncEffectiveConfig } = vi.hoisted(() => ({
   settingsLoad: vi.fn(),
   settingsSave: vi.fn(),
   boostResetRobloxSettings: vi.fn(),
+  boostResetRobloxClient: vi.fn(),
   gamesSaveFlags: vi.fn(),
+  boostUpdateConfig: vi.fn(),
+  boostSyncEffectiveConfig: vi.fn(),
 }));
 
 vi.mock("../lib/commands", () => ({
   settingsLoad,
   settingsSave,
   boostResetRobloxSettings,
+  boostResetRobloxClient,
   gamesSaveFlags,
+  boostUpdateConfig,
+  boostSyncEffectiveConfig,
 }));
 
 async function loadStore() {
@@ -22,6 +28,160 @@ async function loadStore() {
 }
 
 describe("stores/settingsStore", () => {
+  it("orders a full client reset with saves and refreshes only the reset section", async () => {
+    let release!: () => void;
+    const order: string[] = [];
+    settingsSave.mockImplementationOnce(async () => {
+      order.push("earlier save");
+      await new Promise<void>(resolve => { release = resolve; });
+    }).mockImplementation(async () => { order.push("later save"); });
+    const report = { failures: [], flag_files_removed: 1 };
+    boostResetRobloxClient.mockImplementation(async () => { order.push("reset"); return report; });
+    settingsLoad.mockResolvedValue(structuredClone(DEFAULT_SETTINGS));
+    const store = await loadStore();
+    store.getState().update({ config: { ...DEFAULT_SETTINGS.config,
+      roblox_settings: { ...DEFAULT_SETTINGS.config.roblox_settings, unlock_fps: true },
+    } });
+    const first = store.getState().save(true);
+    await Promise.resolve();
+    const resetting = store.getState().resetRobloxClient();
+    store.getState().setTab("games");
+    store.getState().update({ minimize_to_tray: false, config: { ...store.getState().settings.config,
+      overlay: { ...DEFAULT_SETTINGS.config.overlay, enabled: true },
+    } });
+    const last = store.getState().save(true);
+    release();
+    const results = await Promise.all([first, resetting, last]);
+    expect(results[1]).toBe(report);
+    expect(order).toEqual(["earlier save", "reset", "later save"]);
+    expect(store.getState().activeTab).toBe("games");
+    const saved = settingsSave.mock.calls[1][0];
+    expect(saved.current_tab).toBe("games");
+    expect(saved.minimize_to_tray).toBe(false);
+    expect(saved.config.overlay.enabled).toBe(true);
+    expect(saved.config.roblox_settings.unlock_fps).toBe(false);
+  });
+
+  it("keeps a failed full reset retryable without blocking queued saves", async () => {
+    boostResetRobloxClient.mockRejectedValueOnce(new Error("Client files unavailable"));
+    const store = await loadStore();
+    const before = structuredClone(store.getState().settings);
+    const resetting = store.getState().resetRobloxClient();
+    const saving = store.getState().save(true);
+    await expect(resetting).rejects.toThrow("Client files unavailable");
+    await saving;
+    expect(store.getState().settings).toEqual(before);
+    expect(settingsLoad).not.toHaveBeenCalled();
+    expect(settingsSave).toHaveBeenCalledOnce();
+  });
+
+  it("coalesces effective-state reads and publishes them before later full saves", async () => {
+    let release!: (value: object) => void;
+    boostSyncEffectiveConfig.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const store = await loadStore();
+    store.getState().update({ config: { ...DEFAULT_SETTINGS.config,
+      roblox_settings: { ...DEFAULT_SETTINGS.config.roblox_settings, unlock_fps: true },
+    } });
+    const reads = Array.from({ length: 20 }, () => store.getState().syncBoostConfig());
+    await Promise.resolve();
+    store.getState().update({ config: { ...store.getState().settings.config,
+      overlay: { ...DEFAULT_SETTINGS.config.overlay, enabled: true },
+    } });
+    const saving = store.getState().save(true);
+    await Promise.resolve();
+    const wasWaiting = settingsSave.mock.calls.length === 0;
+    release({ applied_config: DEFAULT_SETTINGS.config, warnings: [] });
+    await Promise.all([...reads, saving]);
+    expect(wasWaiting).toBe(true);
+    expect(boostSyncEffectiveConfig).toHaveBeenCalledOnce();
+    expect(settingsSave.mock.calls[0][0].config.roblox_settings.unlock_fps).toBe(false);
+    expect(settingsSave.mock.calls[0][0].config.overlay.enabled).toBe(true);
+  });
+
+  it("releases a failed effective-state read so saves and a later read can recover", async () => {
+    boostSyncEffectiveConfig.mockRejectedValueOnce(new Error("Read unavailable"))
+      .mockResolvedValue({ applied_config: DEFAULT_SETTINGS.config, warnings: [] });
+    const store = await loadStore();
+    const syncing = store.getState().syncBoostConfig();
+    const saving = store.getState().save(true);
+    await expect(syncing).rejects.toThrow("Read unavailable");
+    await saving;
+    await store.getState().syncBoostConfig();
+    expect(boostSyncEffectiveConfig).toHaveBeenCalledTimes(2);
+    expect(settingsSave).toHaveBeenCalledOnce();
+  });
+
+  it("finishes earlier full saves before applying Boost", async () => {
+    let release!: () => void;
+    settingsSave.mockReturnValueOnce(new Promise<void>(resolve => { release = resolve; }));
+    boostUpdateConfig.mockResolvedValue({ applied_config: DEFAULT_SETTINGS.config, warnings: [] });
+    const store = await loadStore();
+    const saving = store.getState().save(true);
+    await Promise.resolve();
+    const applying = store.getState().applyBoostConfig(JSON.stringify(DEFAULT_SETTINGS.config));
+    await Promise.resolve();
+    const wasWaiting = boostUpdateConfig.mock.calls.length === 0;
+    release();
+    await Promise.all([saving, applying]);
+    expect(wasWaiting).toBe(true);
+  });
+
+  it("holds later saves until Boost merges its confirmed fields and preserves in-flight edits", async () => {
+    let release!: (value: object) => void;
+    boostUpdateConfig.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const store = await loadStore();
+    const requested = structuredClone(DEFAULT_SETTINGS.config);
+    requested.roblox_settings.unlock_fps = true;
+    const applying = store.getState().applyBoostConfig(JSON.stringify(requested));
+    await Promise.resolve();
+    store.getState().update({ config: { ...store.getState().settings.config,
+      overlay: { ...DEFAULT_SETTINGS.config.overlay, enabled: true },
+    } });
+    const saving = store.getState().save(true);
+    await Promise.resolve();
+    const wasWaiting = settingsSave.mock.calls.length === 0;
+    release({ applied_config: requested, warnings: [] });
+    await Promise.all([applying, saving]);
+    expect(wasWaiting).toBe(true);
+    expect(store.getState().settings.config.overlay.enabled).toBe(true);
+    expect(settingsSave.mock.calls[0][0].config.overlay.enabled).toBe(true);
+    expect(settingsSave.mock.calls[0][0].config.roblox_settings.unlock_fps).toBe(true);
+  });
+
+  it("rebases a waiting Boost draft over earlier confirmed flag changes", async () => {
+    let release!: (value: object) => void;
+    gamesSaveFlags.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    boostUpdateConfig.mockImplementation(async (json: string) => ({ applied_config: JSON.parse(json), warnings: [] }));
+    const store = await loadStore();
+    const flags = { ...DEFAULT_SETTINGS.config.roblox_settings,
+      custom_fflags_enabled: true, custom_fflags_json: '{"FFlagDebugSkyGray":true}',
+    };
+    const editing = store.getState().applyFastFlags(true, flags.custom_fflags_json, DEFAULT_SETTINGS.config.roblox_settings);
+    await Promise.resolve();
+    const requested = structuredClone(DEFAULT_SETTINGS.config);
+    requested.roblox_settings.unlock_fps = true;
+    const applying = store.getState().applyBoostConfig(JSON.stringify(requested));
+    release({ applied_config: { ...DEFAULT_SETTINGS.config, roblox_settings: flags }, warnings: [] });
+    await Promise.all([editing, applying]);
+    const sent = JSON.parse(boostUpdateConfig.mock.calls[0][0]);
+    expect(sent.roblox_settings.custom_fflags_json).toBe(flags.custom_fflags_json);
+    expect(sent.roblox_settings.unlock_fps).toBe(true);
+  });
+
+  it("releases queued settings after Boost fails without publishing its draft", async () => {
+    boostUpdateConfig.mockRejectedValueOnce(new Error("Could not apply"));
+    const store = await loadStore();
+    const before = structuredClone(store.getState().settings.config);
+    const requested = structuredClone(before);
+    requested.roblox_settings.unlock_fps = true;
+    const applying = store.getState().applyBoostConfig(JSON.stringify(requested));
+    const saving = store.getState().save(true);
+    await expect(applying).rejects.toThrow("Could not apply");
+    await saving;
+    expect(store.getState().settings.config).toEqual(before);
+    expect(settingsSave).toHaveBeenCalledOnce();
+  });
+
   it("finishes earlier settings saves before applying native FastFlags", async () => {
     let release!: () => void;
     settingsSave.mockReturnValueOnce(new Promise<void>(resolve => { release = resolve; }));
@@ -187,7 +347,10 @@ describe("stores/settingsStore", () => {
     settingsLoad.mockReset();
     settingsSave.mockReset();
     boostResetRobloxSettings.mockReset();
+    boostResetRobloxClient.mockReset();
     gamesSaveFlags.mockReset();
+    boostUpdateConfig.mockReset();
+    boostSyncEffectiveConfig.mockReset();
   });
 
   it("loads settings and sets activeTab from current_tab", async () => {

@@ -282,7 +282,6 @@ function OptimizationCard({ def }: { def: OptimizationDef }) {
  *  apply/revert commands. Shown as the first card of the Intermediate tier. */
 function PowerPlanCard() {
   const config = useSettingsStore((s) => s.settings.config);
-  const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
   const updateConfig = useBoostStore((s) => s.updateConfig);
   const addToast = useToastStore((s) => s.addToast);
@@ -311,8 +310,7 @@ function PowerPlanCard() {
 
     setBusy(true);
     try {
-      const applied = await updateConfig(JSON.stringify(nextConfig));
-      updateSettings({ config: applied });
+      await updateConfig(JSON.stringify(nextConfig));
       await saveSettings(true);
       addToast({
         type: next ? "success" : "info",

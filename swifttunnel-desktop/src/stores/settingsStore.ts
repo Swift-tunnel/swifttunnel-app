@@ -1,14 +1,16 @@
 import { create } from "zustand";
-import type { AppSettings, BoostUpdateResult, RobloxSettingsConfig, TabId } from "../lib/types";
-import { boostResetRobloxSettings, gamesSaveFlags, settingsLoad, settingsSave } from "../lib/commands";
+import type { AppSettings, BoostUpdateResult, RobloxResetReportResponse, RobloxSettingsConfig, TabId } from "../lib/types";
+import { boostResetRobloxClient, boostResetRobloxSettings, gamesSaveFlags, boostUpdateConfig, boostSyncEffectiveConfig, settingsLoad, settingsSave } from "../lib/commands";
 import { DEFAULT_SETTINGS, mergeAppSettings } from "../lib/settings";
 import { formatErrorMessage, reportError } from "../lib/errors";
+import { mergeConfigChanges } from "../lib/configMerge";
 import { NAV_ITEMS } from "../components/shell/nav";
 
 // Native saves perform filesystem and system work on blocking workers. Keep
 // one in flight so an older snapshot cannot finish after a newer preference.
 let saveTail: Promise<void> = Promise.resolve();
 let pendingSave: Promise<void> | null = null;
+let pendingBoostSync: Promise<BoostUpdateResult> | null = null;
 
 /**
  * Keep the restored tab inside what this build actually has.
@@ -32,6 +34,9 @@ interface SettingsStore {
   load: () => Promise<void>;
   save: (propagateError?: boolean) => Promise<void>;
   resetRobloxSettings: () => Promise<void>;
+  resetRobloxClient: () => Promise<RobloxResetReportResponse>;
+  applyBoostConfig: (configJson: string) => Promise<BoostUpdateResult>;
+  syncBoostConfig: () => Promise<BoostUpdateResult>;
   applyFastFlags: (enabled: boolean, json: string, expected: RobloxSettingsConfig) => Promise<BoostUpdateResult>;
   update: (partial: Partial<AppSettings>) => void;
   setTab: (tab: TabId) => void;
@@ -96,6 +101,44 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     }
   },
 
+  syncBoostConfig: () => {
+    if (pendingBoostSync) return pendingBoostSync;
+    pendingSave = null;
+    const syncing = saveTail.then(async () => {
+      const observed = get().settings.config;
+      const result = await boostSyncEffectiveConfig();
+      set(state => ({ settings: { ...state.settings,
+        config: mergeConfigChanges(state.settings.config, observed, result.applied_config),
+      } }));
+      return result;
+    }).finally(() => { pendingBoostSync = null; });
+    pendingBoostSync = syncing;
+    saveTail = syncing.then(() => {}, () => {});
+    return syncing;
+  },
+
+  applyBoostConfig: (configJson) => {
+    const requested: AppSettings["config"] = JSON.parse(configJson);
+    const observed = structuredClone(get().settings.config);
+    pendingSave = null;
+    const applying = saveTail.then(async () => {
+      const before = get().settings.config;
+      // Keep the user's draft changes, but carry forward fields confirmed by
+      // an earlier queued apply instead of sending their older draft values.
+      const rebased = mergeConfigChanges(requested, observed, before);
+      const result = await boostUpdateConfig(JSON.stringify(rebased));
+      const applied = result.applied_config ?? rebased;
+      // Publish before a queued full save can start. Preserve edits made while
+      // Windows was applying the config, including another view's overlay edits.
+      set(state => ({ settings: { ...state.settings,
+        config: mergeConfigChanges(state.settings.config, before, applied),
+      } }));
+      return { ...result, applied_config: applied };
+    });
+    saveTail = applying.then(() => {}, () => {});
+    return applying;
+  },
+
   applyFastFlags: (enabled, json, expected) => {
     // Like a native reset, this is an ordering barrier. Earlier full-settings
     // writes finish first; later writes read the confirmed flag fields after
@@ -117,6 +160,22 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     });
     saveTail = applying.then(() => {}, () => {});
     return applying;
+  },
+
+  resetRobloxClient: () => {
+    pendingSave = null;
+    const reset = saveTail.then(async () => {
+      const report = await boostResetRobloxClient();
+      const confirmed = await settingsLoad();
+      // Reload only the native reset's section. A whole-store load would lose
+      // unsaved overlay/preferences and restore the previously persisted tab.
+      set(state => ({ settings: { ...state.settings, config: {
+        ...state.settings.config, roblox_settings: confirmed.config.roblox_settings,
+      } } }));
+      return report;
+    });
+    saveTail = reset.then(() => {}, () => {});
+    return reset;
   },
 
   resetRobloxSettings: async () => {

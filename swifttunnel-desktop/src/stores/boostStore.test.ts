@@ -19,6 +19,15 @@ vi.mock("../lib/commands", () => ({
   boostRestartRoblox,
 }));
 
+// The settings store owns ordering and publishing. Its tests exercise the real
+// queue; these tests cover Boost warnings, error reporting and metrics.
+vi.mock("./settingsStore", () => ({
+  useSettingsStore: { getState: () => ({
+    applyBoostConfig: boostUpdateConfig,
+    syncBoostConfig: boostSyncEffectiveConfig,
+  }) },
+}));
+
 const { notify } = vi.hoisted(() => ({
   notify: vi.fn(),
 }));
