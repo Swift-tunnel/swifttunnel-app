@@ -96,7 +96,7 @@ struct Snapshot {
 }
 
 struct Shared {
-    runtime: tokio::runtime::Runtime,
+    runtime: crate::runtime::EngineRuntime,
     auth: Arc<tokio::sync::Mutex<AuthManager>>,
     vpn: Arc<tokio::sync::Mutex<VpnConnection>>,
     settings: Arc<RwLock<AppSettings>>,
@@ -212,7 +212,7 @@ impl Engine {
         drop(settings_writer);
 
         let shared = Arc::new(Shared {
-            runtime,
+            runtime: runtime.into(),
             auth: Arc::new(tokio::sync::Mutex::new(auth)),
             vpn: Arc::new(tokio::sync::Mutex::new(VpnConnection::new())),
             discord: std::sync::Mutex::new(DiscordManager::new(discord_enabled)),

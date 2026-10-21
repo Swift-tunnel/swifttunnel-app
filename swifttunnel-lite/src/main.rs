@@ -35,6 +35,7 @@ mod operation_gate;
 mod picker;
 mod preview;
 mod roblox_changes;
+mod runtime;
 mod screens;
 mod settings_writer;
 mod single_client;
