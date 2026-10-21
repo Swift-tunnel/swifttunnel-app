@@ -28,13 +28,7 @@ struct Asset {
     size: u64,
 }
 
-fn verify_asset(
-    bytes: &[u8],
-    signature: &str,
-    key: &[u8],
-    arch: &str,
-) -> Result<(String, Asset), String> {
-    verify_manifest_signature_with_public_key(bytes, signature, key)?;
+fn stable_manifest(bytes: &[u8]) -> Result<(Manifest, semver::Version), String> {
     let manifest: Manifest =
         serde_json::from_slice(bytes).map_err(|_| "The Lite release information is invalid.")?;
     let version =
@@ -43,6 +37,28 @@ fn verify_asset(
     {
         return Err("The latest Lite release is not a stable version.".into());
     }
+    Ok((manifest, version))
+}
+
+fn manifest_signature_url(bytes: &[u8]) -> Result<String, String> {
+    // This selects only a strictly formatted tag on our fixed repository.
+    // Its contents do not authorize a download until verify_asset authenticates
+    // these exact bytes against the returned signature and compiled public key.
+    let (manifest, _) = stable_manifest(bytes)?;
+    Ok(format!(
+        "{RELEASES}download/{}/swifttunnel-update-manifest.sig",
+        manifest.tag
+    ))
+}
+
+fn verify_asset(
+    bytes: &[u8],
+    signature: &str,
+    key: &[u8],
+    arch: &str,
+) -> Result<(String, Asset), String> {
+    verify_manifest_signature_with_public_key(bytes, signature, key)?;
+    let (manifest, version) = stable_manifest(bytes)?;
     let asset = match arch {
         "x64" => manifest.lite.x64,
         "arm64" => manifest.lite.arm64,
@@ -143,7 +159,7 @@ pub(crate) fn fetch_verified(
     )?;
     let signature = fetch(
         &client,
-        &format!("{RELEASES}latest/download/swifttunnel-update-manifest.sig"),
+        &manifest_signature_url(&manifest)?,
         4096,
         Duration::from_secs(20),
         |_| {},
@@ -185,6 +201,35 @@ pub fn download(progress: impl FnMut(String)) -> Result<(ProtectedInstaller, Str
 mod tests {
     use super::*;
     use ring::signature::{Ed25519KeyPair, KeyPair};
+    #[test]
+    fn signature_request_stays_on_the_manifest_release_when_latest_changes() {
+        let (bytes, signature, key) = signed("x64");
+        assert_eq!(
+            manifest_signature_url(&bytes).unwrap(),
+            format!("{RELEASES}download/v3.1.6/swifttunnel-update-manifest.sig")
+        );
+        assert!(verify_asset(&bytes, &signature, &key, "x64").is_ok());
+        assert!(verify_asset(&bytes, "invalid", &key, "x64").is_err());
+    }
+
+    #[test]
+    fn unverified_release_cannot_choose_an_arbitrary_signature_url() {
+        let (bytes, _, _) = signed("x64");
+        let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for (version, tag) in [
+            ("3.1.6", "../../other"),
+            ("3.1.6", "v3.1.7"),
+            ("3.1.6-beta.1", "v3.1.6-beta.1"),
+            ("3.1.6+other", "v3.1.6+other"),
+            ("not-a-version", "vnot-a-version"),
+        ] {
+            let mut candidate = original.clone();
+            candidate["version"] = serde_json::json!(version);
+            candidate["tag"] = serde_json::json!(tag);
+            assert!(manifest_signature_url(&serde_json::to_vec(&candidate).unwrap()).is_err());
+        }
+        assert!(manifest_signature_url(b"not json").is_err());
+    }
     #[test]
     fn download_rejects_oversized_truncated_and_failed_http_responses() {
         use std::{io::Write, net::TcpListener};
