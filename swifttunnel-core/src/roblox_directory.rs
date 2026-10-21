@@ -275,7 +275,7 @@ fn parse_servers(
         return Err("The directory response does not match this game.".into());
     }
     let mut servers = Vec::new();
-    for row in page.servers {
+    for mut row in page.servers {
         if !valid_job_id(&row.server_id)
             || !center.datacenter_ids.contains(&row.datacenter_id)
             || row.first_seen.len() > 80
@@ -283,6 +283,9 @@ fn parse_servers(
         {
             continue;
         }
+        // Roblox job IDs are UUIDs. Directory/API/log letter casing must not
+        // create duplicate choices or hide a public server's verified slots.
+        row.server_id.make_ascii_lowercase();
         if servers
             .iter()
             .any(|old: &GameServer| old.job_id == row.server_id)
@@ -327,8 +330,9 @@ async fn public_roster(place: &str) -> Result<(HashMap<String, PublicServer>, bo
         if page.data.len() > 100 || page.next_cursor.as_ref().is_some_and(|c| c.len() > 1024) {
             return Err("Unexpected Roblox server-list response.".into());
         }
-        for row in page.data {
+        for mut row in page.data {
             if valid_job_id(&row.id) {
+                row.id.make_ascii_lowercase();
                 roster.insert(row.id.clone(), row);
             }
         }
@@ -348,7 +352,7 @@ fn apply_availability(
     complete: bool,
 ) {
     for server in servers {
-        if let Some(row) = roster.get(&server.job_id) {
+        if let Some(row) = roster.get(&server.job_id.to_ascii_lowercase()) {
             server.playing = Some(row.playing);
             server.capacity = Some(row.capacity);
             server.availability = if row.capacity > row.playing {
@@ -434,7 +438,7 @@ pub async fn availability(place: &str, job: &str) -> Result<Availability, String
         return Err("Invalid Roblox game or server ID.".into());
     }
     let (roster, _) = public_roster(place).await?;
-    Ok(match roster.get(job) {
+    Ok(match roster.get(&job.to_ascii_lowercase()) {
         Some(row) if row.playing < row.capacity => Availability::Available,
         Some(_) => Availability::Full,
         None => Availability::Unknown,
@@ -598,6 +602,61 @@ mod tests {
         assert_eq!(page.servers[0].availability, Availability::Unknown);
         apply_availability(&mut page.servers, &HashMap::new(), true);
         assert_eq!(page.servers[0].availability, Availability::Unknown);
+    }
+
+    #[test]
+    fn public_availability_accepts_the_same_uuid_with_different_letter_casing() {
+        let mut page = parse_servers(
+            DirectoryPage {
+                place_id: "1818".into(),
+                status: "success".into(),
+                next_cursor: None,
+                servers: vec![DirectoryServer {
+                    server_id: JOB.to_ascii_uppercase(),
+                    datacenter_id: 1,
+                    ip_address: None,
+                    first_seen: String::new(),
+                }],
+            },
+            "1818",
+            &center(),
+        )
+        .unwrap();
+        let roster = HashMap::from([(
+            JOB.to_string(),
+            PublicServer {
+                id: JOB.into(),
+                playing: 3,
+                capacity: 10,
+            },
+        )]);
+        apply_availability(&mut page.servers, &roster, true);
+        assert_eq!(page.servers[0].availability, Availability::Available);
+        assert_eq!(page.servers[0].playing, Some(3));
+    }
+
+    #[test]
+    fn directory_deduplication_treats_uuid_casing_as_one_server() {
+        let page = parse_servers(
+            DirectoryPage {
+                place_id: "1818".into(),
+                status: "success".into(),
+                next_cursor: None,
+                servers: [JOB.to_string(), JOB.to_ascii_uppercase()]
+                    .into_iter()
+                    .map(|server_id| DirectoryServer {
+                        server_id,
+                        datacenter_id: 1,
+                        ip_address: None,
+                        first_seen: String::new(),
+                    })
+                    .collect(),
+            },
+            "1818",
+            &center(),
+        )
+        .unwrap();
+        assert_eq!(page.servers.len(), 1);
     }
     #[test]
     fn cloud_locations_map_without_pretending_other_cities_are_the_same_datacenter() {
