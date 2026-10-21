@@ -100,7 +100,7 @@ struct Shared {
     auth: Arc<tokio::sync::Mutex<AuthManager>>,
     vpn: Arc<tokio::sync::Mutex<VpnConnection>>,
     settings: Arc<RwLock<AppSettings>>,
-    settings_save_signal: std::sync::mpsc::SyncSender<()>,
+    settings_save_signal: crate::settings_writer::SaveSignal,
     /// Rich Presence, driven from the same tunnel state the window shows.
     ///
     /// Its own lock rather than living in the snapshot: the manager talks to
@@ -201,12 +201,8 @@ impl Engine {
 
         let settings = Arc::new(RwLock::new(loaded));
         let (settings_save_signal, settings_writer) =
-            crate::settings_writer::start(settings.clone(), |snapshot| {
-                if let Err(error) = settings::save_settings(snapshot) {
-                    log::warn!("could not save settings: {error}");
-                }
-            })
-            .map_err(|error| format!("Could not start settings saving: {error}"))?;
+            crate::settings_writer::start(settings.clone(), settings::save_settings)
+                .map_err(|error| format!("Could not start settings saving: {error}"))?;
         // The writer owns only the settings and receiver, not Shared/runtime.
         // It finishes when Shared drops its sender, without blocking the GUI.
         drop(settings_writer);
@@ -1315,6 +1311,11 @@ impl Engine {
                     }
                     Ok(())
                 });
+                // The detached settings worker must get its final snapshot before
+                // the GUI exits. A broken disk cannot hold shutdown indefinitely.
+                if let Err(error) = shared.settings_save_signal.flush(Duration::from_secs(3)) {
+                    log::warn!("Could not finish settings saving before exit: {error}");
+                }
                 // The GUI still owns Engine here. Release the worker's Arc before
                 // posting the message that destroys it, keeping final runtime
                 // destruction out of this cleanup worker.
