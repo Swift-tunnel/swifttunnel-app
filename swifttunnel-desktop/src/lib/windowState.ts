@@ -51,17 +51,6 @@ export function normalizeWindowState(state: WindowState): WindowState {
   };
 }
 
-function rectsIntersect(a: MonitorWorkArea, b: MonitorWorkArea): boolean {
-  if (a.width <= 0 || a.height <= 0 || b.width <= 0 || b.height <= 0) return false;
-
-  return (
-    a.x < b.x + b.width &&
-    a.x + a.width > b.x &&
-    a.y < b.y + b.height &&
-    a.y + a.height > b.y
-  );
-}
-
 export function ensureWindowStateVisible(
   state: WindowState,
   monitors: MonitorWorkArea[],
@@ -87,20 +76,27 @@ export function ensureWindowStateVisible(
     width: state.width,
     height: Math.min(state.height, titlebarHeight),
   };
-
-  const isTitlebarVisible = monitors.some((monitor) =>
-    rectsIntersect(titlebarRect, monitor),
+  const visibleMargin = Math.max(
+    0,
+    options?.visibleMargin ?? DEFAULT_VISIBLE_MARGIN,
   );
+
+  // A single visible border pixel is not a usable drag handle. Require a
+  // reachable strip on at least one display before restoring this position.
+  const isTitlebarVisible = monitors.some((monitor) => {
+    if (monitor.width <= 0 || monitor.height <= 0) return false;
+    const width = Math.min(titlebarRect.x + titlebarRect.width, monitor.x + monitor.width)
+      - Math.max(titlebarRect.x, monitor.x);
+    const height = Math.min(titlebarRect.y + titlebarRect.height, monitor.y + monitor.height)
+      - Math.max(titlebarRect.y, monitor.y);
+    return width >= Math.min(titlebarRect.width, monitor.width, Math.max(1, visibleMargin))
+      && height >= Math.min(titlebarRect.height, monitor.height, 32);
+  });
   if (isTitlebarVisible) return state;
 
   const target = options?.primaryMonitor ?? monitors[0];
   const centerX = target.x + Math.round((target.width - state.width) / 2);
   const centerY = target.y + Math.round((target.height - state.height) / 2);
-
-  const visibleMargin = Math.max(
-    0,
-    options?.visibleMargin ?? DEFAULT_VISIBLE_MARGIN,
-  );
 
   const minX = target.x - state.width + visibleMargin;
   const maxX = target.x + target.width - visibleMargin;

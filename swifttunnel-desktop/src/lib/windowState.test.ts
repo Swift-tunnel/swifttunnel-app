@@ -78,7 +78,29 @@ describe("windowState", () => {
     expect(adjusted.y).toBe(120);
   });
 
-  it("keeps the position when any part of the titlebar is visible", () => {
+  it.each([
+    { x: 1919, y: 100 },
+    { x: -1279, y: 100 },
+    { x: 100, y: -63 },
+    { x: 100, y: 1079 },
+  ])("recovers a window with only a one-pixel titlebar sliver at $x, $y", (position) => {
+    const adjusted = ensureWindowStateVisible(
+      { ...position, width: 1280, height: 840, maximized: false },
+      [{ x: 0, y: 0, width: 1920, height: 1080 }],
+    );
+    expect(adjusted.x).toBe(320);
+    expect(adjusted.y).toBe(120);
+  });
+
+  it("preserves a reachable titlebar on another monitor", () => {
+    const saved = { x: 1919, y: 100, width: 1280, height: 840, maximized: false };
+    expect(ensureWindowStateVisible(saved, [
+      { x: 0, y: 0, width: 1920, height: 1080 },
+      { x: 1920, y: 0, width: 1920, height: 1080 },
+    ])).toEqual(saved);
+  });
+
+  it("keeps the position when a usable part of the titlebar is visible", () => {
     const adjusted = ensureWindowStateVisible(
       {
         x: -500,
