@@ -209,6 +209,8 @@ pub async fn boost_update_config(
     let mut config: swifttunnel_core::structs::Config =
         serde_json::from_str(&config_json).map_err(|e| format!("Invalid config: {}", e))?;
     config.network_settings.normalize_legacy_master_boost();
+    // Refuse an invalid active XML cap before any system/network changes.
+    let _ = config.roblox_settings.checked_frame_cap()?;
 
     let settings = state.settings.clone();
     let performance_monitor = state.performance_monitor.clone();

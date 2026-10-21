@@ -502,6 +502,7 @@ impl RobloxOptimizer {
     }
 
     pub fn apply_optimizations(&self, config: &RobloxSettingsConfig) -> Result<Vec<String>> {
+        let _ = config.checked_frame_cap().map_err(anyhow::Error::msg)?;
         info!("Applying Roblox optimizations via GlobalBasicSettings");
         let settings_path = self.resolve_settings_path();
         let mut warnings: Vec<String> = Vec::new();
@@ -838,6 +839,7 @@ impl RobloxOptimizer {
         settings_path: &Path,
         config: &RobloxSettingsConfig,
     ) -> Result<()> {
+        let frame_cap = config.checked_frame_cap().map_err(anyhow::Error::msg)?;
         // Backup current settings first
         self.backup_settings_for(settings_path)?;
 
@@ -862,8 +864,8 @@ impl RobloxOptimizer {
         // the same way it adopts window size and graphics level. A machine at
         // 650 arrives here with 650 already configured, so there is nothing to
         // overwrite and nothing to guard against.
-        if config.unlock_fps {
-            content = self.set_xml_int_value(&content, "FramerateCap", config.target_fps as i32);
+        if let Some(frame_cap) = frame_cap {
+            content = self.set_xml_int_value(&content, "FramerateCap", frame_cap);
             info!("Set FPS cap to: {}", config.target_fps);
         }
 
@@ -3312,6 +3314,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn overflowing_frame_caps_do_not_modify_settings_or_create_a_backup() {
+        for target in [i32::MAX as u32 + 1, u32::MAX] {
+            let dir = std::env::temp_dir()
+                .join(format!("swift-fps-overflow-{:016x}", rand::random::<u64>()));
+            fs::create_dir(&dir).unwrap();
+            let settings = dir.join("GlobalBasicSettings_13.xml");
+            let original = br#"<roblox><int name="FramerateCap">600</int></roblox>"#;
+            fs::write(&settings, original).unwrap();
+            let optimizer = optimizer_with_path(settings.clone());
+            let result = optimizer.apply_xml_settings(
+                &settings,
+                &RobloxSettingsConfig {
+                    unlock_fps: true,
+                    target_fps: target,
+                    ..Default::default()
+                },
+            );
+            let contents = fs::read(&settings).unwrap();
+            let backup_created = optimizer.backup_path.exists();
+            fs::remove_dir_all(&dir).unwrap();
+            assert!(
+                result.is_err(),
+                "FPS limit {target} must not wrap into a negative XML value"
+            );
+            assert_eq!(contents, original);
+            assert!(!backup_created);
+        }
+    }
+
+    #[test]
+    fn a_disabled_frame_cap_does_not_write_its_unused_large_value() {
+        let dir =
+            std::env::temp_dir().join(format!("swift-fps-disabled-{:016x}", rand::random::<u64>()));
+        fs::create_dir(&dir).unwrap();
+        let settings = dir.join("GlobalBasicSettings_13.xml");
+        fs::write(
+            &settings,
+            br#"<roblox><int name="FramerateCap">600</int></roblox>"#,
+        )
+        .unwrap();
+        let optimizer = optimizer_with_path(settings.clone());
+        let result = optimizer.apply_xml_settings(
+            &settings,
+            &RobloxSettingsConfig {
+                unlock_fps: false,
+                target_fps: u32::MAX,
+                ..Default::default()
+            },
+        );
+        let contents = fs::read_to_string(&settings).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(result.is_ok());
+        assert_eq!(
+            RobloxOptimizer::extract_int_value(&contents, "FramerateCap"),
+            Some(600)
+        );
+    }
+
     /// The Cap field works in both directions.
     ///
     /// A version of this asserted the opposite, that applying must never lower
@@ -3350,6 +3411,8 @@ mod tests {
             )
         };
 
+        assert_eq!(cap_after(30), Some(30));
+        assert_eq!(cap_after(99999), Some(99999));
         assert_eq!(cap_after(900), Some(900), "raising must work");
         assert_eq!(
             cap_after(500),

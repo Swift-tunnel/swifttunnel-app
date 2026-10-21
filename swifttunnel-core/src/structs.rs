@@ -180,6 +180,19 @@ pub struct RobloxSettingsConfig {
     pub custom_fflags_json: String,
 }
 
+impl RobloxSettingsConfig {
+    /// Roblox stores this as a signed XML integer. Do not wrap an edited u32
+    /// into a negative cap, and do not interpret a disabled setting's value.
+    pub fn checked_frame_cap(&self) -> std::result::Result<Option<i32>, String> {
+        if !self.unlock_fps {
+            return Ok(None);
+        }
+        i32::try_from(self.target_fps).map(Some).map_err(|_| {
+            "The saved FPS limit is too large. Choose a new limit in Roblox settings.".into()
+        })
+    }
+}
+
 impl Default for RobloxSettingsConfig {
     fn default() -> Self {
         Self {
