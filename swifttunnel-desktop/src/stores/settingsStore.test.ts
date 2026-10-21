@@ -2,16 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "../lib/settings";
 import type { AppSettings } from "../lib/types";
 
-const { settingsLoad, settingsSave, boostResetRobloxSettings } = vi.hoisted(() => ({
+const { settingsLoad, settingsSave, boostResetRobloxSettings, gamesSaveFlags } = vi.hoisted(() => ({
   settingsLoad: vi.fn(),
   settingsSave: vi.fn(),
   boostResetRobloxSettings: vi.fn(),
+  gamesSaveFlags: vi.fn(),
 }));
 
 vi.mock("../lib/commands", () => ({
   settingsLoad,
   settingsSave,
   boostResetRobloxSettings,
+  gamesSaveFlags,
 }));
 
 async function loadStore() {
@@ -20,6 +22,56 @@ async function loadStore() {
 }
 
 describe("stores/settingsStore", () => {
+  it("finishes earlier settings saves before applying native FastFlags", async () => {
+    let release!: () => void;
+    settingsSave.mockReturnValueOnce(new Promise<void>(resolve => { release = resolve; }));
+    gamesSaveFlags.mockResolvedValue({ applied_config: DEFAULT_SETTINGS.config, warnings: [] });
+    const store = await loadStore();
+    const saving = store.getState().save(true);
+    await Promise.resolve();
+    const applying = store.getState().applyFastFlags(true, "{}", DEFAULT_SETTINGS.config.roblox_settings);
+    await Promise.resolve();
+    const nativeWasWaiting = gamesSaveFlags.mock.calls.length === 0;
+    release();
+    await Promise.all([saving, applying]);
+    expect(nativeWasWaiting).toBe(true);
+  });
+
+  it("queues later saves behind FastFlags and preserves edits made during its native call", async () => {
+    let release!: (value: { applied_config: AppSettings["config"]; warnings: string[] }) => void;
+    gamesSaveFlags.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    const store = await loadStore();
+    const applying = store.getState().applyFastFlags(true, '{"FFlagDebugSkyGray":true}', DEFAULT_SETTINGS.config.roblox_settings);
+    await Promise.resolve();
+    store.getState().update({ config: { ...store.getState().settings.config,
+      overlay: { ...DEFAULT_SETTINGS.config.overlay, enabled: true },
+    } });
+    const saving = store.getState().save(true);
+    await Promise.resolve();
+    const nativeWasWaiting = settingsSave.mock.calls.length === 0;
+    const flags = { ...DEFAULT_SETTINGS.config.roblox_settings,
+      custom_fflags_enabled: true, custom_fflags_json: '{"FFlagDebugSkyGray":true}', ultraboost: false,
+    };
+    release({ applied_config: { ...DEFAULT_SETTINGS.config, roblox_settings: flags }, warnings: [] });
+    await Promise.all([applying, saving]);
+    expect(nativeWasWaiting).toBe(true);
+    expect(store.getState().settings.config.overlay.enabled).toBe(true);
+    expect(settingsSave.mock.calls[0][0].config.overlay.enabled).toBe(true);
+    expect(settingsSave.mock.calls[0][0].config.roblox_settings.custom_fflags_json).toBe(flags.custom_fflags_json);
+  });
+
+  it("keeps current settings and releases queued saves after a native FastFlag failure", async () => {
+    gamesSaveFlags.mockRejectedValueOnce(new Error("Flags changed in another view"));
+    const store = await loadStore();
+    store.getState().update({ theme: "light" });
+    const before = structuredClone(store.getState().settings.config);
+    const applying = store.getState().applyFastFlags(true, "{}", before.roblox_settings);
+    const saving = store.getState().save(true);
+    await expect(applying).rejects.toThrow("Flags changed in another view");
+    await saving;
+    expect(store.getState().settings.config).toEqual(before);
+    expect(settingsSave.mock.calls[0][0].theme).toBe("light");
+  });
   it("reports a shared save failure to every waiting caller and allows retry", async () => {
     settingsSave.mockRejectedValueOnce(new Error("Disk unavailable")).mockResolvedValue(undefined);
     const store = await loadStore();
@@ -135,6 +187,7 @@ describe("stores/settingsStore", () => {
     settingsLoad.mockReset();
     settingsSave.mockReset();
     boostResetRobloxSettings.mockReset();
+    gamesSaveFlags.mockReset();
   });
 
   it("loads settings and sets activeTab from current_tab", async () => {

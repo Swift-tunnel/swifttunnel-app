@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Button, Dialog, ErrorBanner, Field, Icon, Panel, Row, Segmented, Select, SliderInput, Toggle, CONTROL_WIDTH, compactFieldClass, fieldClass } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
-import { boostCloseRoblox, boostGetMetrics, gamesSaveFlags, systemOpenUrl } from "../../lib/commands";
+import { boostCloseRoblox, boostGetMetrics, systemOpenUrl } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
 import { booleanFlag, FLAG_KEYS, flagBool, flagBoolean, flagNumber, flagPreset, MESH_FLAGS, parseFlags, patchFlags, rendererPatch, RENDERER_FLAGS, validateCustomFflags, type FlagMap } from "../../lib/fastFlags";
 import { NvidiaPanel } from "./NvidiaPanel";
@@ -58,8 +58,7 @@ export function FastFlagsPanel() {
     try {
       if (close) await boostCloseRoblox();
       if ((await boostGetMetrics()).roblox_running) { setClosing(true); return; }
-      const result = await gamesSaveFlags(enabled, raw, baseline);
-      useSettingsStore.getState().update({ config: result.applied_config });
+      const result = await useSettingsStore.getState().applyFastFlags(enabled, raw, baseline);
       setBaseline(result.applied_config.roblox_settings);
       setClosing(false);
       if (result.warnings.length) { setError(result.warnings.join("\n")); setNotice("Saved, but some files could not be updated."); return; }

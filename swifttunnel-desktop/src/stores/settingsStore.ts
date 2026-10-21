@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import type { AppSettings, TabId } from "../lib/types";
-import { boostResetRobloxSettings, settingsLoad, settingsSave } from "../lib/commands";
+import type { AppSettings, BoostUpdateResult, RobloxSettingsConfig, TabId } from "../lib/types";
+import { boostResetRobloxSettings, gamesSaveFlags, settingsLoad, settingsSave } from "../lib/commands";
 import { DEFAULT_SETTINGS, mergeAppSettings } from "../lib/settings";
 import { formatErrorMessage, reportError } from "../lib/errors";
 import { NAV_ITEMS } from "../components/shell/nav";
@@ -32,6 +32,7 @@ interface SettingsStore {
   load: () => Promise<void>;
   save: (propagateError?: boolean) => Promise<void>;
   resetRobloxSettings: () => Promise<void>;
+  applyFastFlags: (enabled: boolean, json: string, expected: RobloxSettingsConfig) => Promise<BoostUpdateResult>;
   update: (partial: Partial<AppSettings>) => void;
   setTab: (tab: TabId) => void;
 }
@@ -93,6 +94,29 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     } catch (error) {
       if (propagateError) throw error;
     }
+  },
+
+  applyFastFlags: (enabled, json, expected) => {
+    // Like a native reset, this is an ordering barrier. Earlier full-settings
+    // writes finish first; later writes read the confirmed flag fields after
+    // this operation, rather than undoing them with a pre-apply snapshot.
+    pendingSave = null;
+    const applying = saveTail.then(async () => {
+      const result = await gamesSaveFlags(enabled, json, expected);
+      const flags = result.applied_config.roblox_settings;
+      set(state => ({ settings: { ...state.settings, config: {
+        ...state.settings.config,
+        roblox_settings: {
+          ...state.settings.config.roblox_settings,
+          custom_fflags_enabled: flags.custom_fflags_enabled,
+          custom_fflags_json: flags.custom_fflags_json,
+          ultraboost: flags.ultraboost,
+        },
+      } } }));
+      return result;
+    });
+    saveTail = applying.then(() => {}, () => {});
+    return applying;
   },
 
   resetRobloxSettings: async () => {
