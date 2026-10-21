@@ -54,9 +54,11 @@ pub async fn games_save_flags(
     if json.len() > 8192 {
         return Err("FastFlags must be under 8 KB.".into());
     }
+    let operation = super::optimizer::begin_config_change()?;
     let optimizer = state.roblox_optimizer.clone();
     let settings = state.settings.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         let optimizer = optimizer.lock();
         if swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending() {
             return Err("Close Roblox first, then apply FastFlags.".into());
@@ -96,8 +98,14 @@ pub async fn games_flags(
     state: State<'_, AppState>,
     action: FlagAction,
 ) -> Result<swifttunnel_core::roblox_flag_cleanup::FlagCleanupReport, String> {
+    let operation = if matches!(action, FlagAction::Preview) {
+        None
+    } else {
+        Some(super::optimizer::begin_config_change()?)
+    };
     let optimizer = state.roblox_optimizer.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         let _guard = optimizer.lock();
         if !matches!(action, FlagAction::Preview)
             && (swifttunnel_core::roblox_game_profile::pending()

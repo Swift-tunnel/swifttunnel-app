@@ -4,6 +4,14 @@ use tauri::{Emitter, State};
 use crate::events;
 use crate::state::AppState;
 
+static CONFIG_CHANGE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+pub(super) fn begin_config_change() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
+    CONFIG_CHANGE.try_acquire().map_err(|_| {
+        "Another settings change is running. Wait for it to finish, then retry.".to_string()
+    })
+}
+
 #[derive(Serialize)]
 pub struct PerformanceMetricsResponse {
     pub fps: f32,
@@ -192,6 +200,12 @@ pub async fn boost_update_config(
     state: State<'_, AppState>,
     config_json: String,
 ) -> Result<BoostUpdateResult, String> {
+    if config_json.len() > 256 * 1024 {
+        return Err(
+            "These settings are too large to apply. Reload your saved settings and retry.".into(),
+        );
+    }
+    let operation = begin_config_change()?;
     let mut config: swifttunnel_core::structs::Config =
         serde_json::from_str(&config_json).map_err(|e| format!("Invalid config: {}", e))?;
     config.network_settings.normalize_legacy_master_boost();
@@ -203,6 +217,7 @@ pub async fn boost_update_config(
     let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         let mut applied_config = config.clone();
 
         let warnings = {
@@ -378,10 +393,12 @@ fn persist_roblox_reset(
 pub async fn boost_reset_roblox_settings(
     state: State<'_, AppState>,
 ) -> Result<swifttunnel_core::structs::RobloxSettingsConfig, String> {
+    let operation = begin_config_change()?;
     let settings = state.settings.clone();
     let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         // Flag/launch preparation shares this lock. Keep it through the saved
         // defaults too, or a new apply can land between reset and persistence.
         let ro = roblox_optimizer.lock();
@@ -405,10 +422,12 @@ pub async fn boost_reset_roblox_settings(
 pub async fn boost_reset_roblox_client(
     state: State<'_, AppState>,
 ) -> Result<swifttunnel_core::roblox_optimizer::RobloxResetReport, String> {
+    let operation = begin_config_change()?;
     let settings = state.settings.clone();
     let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         let ro = roblox_optimizer.lock();
         let report = ro.reset_client_to_default();
 
@@ -579,6 +598,33 @@ pub async fn boost_close_roblox(state: State<'_, AppState>) -> Result<(), String
 mod tests {
     use super::*;
     use swifttunnel_core::settings::AppSettings;
+
+    #[test]
+    fn config_change_reservation_stays_with_the_worker_and_recovers_after_failure() {
+        use std::{sync::mpsc, time::Duration};
+        let operation = begin_config_change().unwrap();
+        assert!(begin_config_change().is_err());
+        let (started, ready) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _operation = operation;
+            started.send(()).unwrap();
+            let _ = resume.recv_timeout(Duration::from_secs(3));
+            Err::<(), _>("simulated settings apply failure")
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let refused_overlap = begin_config_change().is_err();
+        release.send(()).unwrap();
+        assert!(worker.join().unwrap().is_err());
+        assert!(refused_overlap);
+        assert!(begin_config_change().is_ok());
+        let failed = std::panic::catch_unwind(|| {
+            let _operation = begin_config_change().unwrap();
+            panic!("owned simulated settings worker panic");
+        });
+        assert!(failed.is_err());
+        assert!(begin_config_change().is_ok());
+    }
 
     #[test]
     fn slow_reconciliation_keeps_newer_flags_network_and_unrelated_settings() {
