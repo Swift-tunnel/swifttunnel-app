@@ -1532,10 +1532,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     if let Some(engine) = &app.engine {
                         engine.acknowledge_update();
                     }
-                    app.refresh_from_engine();
-                    app.rebuild(client_of(hwnd));
-                    sync_timer(hwnd, app, on_screen(hwnd));
-                    repaint(hwnd);
+                    let visible = on_screen(hwnd);
+                    if visible {
+                        app.refresh_from_engine();
+                        app.rebuild(client_of(hwnd));
+                        repaint(hwnd);
+                    }
+                    // WM_SHOWWINDOW/restore reads a fresh snapshot before
+                    // drawing. A hidden window needs no cloned fleet, layout
+                    // rebuild or invalidation for background traffic updates.
+                    sync_timer(hwnd, app, visible);
                 }
                 LRESULT(0)
             }
