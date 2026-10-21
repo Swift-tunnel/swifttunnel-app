@@ -61,23 +61,24 @@ pub async fn settings_save(
     let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
         let mut new_settings = settings;
         new_settings.sanitize_in_place();
-        swifttunnel_core::settings::save_settings(&new_settings)?;
+        let discord_enabled = new_settings.enable_discord_rpc;
+        let wants_fps = overlay_wants_fps(&new_settings);
+        let run_on_startup = new_settings.run_on_startup;
+        persist_preferences(
+            &settings_arc,
+            new_settings,
+            swifttunnel_core::settings::save_settings,
+        )?;
 
         {
             let mut discord = discord_manager.lock();
-            discord.set_enabled(new_settings.enable_discord_rpc);
+            discord.set_enabled(discord_enabled);
         }
 
         // The ETW FPS trace runs only while the in-game overlay is actually
         // showing FPS. Other metrics stay lighter and avoid the real-time DXGI
         // present trace entirely.
-        fps_monitor.set_enabled(overlay_wants_fps(&new_settings));
-
-        let run_on_startup = {
-            let mut s = settings_arc.lock();
-            *s = new_settings;
-            s.run_on_startup
-        };
+        fps_monitor.set_enabled(wants_fps);
 
         if let Err(e) = crate::autostart::sync_run_on_startup(&app_handle, run_on_startup) {
             log::warn!(
@@ -108,6 +109,19 @@ pub async fn settings_save(
         router.set_whitelisted_regions(whitelisted_regions);
     }
 
+    Ok(())
+}
+
+fn persist_preferences(
+    settings: &parking_lot::Mutex<AppSettings>,
+    next: AppSettings,
+    persist: impl FnOnce(&AppSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    // Native background writers use this lock through their saves too. Keep
+    // disk publication and its matching in-memory state in the same ordering.
+    let mut current = settings.lock();
+    persist(&next)?;
+    *current = next;
     Ok(())
 }
 
@@ -632,6 +646,40 @@ pub async fn preset_save_to_downloads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_background_writer_cannot_split_preference_persistence_from_publication() {
+        let settings = parking_lot::Mutex::new(AppSettings::default());
+        let mut next = settings.lock().clone();
+        next.enable_discord_rpc = !next.enable_discord_rpc;
+        let disk = std::cell::RefCell::new(serde_json::Value::Null);
+        persist_preferences(&settings, next, |snapshot| {
+            *disk.borrow_mut() = serde_json::to_value(snapshot).unwrap();
+            // A background native writer uses the same state lock. Inject it
+            // at the old gap between writing disk and publishing memory.
+            if let Some(mut competing) = settings.try_lock() {
+                competing.selected_region = "tokyo".into();
+                *disk.borrow_mut() = serde_json::to_value(&*competing).unwrap();
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&*settings.lock()).unwrap(),
+            disk.into_inner()
+        );
+    }
+
+    #[test]
+    fn failed_preference_persistence_preserves_the_confirmed_state() {
+        let settings = parking_lot::Mutex::new(AppSettings::default());
+        let original = serde_json::to_value(&*settings.lock()).unwrap();
+        let mut next = settings.lock().clone();
+        next.selected_region = "tokyo".into();
+        let result = persist_preferences(&settings, next, |_| Err("disk unavailable".into()));
+        assert_eq!(result.unwrap_err(), "disk unavailable");
+        assert_eq!(serde_json::to_value(&*settings.lock()).unwrap(), original);
+    }
 
     struct ExportDirectory(PathBuf);
     impl ExportDirectory {
