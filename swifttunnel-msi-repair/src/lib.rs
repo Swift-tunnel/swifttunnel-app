@@ -199,16 +199,22 @@ fn package_is_usable(path: &str) -> bool {
         Err(_) => return true,
     }
 
-    const OLE_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
     match std::fs::File::open(path) {
-        Ok(mut file) => {
-            use std::io::Read;
-            let mut head = [0u8; 8];
-            // A file too short to hold the signature cannot be a package.
-            file.read_exact(&mut head).is_ok() && head == OLE_SIGNATURE
-        }
+        Ok(file) => package_header_is_usable(file),
         // It is there but we cannot open it. That is a lock or an ACL, not a
         // missing package, so assume the installer will manage.
+        Err(_) => true,
+    }
+}
+
+fn package_header_is_usable(mut file: impl std::io::Read) -> bool {
+    const OLE_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    let mut head = [0u8; 8];
+    match file.read_exact(&mut head) {
+        Ok(()) => head == OLE_SIGNATURE,
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => false,
+        // A read failure after opening the file is still unknown state. Never
+        // authorize unregistering a product because of a transient I/O failure.
         Err(_) => true,
     }
 }
@@ -292,7 +298,37 @@ pub fn unpack_guid(packed: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{files_have_same_contents, package_is_usable, unpack_guid};
+    use super::{
+        files_have_same_contents, package_header_is_usable, package_is_usable, unpack_guid,
+    };
+
+    #[test]
+    fn package_read_errors_are_unknown_not_evidence_of_a_broken_installer() {
+        struct Unreadable(std::io::ErrorKind);
+        impl std::io::Read for Unreadable {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(
+                    self.0,
+                    "simulated package read failure",
+                ))
+            }
+        }
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                package_header_is_usable(Unreadable(kind)),
+                "{kind:?} must not authorize orphan cleanup"
+            );
+        }
+        assert!(!package_header_is_usable(Unreadable(
+            std::io::ErrorKind::UnexpectedEof
+        )));
+        assert!(!package_header_is_usable(&b"not msi!"[..]));
+        assert!(package_header_is_usable(&OLE[..]));
+    }
 
     /// A preserved copy is reused only when it really is the same package.
     ///
