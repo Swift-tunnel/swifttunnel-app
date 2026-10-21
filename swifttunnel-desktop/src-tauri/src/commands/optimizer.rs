@@ -271,8 +271,11 @@ pub async fn boost_update_config(
 
         {
             let mut s = settings.lock();
-            s.config = applied_config.clone();
-            swifttunnel_core::settings::save_settings(&s).map_err(|e| e.to_string())?;
+            persist_applied_config(
+                &mut s,
+                &applied_config,
+                swifttunnel_core::settings::save_settings,
+            )?;
         }
 
         if !warnings.is_empty() {
@@ -372,6 +375,18 @@ fn persist_effective_config(
         warnings,
         applied_config: settings.config.clone(),
     })
+}
+
+fn persist_applied_config(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+    config: &swifttunnel_core::structs::Config,
+    persist: impl FnOnce(&swifttunnel_core::settings::AppSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut updated = settings.clone();
+    updated.config = config.clone();
+    persist(&updated)?;
+    *settings = updated;
+    Ok(())
 }
 
 fn persist_roblox_reset(
@@ -598,6 +613,45 @@ pub async fn boost_close_roblox(state: State<'_, AppState>) -> Result<(), String
 mod tests {
     use super::*;
     use swifttunnel_core::settings::AppSettings;
+
+    #[test]
+    fn failed_boost_save_keeps_the_last_confirmed_config_in_memory() {
+        let mut settings = AppSettings::default();
+        settings.minimize_to_tray = false;
+        let original = settings.config.clone();
+        let mut requested = original.clone();
+        requested.roblox_settings.target_fps = 400;
+        let result = persist_applied_config(&mut settings, &requested, |_| Err("disk full".into()));
+        assert_eq!(result.unwrap_err(), "disk full");
+        assert_eq!(
+            serde_json::to_value(&settings.config).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert!(!settings.minimize_to_tray);
+    }
+
+    #[test]
+    fn successful_boost_save_publishes_the_saved_config_and_preserves_other_preferences() {
+        let mut settings = AppSettings::default();
+        settings.minimize_to_tray = false;
+        let mut requested = settings.config.clone();
+        requested.roblox_settings.target_fps = 400;
+        let mut written = None;
+        persist_applied_config(&mut settings, &requested, |snapshot| {
+            written = Some(snapshot.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&written.unwrap().config).unwrap(),
+            serde_json::to_value(&requested).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&settings.config).unwrap(),
+            serde_json::to_value(&requested).unwrap()
+        );
+        assert!(!settings.minimize_to_tray);
+    }
 
     #[test]
     fn config_change_reservation_stays_with_the_worker_and_recovers_after_failure() {
