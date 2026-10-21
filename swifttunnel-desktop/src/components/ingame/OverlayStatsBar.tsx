@@ -53,6 +53,7 @@ export function OverlayStatsBar() {
   const moveWantedRef = useRef({ x: 0, y: 0 });
   const moveTaskRef = useRef<Promise<void> | null>(null);
   const winSizeRef = useRef({ w: 0, h: 0 });
+  const resizingRef = useRef(false);
   const interactiveRef = useRef<boolean | null>(null);
   const interactiveWantedRef = useRef(false);
   const interactiveTaskRef = useRef<Promise<void> | null>(null);
@@ -201,13 +202,18 @@ export function OverlayStatsBar() {
     const w = Math.max(1, Math.ceil(r.width * scale));
     const h = Math.max(1, Math.ceil(r.height * scale));
     if (w === winSizeRef.current.w && h === winSizeRef.current.h) return;
-    void getCurrentWindow()
-      .setSize(new PhysicalSize(w, h))
+    // ResizeObserver and the fallback poll can both fire while native IPC is
+    // busy. Keep one write pending; a later poll remeasures the latest size.
+    if (resizingRef.current) return;
+    resizingRef.current = true;
+    void Promise.resolve()
+      .then(() => getCurrentWindow().setSize(new PhysicalSize(w, h)))
       .then(() => {
         winSizeRef.current = { w, h };
         applyConfiguredPosition();
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => { resizingRef.current = false; });
   }, [applyConfiguredPosition]);
 
   // Keep the window content-sized, including after a display-scale change.
