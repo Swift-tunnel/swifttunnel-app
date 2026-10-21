@@ -5,12 +5,12 @@
 
 use crate::roblox_library::{RobloxClient, valid_job_id, valid_place_id};
 use regex_lite::Regex;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -34,22 +34,122 @@ pub enum RobloxEvent {
     },
 }
 
+const MAX_PENDING_EVENTS: usize = 64;
+
+#[derive(Default)]
+struct EventBuffer(parking_lot::Mutex<VecDeque<RobloxEvent>>);
+
+impl EventBuffer {
+    fn push(&self, event: RobloxEvent) {
+        let mut pending = self.0.lock();
+        if pending.len() == MAX_PENDING_EVENTS {
+            if matches!(event, RobloxEvent::GameServerDetected { .. }) {
+                return;
+            }
+            // Preserve recent session transitions, especially the final leave.
+            // An informational IP must not displace a join/leave notification.
+            if let Some(index) = pending
+                .iter()
+                .position(|event| matches!(event, RobloxEvent::GameServerDetected { .. }))
+            {
+                pending.remove(index);
+            } else {
+                pending.pop_front();
+            }
+        }
+        pending.push_back(event);
+    }
+
+    fn poll(&self) -> Vec<RobloxEvent> {
+        // Take one bounded snapshot. A concurrent producer cannot keep this
+        // drain running indefinitely or grow a single consumer batch.
+        self.0.lock().drain(..).collect()
+    }
+}
+
+#[cfg(test)]
+mod event_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_backlog_keeps_the_latest_leave_instead_of_leaving_an_old_game_active() {
+        let events = EventBuffer::default();
+        for number in 0..MAX_PENDING_EVENTS {
+            events.push(RobloxEvent::GameLeft {
+                job_id: Some(number.to_string()),
+            });
+        }
+        events.push(RobloxEvent::GameLeft {
+            job_id: Some("latest".into()),
+        });
+        let batch = events.poll();
+        assert_eq!(batch.len(), MAX_PENDING_EVENTS);
+        assert!(
+            matches!(batch.last(), Some(RobloxEvent::GameLeft { job_id: Some(job) }) if job == "latest")
+        );
+        assert!(events.poll().is_empty());
+    }
+
+    #[test]
+    fn session_changes_evict_diagnostics_before_older_session_events() {
+        let events = EventBuffer::default();
+        events.push(RobloxEvent::GameLeft {
+            job_id: Some("previous".into()),
+        });
+        for _ in 1..MAX_PENDING_EVENTS {
+            events.push(RobloxEvent::GameServerDetected {
+                ip: Ipv4Addr::new(128, 116, 47, 3),
+            });
+        }
+        events.push(RobloxEvent::GameLeft {
+            job_id: Some("current".into()),
+        });
+        let batch = events.poll();
+        assert!(
+            matches!(batch.first(), Some(RobloxEvent::GameLeft { job_id: Some(job) }) if job == "previous")
+        );
+        assert!(
+            matches!(batch.last(), Some(RobloxEvent::GameLeft { job_id: Some(job) }) if job == "current")
+        );
+    }
+
+    #[test]
+    fn diagnostic_bursts_cannot_replace_session_state_or_grow_the_batch() {
+        let events = EventBuffer::default();
+        events.push(RobloxEvent::GameLeft {
+            job_id: Some("current".into()),
+        });
+        for number in 0..10_000 {
+            events.push(RobloxEvent::GameServerDetected {
+                ip: Ipv4Addr::from(number as u32),
+            });
+        }
+        let batch = events.poll();
+        assert_eq!(batch.len(), MAX_PENDING_EVENTS);
+        assert!(
+            matches!(batch.first(), Some(RobloxEvent::GameLeft { job_id: Some(job) }) if job == "current")
+        );
+    }
+}
+
 /// Watches Roblox log files for game server connections
 pub struct RobloxWatcher {
-    receiver: Receiver<RobloxEvent>,
+    events: Arc<EventBuffer>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RobloxWatcher {
     /// Create a new Roblox watcher
-    /// Returns None if the Roblox logs directory doesn't exist
+    /// Returns None if the profile is unavailable or the worker cannot start.
+    /// Missing log directories are discovered by the worker when Roblox starts.
     pub fn new() -> Option<Self> {
         let base = PathBuf::from(std::env::var("LOCALAPPDATA").ok()?);
         let directories = vec![
             base.join("Roblox").join("logs"),
             base.join("RobloxPCVNG").join("logs"),
         ];
-        let (sender, receiver) = mpsc::sync_channel(64);
+        let events = Arc::new(EventBuffer::default());
+        let worker_events = events.clone();
         let stop_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_flag_clone = stop_flag.clone();
 
@@ -57,24 +157,17 @@ impl RobloxWatcher {
         thread::Builder::new()
             .name("roblox-log-tail".into())
             .spawn(move || {
-                watch_logs(directories, sender, stop_flag_clone);
+                watch_logs(directories, worker_events, stop_flag_clone);
             })
             .ok()?;
 
         log::info!("Roblox log watcher started");
-        Some(Self {
-            receiver,
-            stop_flag,
-        })
+        Some(Self { events, stop_flag })
     }
 
     /// Poll for new events (non-blocking)
     pub fn poll(&self) -> Vec<RobloxEvent> {
-        let mut events = Vec::new();
-        while let Ok(event) = self.receiver.try_recv() {
-            events.push(event);
-        }
-        events
+        self.events.poll()
     }
 
     /// Stop the watcher
@@ -201,7 +294,7 @@ fn get_patterns() -> (&'static Regex, &'static Regex) {
 /// Main log watching loop
 fn watch_logs(
     directories: Vec<PathBuf>,
-    sender: SyncSender<RobloxEvent>,
+    events: Arc<EventBuffer>,
     stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     // Get compiled regex patterns (compiled once, reused)
@@ -278,7 +371,7 @@ fn watch_logs(
                         RobloxClient::Standard
                     };
                     for event in tracker.feed(&lines, fresh_join || was_reset, client) {
-                        let _ = sender.try_send(event);
+                        events.push(event);
                     }
                     for line in lines {
                         // Try each pattern
@@ -294,7 +387,7 @@ fn watch_logs(
                                     if seen_ips.len() > 1024 {
                                         seen_ips.clear();
                                     }
-                                    let _ = sender.try_send(RobloxEvent::GameServerDetected { ip });
+                                    events.push(RobloxEvent::GameServerDetected { ip });
                                 }
                             }
                         }
