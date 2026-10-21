@@ -94,6 +94,9 @@ fn fetch(
         if bytes.len().saturating_add(n) > limit {
             return Err("Lite download exceeded its expected size.".into());
         }
+        bytes
+            .try_reserve(n)
+            .map_err(|_| "Not enough memory to download Lite. Close other apps and try again.")?;
         bytes.extend_from_slice(&buffer[..n]);
         progress(bytes.len());
     }
