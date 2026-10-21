@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -65,22 +65,7 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if !safe(path.parent().ok_or("Invalid flag-file location.")?) {
         return Err("The flag folder is redirected; it was left untouched.".into());
     }
-    let temporary = path.with_extension(format!("{}.flags.tmp", std::process::id()));
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(|e| e.to_string())?;
-    let result = (|| -> std::io::Result<()> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result.map_err(|e| e.to_string())
+    crate::atomic_file::replace(path, bytes).map_err(|e| e.to_string())
 }
 fn stopped() -> Result<(), String> {
     let mut system = sysinfo::System::new();
@@ -300,6 +285,24 @@ pub fn undo() -> Result<FlagCleanupReport, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interrupted_staging_file_does_not_block_the_next_flag_save() {
+        let dir =
+            std::env::temp_dir().join(format!("swift-flag-staging-{:016x}", rand::random::<u64>()));
+        fs::create_dir(&dir).unwrap();
+        let file = dir.join("ClientAppSettings.json");
+        let stale = file.with_extension(format!("{}.flags.tmp", std::process::id()));
+        fs::write(&file, b"before").unwrap();
+        fs::write(&stale, b"interrupted save").unwrap();
+        let result = write(&file, b"after");
+        let contents = fs::read(&file).unwrap();
+        let preserved_staging = fs::read(&stale).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(contents, b"after");
+        assert_eq!(preserved_staging, b"interrupted save");
+    }
+
     #[test]
     fn cleanup_backs_up_original_bytes_and_undo_preserves_newer_edits() {
         let dir = std::env::temp_dir().join(format!("swift-flag-undo-{}", std::process::id()));
