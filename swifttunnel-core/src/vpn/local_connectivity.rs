@@ -10,7 +10,7 @@
 //! Calling it through the `windows` crate creates a STATIC import, which makes
 //! the whole EXE fail to load on older builds with "entry point
 //! GetNetworkConnectivityHint could not be located". We therefore resolve it
-//! dynamically at runtime (`LoadLibrary` + `GetProcAddress`); when the symbol is
+//! dynamically at runtime (`LoadLibraryEx` + `GetProcAddress`); when the symbol is
 //! absent we degrade gracefully to `Unknown` instead of refusing to launch.
 
 /// Authoritative-enough verdict on whether this device can currently reach
@@ -33,8 +33,27 @@ type GetNetworkConnectivityHintFn = unsafe extern "system" fn(
 
 #[cfg(windows)]
 unsafe extern "system" {
-    fn LoadLibraryW(lplibfilename: *const u16) -> isize;
+    fn LoadLibraryExW(
+        lplibfilename: *const u16,
+        file: *mut std::ffi::c_void,
+        flags: u32,
+    ) -> *mut std::ffi::c_void;
     fn GetProcAddress(hmodule: isize, lpprocname: *const u8) -> *const std::ffi::c_void;
+    fn FreeLibrary(hmodule: *mut std::ffi::c_void) -> i32;
+}
+
+#[cfg(windows)]
+fn load_connectivity_library() -> Option<isize> {
+    use std::os::windows::ffi::OsStrExt;
+    let path = crate::utils::trusted_windows_root()?
+        .join("System32")
+        .join("iphlpapi.dll");
+    let name: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // LOAD_LIBRARY_SEARCH_SYSTEM32 also restricts dependency resolution. Do
+    // not search the application directory, current directory or PATH from
+    // this elevated process. The optional API still resolves dynamically.
+    let module = unsafe { LoadLibraryExW(name.as_ptr(), std::ptr::null_mut(), 0x800) };
+    (!module.is_null()).then_some(module as isize)
 }
 
 /// Resolve `GetNetworkConnectivityHint` from `iphlpapi.dll` at runtime, once.
@@ -48,19 +67,15 @@ fn network_connectivity_hint_fn() -> Option<GetNetworkConnectivityHintFn> {
         std::sync::OnceLock::new();
 
     *RESOLVED.get_or_init(|| {
-        let lib_name: Vec<u16> = "iphlpapi.dll"
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-
-        let module = unsafe { LoadLibraryW(lib_name.as_ptr()) };
-        if module == 0 {
-            return None;
-        }
+        let module = load_connectivity_library()?;
 
         let address =
             unsafe { GetProcAddress(module, c"GetNetworkConnectivityHint".as_ptr().cast::<u8>()) };
         if address.is_null() {
+            // No function pointer will retain this reference on older Windows.
+            unsafe {
+                let _ = FreeLibrary(module as *mut std::ffi::c_void);
+            }
             return None;
         }
 
@@ -71,6 +86,40 @@ fn network_connectivity_hint_fn() -> Option<GetNetworkConnectivityHintFn> {
             std::mem::transmute::<*const std::ffi::c_void, GetNetworkConnectivityHintFn>(address)
         })
     })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::os::windows::ffi::OsStringExt;
+
+    unsafe extern "system" {
+        fn GetModuleFileNameW(module: isize, name: *mut u16, size: u32) -> u32;
+    }
+
+    #[test]
+    fn connectivity_library_resolves_to_the_real_windows_system_directory() {
+        let module = load_connectivity_library().expect("Windows IP helper library");
+        let mut name = [0u16; 32768];
+        let length =
+            unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) } as usize;
+        // Balance this test's reference, not the process-wide resolver's handle.
+        unsafe {
+            let _ = FreeLibrary(module as *mut std::ffi::c_void);
+        }
+        assert!(length > 0 && length < name.len());
+        let actual = std::path::PathBuf::from(std::ffi::OsString::from_wide(&name[..length]));
+        let expected = crate::utils::trusted_windows_root()
+            .unwrap()
+            .join("System32")
+            .join("iphlpapi.dll");
+        assert!(
+            actual
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&expected.to_string_lossy()),
+            "loaded {actual:?}, expected {expected:?}"
+        );
+    }
 }
 
 // The NLM connectivity-hint values come from windows-rs, which generates them
