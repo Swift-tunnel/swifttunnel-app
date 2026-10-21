@@ -143,6 +143,12 @@ fn resolve_windows_command_path_with_root(
     program: &str,
     system_root: Option<&std::path::Path>,
 ) -> PathBuf {
+    if program.eq_ignore_ascii_case("explorer") || program.eq_ignore_ascii_case("explorer.exe") {
+        return system_root
+            .map(|root| root.join("explorer.exe"))
+            .unwrap_or_default();
+    }
+
     if is_powershell_program(program) {
         let Some(root) = system_root else {
             return PathBuf::new();
@@ -1126,6 +1132,23 @@ mod tests {
     fn test_resolve_windows_command_path_leaves_other_programs_unchanged() {
         let resolved = resolve_windows_command_path_with_root("custom-helper", None);
         assert_eq!(resolved, PathBuf::from("custom-helper"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explorer_uses_the_windows_root_and_never_searches_path() {
+        let root = std::path::Path::new("E:/Windows");
+        for name in ["explorer", "Explorer.EXE"] {
+            assert_eq!(
+                resolve_windows_command_path_with_root(name, Some(root)),
+                root.join("explorer.exe")
+            );
+            assert!(
+                resolve_windows_command_path_with_root(name, None)
+                    .as_os_str()
+                    .is_empty()
+            );
+        }
     }
 
     #[cfg(windows)]

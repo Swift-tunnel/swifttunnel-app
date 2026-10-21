@@ -43,6 +43,7 @@ mod surface;
 mod theme;
 mod tray;
 mod ui;
+mod ui_update;
 mod uninstall;
 mod view;
 

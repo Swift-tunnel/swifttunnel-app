@@ -1529,6 +1529,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if let Some(app) = app_of(hwnd)
                     && !app.quit_pending
                 {
+                    if let Some(engine) = &app.engine {
+                        engine.acknowledge_update();
+                    }
                     app.refresh_from_engine();
                     app.rebuild(client_of(hwnd));
                     sync_timer(hwnd, app, on_screen(hwnd));

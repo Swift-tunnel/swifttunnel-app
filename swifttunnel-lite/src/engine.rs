@@ -110,6 +110,7 @@ struct Shared {
     snapshot: RwLock<Snapshot>,
     /// Set once the window exists. Stored as an isize because HWND is not Send.
     hwnd: AtomicIsize,
+    ui_update: crate::ui_update::UiUpdate,
     stop: AtomicBool,
     /// Serializes connect, disconnect, uninstall and installer handoff.
     busy: OperationGate,
@@ -146,14 +147,15 @@ impl Shared {
         // SAFETY: posting to a window handle published by `run`. A stale
         // handle after the window closed makes PostMessageW fail, which is
         // exactly the harmless outcome wanted.
-        unsafe {
-            let _ = PostMessageW(
+        self.ui_update.post(|| unsafe {
+            PostMessageW(
                 Some(HWND(raw as *mut std::ffi::c_void)),
                 WM_ENGINE_UPDATE,
                 WPARAM(0),
                 LPARAM(0),
-            );
-        }
+            )
+            .is_ok()
+        });
     }
 
     fn edit<T>(&self, f: impl FnOnce(&mut Snapshot) -> T) -> Option<T> {
@@ -238,6 +240,7 @@ impl Engine {
                 login_error: None,
             }),
             hwnd: AtomicIsize::new(0),
+            ui_update: crate::ui_update::UiUpdate::default(),
             stop: AtomicBool::new(false),
             busy: OperationGate::default(),
             update_busy: OperationGate::default(),
@@ -294,6 +297,10 @@ impl Engine {
     /// Publish the window handle so background work can ask for a repaint.
     pub fn attach(&self, hwnd: isize) {
         self.shared.hwnd.store(hwnd, Ordering::Relaxed);
+    }
+
+    pub fn acknowledge_update(&self) {
+        self.shared.ui_update.acknowledge();
     }
 
     /// Copy everything the screens read out of the snapshot and the settings.
@@ -2530,7 +2537,7 @@ fn open_logs() {
     let Some(path) = crate::log_path() else {
         return;
     };
-    let _ = std::process::Command::new("explorer")
+    let _ = swifttunnel_core::hidden_command("explorer")
         .arg(format!("/select,{}", path.display()))
         .spawn();
 }
