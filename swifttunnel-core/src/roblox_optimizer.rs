@@ -1059,11 +1059,18 @@ impl RobloxOptimizer {
             return Ok(());
         }
         if settings_path.exists() {
+            let original = crate::utils::read_file_bounded(
+                settings_path,
+                4 * 1024 * 1024,
+                "Roblox settings backup",
+            )?;
             info!("Creating backup of Roblox settings");
             if let Some(parent) = self.backup_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(settings_path, &self.backup_path)?;
+            // Do not expose a partial backup after an interrupted copy. Future
+            // applies preserve the first published snapshot, including its bytes.
+            crate::atomic_file::replace(&self.backup_path, &original)?;
             info!("Backup created at: {:?}", self.backup_path);
         }
         Ok(())
@@ -3055,6 +3062,30 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(file).unwrap()).unwrap();
         assert_eq!(remaining, serde_json::json!({"UserFlag": "keep"}));
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_settings_are_rejected_before_creating_a_backup() {
+        use std::io::Write;
+        let dir =
+            std::env::temp_dir().join(format!("swift-backup-bound-{:016x}", rand::random::<u64>()));
+        fs::create_dir(&dir).unwrap();
+        let settings = dir.join("GlobalBasicSettings_13.xml");
+        let mut source = fs::File::create(&settings).unwrap();
+        source.write_all(b"<roblox>").unwrap();
+        source.set_len(4 * 1024 * 1024 + 1).unwrap();
+        drop(source);
+        let optimizer = optimizer_with_path(settings.clone());
+        let result = optimizer.backup_settings_for(&settings);
+        let backup_exists = optimizer.backup_path.exists();
+        let unchanged_size = fs::metadata(&settings).unwrap().len();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            result.is_err(),
+            "Oversized settings must fail before taking a backup"
+        );
+        assert!(!backup_exists);
+        assert_eq!(unchanged_size, 4 * 1024 * 1024 + 1);
     }
 
     /// The backup is the original, not the previous apply.
