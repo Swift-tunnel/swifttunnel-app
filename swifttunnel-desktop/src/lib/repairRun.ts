@@ -4,7 +4,7 @@ import {
   type RepairIssueId,
   type RepairReport,
   type RepairStatus,
-} from "./repairCenter";
+} from "./repairResults";
 import { repairCompletion } from "./repairCompletion";
 
 export type RepairItemResult = RepairReport & { id: RepairIssueId; label: string };

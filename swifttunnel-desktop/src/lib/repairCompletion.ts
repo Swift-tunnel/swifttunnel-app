@@ -1,4 +1,4 @@
-import type { RepairReport, RepairStatus } from "./repairCenter";
+import type { RepairReport, RepairStatus } from "./repairResults";
 
 type RepairResult = Pick<RepairReport, "status" | "changed">;
 

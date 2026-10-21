@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { parseRepairRun, type RepairRun, type RepairItemResult } from "../lib/repairRun";
-import type { RepairReport } from "../lib/repairCenter";
+import type { RepairReport } from "../lib/repairResults";
 
 const STORAGE_KEY = "swifttunnel.lastRepairAll.v1";
 function savedRun(): RepairRun | null {
