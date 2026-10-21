@@ -45,6 +45,7 @@ const UPLOAD_BYTES_PER_REQ: usize = 750_000; // 0.75 MB
 /// HTTP client timeout
 const REQUEST_TIMEOUT_SECS: u64 = 20;
 const RETRY_DELAY: Duration = Duration::from_millis(500);
+const LOAD_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run a bufferbloat test.
 ///
@@ -74,15 +75,14 @@ pub async fn run_bufferbloat_test(
             format!("{}?bytes={}", DOWNLOAD_URL, DOWNLOAD_BYTES_PER_REQ),
         ),
         upload_load_loop(client.clone(), upload_transferred.clone()),
-        sample_latency(LOADED_SAMPLES),
+        sample_after_load_starts(
+            &download_transferred,
+            &upload_transferred,
+            LOAD_START_TIMEOUT,
+            sample_latency(LOADED_SAMPLES),
+        ),
     )
     .await?;
-    // A blocked speed-test endpoint would otherwise turn idle pings into an
-    // A grade, despite never generating load in one or both directions.
-    if !download_transferred.load(Ordering::Relaxed) || !upload_transferred.load(Ordering::Relaxed)
-    {
-        return Err("Could not measure both download and upload traffic. Try the test again when the speed-test service is reachable.".into());
-    }
     debug!("Bufferbloat: loaded median = {}ms", loaded_latency);
 
     let bufferbloat_ms = loaded_latency.saturating_sub(idle_latency);
@@ -105,6 +105,25 @@ pub async fn run_bufferbloat_test(
     );
 
     Ok(results)
+}
+
+async fn sample_after_load_starts(
+    download: &AtomicBool,
+    upload: &AtomicBool,
+    startup_timeout: Duration,
+    sample: impl Future<Output = Result<u32, String>>,
+) -> Result<u32, String> {
+    // Connection setup can take most of the sampling window. A final check
+    // that some bytes arrived is too late: it cannot make earlier idle pings
+    // into loaded samples. Wait for both directions before polling `sample`.
+    tokio::time::timeout(startup_timeout, async {
+        while !download.load(Ordering::Relaxed) || !upload.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .map_err(|_| "Could not start both download and upload traffic. Check your connection and try the test again.".to_string())?;
+    sample.await
 }
 
 async fn sample_under_load<D, U, S>(download: D, upload: U, sample: S) -> Result<u32, String>
@@ -257,6 +276,46 @@ async fn upload_load_loop(client: Client, transferred: Arc<AtomicBool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn loaded_latency_waits_for_actual_traffic_in_both_directions() {
+        let download = Arc::new(AtomicBool::new(false));
+        let upload = Arc::new(AtomicBool::new(false));
+        let (down, up) = (download.clone(), upload.clone());
+        let startup = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            down.store(true, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            up.store(true, Ordering::Relaxed);
+        });
+        let result = sample_after_load_starts(&download, &upload, Duration::from_secs(1), async {
+            if download.load(Ordering::Relaxed) && upload.load(Ordering::Relaxed) {
+                Ok(20)
+            } else {
+                Err("latency sampled before load started".into())
+            }
+        })
+        .await;
+        startup.await.unwrap();
+        assert_eq!(result, Ok(20));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_load_start_fails_without_sampling_idle_latency_as_loaded() {
+        let sampled = AtomicBool::new(false);
+        let result = sample_after_load_starts(
+            &AtomicBool::new(true),
+            &AtomicBool::new(false),
+            Duration::from_millis(5),
+            async {
+                sampled.store(true, Ordering::Relaxed);
+                Ok(1)
+            },
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!sampled.load(Ordering::Relaxed));
+    }
 
     #[tokio::test]
     async fn bufferbloat_empty_download_does_not_create_a_fast_retry_loop() {
