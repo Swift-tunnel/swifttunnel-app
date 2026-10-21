@@ -382,14 +382,12 @@ pub async fn boost_reset_roblox_settings(
     let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        {
-            let ro = roblox_optimizer.lock();
-            ro.reset_swifttunnel_changes().map_err(|e| e.to_string())?;
-        }
-        {
-            let mut s = settings.lock();
-            persist_roblox_reset(&mut s, swifttunnel_core::settings::save_settings)
-        }
+        // Flag/launch preparation shares this lock. Keep it through the saved
+        // defaults too, or a new apply can land between reset and persistence.
+        let ro = roblox_optimizer.lock();
+        ro.reset_swifttunnel_changes().map_err(|e| e.to_string())?;
+        let mut s = settings.lock();
+        persist_roblox_reset(&mut s, swifttunnel_core::settings::save_settings)
     })
     .await
     .map_err(|e| format!("Reset Roblox task failed: {}", e))?
@@ -411,10 +409,8 @@ pub async fn boost_reset_roblox_client(
     let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let report = {
-            let ro = roblox_optimizer.lock();
-            ro.reset_client_to_default()
-        };
+        let ro = roblox_optimizer.lock();
+        let report = ro.reset_client_to_default();
 
         // The saved config has to follow the client, or the app goes on showing
         // Ultraboost as on over a Roblox that no longer has a single flag in it.
