@@ -176,16 +176,108 @@ pub fn place(pid: u32, borderless: bool, monitor: Option<&str>) -> Result<bool, 
                 (current.bottom - current.top).min(selected.height),
             )
         };
+        position_window(window, selected.left, selected.top, width, height)?;
+    }
+    Ok(true)
+}
+
+fn position_window(
+    window: HWND,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), String> {
+    unsafe {
         SetWindowPos(
             window,
             None,
-            selected.left,
-            selected.top,
+            left,
+            top,
             width,
             height,
-            SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
+            // The player can be busy starting/rendering. Queue the placement
+            // on its window thread instead of holding a blocking worker until
+            // that thread processes synchronous window-position messages.
+            SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED,
         )
-        .map_err(|e| e.to_string())?;
     }
-    Ok(true)
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use windows::core::w;
+
+    #[test]
+    fn positioning_does_not_wait_for_the_players_window_thread() {
+        let (created_tx, created_rx) = mpsc::channel();
+        let (pump_tx, pump_rx) = mpsc::channel();
+        let owner = std::thread::spawn(move || {
+            // This private hidden window models a player thread busy rendering.
+            // It is never shown, and no Roblox/user window is queried or moved.
+            let window = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    w!("SwiftTunnel owned placement test"),
+                    WINDOW_STYLE::default(),
+                    0,
+                    0,
+                    64,
+                    64,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            };
+            created_tx.send(window.0 as usize).unwrap();
+            let _ = pump_rx.recv_timeout(Duration::from_secs(5));
+            // Rescue a synchronous implementation before making assertions.
+            for _ in 0..20 {
+                let mut message = MSG::default();
+                unsafe {
+                    while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                        let _ = TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let mut rect = RECT::default();
+            let read = unsafe { GetWindowRect(window, &mut rect) };
+            unsafe {
+                let _ = DestroyWindow(window);
+            }
+            read.unwrap();
+            (
+                rect.left,
+                rect.top,
+                rect.right - rect.left,
+                rect.bottom - rect.top,
+            )
+        });
+        let raw_window = created_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (moved_tx, moved_rx) = mpsc::channel();
+        let mover = std::thread::spawn(move || {
+            let result =
+                position_window(HWND(raw_window as *mut std::ffi::c_void), 20, 30, 640, 480);
+            moved_tx.send(result).unwrap();
+        });
+        let prompt = moved_rx.recv_timeout(Duration::from_secs(1));
+        let _ = pump_tx.send(());
+        mover.join().unwrap();
+        let rect = owner.join().unwrap();
+        assert!(
+            prompt.is_ok(),
+            "positioning waited for the player's message pump"
+        );
+        prompt.unwrap().unwrap();
+        assert_eq!(rect, (20, 30, 640, 480));
+    }
 }
