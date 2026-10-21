@@ -330,6 +330,27 @@ mod tests {
         assert!(package_header_is_usable(&OLE[..]));
     }
 
+    #[test]
+    fn oversized_sources_are_not_read_and_exact_limit_sources_remain_byte_exact() {
+        let path = std::env::temp_dir().join(format!(
+            "swift-source-bound-{}-{}.msi",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bytes = [0xAB; 33];
+        std::fs::write(&path, bytes).unwrap();
+        let too_large = super::read_source_file_bounded(&path, 32);
+        let exact = super::read_source_file_bounded(&path, 33);
+        let source = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(too_large.is_err());
+        assert_eq!(exact.unwrap(), bytes);
+        assert_eq!(source, bytes);
+    }
+
     /// A preserved copy is reused only when it really is the same package.
     ///
     /// This compared lengths, and the signature check beside it passes for any
@@ -559,7 +580,9 @@ pub fn preserve_installer_sources() -> Result<Vec<String>, String> {
         );
         // Copy from a readable registered package, then hold the verified
         // protected copy while checking the OLE header and updating SourceList.
-        let Ok(bytes) = std::fs::read(&product.local_package) else {
+        let Ok(bytes) =
+            read_source_file_bounded(Path::new(&product.local_package), 256 * 1024 * 1024)
+        else {
             continue;
         };
         let Ok(installer) = cache.stage(&file_name, &bytes) else {
@@ -586,6 +609,41 @@ pub fn preserve_installer_sources() -> Result<Vec<String>, String> {
     }
 
     Ok(preserved)
+}
+
+/// A damaged cached package must not control startup memory consumption.
+fn read_source_file_bounded(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::{Error, ErrorKind, Read};
+
+    let mut file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > limit as u64 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Installer source is too large",
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        // Also catch a source that grows after the metadata check. Read at
+        // most one extra byte, without reserving memory beyond the limit.
+        let capacity = buffer.len().min((limit - bytes.len()).saturating_add(1));
+        let count = match file.read(&mut buffer[..capacity]) {
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if count > limit - bytes.len() {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Installer source is too large",
+            ));
+        }
+        bytes.try_reserve(count).map_err(Error::other)?;
+        bytes.extend_from_slice(&buffer[..count]);
+    }
 }
 
 /// Record `dir\file_name` as where this product was installed from.
