@@ -1,13 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import App from "./App";
-import { OverlayStatsBar } from "./components/ingame/OverlayStatsBar";
 import { installWebviewLockdown, shouldLockDown } from "./lib/webviewLockdown";
-import { installAnimationIdle } from "./lib/animationIdle";
-import { MotionConfig } from "framer-motion";
-import { useSettingsStore } from "./stores/settingsStore";
-import { trackTunnelSessions } from "./stores/sessionStatsStore";
 import "./styles/globals.css";
 
 // Right-click and F12 otherwise expose the page context menu and developer
@@ -32,31 +26,33 @@ if (isStatsOverlay) {
   document.body.style.background = "transparent";
   const root = document.getElementById("root");
   if (root) root.style.background = "transparent";
-} else {
-  // Main window only. The overlays are never focused by design, so pausing
-  // their motion on blur would freeze the one surface meant to animate while
-  // you are looking at the game.
-  installAnimationIdle({
-    isIdleEnabled: () =>
-      useSettingsStore.getState().settings.idle_when_unfocused,
-  });
-  // Session ping stats for the Connect tab, counted whichever tab is open.
-  trackTunnelSessions();
 }
 
-if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("game-preview")) {
-  void import("./lib/GamePreview").then(({ GamePreview }) => ReactDOM.createRoot(document.getElementById("root")!).render(<GamePreview />));
-} else {
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <MotionConfig reducedMotion="user">
-    {isStatsOverlay ? (
-      <OverlayStatsBar />
-    ) : (
-      <App />
-    )}
-    </MotionConfig>
-  </React.StrictMode>,
-);
+const root = ReactDOM.createRoot(document.getElementById("root")!);
 
+async function mountWindow() {
+  if (import.meta.env.DEV && new URLSearchParams(window.location.search).has("game-preview")) {
+    const { GamePreview } = await import("./lib/GamePreview");
+    root.render(<GamePreview />);
+  } else if (isStatsOverlay) {
+    // Do not parse the full shell, auth/VPN stores, repair or launcher pages
+    // in a second renderer just to display a small bar of supplied values.
+    const { OverlayStatsBar } = await import("./components/ingame/OverlayStatsBar");
+    root.render(<React.StrictMode><OverlayStatsBar /></React.StrictMode>);
+  } else {
+    const { MainWindow, prepareMainWindow } = await import("./MainWindow");
+    prepareMainWindow();
+    root.render(<React.StrictMode><MainWindow /></React.StrictMode>);
+  }
 }
+
+void mountWindow().catch(error => {
+  console.error("SwiftTunnel window could not load", error);
+  if (isStatsOverlay) {
+    void getCurrentWindow().hide().catch(() => {});
+  } else {
+    root.render(<p role="alert" className="p-6 text-text-primary">
+      SwiftTunnel could not open. Close the app and try again.
+    </p>);
+  }
+});
