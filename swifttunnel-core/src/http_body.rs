@@ -31,6 +31,12 @@ pub async fn read_bounded(
         if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
             return Err(too_large());
         }
+        // Lite also uses this reader for installers. A bounded download can
+        // still exceed available RAM; report allocation failure instead of
+        // letting Vec's infallible growth abort the client mid-session.
+        bytes.try_reserve(chunk.len()).map_err(|_| {
+            format!("Not enough memory to download the {what}. Close other apps and retry.")
+        })?;
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
