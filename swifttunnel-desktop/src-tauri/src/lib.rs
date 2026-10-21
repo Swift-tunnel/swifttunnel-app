@@ -454,17 +454,17 @@ fn spawn_roblox_version_watcher(app: tauri::AppHandle) {
                 if current == last_seen {
                     continue;
                 }
+                let Some(state) = app.try_state::<AppState>() else {
+                    continue;
+                };
+                // Launch/reset/flag work uses this lock. Check temporary state
+                // and read the saved config only after any earlier apply finishes.
+                let optimizer = state.roblox_optimizer.lock();
                 if swifttunnel_core::roblox_game_profile::pending()
                     || swifttunnel_core::roblox_launch_flags::pending()
                 {
                     continue;
                 }
-                last_seen = current;
-
-                let Some(state) = app.try_state::<AppState>() else {
-                    continue;
-                };
-
                 let config = {
                     let settings = state.settings.lock();
                     settings.config.roblox_settings.clone()
@@ -474,13 +474,18 @@ fn spawn_roblox_version_watcher(app: tauri::AppHandle) {
                 // Ultraboost: the startup path checks only Ultraboost, so a
                 // custom-flag user was never recovered at all.
                 if !config.ultraboost && !config.custom_fflags_enabled {
+                    last_seen = current;
                     continue;
                 }
 
                 info!("Roblox install changed; reapplying saved FFlags");
-                let optimizer = state.roblox_optimizer.lock();
-                if let Err(e) = optimizer.reapply_saved_client_fflags(&config) {
-                    warn!("Could not reapply FFlags after a Roblox update: {e}");
+                match optimizer.reapply_saved_client_fflags(&config) {
+                    Ok(()) => last_seen = current,
+                    Err(e) => {
+                        // A file may still be locked while Roblox updates. Retry
+                        // on the next minute instead of forgetting this version.
+                        warn!("Could not reapply FFlags after a Roblox update: {e}");
+                    }
                 }
             }
         });
@@ -498,17 +503,21 @@ fn spawn_roblox_window_size_watcher(app: tauri::AppHandle) {
                     continue;
                 };
 
-                let running = {
-                    let ro = state.roblox_optimizer.lock();
-                    ro.is_roblox_running()
-                };
+                let ro = state.roblox_optimizer.lock();
+                let running = ro.is_roblox_running();
 
                 if was_running && !running {
+                    if swifttunnel_core::roblox_game_profile::pending()
+                        || swifttunnel_core::roblox_launch_flags::pending()
+                    {
+                        // The join watcher restores its temporary profile first.
+                        // Keep the exit pending until that recovery has completed.
+                        continue;
+                    }
                     let config = {
                         let s = state.settings.lock();
                         s.config.roblox_settings.clone()
                     };
-                    let ro = state.roblox_optimizer.lock();
                     if let Err(e) = ro.reapply_window_size(&config) {
                         log::warn!("Could not restore Roblox window size after exit: {e}");
                     }

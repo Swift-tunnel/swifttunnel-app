@@ -220,7 +220,7 @@ pub async fn boost_update_config(
         let _operation = operation;
         let mut applied_config = config.clone();
 
-        let warnings = {
+        let mut warnings = {
             let mut warn_list = Vec::new();
             let roblox_pid = {
                 let mut monitor = performance_monitor.lock();
@@ -255,19 +255,19 @@ pub async fn boost_update_config(
                 );
             }
 
-            {
-                let ro = roblox_optimizer.lock();
-                if let Err(e) = ro.restore_settings() {
-                    warn_list.push(format!("Roblox optimizer restore: {}", e));
-                }
-                match ro.apply_optimizations(&config.roblox_settings) {
-                    Ok(opt_warnings) => warn_list.extend(opt_warnings),
-                    Err(e) => warn_list.push(format!("Roblox optimizer: {}", e)),
-                }
-            }
-
             warn_list
         };
+
+        // A launch or watcher must not slip between applying the files and
+        // publishing their matching config. Keep optimizer -> settings order.
+        let ro = roblox_optimizer.lock();
+        if let Err(e) = ro.restore_settings() {
+            warnings.push(format!("Roblox optimizer restore: {}", e));
+        }
+        match ro.apply_optimizations(&config.roblox_settings) {
+            Ok(opt_warnings) => warnings.extend(opt_warnings),
+            Err(e) => warnings.push(format!("Roblox optimizer: {}", e)),
+        }
 
         {
             let mut s = settings.lock();
