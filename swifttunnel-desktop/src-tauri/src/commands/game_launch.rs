@@ -594,11 +594,7 @@ pub async fn games_launch(
         if games.cleanup_scheduled {
             return Err("The previous game's settings are still being restored. Try Play again in a moment.".into());
         }
-        if games.launch_pending()
-            && games
-                .launch_started
-                .is_some_and(|at| games.launch_updating || at.elapsed() < Duration::from_secs(60))
-        {
+        if games.launch_request_in_progress(std::time::Instant::now()) {
             return Err("A Roblox launch is already in progress.".into());
         }
         games.begin_launch(client)

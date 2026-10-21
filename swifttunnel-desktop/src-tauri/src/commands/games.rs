@@ -180,6 +180,7 @@ pub struct GamesState {
     pub status: Option<String>,
     pub search: Option<ServerSearch>,
     pub launch_started: Option<std::time::Instant>,
+    launch_resumed: Option<std::time::Instant>,
     pub launch_player_seen: bool,
     pub launch_updating: bool,
     pub launch_gone_since: Option<std::time::Instant>,
@@ -234,6 +235,7 @@ impl GamesState {
         self.current = None;
         self.process_gone_since = None;
         self.launch_started = Some(std::time::Instant::now());
+        self.launch_resumed = None;
         self.launch_player_seen = false;
         self.launch_updating = false;
         self.launch_gone_since = None;
@@ -277,8 +279,20 @@ impl GamesState {
         self.launch_started.is_some() && (!self.launch_player_seen || self.launch_updating)
     }
 
+    pub(crate) fn launch_request_in_progress(&self, now: std::time::Instant) -> bool {
+        self.launch_pending()
+            && (self.launch_updating
+                || self
+                    .launch_resumed
+                    .or(self.launch_started)
+                    .is_some_and(|at| {
+                        now.saturating_duration_since(at) < std::time::Duration::from_secs(60)
+                    }))
+    }
+
     pub fn clear_launch(&mut self) {
         self.launch_started = None;
+        self.launch_resumed = None;
         self.launch_player_seen = false;
         self.launch_updating = false;
         self.launch_gone_since = None;
@@ -290,6 +304,7 @@ impl GamesState {
             return false;
         }
         self.launch_player_seen = true;
+        self.launch_resumed = None;
         self.launch_updating = false;
         self.launch_gone_since = None;
         self.warning = None;
@@ -316,6 +331,18 @@ impl GamesState {
             self.status = Some(message.into());
             return true;
         }
+        if self.launch_updating {
+            // Updating can take longer than the normal opening deadline. Its
+            // exit is not proof the next player failed or was closed: Windows
+            // can observe neither process during the handoff. Start a fresh,
+            // bounded opening window without extending the overall update cap.
+            self.launch_updating = false;
+            self.launch_player_seen = false;
+            self.launch_gone_since = None;
+            self.launch_resumed = Some(now);
+            self.status = Some("Roblox is opening.".into());
+            return true;
+        }
         if self.launch_player_seen {
             let gone = self.launch_gone_since.get_or_insert(now);
             if now.saturating_duration_since(*gone) < std::time::Duration::from_secs(3) {
@@ -328,7 +355,9 @@ impl GamesState {
             log::info!("Roblox launch: player closed before game metadata was confirmed");
             return true;
         }
-        if now.saturating_duration_since(started) > std::time::Duration::from_secs(60) {
+        if now.saturating_duration_since(self.launch_resumed.unwrap_or(started))
+            > std::time::Duration::from_secs(60)
+        {
             self.clear_launch();
             self.cancel_window_placement();
             self.left_confirmed = true;
@@ -657,6 +686,49 @@ mod launch_activity_tests {
         assert_eq!(games.status.as_deref(), Some("Roblox is open."));
         assert!(!games.launch_pending());
         assert!(games.warning.is_none());
+    }
+
+    #[test]
+    fn finishing_a_long_update_gives_the_player_time_to_start() {
+        let at = Instant::now();
+        let mut games = launch(at);
+        assert!(games.track_launch(at + Duration::from_secs(2), false, true));
+        assert!(!games.track_launch(at + Duration::from_secs(90), false, true));
+        games.track_launch(at + Duration::from_secs(91), false, false);
+        assert!(
+            games.launch_pending(),
+            "the updater exit is not a failed launch"
+        );
+        assert!(!games.launch_updating);
+        assert!(games.warning.is_none());
+        assert_eq!(
+            games.launch_started,
+            Some(at),
+            "keep the existing ten-minute update cap"
+        );
+        assert!(games.launch_request_in_progress(at + Duration::from_secs(93)));
+        assert!(games.track_launch(at + Duration::from_secs(94), true, false));
+        assert_eq!(games.status.as_deref(), Some("Roblox is open."));
+    }
+
+    #[test]
+    fn an_update_handoff_does_not_reuse_the_old_players_close_timer() {
+        let at = Instant::now();
+        let mut games = launch(at);
+        games.track_launch(at + Duration::from_secs(1), true, false);
+        games.track_launch(at + Duration::from_secs(2), false, true);
+        games.track_launch(at + Duration::from_secs(90), false, true);
+        games.track_launch(at + Duration::from_secs(91), false, false);
+        games.track_launch(at + Duration::from_secs(95), false, false);
+        assert!(games.launch_pending());
+        assert!(games.warning.is_none());
+        assert!(games.track_launch(at + Duration::from_secs(152), false, false));
+        assert!(
+            !games.launch_pending(),
+            "a missing player still times out after the new grace period"
+        );
+        assert!(games.warning.is_some());
+        assert!(!games.launch_request_in_progress(at + Duration::from_secs(152)));
     }
 
     #[test]
