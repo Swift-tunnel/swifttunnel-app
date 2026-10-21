@@ -297,6 +297,10 @@ impl Engine {
     /// Publish the window handle so background work can ask for a repaint.
     pub fn attach(&self, hwnd: isize) {
         self.shared.hwnd.store(hwnd, Ordering::Relaxed);
+        // Workers can finish between the window's initial snapshot read and
+        // publication of its handle. Their earlier notifications had no
+        // recipient; always request one current snapshot after attachment.
+        self.shared.notify();
     }
 
     pub fn acknowledge_update(&self) {
