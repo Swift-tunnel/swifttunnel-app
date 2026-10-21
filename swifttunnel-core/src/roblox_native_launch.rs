@@ -30,8 +30,7 @@ pub fn updater_running() -> bool {
     let Some(root) = std::env::var_os("LOCALAPPDATA") else {
         return false;
     };
-    let roots = [RobloxClient::Standard, RobloxClient::Vng]
-        .map(|client| installation_root(&PathBuf::from(&root), client));
+    let base = PathBuf::from(root);
     #[cfg(windows)]
     {
         let Ok(processes) = crate::process_snapshot::list() else {
@@ -44,13 +43,13 @@ pub fn updater_running() -> bool {
                 crate::process_snapshot::image_path(process.pid)
                     .ok()
                     .flatten()
-                    .is_some_and(|image| {
-                        roots.iter().any(|root| Path::new(&image).starts_with(root))
-                    })
+                    .is_some_and(|image| updater_image_is_installed(&base, Path::new(&image)))
             })
     }
     #[cfg(not(windows))]
     {
+        let roots = [RobloxClient::Standard, RobloxClient::Vng]
+            .map(|client| installation_root(&base, client));
         let mut system = sysinfo::System::new();
         system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         system.processes().values().any(|p| {
@@ -62,6 +61,12 @@ pub fn updater_running() -> bool {
                 .is_some_and(|p| roots.iter().any(|root| p.starts_with(root)))
         })
     }
+}
+#[cfg(windows)]
+fn updater_image_is_installed(base: &Path, image: &Path) -> bool {
+    // Process image paths and LOCALAPPDATA can preserve different casing.
+    // Use the same case-insensitive, directory-bounded match as the player.
+    client_for_image(base, image).is_some()
 }
 #[cfg(windows)]
 fn is_updater_name(name: &str) -> bool {
@@ -195,6 +200,33 @@ pub fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn updater_paths_follow_windows_casing_without_accepting_sibling_folders() {
+        let base = Path::new(r"E:\Users\Player\AppData\Local");
+        assert!(updater_image_is_installed(
+            base,
+            Path::new(
+                r"e:\users\PLAYER\appdata\local\ROBLOX\Versions\version-test\RobloxPlayerInstaller.exe"
+            )
+        ));
+        assert!(updater_image_is_installed(
+            base,
+            Path::new(r"E:\Users\Player\AppData\Local\robloxpcvng\RobloxInstaller.exe")
+        ));
+        assert!(!updater_image_is_installed(
+            base,
+            Path::new(r"E:\Users\Player\AppData\Local\Roblox-other\RobloxPlayerInstaller.exe")
+        ));
+        assert!(!updater_image_is_installed(
+            base,
+            Path::new(r"E:\Users\Player\AppData\Local\RobloxPCVNG-other\RobloxInstaller.exe")
+        ));
+        assert!(!updater_image_is_installed(
+            base,
+            Path::new(r"E:\Downloads\RobloxPlayerInstaller.exe")
+        ));
+    }
     #[test]
     fn restart_resolves_the_client_and_builds_a_native_command_without_a_protocol_handler() {
         let base =
