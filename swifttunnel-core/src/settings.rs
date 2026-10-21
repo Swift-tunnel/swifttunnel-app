@@ -385,8 +385,8 @@ impl AppSettings {
         // defaulted on. It shipped off, so most existing installs sit at
         // Roblox's stock 60 having never found the switch.
         //
-        // Guarded by a marker rather than forced like the two rules below,
-        // because forcing it would re-enable the cap on every launch and there
+        // Guarded by a marker rather than forced on every load, because
+        // forcing it would re-enable the cap on every launch and there
         // would be no way to turn it off. Raises the target rather than setting
         // it, so anyone who already picked something higher keeps it, and
         // `apply_xml_settings` will not lower their FramerateCap either.
@@ -411,9 +411,6 @@ impl AppSettings {
         if self.enable_api_tunneling || self.enable_country_ban {
             self.auto_routing_enabled = false;
         }
-        // Older releases serialized false as the default even though the app has
-        // no user-facing toggle. Keep app-close safe for shared/cafe PCs.
-        self.minimize_to_tray = true;
         // Partial Bypass was removed. A saved `enable_partial_country_ban`
         // is ignored as an unknown field, so upgrading users simply lose the
         // mode rather than hitting a parse error. Both normalisation rules
@@ -799,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn test_settings_sanitize_migrates_legacy_minimize_to_tray_false() {
+    fn test_settings_sanitize_preserves_an_explicit_close_to_tray_opt_out() {
         let mut settings = AppSettings {
             minimize_to_tray: false,
             ..Default::default()
@@ -807,7 +804,11 @@ mod tests {
 
         settings.sanitize_in_place();
 
-        assert!(settings.minimize_to_tray);
+        assert!(!settings.minimize_to_tray);
+        let mut reloaded: AppSettings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        reloaded.sanitize_in_place();
+        assert!(!reloaded.minimize_to_tray);
     }
 
     /// An install from before the cap defaulted on gets it turned on, once.
@@ -848,8 +849,8 @@ mod tests {
         );
     }
 
-    /// Once is once. Forcing this the way `minimize_to_tray` is forced would
-    /// re-enable the cap on every launch and leave no way to turn it off.
+    /// Once is once. Forcing this on every load would re-enable the cap on
+    /// every launch and leave no way to turn it off.
     #[test]
     fn the_frame_cap_migration_does_not_run_twice() {
         let mut settings = AppSettings::default();
