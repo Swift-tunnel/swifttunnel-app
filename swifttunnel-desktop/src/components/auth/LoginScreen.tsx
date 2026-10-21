@@ -1,5 +1,5 @@
 import { type FormEvent, useState } from "react";
-import { motion } from "framer-motion";
+import * as motion from "framer-motion/m";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useAuthStore } from "../../stores/authStore";
 import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";

@@ -1,5 +1,5 @@
 import App from "./App";
-import { MotionConfig } from "framer-motion";
+import { AppMotion } from "./components/common/AppMotion";
 import { installAnimationIdle } from "./lib/animationIdle";
 import { useSettingsStore } from "./stores/settingsStore";
 import { trackTunnelSessions } from "./stores/sessionStatsStore";
@@ -12,5 +12,5 @@ export function prepareMainWindow() {
 }
 
 export function MainWindow() {
-  return <MotionConfig reducedMotion="user"><App /></MotionConfig>;
+  return <AppMotion><App /></AppMotion>;
 }

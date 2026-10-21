@@ -1,6 +1,6 @@
 import { bulkEnableTargets, type BulkItem } from "./bulkSelection";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { motion } from "framer-motion";
+import * as motion from "framer-motion/m";
 import { SectionHeader, Toggle, Tooltip, InfoIcon, Spinner, Chip, Icon, Watermark } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
 import { PresetsPanel, PresetsDialog, type PresetMode } from "./PresetsCard";

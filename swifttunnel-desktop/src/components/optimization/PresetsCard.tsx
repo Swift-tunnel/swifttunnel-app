@@ -1,6 +1,6 @@
 import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
+import * as motion from "framer-motion/m";
 import { Button, Dialog, Spinner, Icon } from "../ui";
 import { useToastStore } from "../../stores/toastStore";
 import { formatErrorMessage } from "../../lib/errors";

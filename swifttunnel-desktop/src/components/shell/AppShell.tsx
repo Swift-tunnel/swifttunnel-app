@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, type ReactNode } from "react";
-import { motion } from "framer-motion";
+import * as motion from "framer-motion/m";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { Sidebar } from "./Sidebar";
 import { TopBar } from "./TopBar";

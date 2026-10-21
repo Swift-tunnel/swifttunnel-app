@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { motion } from "framer-motion";
+import * as motion from "framer-motion/m";
 import { useNetworkStore } from "../../stores/networkStore";
 import type { PingSample } from "../../lib/types";
 import {

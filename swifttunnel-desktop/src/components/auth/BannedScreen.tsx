@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { motion } from "framer-motion";
+import * as motion from "framer-motion/m";
 import { useAuthStore } from "../../stores/authStore";
 import { Button, Spinner, Icon } from "../ui";
 import { SwiftLogo } from "../common/SwiftLogo";

@@ -1,4 +1,5 @@
-import { motion, AnimatePresence } from "framer-motion";
+import * as motion from "framer-motion/m";
+import { AnimatePresence } from "framer-motion";
 import { useToastStore } from "../../stores/toastStore";
 import type { ToastType } from "../../stores/toastStore";
 import { Icon, type IconName } from "../ui/Icon";
