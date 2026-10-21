@@ -37,23 +37,34 @@ struct LaunchGuard<'a> {
 pub async fn games_suggest_server(
     state: State<'_, AppState>,
 ) -> Result<Option<LaunchPlan>, String> {
-    let config = swifttunnel_core::roblox_launcher::LauncherConfig::load()?;
-    let current = state.games.lock().current.clone();
-    let Some(current) = current.filter(|g| g.fresh_join && g.location.is_some()) else {
-        return Ok(None);
-    };
-    if !config.matchmaker.offer_better_server || !config.matchmaker.applies(&current.place_id) {
+    let config = super::launcher::games_launcher_config().await?;
+    if !config.matchmaker.offer_better_server {
         return Ok(None);
     }
-    let preferences = state
-        .games
-        .lock()
-        .library()?
-        .entries
-        .iter()
-        .find(|e| e.place_id == current.place_id && e.client == current.client)
-        .map(|e| e.preferences.clone())
-        .unwrap_or_default();
+    let snapshot = games::library_task(state.games.clone(), |games| {
+        let Some(current) = games
+            .current
+            .clone()
+            .filter(|g| g.fresh_join && g.location.is_some())
+        else {
+            return Ok(None);
+        };
+        let preferences = games
+            .library()?
+            .entries
+            .iter()
+            .find(|e| e.place_id == current.place_id && e.client == current.client)
+            .map(|e| e.preferences.clone())
+            .unwrap_or_default();
+        Ok(Some((current, preferences)))
+    })
+    .await?;
+    let Some((current, preferences)) = snapshot else {
+        return Ok(None);
+    };
+    if !config.matchmaker.applies(&current.place_id) {
+        return Ok(None);
+    }
     if preferences.skip_matchmaker || preferences.datacenter_id.is_some() {
         return Ok(None);
     }
@@ -156,14 +167,16 @@ pub async fn games_set_preferences(
     preferences: GamePreferences,
 ) -> Result<(), String> {
     preferences.validate()?;
-    let previous = state
-        .games
-        .lock()
-        .library()?
-        .entries
-        .iter()
-        .find(|e| e.place_id == place_id && e.client == client)
-        .and_then(|e| e.preferences.datacenter_id);
+    let lookup_place = place_id.clone();
+    let previous = games::library_task(state.games.clone(), move |games| {
+        Ok(games
+            .library()?
+            .entries
+            .iter()
+            .find(|e| e.place_id == lookup_place && e.client == client)
+            .and_then(|e| e.preferences.datacenter_id))
+    })
+    .await?;
     if preferences.datacenter_id != previous
         && let Some(id) = preferences.datacenter_id
         && !roblox_directory::datacenters()
@@ -383,19 +396,18 @@ pub async fn games_launch_plan(
     if !valid_place_id(&place_id) || job_id.as_deref().is_some_and(|j| !valid_job_id(j)) {
         return Err("Choose a valid game and server.".into());
     }
-    let place_id = state
-        .games
-        .lock()
-        .library()?
-        .launch_place(&place_id, client, job_id.is_some());
-    let mut preferences = state
-        .games
-        .lock()
-        .library()?
-        .entry_for(&place_id, client)
-        .map(|e| e.preferences.clone())
-        .unwrap_or_default();
-    let launcher = swifttunnel_core::roblox_launcher::LauncherConfig::load()?;
+    let rejoining = job_id.is_some();
+    let (place_id, mut preferences) = games::library_task(state.games.clone(), move |games| {
+        let library = games.library()?;
+        let place_id = library.launch_place(&place_id, client, rejoining);
+        let preferences = library
+            .entry_for(&place_id, client)
+            .map(|e| e.preferences.clone())
+            .unwrap_or_default();
+        Ok((place_id, preferences))
+    })
+    .await?;
+    let launcher = super::launcher::games_launcher_config().await?;
     preferences.use_tunnel |= launcher.matchmaker.prepare_tunnel
         && launcher.matchmaker.applies(&place_id)
         && !preferences.skip_matchmaker;
@@ -606,7 +618,11 @@ pub async fn games_launch(
         complete: false,
     };
     let profile = plan.preferences.clone();
-    let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
+    let player = tauri::async_runtime::spawn_blocking(move || {
+        swifttunnel_core::roblox_native_launch::official_player_for(client)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
     let global = state.settings.lock().config.roblox_settings.clone();
     let mut flags = if safe_launch.unwrap_or(false) {
         std::collections::HashMap::new()
@@ -614,12 +630,14 @@ pub async fn games_launch(
         swifttunnel_core::roblox_optimizer::RobloxOptimizer::native_launch_flags(&global)
             .map_err(|e| e.to_string())?
     };
-    let explicit_graphics = state
-        .games
-        .lock()
-        .library()?
-        .entry_for(&place_id, client)
-        .is_some_and(|e| e.preferences.graphics_quality.is_some());
+    let lookup_place = place_id.clone();
+    let explicit_graphics = games::library_task(state.games.clone(), move |games| {
+        Ok(games
+            .library()?
+            .entry_for(&lookup_place, client)
+            .is_some_and(|e| e.preferences.graphics_quality.is_some()))
+    })
+    .await?;
     if explicit_graphics {
         flags.remove("DFIntDebugFRMQualityLevelOverride");
     }
