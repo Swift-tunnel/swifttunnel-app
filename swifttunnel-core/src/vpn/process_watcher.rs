@@ -328,9 +328,7 @@ fn run_etw_session(
             EVENT_TRACE_CONTROL_STOP,
         );
 
-        if result != ERROR_SUCCESS && !stop_flag.load(Ordering::SeqCst) {
-            return Err(format!("ProcessTrace failed: 0x{:08X}", result.0));
-        }
+        crate::etw_lifecycle::trace_session_result(&stop_flag, result)?;
     }
 
     log::info!("ETW process watcher stopped");

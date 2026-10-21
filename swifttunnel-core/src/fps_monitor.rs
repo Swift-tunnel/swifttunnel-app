@@ -439,9 +439,7 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
             EVENT_TRACE_CONTROL_STOP,
         );
 
-        if result != ERROR_SUCCESS && !shared.stop_flag.load(Ordering::SeqCst) {
-            return Err(format!("ProcessTrace failed: 0x{:08X}", result.0));
-        }
+        crate::etw_lifecycle::trace_session_result(&shared.stop_flag, result)?;
     }
 
     Ok(())

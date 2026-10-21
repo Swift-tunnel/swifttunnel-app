@@ -21,6 +21,18 @@ pub(crate) fn process_trace_unless_stopped(
     }
 }
 
+/// A controller outside this worker can end a trace successfully. Only our
+/// own stop request means the supervisor should retire instead of retrying.
+pub(crate) fn trace_session_result(stop: &AtomicBool, result: WIN32_ERROR) -> Result<(), String> {
+    if stop.load(Ordering::SeqCst) {
+        Ok(())
+    } else if result == ERROR_SUCCESS {
+        Err("The ETW trace ended without a stop request".into())
+    } else {
+        Err(format!("ProcessTrace failed: 0x{:08X}", result.0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +75,16 @@ mod tests {
             "shutdown waited on a trace created after stop"
         );
         assert!(!entered.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_trace_stopped_elsewhere_must_not_disable_the_supervisor() {
+        let stop = AtomicBool::new(false);
+        assert!(trace_session_result(&stop, ERROR_SUCCESS).is_err());
+        assert!(trace_session_result(&stop, WIN32_ERROR(123)).is_err());
+        stop.store(true, Ordering::SeqCst);
+        assert!(trace_session_result(&stop, ERROR_SUCCESS).is_ok());
+        assert!(trace_session_result(&stop, WIN32_ERROR(123)).is_ok());
     }
 
     #[test]
