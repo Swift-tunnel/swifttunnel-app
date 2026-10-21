@@ -28,6 +28,7 @@ mod canvas;
 mod clipboard;
 mod engine;
 mod fonts;
+mod game_location;
 mod gdi;
 mod installer_cli;
 mod operation_gate;

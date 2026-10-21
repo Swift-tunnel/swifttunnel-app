@@ -1658,80 +1658,87 @@ fn spawn_game_logs(shared: Arc<Shared>) {
             else {
                 return;
             };
-            let mut game_started: Option<Instant> = None;
-            while !shared.stop.load(Ordering::Relaxed) {
-                for event in watcher.poll() {
-                    match event {
-                        RobloxEvent::GameJoined {
-                            ip,
-                            place_id,
-                            job_id,
-                            ..
-                        } => {
-                            if !RobloxOptimizer::new().is_roblox_running() {
-                                continue;
-                            }
-                            game_started = Some(Instant::now());
-                            game_destination::register(ObservedGame {
+            runtime.block_on(async {
+                let mut game_started: Option<Instant> = None;
+                let mut location = crate::game_location::GameLocation::default();
+                while !shared.stop.load(Ordering::Relaxed) {
+                    for event in watcher.poll() {
+                        match event {
+                            RobloxEvent::GameJoined {
                                 ip,
-                                job_id: job_id.clone(),
-                                location: None,
-                                region: None,
-                                prelaunch: false,
-                            });
-                            if !swifttunnel_core::geolocation::is_roblox_game_server_ip(ip)
-                                && let Some(center) = runtime.block_on(
-                                    swifttunnel_core::roblox_directory::resolve_session(
-                                        &place_id, &job_id, ip,
-                                    ),
-                                )
-                            {
-                                let region =
-                                    swifttunnel_core::geolocation::RobloxRegion::all_regions()
-                                        .iter()
-                                        .find(|region| {
-                                            region.best_swifttunnel_region()
-                                                == center.relay_region.as_deref()
-                                        })
-                                        .cloned();
+                                place_id,
+                                job_id,
+                                ..
+                            } => {
                                 if !RobloxOptimizer::new().is_roblox_running() {
                                     continue;
                                 }
-                                game_started = Some(Instant::now());
-                                game_destination::register(ObservedGame {
+                                location.clear();
+                                if !game_destination::register(ObservedGame {
                                     ip,
-                                    job_id,
-                                    location: Some(center.city),
-                                    region,
+                                    job_id: job_id.clone(),
+                                    location: None,
+                                    region: None,
                                     prelaunch: false,
-                                });
+                                }) {
+                                    continue;
+                                }
+                                game_started = Some(Instant::now());
+                                if !swifttunnel_core::geolocation::is_roblox_game_server_ip(ip) {
+                                    location.replace(ip, place_id, job_id);
+                                }
                             }
-                        }
-                        RobloxEvent::GameLeft { job_id } => {
-                            if job_id
-                                .as_deref()
-                                .is_some_and(game_destination::clear_for_session)
-                            {
-                                game_started = None;
+                            RobloxEvent::GameLeft { job_id } => {
+                                if let Some(job_id) = job_id {
+                                    location.clear_for_session(&job_id);
+                                    if game_destination::clear_for_session(&job_id) {
+                                        game_started = None;
+                                    }
+                                }
                             }
+                            RobloxEvent::PlayerOpened | RobloxEvent::GameServerDetected { .. } => {}
                         }
-                        RobloxEvent::PlayerOpened | RobloxEvent::GameServerDetected { .. } => {}
+                    }
+                    let running = shared
+                        .snapshot
+                        .read()
+                        .map(|s| s.roblox.running)
+                        .unwrap_or(false);
+                    if running
+                        || game_started.is_some_and(|at| at.elapsed() < Duration::from_secs(8))
+                    {
+                        game_destination::refresh();
+                    } else {
+                        game_started = None;
+                        location.clear();
+                        game_destination::clear();
+                    }
+                    // Continue consuming joins/leaves even if the optional
+                    // cloud-location service stalls. Only the newest session
+                    // owns a lookup, and shutdown drops it with this loop.
+                    if let Some(resolved) = location.advance(Duration::from_secs(1)).await {
+                        if shared.stop.load(Ordering::Relaxed)
+                            || !RobloxOptimizer::new().is_roblox_running()
+                        {
+                            continue;
+                        }
+                        let region = swifttunnel_core::geolocation::RobloxRegion::all_regions()
+                            .iter()
+                            .find(|region| {
+                                region.best_swifttunnel_region()
+                                    == resolved.center.relay_region.as_deref()
+                            })
+                            .cloned();
+                        game_destination::update_location(
+                            resolved.ip,
+                            &resolved.job_id,
+                            resolved.center.city,
+                            region,
+                        );
                     }
                 }
-                let running = shared
-                    .snapshot
-                    .read()
-                    .map(|s| s.roblox.running)
-                    .unwrap_or(false);
-                if running || game_started.is_some_and(|at| at.elapsed() < Duration::from_secs(8)) {
-                    game_destination::refresh();
-                } else {
-                    game_started = None;
-                    game_destination::clear();
-                }
-                std::thread::sleep(Duration::from_secs(1));
-            }
-            game_destination::clear();
+                game_destination::clear();
+            });
         })
         .expect("Lite game log watcher");
 }

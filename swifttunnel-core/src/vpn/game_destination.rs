@@ -92,6 +92,30 @@ impl Destination {
         }
     }
 
+    fn update_location(
+        &self,
+        ip: Ipv4Addr,
+        job_id: &str,
+        location: String,
+        region: Option<crate::geolocation::RobloxRegion>,
+        now: u64,
+    ) -> bool {
+        if location.len() > 80 || location.chars().any(char::is_control) {
+            return false;
+        }
+        let mut details = self.details.write();
+        let Some(game) = details.as_mut().filter(|game| {
+            game.ip == ip && game.job_id.eq_ignore_ascii_case(job_id) && self.contains(ip, now)
+        }) else {
+            return false;
+        };
+        // Metadata may enrich the current observation, never recreate a game
+        // after leave, replace a different session, or extend its lifetime.
+        game.location = Some(location);
+        game.region = region;
+        true
+    }
+
     fn clear_session(&self, job_id: Option<&str>) -> bool {
         let mut details = self.details.write();
         if let Some(job_id) = job_id
@@ -129,6 +153,16 @@ pub fn routing_candidate(ip: Ipv4Addr) -> bool {
 }
 pub fn refresh() {
     DESTINATION.refresh(tick());
+}
+
+/// Apply optional location data only to the still-current observation.
+pub fn update_location(
+    ip: Ipv4Addr,
+    job_id: &str,
+    location: String,
+    region: Option<crate::geolocation::RobloxRegion>,
+) -> bool {
+    DESTINATION.update_location(ip, job_id, location, region, tick())
 }
 pub fn clear() {
     DESTINATION.clear_session(None);
@@ -251,5 +285,50 @@ mod tests {
             region: None,
             prelaunch: false
         }));
+    }
+
+    #[test]
+    fn late_location_cannot_restore_or_replace_a_session() {
+        let destination = Destination::new();
+        let ip = game(FIRST).ip;
+        destination.register(game(FIRST), 0);
+        destination.register(game(SECOND), 1);
+        assert!(!destination.update_location(ip, FIRST, "Old city".into(), None, 2));
+        assert!(destination.update_location(
+            ip,
+            &SECOND.to_ascii_uppercase(),
+            "Current city".into(),
+            None,
+            2
+        ));
+        assert_eq!(
+            destination.details(ip, 3).unwrap().location.as_deref(),
+            Some("Current city")
+        );
+        assert!(!destination.update_location(
+            "34.1.2.4".parse().unwrap(),
+            SECOND,
+            "Wrong IP".into(),
+            None,
+            3
+        ));
+        destination.clear_session(Some(SECOND));
+        assert!(!destination.update_location(ip, SECOND, "Late city".into(), None, 4));
+        assert!(destination.details(ip, 4).is_none());
+    }
+
+    #[test]
+    fn optional_location_preserves_expiry_policy_and_rejects_invalid_text() {
+        let destination = Destination::new();
+        let mut observed = game(FIRST);
+        observed.prelaunch = true;
+        let ip = observed.ip;
+        destination.register(observed, 0);
+        assert!(!destination.update_location(ip, FIRST, "bad\ncity".into(), None, 1));
+        assert!(!destination.update_location(ip, FIRST, "a".repeat(81), None, 1));
+        assert!(destination.update_location(ip, FIRST, "City".into(), None, TTL_MS - 1));
+        assert!(destination.routing_candidate(ip, TTL_MS - 1));
+        assert!(!destination.update_location(ip, FIRST, "Expired".into(), None, TTL_MS));
+        assert!(!destination.contains(ip, TTL_MS));
     }
 }
