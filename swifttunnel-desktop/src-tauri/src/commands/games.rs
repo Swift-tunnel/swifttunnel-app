@@ -132,15 +132,18 @@ pub async fn games_refresh_metadata(
     let Ok(_batch) = BATCH_SLOT.try_acquire() else {
         return Ok(());
     };
-    let targets: Vec<_> = state
-        .games
-        .lock()
-        .library()?
-        .entries
-        .iter()
-        .filter(|e| e.icon_url.is_none() || e.universe_id.is_none() || e.root_place_id.is_none())
-        .map(|e| (e.place_id.clone(), e.client))
-        .collect();
+    let targets: Vec<_> = library_task(state.games.clone(), |games| {
+        Ok(games
+            .library()?
+            .entries
+            .iter()
+            .filter(|e| {
+                e.icon_url.is_none() || e.universe_id.is_none() || e.root_place_id.is_none()
+            })
+            .map(|e| (e.place_id.clone(), e.client))
+            .collect())
+    })
+    .await?;
     for (place, client) in targets {
         if refresh_name(&state, &place, client).await == Ok(true) {
             let _ = app.emit(LIBRARY_CHANGED, ());
@@ -495,14 +498,18 @@ pub async fn refresh_name(
     let Ok(_slot) = METADATA_SLOTS.try_acquire() else {
         return Ok(false);
     };
-    let needs_name = state.games.lock().library()?.entries.iter().any(|e| {
-        e.place_id == place_id
-            && e.client == client
-            && (e.name == format!("Place {place_id}")
-                || e.icon_url.is_none()
-                || e.universe_id.is_none()
-                || e.root_place_id.is_none())
-    });
+    let lookup_place = place_id.to_owned();
+    let needs_name = library_task(state.games.clone(), move |games| {
+        Ok(games.library()?.entries.iter().any(|e| {
+            e.place_id == lookup_place
+                && e.client == client
+                && (e.name == format!("Place {lookup_place}")
+                    || e.icon_url.is_none()
+                    || e.universe_id.is_none()
+                    || e.root_place_id.is_none())
+        }))
+    })
+    .await?;
     if !needs_name {
         return Ok(false);
     }
