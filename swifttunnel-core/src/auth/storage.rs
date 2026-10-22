@@ -379,7 +379,7 @@ impl SecureStorage {
                         warn!("Failed to re-seal legacy session file: {}", e);
                     }
                 }
-                info!("Loaded session for user: {}", session.user.email);
+                info!("Loaded stored session");
                 Ok(Some(*session))
             }
             DecodedBlob::RejectDpapi => {
@@ -503,7 +503,7 @@ impl SecureStorage {
 
     /// Store the authentication session (to BOTH file and keyring)
     pub fn store_session(&self, session: &AuthSession) -> Result<(), AuthError> {
-        info!("Storing auth session for {}", session.user.email);
+        info!("Storing auth session");
         self.store_to_file(session)?;
         let _ = self.store_to_keyring(session);
         Ok(())

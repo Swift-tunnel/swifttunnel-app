@@ -110,7 +110,6 @@ impl AuthManager {
             Ok(Some(session)) => {
                 info!("========================================");
                 info!("FOUND STORED SESSION!");
-                info!("  User email: {}", session.user.email);
                 info!("  User ID: {}", session.user.id);
                 info!("  Token length: {} chars", session.access_token.len());
                 info!(
@@ -276,7 +275,7 @@ impl AuthManager {
 
     /// Sign in with email and password
     pub async fn sign_in(&self, email: &str, password: &str) -> Result<(), AuthError> {
-        info!("Signing in user: {}", email);
+        info!("Signing in user");
 
         // Set state to logging in
         {
@@ -886,10 +885,7 @@ impl AuthManager {
             }
         };
 
-        info!(
-            "Exchanged OAuth code for magic link ({})",
-            exchange_response.email
-        );
+        info!("Exchanged OAuth code for magic link");
 
         // New web builds return a ready session so desktop does not need to
         // contact auth.swifttunnel.net, which some networks block.
@@ -915,7 +911,7 @@ impl AuthManager {
         } else {
             match self
                 .client
-                .verify_magic_link(&exchange_response.email, &exchange_response.token)
+                .verify_magic_link(&exchange_response.token)
                 .await
             {
                 Ok(response) => response,

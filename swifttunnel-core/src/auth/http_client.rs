@@ -500,7 +500,7 @@ impl AuthClient {
         email: &str,
         password: &str,
     ) -> Result<SupabaseAuthResponse, AuthError> {
-        debug!("Signing in user: {}", email);
+        debug!("Signing in user");
 
         match self
             .sign_in_with_password_via_desktop_api(email, password)
@@ -859,12 +859,11 @@ impl AuthClient {
     /// Verify magic link token with Supabase to get access/refresh tokens
     pub async fn verify_magic_link(
         &self,
-        email: &str,
         token_hash: &str,
     ) -> Result<SupabaseAuthResponse, AuthError> {
         let url = format!("{}/auth/v1/verify", SUPABASE_URL);
 
-        debug!("Verifying magic link for {} (token omitted)", email);
+        debug!("Verifying magic link (token omitted)");
 
         let response = self
             .send_to_fixed_url("magic link verification", |client| {
