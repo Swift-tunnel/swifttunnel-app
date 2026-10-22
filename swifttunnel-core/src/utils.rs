@@ -289,17 +289,44 @@ pub fn is_administrator() -> bool {
 //  URL OPENING
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Open a URL or folder, reporting failure without logging credential URLs.
+#[cfg(windows)]
+fn checked_shell_target(target: &str) -> Result<(&'static str, String), String> {
+    let invalid = || "Only web links and existing folders can be opened.".to_string();
+    if target.is_empty() || target.len() > 8192 || target.chars().any(char::is_control) {
+        return Err(invalid());
+    }
+    if let Ok(url) = url::Url::parse(target)
+        && matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+    {
+        // Pass the parsed URL, which encodes shell-sensitive raw characters.
+        return Ok(("open", url.into()));
+    }
+    let path = std::path::Path::new(target);
+    if path.is_absolute() && path.is_dir() {
+        // Do not use the executable-capable "open" verb for a folder, including
+        // if the filesystem object changes after this inspection.
+        return Ok(("explore", target.to_string()));
+    }
+    Err(invalid())
+}
+
+/// Open a web URL or existing absolute folder, without logging credential URLs.
 #[cfg(windows)]
 pub fn try_open_url(url: &str) -> Result<(), String> {
     use windows::Win32::UI::Shell::ShellExecuteW;
     use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
     use windows::core::HSTRING;
+    // ShellExecute's "open" verb also executes programs and registered custom
+    // protocols. This helper serves browser links and exported-file folders.
+    let (verb, target) = checked_shell_target(url)?;
     let result = unsafe {
         ShellExecuteW(
             None,
-            &HSTRING::from("open"),
-            &HSTRING::from(url),
+            &HSTRING::from(verb),
+            &HSTRING::from(target),
             None,
             None,
             SW_SHOW,
@@ -999,6 +1026,56 @@ mod error_chain_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_links_allow_web_pages_and_folders_without_accepting_programs_or_protocols() {
+        for target in [
+            "https://www.swifttunnel.net/login?state=fixture&redirect_port=17435",
+            "http://127.0.0.1:17435/callback",
+        ] {
+            assert_eq!(
+                checked_shell_target(target).unwrap(),
+                ("open", target.to_string())
+            );
+        }
+        for target in [
+            "javascript:alert(1)",
+            "file:///C:/Windows/notepad.exe",
+            "ms-settings:network-proxy",
+            "roblox://placeId=1",
+            "cmd.exe",
+            "https://user:password@example.invalid/",
+            "https://example.invalid/\nforged",
+            "https://example.invalid/\0ignored",
+        ] {
+            assert!(
+                checked_shell_target(target).is_err(),
+                "rejected shell target: {target:?}"
+            );
+        }
+        let directory =
+            std::env::temp_dir().join(format!("SwiftTunnel-shell-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&directory).unwrap();
+        struct OwnedDirectory(PathBuf);
+        impl Drop for OwnedDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _owned = OwnedDirectory(directory.clone());
+        assert_eq!(
+            checked_shell_target(&directory.to_string_lossy())
+                .unwrap()
+                .0,
+            "explore"
+        );
+        for name in ["fixture.exe", "fixture.lnk", "fixture.url", "fixture.bat"] {
+            let path = directory.join(name);
+            std::fs::write(&path, b"test fixture, never executed").unwrap();
+            assert!(checked_shell_target(&path.to_string_lossy()).is_err());
+        }
+    }
     #[cfg(windows)]
     use std::fs;
 
