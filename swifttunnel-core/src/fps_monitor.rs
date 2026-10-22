@@ -1,15 +1,15 @@
-//! ETW FPS Monitor — anti-cheat-safe in-game FPS.
+//! ETW FPS monitor using events emitted outside the game process.
 //!
-//! Reports a game's real framerate by counting `Microsoft-Windows-DXGI`
-//! Present events emitted by the target process, entirely from OUTSIDE that
-//! process. We never read its memory, inject, or hook anything — this is the
-//! same OS-level present-event source PresentMon uses — so Roblox's Byfron /
-//! Hyperion anti-cheat has nothing to flag.
+//! Estimates a game's frame submission rate by counting Microsoft-Windows-DXGI
+//! Present events emitted by the target process. This does not read the game's
+//! memory or inject hooks. PresentMon uses the same provider, but its full
+//! presentation analysis is more detailed than this lightweight counter.
 //!
 //! Each call to `IDXGISwapChain::Present` logs a DXGI "Present Start" event
 //! (id 42) in the *calling* process's context. Counting those whose
 //! `EventHeader.ProcessId` is the game and dividing by elapsed time gives
-//! presents-per-second = FPS. Mirrors the real-time ETW session pattern in
+//! presents-per-second. This is not a measurement of displayed frames. Mirrors
+//! the real-time ETW session pattern in
 //! [`crate::vpn::process_watcher`].
 //!
 //! ## Requirements
@@ -24,13 +24,16 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use windows::Win32::Foundation::{
+    ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED, ERROR_SUCCESS, WIN32_ERROR,
+};
 use windows::Win32::System::Diagnostics::Etw::{
-    CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW, EVENT_CONTROL_CODE_ENABLE_PROVIDER,
-    EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW, EVENT_TRACE_PROPERTIES,
-    EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2, OpenTraceW, PROCESS_TRACE_MODE_EVENT_RECORD,
-    PROCESS_TRACE_MODE_REAL_TIME, ProcessTrace, StartTraceW, TRACE_LEVEL_VERBOSE,
-    WNODE_FLAG_TRACED_GUID,
+    CONTROLTRACE_HANDLE, CloseTrace, ControlTraceW, ENABLE_TRACE_PARAMETERS,
+    ENABLE_TRACE_PARAMETERS_VERSION_2, EVENT_CONTROL_CODE_ENABLE_PROVIDER, EVENT_FILTER_DESCRIPTOR,
+    EVENT_FILTER_TYPE_EVENT_ID, EVENT_RECORD, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_LOGFILEW,
+    EVENT_TRACE_PROPERTIES, EVENT_TRACE_REAL_TIME_MODE, EnableTraceEx2, OpenTraceW,
+    PROCESS_TRACE_MODE_EVENT_RECORD, PROCESS_TRACE_MODE_REAL_TIME, ProcessTrace, StartTraceW,
+    TRACE_LEVEL_VERBOSE, WNODE_FLAG_TRACED_GUID,
 };
 use windows::core::{GUID, PCWSTR, PWSTR};
 
@@ -48,6 +51,51 @@ const DXGI_PROVIDER_GUID: GUID = GUID::from_values(
 /// driver path, so count present-start tasks instead of one hard-coded event id.
 const DXGI_PRESENT_TASKS: &[u16] = &[9, 80, 468, 482];
 const ETW_OPCODE_START: u8 = 1;
+
+// Present-start IDs for the four tasks above in the DXGI manifest. Filter these
+// in ETW as well as checking task, opcode and PID in the callback, avoiding the
+// delivery of unrelated swap-chain operations and matching stop events.
+const DXGI_PRESENT_EVENT_IDS: [u16; 4] = [42, 178, 854, 882];
+
+// EVENT_FILTER_EVENT_ID has a variable-length trailing USHORT array. Keep the
+// complete native layout in one aligned allocation for EnableTraceEx2.
+#[repr(C)]
+struct PresentEventFilter {
+    filter_in: bool,
+    reserved: u8,
+    count: u16,
+    events: [u16; 4],
+}
+
+fn enable_present_events(
+    mut enable: impl FnMut(Option<&ENABLE_TRACE_PARAMETERS>) -> WIN32_ERROR,
+) -> WIN32_ERROR {
+    let filter = PresentEventFilter {
+        filter_in: true,
+        reserved: 0,
+        count: DXGI_PRESENT_EVENT_IDS.len() as u16,
+        events: DXGI_PRESENT_EVENT_IDS,
+    };
+    let mut descriptor = EVENT_FILTER_DESCRIPTOR {
+        Ptr: std::ptr::from_ref(&filter) as u64,
+        Size: std::mem::size_of_val(&filter) as u32,
+        Type: EVENT_FILTER_TYPE_EVENT_ID,
+    };
+    let parameters = ENABLE_TRACE_PARAMETERS {
+        Version: ENABLE_TRACE_PARAMETERS_VERSION_2,
+        EnableFilterDesc: &mut descriptor,
+        FilterDescCount: 1,
+        ..Default::default()
+    };
+    let result = enable(Some(&parameters));
+    // Keep FPS available if a provider/platform rejects event-ID filtering.
+    // Permission and session errors still follow the ordinary retry policy.
+    if result == ERROR_INVALID_PARAMETER || result == ERROR_NOT_SUPPORTED {
+        enable(None)
+    } else {
+        result
+    }
+}
 
 /// Session behind the in-game overlay's FPS readout.
 const OVERLAY_SESSION_NAME: &str = "SwiftTunnelFpsMonitor";
@@ -95,12 +143,12 @@ impl FpsRuntime {
     }
 }
 
-/// Anti-cheat-safe FPS source. While enabled it owns a real-time ETW session
+/// External FPS source. While enabled it owns a real-time ETW session
 /// (counts DXGI presents) plus a 1-second sampler that turns the running count
 /// into FPS.
 ///
-/// DEMAND-DRIVEN: the ETW callback fires for every present from every process
-/// system-wide, which is real overhead on weak machines — so nothing runs
+/// DEMAND-DRIVEN: the ETW callback receives present events from every process
+/// system-wide, so nothing runs
 /// until `set_enabled(true)` and `set_enabled(false)` tears the session down
 /// again. The overlay enables its monitor while it shows FPS. Connecting a
 /// tunnel does not start an additional trace for diagnostic logging.
@@ -373,20 +421,22 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
             return Err(format!("StartTraceW failed: 0x{:08X}", result.0));
         }
 
-        // Enable all DXGI keywords and filter to Present-start in the callback. A
+        // Keep all DXGI keywords, but deliver only the present-start IDs. A
         // zero keyword mask can miss non-default provider events on some
         // systems, which leaves the overlay showing "--" even though the trace
         // started correctly.
-        let result = EnableTraceEx2(
-            session_handle,
-            &DXGI_PROVIDER_GUID,
-            EVENT_CONTROL_CODE_ENABLE_PROVIDER.0,
-            TRACE_LEVEL_VERBOSE as u8,
-            TRACE_MATCH_ANY_KEYWORD_ALL,
-            0,
-            0,
-            None,
-        );
+        let result = enable_present_events(|parameters| {
+            EnableTraceEx2(
+                session_handle,
+                &DXGI_PROVIDER_GUID,
+                EVENT_CONTROL_CODE_ENABLE_PROVIDER.0,
+                TRACE_LEVEL_VERBOSE as u8,
+                TRACE_MATCH_ANY_KEYWORD_ALL,
+                0,
+                0,
+                parameters.map(std::ptr::from_ref),
+            )
+        });
         if result != ERROR_SUCCESS {
             let _ = ControlTraceW(
                 session_handle,
@@ -544,6 +594,67 @@ impl FpsMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_filter_preserves_the_counted_present_events_and_excludes_noise() {
+        use windows::Win32::System::Diagnostics::Etw::EVENT_FILTER_EVENT_ID;
+
+        assert_eq!(
+            std::mem::offset_of!(PresentEventFilter, events),
+            std::mem::offset_of!(EVENT_FILTER_EVENT_ID, Events)
+        );
+        let result = enable_present_events(|parameters| {
+            let parameters = parameters.expect("event filtering should be requested");
+            assert_eq!(parameters.Version, ENABLE_TRACE_PARAMETERS_VERSION_2);
+            assert_eq!(parameters.FilterDescCount, 1);
+            let descriptor = unsafe { &*parameters.EnableFilterDesc };
+            assert_eq!(descriptor.Type, EVENT_FILTER_TYPE_EVENT_ID);
+            assert_eq!(descriptor.Size as usize, 4 + 4 * 2);
+            let filter = unsafe { &*(descriptor.Ptr as *const PresentEventFilter) };
+            assert!(filter.filter_in);
+            assert_eq!(filter.reserved, 0);
+            assert_eq!(filter.count, 4);
+
+            // IDs/tasks from the Windows DXGI provider manifest, including the
+            // newer partner paths already supported by the callback.
+            for (id, task) in [(42, 9), (178, 80), (854, 468), (882, 482)] {
+                assert!(DXGI_PRESENT_TASKS.contains(&task));
+                assert!(filter.events.contains(&id));
+            }
+            // Present-stop, swap-chain creation and GetLastPresentCount.
+            for id in [43, 179, 855, 883, 10, 196] {
+                assert!(!filter.events.contains(&id));
+            }
+            ERROR_SUCCESS
+        });
+        assert_eq!(result, ERROR_SUCCESS);
+    }
+
+    #[test]
+    fn unsupported_filter_falls_back_but_real_enable_failures_are_preserved() {
+        use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+
+        for first_result in [ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED] {
+            let mut calls = Vec::new();
+            let result = enable_present_events(|parameters| {
+                calls.push(parameters.is_some());
+                if parameters.is_some() {
+                    first_result
+                } else {
+                    ERROR_SUCCESS
+                }
+            });
+            assert_eq!(result, ERROR_SUCCESS);
+            assert_eq!(calls, [true, false]);
+        }
+        let mut calls = 0;
+        let result = enable_present_events(|_| {
+            calls += 1;
+            ERROR_ACCESS_DENIED
+        });
+        assert_eq!(result, ERROR_ACCESS_DENIED);
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn late_metrics_poll_cannot_restart_a_disabled_trace() {
