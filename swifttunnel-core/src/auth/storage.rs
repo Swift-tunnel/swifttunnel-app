@@ -1,18 +1,14 @@
-//! Auth session storage backed by AES-256-GCM with a machine-bound key.
+//! Auth session storage backed by AES-256-GCM with a machine/path-derived key.
 //!
 //! `auth_session.dat` holds the access/refresh tokens. Bytes are
 //! `[0x03][nonce: 12][ciphertext || 16-byte tag]`. The key is derived from a
 //! machine identifier (the registry `MachineGuid`) mixed with the per-user
-//! data directory path, so sessions written on machine A can't be decrypted
-//! on machine B, and sessions written by user A can't be decrypted by user B.
+//! data directory path. Ordinary copies with different inputs do not decode.
 //!
-//! We used to encrypt this blob with DPAPI (`CryptProtectData`) — that caused
-//! Windows Defender's ML classifier to flag the installer as an infostealer
-//! because unsigned PEs that statically import `CryptProtectData` together
-//! with kernel-driver install, packet interception, and process enumeration
-//! match the infostealer fingerprint almost perfectly. AES-GCM via `ring`
-//! gives an equivalent threat model (same-user local-disk protection) without
-//! the Win32 crypto imports.
+//! The derivation inputs are not secrets. This is not equivalent to OS-backed
+//! key protection: someone with the blob and its derivation inputs can recreate
+//! the key. Access to the file still relies on the Windows profile permissions.
+//! Changing key storage requires a separate credential migration.
 //!
 //! Windows Credential Manager is kept as a secondary store. Both stores hold
 //! the same AES-GCM blob (the keyring copy is base64-encoded so it can be
@@ -265,8 +261,8 @@ impl SecureStorage {
 
     /// Bytes to mix into the session key alongside the machine id. The data
     /// directory is naturally per-user on Windows (`%LOCALAPPDATA%`), so
-    /// using it as the bind means users on the same machine can't read each
-    /// other's sessions.
+    /// using it as the bind distinguishes ordinary profile copies. The path
+    /// itself is public context, not secret key material.
     fn user_bind(&self) -> Vec<u8> {
         self.data_dir
             .as_os_str()
@@ -391,7 +387,10 @@ impl SecureStorage {
                 Ok(None)
             }
             DecodedBlob::Corrupt => {
-                let _ = std::fs::remove_file(&path);
+                // Failure to authenticate this copy does not prove its bytes
+                // are irrecoverable. A restored/moved profile or temporarily
+                // unavailable key input can produce the same result.
+                warn!("Unreadable session file retained; trying the independent keyring backup");
                 Ok(None)
             }
         }
@@ -799,6 +798,24 @@ mod tests {
         assert_eq!(raw[0], SESSION_VERSION_TAG);
 
         storage.clear_session().unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_encrypted_copy_is_retained_for_its_original_binding() {
+        let original = SecureStorage::with_isolated_data_dir();
+        let other = SecureStorage::with_isolated_data_dir();
+        let session = make_session("original-binding");
+        let bytes = original.encode_session(&session).unwrap();
+        std::fs::write(other.session_file_path(), &bytes).unwrap();
+        let unreadable = other.load_from_file().unwrap();
+        let retained = std::fs::read(other.session_file_path());
+        other.clear_session().unwrap();
+        assert!(unreadable.is_none());
+        assert_eq!(retained.unwrap(), bytes);
+        std::fs::write(original.session_file_path(), &bytes).unwrap();
+        let recovered = original.load_from_file().unwrap();
+        original.clear_session().unwrap();
+        assert_eq!(recovered.unwrap().refresh_token, session.refresh_token);
     }
 
     #[test]
