@@ -16,7 +16,6 @@ use log::{info, warn};
 use state::AppState;
 use swifttunnel_core::auth::types::{AuthError, AuthState};
 #[cfg(windows)]
-use swifttunnel_core::utils::run_hidden_command_output_with_timeout as run_hidden_command_with_timeout;
 use tauri::{Emitter, Manager};
 use window_restore::restore_main_window;
 
@@ -194,63 +193,6 @@ fn recover_stale_network_state() {
         }
     }
 }
-
-/// Best-effort background fixes for the most common "it broke when I opened
-/// Roblox" problems that are NOT leftover SwiftTunnel state, so users stop
-/// opening tickets for them:
-///   - a stale DNS cache (Roblox connect/login resolving to dead records)
-///   - a wrong system clock — the single most common cause of Roblox's
-///     "An error was encountered during authentication", because TLS to the
-///     auth servers fails when the clock is off by more than a few minutes
-///
-/// Runs AFTER the UI has been released, so it never delays startup. Everything
-/// here is safe and self-correcting: flushing DNS only drops a cache, and
-/// `w32tm /resync` only pulls the real time from an NTP server — neither can
-/// leave the machine worse off than it was.
-#[cfg(windows)]
-fn run_startup_connectivity_maintenance() {
-    // 1. Flush DNS so Roblox (and the relay) resolve against fresh records.
-    match run_hidden_command_with_timeout(
-        "ipconfig",
-        &["/flushdns"],
-        std::time::Duration::from_secs(4),
-    ) {
-        Ok(o) if o.status.success() => info!("Startup maintenance: DNS cache flushed"),
-        Ok(o) => warn!(
-            "Startup maintenance: ipconfig /flushdns exited with {}",
-            o.status.code().unwrap_or(-1)
-        ),
-        Err(e) => warn!("Startup maintenance: could not flush DNS: {e}"),
-    }
-
-    // 2. Re-sync the system clock. The Windows Time service is set to Manual on
-    //    most home PCs, so start it transiently first, then resync. With no
-    //    internet `w32tm /resync` simply reports "no time data available" — a
-    //    harmless no-op, not an error worth surfacing.
-    let _ = run_hidden_command_with_timeout(
-        "sc",
-        &["start", "w32time"],
-        std::time::Duration::from_secs(4),
-    );
-    match run_hidden_command_with_timeout(
-        "w32tm",
-        &["/resync", "/force"],
-        std::time::Duration::from_secs(6),
-    ) {
-        Ok(o) if o.status.success() => info!("Startup maintenance: system clock re-synced"),
-        Ok(o) => {
-            let detail = String::from_utf8_lossy(&o.stdout);
-            info!(
-                "Startup maintenance: clock resync not applied ({})",
-                detail.trim()
-            );
-        }
-        Err(e) => warn!("Startup maintenance: could not run w32tm /resync: {e}"),
-    }
-}
-
-#[cfg(not(windows))]
-fn run_startup_connectivity_maintenance() {}
 
 fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
     let Some(state) = app.try_state::<AppState>() else {
@@ -1024,15 +966,6 @@ pub fn run() {
                 // Let the UI drop its "preparing your connection" screen now that
                 // the network self-heal has run.
                 let _ = app_handle.emit(events::STARTUP_RECOVERY_COMPLETE, ());
-
-                // Routine connectivity maintenance for common Roblox connect/login
-                // issues (stale DNS, wrong clock). Detached + after the UI is
-                // released, so it never delays startup.
-                // Detached on purpose. Dropping the JoinHandle does not cancel a
-                // spawn_blocking task, it only means nothing waits for the result.
-                drop(tokio::task::spawn_blocking(
-                    run_startup_connectivity_maintenance,
-                ));
 
                 // 2. These paths can run icacls/powercfg and wait for mutexes.
                 // They must not occupy an async worker while networking and
