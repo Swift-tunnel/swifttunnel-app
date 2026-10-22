@@ -520,13 +520,15 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                             RobloxEvent::GameJoined { ip, place_id, job_id, client, fresh_join } => {
                                 let state = app.state::<AppState>();
                                 if !state.performance_monitor.lock().is_roblox_running() { continue; }
+                                // Publish the destination and session under one
+                                // lock so older cleanup cannot split this join.
+                                let mut games = state.games.lock();
                                 let previous = swifttunnel_core::vpn::game_destination::details(ip)
                                     .filter(|game| game.job_id == job_id);
                                 swifttunnel_core::vpn::game_destination::register(swifttunnel_core::vpn::game_destination::ObservedGame {
                                     ip, job_id: job_id.clone(), location: previous.as_ref().and_then(|g| g.location.clone()),
                                     region: previous.as_ref().and_then(|g| g.region.clone()), prelaunch: previous.is_some_and(|g| g.prelaunch),
                                 });
-                                let mut games = state.games.lock();
                                 games.record_join(commands::games::CurrentGame {
                                     ip: ip.to_string(), place_id: place_id.clone(), job_id: job_id.clone(), client, fresh_join,
                                     observed_at: chrono::Utc::now().timestamp_millis().max(0) as u64,

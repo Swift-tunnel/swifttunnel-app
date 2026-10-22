@@ -935,12 +935,13 @@ pub fn update_session_location(
 }
 
 pub async fn restore_game_profile(state: &AppState) {
-    {
+    let generation = {
         let games = state.games.lock();
         if games.current.is_some() || games.launch_started.is_some() {
             return;
         }
-    }
+        games.window_placement_generation
+    };
     // A connection holds this mutex throughout setup. Defer cleanup to the
     // watcher's next attempt rather than blocking Play behind that setup.
     let recent_traffic = match state.vpn_connection.try_lock() {
@@ -960,8 +961,88 @@ pub async fn restore_game_profile(state: &AppState) {
     .await
     .map_err(|error| error.to_string())
     .and_then(|result| result);
-    if let Err(error) = restored {
-        state.games.lock().warning = Some(error);
+    finish_profile_cleanup(
+        &mut state.games.lock(),
+        generation,
+        restored,
+        game_destination::clear,
+    );
+}
+
+fn finish_profile_cleanup(
+    games: &mut games::GamesState,
+    generation: u64,
+    restored: Result<bool, String>,
+    clear_destination: impl FnOnce(),
+) {
+    // File recovery can wait for the optimizer while the player joins a game
+    // outside SwiftTunnel. Never publish that older cleanup into a new session.
+    if games.window_placement_generation != generation
+        || games.current.is_some()
+        || games.launch_started.is_some()
+    {
+        return;
     }
-    game_destination::clear();
+    if let Err(error) = restored {
+        games.warning = Some(error);
+    }
+    clear_destination();
+}
+
+#[cfg(test)]
+mod cleanup_completion_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn old_cleanup_cannot_clear_a_join_or_publish_its_error_into_the_new_session() {
+        let mut games = games::GamesState::default();
+        let generation = games.window_placement_generation;
+        games.current = Some(games::CurrentGame {
+            place_id: "1818".into(),
+            job_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            ip: "34.1.2.3".into(),
+            client: RobloxClient::Standard,
+            fresh_join: true,
+            observed_at: 1,
+            location: None,
+            location_source: None,
+        });
+        let cleared = Cell::new(false);
+        finish_profile_cleanup(
+            &mut games,
+            generation,
+            Err("old cleanup failed".into()),
+            || cleared.set(true),
+        );
+        assert!(!cleared.get());
+        assert!(games.warning.is_none());
+    }
+
+    #[test]
+    fn a_new_launch_or_later_generation_retires_an_old_cleanup() {
+        for has_pending_launch in [true, false] {
+            let mut games = games::GamesState::default();
+            let generation = games.window_placement_generation;
+            games.begin_launch(RobloxClient::Standard);
+            if !has_pending_launch {
+                games.clear_launch();
+            }
+            let cleared = Cell::new(false);
+            finish_profile_cleanup(&mut games, generation, Ok(true), || cleared.set(true));
+            assert!(!cleared.get());
+        }
+    }
+
+    #[test]
+    fn cleanup_of_the_same_idle_session_keeps_its_warning_and_clears_the_old_route() {
+        let mut games = games::GamesState::default();
+        let generation = games.window_placement_generation;
+        let cleared = Cell::new(false);
+        finish_profile_cleanup(&mut games, generation, Err("restore failed".into()), || {
+            cleared.set(true)
+        });
+        assert!(cleared.get());
+        assert_eq!(games.warning.as_deref(), Some("restore failed"));
+    }
 }
