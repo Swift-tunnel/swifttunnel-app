@@ -149,7 +149,7 @@ impl PerformanceMonitor {
         // like "Roblox not running" and cleared the FPS target.
         *metrics = self.last_metrics.clone();
 
-        metrics.process_id = self.refresh_player(false);
+        metrics.process_id = self.refresh_player(false, true);
         metrics.roblox_running = metrics.process_id.is_some();
         if let Some(process) = metrics
             .process_id
@@ -185,13 +185,20 @@ impl PerformanceMonitor {
     /// Refresh a known player only. Idle polling shares one discovery scan
     /// across metrics, the overlay and launch tracking, rather than each caller
     /// scanning every process. Destructive operations request fresh discovery.
-    fn refresh_player(&mut self, force_discovery: bool) -> Option<u32> {
+    fn refresh_player(&mut self, force_discovery: bool, sample_metrics: bool) -> Option<u32> {
+        let refresh = if sample_metrics {
+            metrics_refresh_kind()
+        } else {
+            // Presence checks must not consume CPU sampling baselines or
+            // query memory just to learn whether a process still exists.
+            ProcessRefreshKind::new()
+        };
         if let Some(pid) = self.last_metrics.process_id {
             let process_pid = sysinfo::Pid::from_u32(pid);
             self.system.refresh_processes_specifics(
                 ProcessesToUpdate::Some(&[process_pid]),
                 true,
-                metrics_refresh_kind(),
+                refresh,
             );
             if self.system.process(process_pid).is_some_and(|process| {
                 is_roblox_player_process_name(&process.name().to_string_lossy())
@@ -208,13 +215,34 @@ impl PerformanceMonitor {
             self.system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                metrics_refresh_kind(),
+                ProcessRefreshKind::new(),
             );
             #[cfg(test)]
             {
                 self.full_scans += 1;
             }
-            self.find_roblox_process().map(|(pid, _)| pid)
+            let pid = self.find_roblox_process().map(|(pid, _)| pid);
+            if sample_metrics && let Some(pid) = pid {
+                // Discovery needs only names. Read CPU/RAM for the selected
+                // player rather than every process on the computer.
+                self.system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+                    true,
+                    refresh,
+                );
+                if !self
+                    .system
+                    .process(sysinfo::Pid::from_u32(pid))
+                    .is_some_and(|process| {
+                        is_roblox_player_process_name(&process.name().to_string_lossy())
+                    })
+                {
+                    self.last_metrics.process_id = None;
+                    self.last_metrics.roblox_running = false;
+                    return None;
+                }
+            }
+            pid
         } else {
             None
         };
@@ -226,17 +254,17 @@ impl PerformanceMonitor {
     /// Polling may take up to four seconds to discover a newly started player;
     /// an already discovered player's exit is checked on every call.
     pub fn poll_roblox_pid(&mut self) -> Option<u32> {
-        self.refresh_player(false)
+        self.refresh_player(false, false)
     }
 
     /// Fresh discovery for applying/restoring optimizations and launch safety.
     pub fn get_roblox_pid(&mut self) -> Option<u32> {
-        self.refresh_player(true)
+        self.refresh_player(true, false)
     }
 
     /// Fresh check for cleanup/launch safety. Do not use this for routine polls.
     pub fn is_roblox_running(&mut self) -> bool {
-        self.refresh_player(true).is_some()
+        self.refresh_player(true, false).is_some()
     }
 }
 
