@@ -53,6 +53,12 @@ fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn exhausted_refresh_result(expired: bool, last_error: AuthError) -> Result<(), AuthError> {
+    // Access-token expiry and temporary refresh failures do not revoke the
+    // saved refresh token. Keep it so a later request can recover online.
+    if expired { Err(last_error) } else { Ok(()) }
+}
+
 impl AuthManager {
     /// Create a new AuthManager
     pub fn new() -> Result<Self, AuthError> {
@@ -375,6 +381,7 @@ impl AuthManager {
         }
 
         // Try to refresh with retries
+        let mut last_error = AuthError::NetworkError("Could not refresh your session.".into());
         for attempt in 1..=MAX_REFRESH_RETRIES {
             match self.try_refresh_token(&session).await {
                 Ok(new_session) => {
@@ -444,6 +451,7 @@ impl AuthManager {
                     }
 
                     warn!("Token refresh attempt {} failed: {}", attempt, e);
+                    last_error = e;
 
                     // Wait before retry (exponential backoff: 1s, 2s, 4s)
                     if attempt < MAX_REFRESH_RETRIES {
@@ -461,25 +469,7 @@ impl AuthManager {
             MAX_REFRESH_RETRIES, failure_count
         );
 
-        // Too many consecutive transient failures — token may be stale, force re-login
-        if failure_count >= 5 {
-            warn!("Too many consecutive refresh failures — forcing re-login");
-            let _ = self.force_logout();
-            return Err(AuthError::RefreshTokenInvalid);
-        }
-
-        // Return OK even though refresh failed - user stays logged in with stale data
-        // This prevents "session expired" messages for temporary network issues
-        if !session.is_expired() {
-            // Token not yet expired, user can continue
-            info!("Refresh failed but token not yet expired - continuing with existing session");
-            Ok(())
-        } else {
-            // Token is expired and we couldn't refresh — force re-login
-            warn!("Token expired and refresh failed — forcing re-login");
-            let _ = self.force_logout();
-            Err(AuthError::RefreshTokenInvalid)
-        }
+        exhausted_refresh_result(session.is_expired(), last_error)
     }
 
     /// Attempt a single token refresh
@@ -1007,6 +997,30 @@ mod tests {
     use super::AuthManager;
     use crate::auth::types::{SupabaseAuthResponse, SupabaseUser};
     use url::form_urlencoded;
+
+    #[test]
+    fn temporary_refresh_failures_never_become_revoked_credentials() {
+        use super::exhausted_refresh_result;
+        use crate::auth::types::AuthError;
+        for detail in ["offline", "DNS lookup failed", "request timed out"] {
+            assert!(
+                exhausted_refresh_result(false, AuthError::NetworkError(detail.into())).is_ok()
+            );
+            assert!(matches!(
+                exhausted_refresh_result(true, AuthError::NetworkError(detail.into())),
+                Err(AuthError::NetworkError(message)) if message == detail
+            ));
+        }
+    }
+
+    #[test]
+    fn expired_access_token_reports_the_server_failure_without_claiming_a_bad_login() {
+        use crate::auth::types::AuthError;
+        assert!(matches!(
+            super::exhausted_refresh_result(true, AuthError::ApiError("service unavailable".into())),
+            Err(AuthError::ApiError(message)) if message == "service unavailable"
+        ));
+    }
 
     #[test]
     fn test_form_urlencoded_round_trip_state() {

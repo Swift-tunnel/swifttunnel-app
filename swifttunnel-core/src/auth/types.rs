@@ -303,10 +303,8 @@ pub enum AuthError {
     FreeTierLimitReached(String),
 
     /// The API answered 429, or ticket issuance is busy (503). Unlike `ApiError`, it must never be
-    /// retried straight away and must never count toward the consecutive
-    /// failure tally that forces a re-login: being throttled says nothing about
-    /// whether the session is still valid, and treating it as a normal
-    /// transient error is what signed users out during a throttling episode.
+    /// retried straight away: being throttled says nothing about whether
+    /// the session is still valid.
     ///
     /// Carries the server's `Retry-After` in seconds.
     #[error("Rate limited by the API; retry in {0}s")]
