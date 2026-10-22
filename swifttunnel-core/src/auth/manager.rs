@@ -77,6 +77,25 @@ fn exhausted_refresh_result(expired: bool, last_error: AuthError) -> Result<(), 
     if expired { Err(last_error) } else { Ok(()) }
 }
 
+fn persist_new_session(
+    state: &Mutex<AuthState>,
+    session: AuthSession,
+    persist: impl FnOnce(&AuthSession) -> Result<(), AuthError>,
+) -> Result<(), AuthError> {
+    if let Err(error) = persist(&session) {
+        // Both password and browser sign-in enter LoggingIn before saving.
+        // A disk/credential-store failure must end that pending state too.
+        *state.lock() = AuthState::Error(error.to_string());
+        return Err(error);
+    }
+    *state.lock() = if session.user.is_banned {
+        AuthState::Banned(session)
+    } else {
+        AuthState::LoggedIn(session)
+    };
+    Ok(())
+}
+
 impl AuthManager {
     /// Create a new AuthManager
     pub fn new() -> Result<Self, AuthError> {
@@ -241,9 +260,9 @@ impl AuthManager {
     }
 
     fn store_and_set_session_state(&self, session: AuthSession) -> Result<(), AuthError> {
-        self.storage.store_session(&session)?;
-        self.set_session_state(session);
-        Ok(())
+        persist_new_session(&self.state, session, |session| {
+            self.storage.store_session(session)
+        })
     }
 
     fn set_session_state(&self, session: AuthSession) {
@@ -1002,6 +1021,45 @@ mod tests {
     use super::AuthManager;
     use crate::auth::types::{SupabaseAuthResponse, SupabaseUser};
     use url::form_urlencoded;
+
+    #[test]
+    fn failed_login_persistence_ends_logging_in_and_allows_a_later_retry() {
+        use super::{AuthError, AuthState, Mutex, persist_new_session};
+        let state = Mutex::new(AuthState::LoggingIn);
+        let session = AuthManager::session_from_auth_response(
+            SupabaseAuthResponse {
+                access_token: "fixture-access".into(),
+                refresh_token: "fixture-refresh".into(),
+                expires_in: 3600,
+                expires_at: None,
+                token_type: "bearer".into(),
+                user: SupabaseUser {
+                    id: "fixture-user".into(),
+                    email: None,
+                },
+            },
+            "fixture@example.invalid".into(),
+            false,
+            false,
+            None,
+            None,
+        );
+        let failed = persist_new_session(&state, session.clone(), |_| {
+            Err(AuthError::StorageError("fixture disk is full".into()))
+        });
+        assert!(matches!(failed, Err(AuthError::StorageError(_))));
+        assert!(
+            matches!(&*state.lock(), AuthState::Error(message) if message.contains("disk is full"))
+        );
+
+        *state.lock() = AuthState::LoggingIn;
+        persist_new_session(&state, session.clone(), |_| Ok(())).unwrap();
+        assert_eq!(*state.lock(), AuthState::LoggedIn(session.clone()));
+        let mut banned = session;
+        banned.user.is_banned = true;
+        persist_new_session(&state, banned.clone(), |_| Ok(())).unwrap();
+        assert_eq!(*state.lock(), AuthState::Banned(banned));
+    }
 
     #[test]
     fn refresh_backoff_suppresses_requests_until_its_monotonic_deadline() {
