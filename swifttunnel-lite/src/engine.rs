@@ -180,6 +180,13 @@ impl Shared {
                 .read()
                 .is_ok_and(|settings| settings.update_settings.auto_check)
     }
+
+    // Called only on exit/update workers, never the GUI thread.
+    fn flush_settings_before_exit(&self) {
+        if let Err(error) = self.settings_save_signal.flush(Duration::from_secs(3)) {
+            log::warn!("Could not finish settings saving before exit: {error}");
+        }
+    }
 }
 
 pub struct Engine {
@@ -1011,6 +1018,8 @@ impl Engine {
                         log::info!(
                             "update: installer started, closing so it can replace this build"
                         );
+                        shared.stop.store(true, Ordering::Relaxed);
+                        shared.flush_settings_before_exit();
                         std::process::exit(0);
                     }
                     Err(error) => {
@@ -1321,9 +1330,7 @@ impl Engine {
                 });
                 // The detached settings worker must get its final snapshot before
                 // the GUI exits. A broken disk cannot hold shutdown indefinitely.
-                if let Err(error) = shared.settings_save_signal.flush(Duration::from_secs(3)) {
-                    log::warn!("Could not finish settings saving before exit: {error}");
-                }
+                shared.flush_settings_before_exit();
                 // The GUI still owns Engine here. Release the worker's Arc before
                 // posting the message that destroys it, keeping final runtime
                 // destruction out of this cleanup worker.
@@ -1612,6 +1619,8 @@ fn spawn_auto_update(shared: Arc<Shared>) {
             match swifttunnel_core::lite_update::launch_installer(&staged) {
                 Ok(()) => {
                     log::info!("auto-update: installer started, closing so it can replace us");
+                    shared.stop.store(true, Ordering::Relaxed);
+                    shared.flush_settings_before_exit();
                     std::process::exit(0);
                 }
                 Err(error) => {
