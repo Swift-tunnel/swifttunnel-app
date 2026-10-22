@@ -12,8 +12,7 @@ use log::{debug, error, info, warn};
 use parking_lot::Mutex;
 use rand::Rng;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration as StdDuration;
+use std::time::{Duration as StdDuration, Instant};
 use url::form_urlencoded;
 
 /// Path of the sign-in page opened in the user's browser.
@@ -27,6 +26,33 @@ const OAUTH_LOGIN_PATH: &str = "/login";
 
 /// Maximum number of token refresh retries
 const MAX_REFRESH_RETRIES: u32 = 3;
+const TRANSIENT_REFRESH_BACKOFF: StdDuration = StdDuration::from_secs(30);
+
+#[derive(Default)]
+struct RefreshBackoff {
+    deadline: Option<Instant>,
+    rate_limited: bool,
+}
+
+impl RefreshBackoff {
+    fn waiting_result(&self, now: Instant, expired: bool) -> Option<Result<(), AuthError>> {
+        let remaining = self.deadline?.checked_duration_since(now)?;
+        if remaining.is_zero() {
+            return None;
+        }
+        if !expired {
+            return Some(Ok(()));
+        }
+        let wait = remaining.as_secs().max(1);
+        Some(Err(if self.rate_limited {
+            AuthError::RateLimited(wait)
+        } else {
+            AuthError::NetworkError(format!(
+                "Could not refresh your login. Try again in {wait} seconds."
+            ))
+        }))
+    }
+}
 
 /// Authentication manager
 pub struct AuthManager {
@@ -35,22 +61,14 @@ pub struct AuthManager {
     client: AuthClient,
     /// Active OAuth server (if awaiting callback)
     oauth_server: Arc<Mutex<Option<OAuthServer>>>,
-    /// Unix seconds until which refresh requests are suppressed after a 429.
+    /// Suppress repeated refreshes after throttling or temporary failures.
     ///
     /// Handling the 429 once it arrives is not enough: `refresh_if_needed` is
     /// called ahead of API work, so an expired token means every subsequent
     /// call tries again and adds to the very throttle it is waiting on. This
     /// stops the request being sent at all until the server's `Retry-After`
     /// has passed.
-    refresh_blocked_until: Arc<AtomicU64>,
-}
-
-/// Unix timestamp in seconds, or 0 if the clock is before the epoch.
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    refresh_backoff: Arc<Mutex<RefreshBackoff>>,
 }
 
 fn exhausted_refresh_result(expired: bool, last_error: AuthError) -> Result<(), AuthError> {
@@ -122,7 +140,7 @@ impl AuthManager {
             storage,
             client,
             oauth_server: Arc::new(Mutex::new(None)),
-            refresh_blocked_until: Arc::new(AtomicU64::new(0)),
+            refresh_backoff: Arc::new(Mutex::new(RefreshBackoff::default())),
         })
     }
 
@@ -356,22 +374,12 @@ impl AuthManager {
         // Still inside the window the server asked us to wait out. Sending now
         // would only deepen the throttle, and a 429 says nothing about whether
         // the session is still valid — so an unexpired token simply carries on.
-        let blocked_until = self.refresh_blocked_until.load(Ordering::Relaxed);
-        let now_secs = unix_now_secs();
-        if now_secs < blocked_until {
-            let wait = blocked_until - now_secs;
-            if !session.is_expired() {
-                debug!(
-                    "Refresh suppressed for {}s after a 429; token still valid",
-                    wait
-                );
-                return Ok(());
-            }
-            warn!(
-                "Refresh suppressed for {}s after a 429; token already expired",
-                wait
-            );
-            return Err(AuthError::RateLimited(wait));
+        if let Some(result) = self
+            .refresh_backoff
+            .lock()
+            .waiting_result(Instant::now(), session.is_expired())
+        {
+            return result;
         }
 
         if session.is_expired() {
@@ -393,7 +401,7 @@ impl AuthManager {
 
                     // Reset refresh failure count on success
                     self.storage.reset_refresh_failures();
-                    self.refresh_blocked_until.store(0, Ordering::Relaxed);
+                    *self.refresh_backoff.lock() = RefreshBackoff::default();
 
                     {
                         let mut state = self.state.lock();
@@ -439,8 +447,11 @@ impl AuthManager {
                             "Token refresh rate limited; suppressing refreshes for {}s",
                             retry_after
                         );
-                        self.refresh_blocked_until
-                            .store(unix_now_secs() + retry_after, Ordering::Relaxed);
+                        *self.refresh_backoff.lock() = RefreshBackoff {
+                            deadline: Instant::now()
+                                .checked_add(StdDuration::from_secs(retry_after)),
+                            rate_limited: true,
+                        };
                         self.storage.reset_refresh_failures();
 
                         return if session.is_expired() {
@@ -469,6 +480,10 @@ impl AuthManager {
             MAX_REFRESH_RETRIES, failure_count
         );
 
+        *self.refresh_backoff.lock() = RefreshBackoff {
+            deadline: Some(Instant::now() + TRANSIENT_REFRESH_BACKOFF),
+            rate_limited: false,
+        };
         exhausted_refresh_result(session.is_expired(), last_error)
     }
 
@@ -997,6 +1012,38 @@ mod tests {
     use super::AuthManager;
     use crate::auth::types::{SupabaseAuthResponse, SupabaseUser};
     use url::form_urlencoded;
+
+    #[test]
+    fn refresh_backoff_suppresses_requests_until_its_monotonic_deadline() {
+        use super::{Instant, RefreshBackoff, StdDuration};
+        use crate::auth::types::AuthError;
+        let now = Instant::now();
+        let deadline = now + StdDuration::from_secs(30);
+        for rate_limited in [false, true] {
+            let backoff = RefreshBackoff {
+                deadline: Some(deadline),
+                rate_limited,
+            };
+            assert!(matches!(backoff.waiting_result(now, false), Some(Ok(()))));
+            let blocked = backoff.waiting_result(now, true);
+            if rate_limited {
+                assert!(matches!(blocked, Some(Err(AuthError::RateLimited(30)))));
+            } else {
+                assert!(matches!(blocked, Some(Err(AuthError::NetworkError(_)))));
+            }
+            assert!(backoff.waiting_result(deadline, true).is_none());
+            assert!(
+                backoff
+                    .waiting_result(deadline + StdDuration::from_secs(1), true)
+                    .is_none()
+            );
+        }
+        assert!(
+            RefreshBackoff::default()
+                .waiting_result(now, true)
+                .is_none()
+        );
+    }
 
     #[test]
     fn temporary_refresh_failures_never_become_revoked_credentials() {
