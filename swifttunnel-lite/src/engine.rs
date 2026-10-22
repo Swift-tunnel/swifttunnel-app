@@ -172,6 +172,14 @@ impl Shared {
                 )
             })
     }
+
+    fn automatic_updates_allowed(&self) -> bool {
+        !self.stop.load(Ordering::Relaxed)
+            && self
+                .settings
+                .read()
+                .is_ok_and(|settings| settings.update_settings.auto_check)
+    }
 }
 
 pub struct Engine {
@@ -1504,6 +1512,9 @@ fn spawn_auto_update(shared: Arc<Shared>) {
             if shared.stop.load(Ordering::Relaxed) {
                 return;
             }
+            if !shared.automatic_updates_allowed() {
+                continue;
+            }
 
             // Connected, or busy connecting: leave it alone and come back.
             let in_use = shared
@@ -1552,6 +1563,10 @@ fn spawn_auto_update(shared: Arc<Shared>) {
                 continue;
             }
 
+            if !shared.automatic_updates_allowed() {
+                continue;
+            }
+
             log::info!("auto-update: {} is available, fetching", update.version);
             shared.edit(|s| s.update = UpdateState::Working("Updating...".to_string()));
             shared.notify();
@@ -1581,8 +1596,10 @@ fn spawn_auto_update(shared: Arc<Shared>) {
                 shared.notify();
                 continue;
             };
-            if !shared.connection_is_idle() {
-                log::info!("auto-update: connected while downloading, leaving it for next time");
+            if !shared.connection_is_idle() || !shared.automatic_updates_allowed() {
+                log::info!(
+                    "auto-update: connection or preferences changed while downloading, deferring"
+                );
                 shared.edit(|s| s.update = UpdateState::Idle);
                 shared.notify();
                 continue;
