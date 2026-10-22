@@ -20,6 +20,7 @@ struct Journal {
 }
 const RESTORE_ERROR: &str =
     "Couldn't restore your Roblox FastFlags. Contact support and include your log.";
+const MAX_JOURNAL_BYTES: usize = 256 * 1024;
 fn journal_path() -> Result<PathBuf, String> {
     Ok(crate::roblox_library::library_path()?.with_file_name("native-launch-flags.json"))
 }
@@ -33,7 +34,7 @@ fn read(path: &Path) -> Result<Option<String>, String> {
         .file_name()
         .is_some_and(|name| name == "native-launch-flags.json")
     {
-        256 * 1024
+        MAX_JOURNAL_BYTES
     } else {
         128 * 1024
     };
@@ -63,6 +64,17 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     crate::roblox_native_launch::safe_path(path)?;
     fs::create_dir_all(path.parent().ok_or("Invalid flags path.")?).map_err(|e| e.to_string())?;
     crate::atomic_file::replace(path, bytes).map_err(|e| e.to_string())
+}
+fn write_journal(path: &Path, journal: &Journal) -> Result<(), String> {
+    let bytes = serde_json::to_vec(journal).map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_JOURNAL_BYTES {
+        log::warn!("Native FastFlags backup would exceed its recovery read limit");
+        return Err(
+            "Your existing Roblox FastFlags could not be backed up safely. Nothing was changed."
+                .into(),
+        );
+    }
+    write(path, &bytes)
 }
 fn hash(raw: &str) -> String {
     format!("{:x}", Sha256::digest(raw.as_bytes()))
@@ -122,10 +134,7 @@ pub fn prepare(player: &Path, flags: HashMap<String, String>) -> Result<(), Stri
         }],
         flags,
     };
-    write(
-        &journal_path()?,
-        &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
-    )?;
+    write_journal(&journal_path()?, &journal)?;
     write(&path, raw.as_bytes())
 }
 pub fn restore() -> Result<bool, String> {
@@ -218,6 +227,62 @@ pub fn diagnostic() -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn escaped_backup_cannot_replace_a_record_with_one_recovery_cannot_read() {
+        let root = std::env::temp_dir().join(format!(
+            "swift-flags-backup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("native-launch-flags.json");
+        fs::write(&path, b"previous backup").unwrap();
+        // The source is within the 64 KB backup limit, but JSON escaping
+        // expands control bytes beyond the recovery reader's 256 KB cap.
+        let journal = Journal {
+            entries: vec![Entry {
+                path: root.join("ClientAppSettings.json"),
+                before: Some("\0".repeat(64 * 1024)),
+                applied: hash("{}"),
+            }],
+            flags: HashMap::new(),
+        };
+        let result = write_journal(&path, &journal);
+        let after = fs::read(&path).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert!(result.is_err());
+        assert_eq!(after, b"previous backup");
+    }
+
+    #[test]
+    fn normal_backup_round_trips_original_bytes_through_the_recovery_reader() {
+        let root = std::env::temp_dir().join(format!(
+            "swift-flags-roundtrip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("native-launch-flags.json");
+        let before = "{\"label\":\"a\\\\b\\n\\\"c\"}\n";
+        let journal = Journal {
+            entries: vec![Entry {
+                path: root.join("ClientAppSettings.json"),
+                before: Some(before.into()),
+                applied: hash("{}"),
+            }],
+            flags: HashMap::new(),
+        };
+        write_journal(&path, &journal).unwrap();
+        let restored: Journal = serde_json::from_str(&read(&path).unwrap().unwrap()).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(restored.entries[0].before.as_deref(), Some(before));
+    }
     #[test]
     fn restoration_recovers_original_bytes_but_preserves_external_changes() {
         let root = std::env::temp_dir().join(format!("swift-flags-{}", std::process::id()));
