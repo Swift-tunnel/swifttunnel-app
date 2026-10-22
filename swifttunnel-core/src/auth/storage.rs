@@ -314,8 +314,7 @@ impl SecureStorage {
             LEGACY_DPAPI_VERSION_TAG => {
                 warn!(
                     "Session blob is in legacy DPAPI format (1.24.0/1.24.1). \
-                     Discarding and forcing re-authentication — DPAPI support was \
-                     removed to stop Defender false positives."
+                     This stored copy cannot be read; trying any independent backup."
                 );
                 DecodedBlob::RejectDpapi
             }
@@ -360,7 +359,7 @@ impl SecureStorage {
     /// Load session from file (primary storage). Migrates legacy pre-1.24
     /// files on first read by re-sealing them in the current format; rejects
     /// 1.24.0/1.24.1 DPAPI files by deleting them and returning `None` so
-    /// the caller forces a re-login.
+    /// the caller can try the independent keyring backup.
     fn load_from_file(&self) -> Result<Option<AuthSession>, AuthError> {
         let path = self.session_file_path();
         if !path.exists() {
@@ -389,7 +388,6 @@ impl SecureStorage {
             }
             DecodedBlob::RejectDpapi => {
                 let _ = std::fs::remove_file(&path);
-                let _ = self.clear_from_keyring();
                 Ok(None)
             }
             DecodedBlob::Corrupt => {
@@ -804,7 +802,33 @@ mod tests {
     }
 
     #[test]
-    fn dpapi_file_is_deleted_and_forces_relogin() {
+    fn an_unsupported_primary_file_does_not_delete_a_valid_keyring_backup() {
+        let mut storage = SecureStorage::with_isolated_data_dir();
+        storage.keyring_entry = Some(Entry::new_with_credential(Box::new(
+            keyring::mock::MockCredential::default(),
+        )));
+        let session = make_session("recoverable-backup");
+        storage.store_to_keyring(&session).unwrap();
+        std::fs::write(
+            storage.session_file_path(),
+            [LEGACY_DPAPI_VERSION_TAG, 1, 2, 3],
+        )
+        .unwrap();
+        let recovered = storage.load_session().unwrap();
+        let backup = storage.load_from_keyring().unwrap();
+        storage.clear_session().unwrap();
+        assert_eq!(
+            recovered.as_ref().map(|s| &s.refresh_token),
+            Some(&session.refresh_token)
+        );
+        assert_eq!(
+            backup.as_ref().map(|s| &s.refresh_token),
+            Some(&session.refresh_token)
+        );
+    }
+
+    #[test]
+    fn dpapi_file_without_a_recoverable_keyring_requires_relogin() {
         let storage = SecureStorage::with_isolated_data_dir();
 
         // Simulate a 1.24.1 DPAPI file on disk.
