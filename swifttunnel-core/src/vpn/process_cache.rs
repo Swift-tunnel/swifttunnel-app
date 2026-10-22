@@ -198,52 +198,6 @@ pub fn is_game_server(
     is_roblox_game_server(dst_ip, dst_port, protocol, api_tunneling)
 }
 
-// ============================================================================
-// ON-DEMAND PID LOOKUP (for first-packet guarantee)
-// ============================================================================
-
-/// Get process name by PID using Windows API
-///
-/// Uses K32GetProcessImageFileNameW for fast process name lookup.
-/// This is called when on-demand PID lookup succeeds but the PID isn't
-/// in the cached snapshot (stale snapshot race condition).
-#[cfg(windows)]
-#[allow(dead_code)]
-fn get_process_name_by_pid_fast(pid: u32) -> Option<String> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::ProcessStatus::K32GetProcessImageFileNameW;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-
-    unsafe {
-        // Open process with minimal permissions
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-
-        if handle.is_invalid() {
-            return None;
-        }
-
-        // Get process image file name (NT path like \Device\HarddiskVolume3\...\RobloxPlayerBeta.exe)
-        let mut buffer = [0u16; 512];
-        let len = K32GetProcessImageFileNameW(handle, &mut buffer);
-
-        let _ = CloseHandle(handle);
-
-        if len == 0 {
-            return None;
-        }
-
-        let path = String::from_utf16_lossy(&buffer[..len as usize]);
-
-        // Extract just the filename from the full path
-        path.rsplit('\\').next().map(|s| s.to_string())
-    }
-}
-
-#[cfg(not(windows))]
-fn get_process_name_by_pid_fast(_pid: u32) -> Option<String> {
-    None
-}
-
 /// Immutable snapshot of process state
 ///
 /// Once created, this is NEVER modified. Readers can safely access
