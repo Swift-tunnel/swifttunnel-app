@@ -117,6 +117,7 @@ impl OAuthServer {
         expected_state: String,
     ) {
         info!("OAuth server thread started");
+        let mut invalid_requests = 0u64;
 
         loop {
             if stop_flag.load(Ordering::Relaxed) {
@@ -133,11 +134,6 @@ impl OAuthServer {
                     // the state that binds it. Logging the whole URL put a live
                     // credential in a file users routinely attach to support
                     // tickets.
-                    info!(
-                        "OAuth server received request: {} (query omitted)",
-                        Self::log_safe_path(url_str)
-                    );
-
                     // A previous browser tab may reach the reused port after a
                     // new attempt starts. Ignore it without consuming the new
                     // attempt's one callback. The manager also verifies state
@@ -148,7 +144,10 @@ impl OAuthServer {
                         .filter(|callback| callback.state == expected_state);
                     match callback {
                         Some(callback) => {
-                            info!("OAuth callback parsed successfully");
+                            info!(
+                                "OAuth callback received: {} (query omitted)",
+                                Self::log_safe_path(url_str)
+                            );
 
                             // Deliver independently of whether the browser is
                             // still connected or can accept the response.
@@ -177,10 +176,14 @@ impl OAuthServer {
                         }
                         None => {
                             // Invalid request - send error response
-                            warn!(
-                                "Invalid OAuth callback request: {} (query omitted)",
-                                Self::log_safe_path(url_str)
-                            );
+                            invalid_requests = invalid_requests.saturating_add(1);
+                            if invalid_requests <= 4 || invalid_requests.is_power_of_two() {
+                                warn!(
+                                    "Invalid OAuth callback request #{}: {} (query omitted)",
+                                    invalid_requests,
+                                    Self::log_safe_path(url_str)
+                                );
+                            }
                             let html = Self::error_html("Invalid callback parameters");
                             let response = Response::from_string(html)
                                 .with_status_code(StatusCode(400))
@@ -214,8 +217,18 @@ impl OAuthServer {
     /// exchange token, which redeems for a session, and the state that binds
     /// it. The path alone still tells support whether the browser reached us
     /// and on which route, which is the whole diagnostic value of the line.
-    fn log_safe_path(url_str: &str) -> &str {
-        url_str.split(['?', '#']).next().unwrap_or("/")
+    fn log_safe_path(url_str: &str) -> String {
+        let path = url_str.split(['?', '#']).next().unwrap_or("/");
+        let mut characters = path.chars();
+        let mut safe: String = characters
+            .by_ref()
+            .take(128)
+            .map(|c| if c.is_control() { '_' } else { c })
+            .collect();
+        if characters.next().is_some() {
+            safe.push_str("...");
+        }
+        safe
     }
 
     /// Parse the callback URL to extract token and state
@@ -449,6 +462,19 @@ impl Drop for OAuthServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_log_paths_bound_untrusted_text_and_cannot_inject_log_lines() {
+        let input = format!(
+            "/{}?token=secret-token&state=secret-state",
+            "界".repeat(10_000)
+        );
+        let logged = OAuthServer::log_safe_path(&input);
+        assert!(logged.chars().count() <= 131);
+        assert!(!logged.contains("secret"));
+        let logged = OAuthServer::log_safe_path("/bad\nforged-line\r\0?token=secret");
+        assert!(!logged.chars().any(char::is_control));
+    }
 
     #[tokio::test]
     async fn stale_or_invalid_requests_do_not_consume_the_pending_sign_in() {
