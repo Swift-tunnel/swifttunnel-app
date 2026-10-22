@@ -10,6 +10,8 @@ pub struct RollingLog {
     file: Option<File>,
     size: u64,
     max: u64,
+    #[cfg(windows)]
+    _writer_lock: File,
 }
 
 impl RollingLog {
@@ -20,6 +22,22 @@ impl RollingLog {
                 "invalid log rotation configuration",
             ));
         }
+        // Logging starts before the app's single-instance guard. A second
+        // process must not rotate files still owned by the running logger.
+        // Keep this handle separate from the log, whose handle changes during
+        // rotation. A leftover lock file is harmless after its owner exits.
+        #[cfg(windows)]
+        let writer_lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            let mut lock_path = path.as_os_str().to_os_string();
+            lock_path.push(".writer-lock");
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .share_mode(0)
+                .open(lock_path)?
+        };
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let size = file.metadata()?.len();
         let mut writer = Self {
@@ -28,6 +46,8 @@ impl RollingLog {
             file: Some(file),
             size,
             max,
+            #[cfg(windows)]
+            _writer_lock: writer_lock,
         };
         if size >= max {
             writer.rotate()?;
@@ -160,6 +180,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn another_process_logger_cannot_rotate_a_running_writers_files() {
+        let dir = Fixture::new();
+        let mut first = dir.open();
+        first.write_all(b"1234567890abcdef").unwrap();
+        let second = RollingLog::open(&dir.current(), &dir.previous(), 16);
+        assert!(second.is_err());
+        assert_eq!(std::fs::read(dir.current()).unwrap(), b"1234567890abcdef");
+        assert!(!dir.previous().exists());
+        first.write_all(b"new").unwrap();
+        assert_eq!(std::fs::read(dir.previous()).unwrap(), b"1234567890abcdef");
+        drop(first);
+        // The lock file can remain on disk. Ownership is the open handle, so
+        // neither normal exit nor a stale empty file strands future logging.
+        let mut reopened = dir.open();
+        reopened.write_all(b" run").unwrap();
+        assert_eq!(std::fs::read(dir.current()).unwrap(), b"new run");
     }
 
     #[test]
