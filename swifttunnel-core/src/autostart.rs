@@ -14,6 +14,7 @@
 //! The saved setting is still shared, so turning it on in one turns the switch
 //! on in the other's UI too. If both end up registered, the single-client lock
 //! sorts it out: the second to launch focuses the first and exits.
+//! Turning it off removes both clients' entries, matching the shared switch.
 
 use std::path::Path;
 
@@ -33,7 +34,7 @@ fn startup_command_for_exe(exe_path: &Path) -> String {
     format!("\"{}\" {}", exe_path.display(), STARTUP_FLAG)
 }
 
-/// Add or remove this executable's Run entry.
+/// Register this executable, or disable startup for both SwiftTunnel clients.
 #[cfg(windows)]
 pub fn sync_run_on_startup(value_name: &str, enabled: bool) -> Result<(), String> {
     use std::io::ErrorKind;
@@ -52,10 +53,16 @@ pub fn sync_run_on_startup(value_name: &str, enabled: bool) -> Result<(), String
         run_key
             .set_value(value_name, &command)
             .map_err(|e| format!("Failed to set startup registry value: {}", e))?;
-    } else if let Err(e) = run_key.delete_value(value_name)
-        && e.kind() != ErrorKind::NotFound
-    {
-        return Err(format!("Failed to remove startup registry value: {}", e));
+    } else {
+        // Desktop and Lite share the preference. Leaving the other entry
+        // enabled would still launch SwiftTunnel while the switch says Off.
+        for value in [RUN_VALUE_APP, RUN_VALUE_LITE] {
+            if let Err(e) = run_key.delete_value(value)
+                && e.kind() != ErrorKind::NotFound
+            {
+                return Err(format!("Failed to remove startup registry value: {}", e));
+            }
+        }
     }
 
     Ok(())
