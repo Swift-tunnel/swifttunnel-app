@@ -400,7 +400,6 @@ impl AuthManager {
                     }
 
                     // Reset refresh failure count on success
-                    self.storage.reset_refresh_failures();
                     *self.refresh_backoff.lock() = RefreshBackoff::default();
 
                     {
@@ -421,7 +420,6 @@ impl AuthManager {
                     // Permanent error: token revoked/rotated — retrying won't help
                     if matches!(e, AuthError::RefreshTokenInvalid) {
                         warn!("Refresh token is permanently invalid — forcing re-login");
-                        self.storage.reset_refresh_failures();
                         let _ = self.force_logout();
                         return Err(e);
                     }
@@ -429,19 +427,14 @@ impl AuthManager {
                         // A ban can now come directly from the refresh API,
                         // before try_refresh_token reaches the profile lookup.
                         let _ = self.mark_current_session_banned(reason);
-                        self.storage.reset_refresh_failures();
                         return Err(e);
                     }
                     if matches!(e, AuthError::UpdateRequired(_)) {
-                        self.storage.reset_refresh_failures();
                         return Err(e);
                     }
 
-                    // Throttled. Back off for as long as the server asked and
-                    // stop here: no immediate retries, and crucially no failure
-                    // recorded. Counting these was what signed people out — five
-                    // throttled rounds tripped the consecutive-failure logout
-                    // even though the session was never in question.
+                    // Throttled. Honor the server's delay without immediate
+                    // retries or treating the credentials as revoked.
                     if let AuthError::RateLimited(retry_after) = e {
                         warn!(
                             "Token refresh rate limited; suppressing refreshes for {}s",
@@ -452,7 +445,6 @@ impl AuthManager {
                                 .checked_add(StdDuration::from_secs(retry_after)),
                             rate_limited: true,
                         };
-                        self.storage.reset_refresh_failures();
 
                         return if session.is_expired() {
                             Err(AuthError::RateLimited(retry_after))
@@ -473,11 +465,9 @@ impl AuthManager {
             }
         }
 
-        // All retries failed - track the failure
-        let failure_count = self.storage.increment_refresh_failures();
         warn!(
-            "Token refresh failed after {} attempts (total failures: {})",
-            MAX_REFRESH_RETRIES, failure_count
+            "Token refresh failed after {} attempts; keeping the saved session",
+            MAX_REFRESH_RETRIES
         );
 
         *self.refresh_backoff.lock() = RefreshBackoff {

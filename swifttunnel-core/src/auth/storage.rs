@@ -20,20 +20,16 @@
 
 use super::types::{AuthError, AuthSession};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use chrono::{DateTime, Utc};
 use keyring::Entry;
 use log::{debug, error, info, warn};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom, SystemRandom};
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 const SERVICE_NAME: &str = "SwiftTunnel";
 const SESSION_KEY: &str = "auth_session";
 const AUTH_SESSION_FILE: &str = "auth_session.dat";
-const REFRESH_FAILURES_FILE: &str = "refresh_failures.json";
-const LEGACY_REFRESH_FAILURES_FILE: &str = "refresh_failures.txt";
 
 /// Version tag for AES-256-GCM sealed session blobs. Chosen outside the
 /// printable base64 alphabet (>= 0x2B) so the loader can dispatch on the
@@ -57,17 +53,6 @@ const AEAD_TAG_LEN: usize = 16;
 /// XOR key kept ONLY for one-shot migration of pre-1.24 auth_session.dat
 /// files. No new files are ever written in this format.
 const LEGACY_OBFUSCATION_KEY: &[u8] = b"SwiftTunnel2024AuthStorage";
-
-/// Window during which consecutive refresh failures are aggregated. Failures
-/// older than this reset the counter on the next increment so transient
-/// errors days apart never strand a user.
-const REFRESH_FAILURE_WINDOW: chrono::Duration = chrono::Duration::hours(1);
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RefreshFailureRecord {
-    count: u32,
-    first_failure_at: DateTime<Utc>,
-}
 
 /// Read the Windows machine GUID from the registry. Falls back to a
 /// well-known string so a failed read still produces a deterministic key
@@ -570,91 +555,6 @@ impl SecureStorage {
         info!("Auth session cleared");
         Ok(())
     }
-    fn refresh_failures_path(&self) -> PathBuf {
-        self.data_dir.join(REFRESH_FAILURES_FILE)
-    }
-
-    fn legacy_refresh_failures_path(&self) -> PathBuf {
-        self.data_dir.join(LEGACY_REFRESH_FAILURES_FILE)
-    }
-
-    /// Read the persisted refresh-failure record, dropping any record older
-    /// than the aggregation window so the counter doesn't accumulate forever.
-    fn read_refresh_record(&self) -> Option<RefreshFailureRecord> {
-        let _ = std::fs::remove_file(self.legacy_refresh_failures_path());
-
-        let path = self.refresh_failures_path();
-        if !path.exists() {
-            return None;
-        }
-        let raw = crate::utils::read_text_file_bounded(&path, 16 * 1024, "Refresh failure record")
-            .ok()?;
-        let record: RefreshFailureRecord = serde_json::from_str(&raw).ok()?;
-        if Utc::now() - record.first_failure_at > REFRESH_FAILURE_WINDOW {
-            None
-        } else {
-            Some(record)
-        }
-    }
-
-    fn write_refresh_record(&self, record: &RefreshFailureRecord) {
-        let path = self.refresh_failures_path();
-        match serde_json::to_string(record) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
-                    warn!("Failed to write refresh failures record: {}", e);
-                }
-            }
-            Err(e) => warn!("Failed to serialize refresh failures record: {}", e),
-        }
-    }
-
-    /// Increment the refresh failure counter and return the new count.
-    /// Failures older than `REFRESH_FAILURE_WINDOW` reset the count to 1.
-    pub fn increment_refresh_failures(&self) -> u32 {
-        let new_count = match self.read_refresh_record() {
-            Some(mut record) => {
-                record.count = record.count.saturating_add(1);
-                self.write_refresh_record(&record);
-                record.count
-            }
-            None => {
-                let record = RefreshFailureRecord {
-                    count: 1,
-                    first_failure_at: Utc::now(),
-                };
-                self.write_refresh_record(&record);
-                1
-            }
-        };
-        debug!("Incremented refresh failures to {}", new_count);
-        new_count
-    }
-
-    /// Get the current (in-window) refresh failure count.
-    #[allow(dead_code)]
-    pub fn get_refresh_failures(&self) -> u32 {
-        self.read_refresh_record().map(|r| r.count).unwrap_or(0)
-    }
-
-    /// Reset the refresh failure counter (called on successful refresh).
-    pub fn reset_refresh_failures(&self) {
-        let path = self.refresh_failures_path();
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(&path) {
-                warn!("Failed to remove refresh failures file: {}", e);
-            } else {
-                debug!("Reset refresh failures counter");
-            }
-        }
-        let _ = std::fs::remove_file(self.legacy_refresh_failures_path());
-    }
-}
-
-impl Default for SecureStorage {
-    fn default() -> Self {
-        Self::new().expect("Failed to create SecureStorage")
-    }
 }
 
 #[cfg(test)]
@@ -917,50 +817,5 @@ mod tests {
         // next run starts clean.
         assert!(storage.load_session().unwrap().is_none());
         assert!(!storage.session_file_path().exists());
-    }
-
-    #[test]
-    fn refresh_failures_within_window_increments() {
-        let storage = SecureStorage::with_isolated_data_dir();
-
-        assert_eq!(storage.increment_refresh_failures(), 1);
-        assert_eq!(storage.increment_refresh_failures(), 2);
-        assert_eq!(storage.increment_refresh_failures(), 3);
-        assert_eq!(storage.get_refresh_failures(), 3);
-
-        storage.reset_refresh_failures();
-        assert_eq!(storage.get_refresh_failures(), 0);
-    }
-
-    #[test]
-    fn refresh_failures_time_bucket_resets_after_window() {
-        let storage = SecureStorage::with_isolated_data_dir();
-
-        // Stamp a record more than 1 hour old; the next increment should
-        // observe it as expired and reset the count back to 1.
-        let stale = RefreshFailureRecord {
-            count: 99,
-            first_failure_at: Utc::now() - Duration::hours(2),
-        };
-        storage.write_refresh_record(&stale);
-
-        // get_refresh_failures observes the stale record as 0
-        assert_eq!(storage.get_refresh_failures(), 0);
-        // ...and the next increment starts fresh.
-        assert_eq!(storage.increment_refresh_failures(), 1);
-    }
-
-    #[test]
-    fn legacy_refresh_failures_txt_is_deleted() {
-        let storage = SecureStorage::with_isolated_data_dir();
-
-        std::fs::write(storage.legacy_refresh_failures_path(), "42").unwrap();
-        assert!(storage.legacy_refresh_failures_path().exists());
-
-        // Touching the new path through any read/increment must purge the legacy file.
-        let _ = storage.get_refresh_failures();
-        assert!(!storage.legacy_refresh_failures_path().exists());
-
-        storage.reset_refresh_failures();
     }
 }
