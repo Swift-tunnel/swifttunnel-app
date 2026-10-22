@@ -31,7 +31,7 @@ use tokio::sync::{Mutex, watch};
 /// 500ms balances detection speed with CPU usage
 const REFRESH_INTERVAL_MS: u64 = 500;
 
-/// Let other runtime tasks continue during synchronous driver operations.
+/// Let other runtime tasks continue during synchronous driver and process tuning operations.
 /// Keep the operation on this stack so cancellation cannot abandon an owned
 /// driver halfway through configuration. Non-threaded callers retain their
 /// existing synchronous behavior instead of panicking in block_in_place.
@@ -613,7 +613,7 @@ async fn wait_for_tunnel_process_connections(
         }
 
         let mut driver_guard = driver.lock().await;
-        if let Err(e) = driver_guard.refresh_exclusions() {
+        if let Err(e) = blocking_driver_step(|| driver_guard.refresh_exclusions()) {
             log::warn!("V3: Refresh during ETW hold failed: {}", e);
         }
 
@@ -2789,7 +2789,7 @@ impl VpnConnection {
         let running_processes = driver.get_running_tunnel_processes();
         if let Some(ref manager) = process_performance_manager {
             let mut guard = manager.lock().await;
-            guard.sync_targets(&running_processes);
+            blocking_driver_step(|| guard.sync_targets(&running_processes));
         }
         let running = dedupe_process_names(&running_processes);
         if !running.is_empty() {
@@ -2952,7 +2952,7 @@ impl VpnConnection {
                                 if etw_events_received {
                                     let pending_after_wait = if blocked_paths.is_empty() {
                                         let mut driver_guard = driver.lock().await;
-                                        if let Err(e) = driver_guard.refresh_exclusions() {
+                                        if let Err(e) = blocking_driver_step(|| driver_guard.refresh_exclusions()) {
                                             log::warn!("V3: Immediate refresh after ETW failed: {}", e);
                                         }
                                         pending_events
@@ -2986,7 +2986,7 @@ impl VpnConnection {
 
                                     if let Some(ref manager) = process_performance_for_monitor {
                                         let mut guard = manager.lock().await;
-                                        guard.sync_targets(&running_processes);
+                                        blocking_driver_step(|| guard.sync_targets(&running_processes));
                                     }
 
                                     // Update UI state promptly when games start/stop
@@ -3085,7 +3085,7 @@ impl VpnConnection {
                                         }
                                         if let Some(ref manager) = process_performance_for_monitor {
                                             let mut guard = manager.lock().await;
-                                            guard.cleanup_all(cleanup_reason);
+                                            blocking_driver_step(|| guard.cleanup_all(cleanup_reason));
                                         }
                                         break;
                                     } else {
@@ -3108,7 +3108,7 @@ impl VpnConnection {
                             Ok(false) => {}
                             Err(e) => log::warn!("V3: Split tunnel adapter rebind failed: {}", e),
                         }
-                        match driver_guard.refresh_exclusions() {
+                        match blocking_driver_step(|| driver_guard.refresh_exclusions()) {
                             Ok(_) => {
                                 let running_processes = driver_guard.get_running_tunnel_processes();
                                 let running_names = dedupe_process_names(&running_processes);
@@ -3116,7 +3116,7 @@ impl VpnConnection {
 
                                 if let Some(ref manager) = process_performance_for_monitor {
                                     let mut guard = manager.lock().await;
-                                    guard.sync_targets(&running_processes);
+                                    blocking_driver_step(|| guard.sync_targets(&running_processes));
                                 }
 
                                 state_handle.send_if_modified(|state| {
@@ -3217,7 +3217,7 @@ impl VpnConnection {
                                     }
                                     if let Some(ref manager) = process_performance_for_monitor {
                                         let mut guard = manager.lock().await;
-                                        guard.cleanup_all(cleanup_reason);
+                                        blocking_driver_step(|| guard.cleanup_all(cleanup_reason));
                                     }
                                     break;
                                 }
@@ -3294,7 +3294,7 @@ impl VpnConnection {
                                         }
                                         if let Some(ref manager) = process_performance_for_monitor {
                                             let mut guard = manager.lock().await;
-                                            guard.cleanup_all(cleanup_reason);
+                                            blocking_driver_step(|| guard.cleanup_all(cleanup_reason));
                                         }
                                         break;
                                     }
@@ -3607,7 +3607,7 @@ impl VpnConnection {
 
         if let Some(manager) = self.process_performance_manager.take() {
             let mut guard = manager.lock().await;
-            guard.cleanup_all("tunnel_cleanup");
+            blocking_driver_step(|| guard.cleanup_all("tunnel_cleanup"));
         }
 
         // Clear split tunnel
