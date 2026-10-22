@@ -755,7 +755,10 @@ impl SplitTunnelDriver {
         }
 
         // Third try: System32 drivers folder (default WinpkFilter location)
-        let system_path = PathBuf::from(r"C:\Windows\System32\drivers\ndisrd.sys");
+        let system_path = crate::utils::trusted_windows_root()?
+            .join("System32")
+            .join("drivers")
+            .join("ndisrd.sys");
         if system_path.exists() {
             return Some(system_path);
         }
@@ -1113,8 +1116,22 @@ impl SplitTunnelDriver {
     ///
     /// Comparing those as raw strings reports a mismatch every time, which is
     /// what drove the repeated service rewrites that wedged NDISRD.
-    fn normalize_service_binary_path(raw: &str) -> String {
-        let mut path = raw.trim().trim_matches('"').to_string();
+    fn normalize_service_binary_path(raw: &str) -> Option<String> {
+        Self::normalize_service_binary_path_with_root(
+            raw,
+            crate::utils::trusted_windows_root().as_deref(),
+        )
+    }
+
+    fn normalize_service_binary_path_with_root(
+        raw: &str,
+        windows_dir: Option<&Path>,
+    ) -> Option<String> {
+        let mut path = raw
+            .trim()
+            .trim_matches('"')
+            .replace('/', "\\")
+            .to_ascii_lowercase();
 
         // NT namespace prefix, and the \SystemRoot\ alias the SCM also uses.
         for prefix in ["\\??\\", "\\\\?\\"] {
@@ -1122,20 +1139,25 @@ impl SplitTunnelDriver {
                 path = stripped.to_string();
             }
         }
-        let windows_dir = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-        for prefix in ["\\SystemRoot\\", "%SystemRoot%\\"] {
+        for prefix in ["\\systemroot\\", "%systemroot%\\"] {
             if let Some(stripped) = path.strip_prefix(prefix) {
-                path = format!("{}\\{}", windows_dir.trim_end_matches('\\'), stripped);
+                path = windows_dir?
+                    .join(stripped)
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
             }
         }
 
         // A bare relative path in the registry is relative to the Windows dir.
         let looks_absolute = path.chars().nth(1) == Some(':') || path.starts_with('\\');
         if !looks_absolute && !path.is_empty() {
-            path = format!("{}\\{}", windows_dir.trim_end_matches('\\'), path);
+            path = windows_dir?
+                .join(path)
+                .to_string_lossy()
+                .to_ascii_lowercase();
         }
 
-        path.replace('/', "\\").to_ascii_lowercase()
+        Some(path)
     }
 
     /// Check the service's binary path and update it if it points to the wrong location.
@@ -1191,9 +1213,15 @@ impl SplitTunnelDriver {
             // the machine loses networking until the service is rebuilt. That user
             // could not reach the internet after boot, or run any other VPN, until
             // they ran SwiftTunnel's repair.
-            if Self::normalize_service_binary_path(&current_path_str)
-                == Self::normalize_service_binary_path(&expected_str)
-            {
+            let (Some(current), Some(expected)) = (
+                Self::normalize_service_binary_path(&current_path_str),
+                Self::normalize_service_binary_path(&expected_str),
+            ) else {
+                // An unresolved Windows root does not prove a mismatch.
+                log::warn!("Could not resolve the Windows folder for driver path verification");
+                return;
+            };
+            if current == expected {
                 return;
             }
 
@@ -2132,6 +2160,60 @@ mod tests {
             SplitTunnelDriver::normalize_service_binary_path(
                 r"C:\Windows\System32\drivers\ndisrd.sys"
             ),
+        );
+    }
+
+    #[test]
+    fn service_paths_resolve_aliases_against_the_actual_windows_installation() {
+        let root = crate::utils::trusted_windows_root().expect("Windows system directory");
+        let expected = SplitTunnelDriver::normalize_service_binary_path(
+            &root.join("System32/drivers/ndisrd.sys").to_string_lossy(),
+        );
+        for path in [
+            r"\SystemRoot\System32\drivers\ndisrd.sys",
+            r"\systemroot\System32\drivers\ndisrd.sys",
+            r"%SYSTEMROOT%\System32\drivers\ndisrd.sys",
+            r"System32\drivers\ndisrd.sys",
+        ] {
+            assert_eq!(
+                SplitTunnelDriver::normalize_service_binary_path(path),
+                expected,
+                "Windows aliases are case insensitive: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_service_paths_use_the_supplied_windows_drive_and_require_a_root() {
+        for root in [r"E:\Windows", r"D:\System Root\Windows"] {
+            let root = Path::new(root);
+            let expected = Some(
+                root.join("System32/drivers/ndisrd.sys")
+                    .to_string_lossy()
+                    .replace('/', "\\")
+                    .to_ascii_lowercase(),
+            );
+            for path in [
+                r"\SystemRoot\System32\drivers\ndisrd.sys",
+                r"%SYSTEMROOT%/System32/drivers/ndisrd.sys",
+                r"System32\drivers\ndisrd.sys",
+            ] {
+                assert_eq!(
+                    SplitTunnelDriver::normalize_service_binary_path_with_root(path, Some(root)),
+                    expected,
+                );
+                assert_eq!(
+                    SplitTunnelDriver::normalize_service_binary_path_with_root(path, None),
+                    None,
+                );
+            }
+        }
+        assert!(
+            SplitTunnelDriver::normalize_service_binary_path_with_root(
+                r"E:\Windows\System32\drivers\ndisrd.sys",
+                None,
+            )
+            .is_some()
         );
     }
 
