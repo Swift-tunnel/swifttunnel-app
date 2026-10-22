@@ -511,30 +511,7 @@ impl Engine {
             Action::ApplyRoblox => self.apply_roblox(state),
             Action::ResetRoblox => self.reset_roblox(state),
 
-            Action::SignOut => {
-                let shared = self.shared.clone();
-                shared.runtime.spawn({
-                    let shared = shared.clone();
-                    async move {
-                        let auth = shared.auth.lock().await;
-                        let _ = auth.logout();
-                        drop(auth);
-                        if let Ok(mut discord) = shared.discord.lock() {
-                            discord.clear();
-                        }
-                        // Same as the full app's auth_logout: a signed-out
-                        // client must not bring the tunnel back on its own.
-                        if let Ok(mut settings) = shared.settings.write() {
-                            settings.auto_reconnect = false;
-                            settings.resume_vpn_on_startup = false;
-                            drop(settings);
-                            let _ = shared.settings_save_signal.try_send(());
-                        }
-                        refresh_auth(&shared).await;
-                        shared.notify();
-                    }
-                });
-            }
+            Action::SignOut => self.sign_out(),
             Action::SignIn => self.sign_in(),
             Action::SubmitLogin => self.submit_login(state),
             Action::RepairDriver => self.repair_driver(),
@@ -1135,6 +1112,67 @@ impl Engine {
     ///
     /// The same core call the full app's auth_login makes, so the two clients
     /// cannot drift on what counts as a valid sign-in.
+    fn sign_out(&self) {
+        if self.shared.edit(|s| {
+            if s.login_busy {
+                return false;
+            }
+            s.login_busy = true;
+            s.login_error = None;
+            true
+        }) != Some(true)
+        {
+            return;
+        }
+        self.shared.notify();
+        let shared = self.shared.clone();
+        shared.runtime.spawn({
+            let shared = shared.clone();
+            async move {
+                let manager = shared.auth.clone();
+                // Credential deletion can wait for disk or the Windows vault.
+                // Keep it off the two asynchronous engine workers too.
+                let result =
+                    tokio::task::spawn_blocking(move || manager.blocking_lock().logout()).await;
+                let failure = match result {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => {
+                        log::warn!("Could not sign out: {error}");
+                        Some("Could not remove your saved login. Try signing out again.")
+                    }
+                    Err(error) => {
+                        log::warn!("Sign-out worker stopped: {error}");
+                        Some("Could not finish signing out. Try again.")
+                    }
+                };
+                if let Some(message) = failure {
+                    shared.edit(|s| {
+                        s.login_busy = false;
+                        s.login_error = Some(message.into());
+                    });
+                    shared.notify();
+                    return;
+                }
+                if let Ok(mut discord) = shared.discord.lock() {
+                    discord.clear();
+                }
+                // A successfully signed-out client must not reconnect on its own.
+                if let Ok(mut settings) = shared.settings.write() {
+                    settings.auto_reconnect = false;
+                    settings.resume_vpn_on_startup = false;
+                    drop(settings);
+                    let _ = shared.settings_save_signal.try_send(());
+                }
+                refresh_auth(&shared).await;
+                shared.edit(|s| {
+                    s.login_busy = false;
+                    s.login_error = None;
+                });
+                shared.notify();
+            }
+        });
+    }
+
     fn submit_login(&self, state: &mut State) {
         if state.login.busy
             || self

@@ -91,10 +91,13 @@ fn locked_out(state: &State, lockout: &Lockout) -> Vec<Item> {
         }
     }
 
-    if matches!(lockout, Lockout::Banned(_)) && state.signed_in {
-        items.push(Item::Group(vec![
-            Row::new("Sign out").action(Action::SignOut).danger_if(true),
-        ]));
+    // Core keeps a banned session for its details and sign-out, while
+    // is_logged_in() correctly refuses to authorize it for a connection.
+    if matches!(lockout, Lockout::Banned(_)) {
+        items.push(Item::Group(vec![sign_out_row(state)]));
+        if let Some(error) = &state.login.error {
+            items.push(Item::Note(error.clone()));
+        }
     }
 
     items
@@ -722,19 +725,27 @@ fn settings(state: &State) -> Vec<Item> {
         },
         Item::Group(vec![
             Row::new(state.email.clone().unwrap_or_else(|| "Signed out".into())),
-            Row::new(if state.signed_in {
-                "Sign out"
+            if state.signed_in {
+                sign_out_row(state)
             } else {
-                "Sign in"
-            })
-            .action(if state.signed_in {
-                Action::SignOut
-            } else {
-                Action::SignIn
-            })
-            .danger_if(state.signed_in),
+                Row::new("Sign in")
+                    .action(Action::SignIn)
+                    .disabled(state.login.busy)
+            },
         ]),
+        Item::Note(state.login.error.clone().unwrap_or_default()),
     ]
+}
+
+fn sign_out_row(state: &State) -> Row {
+    Row::new(if state.login.busy {
+        "Signing out..."
+    } else {
+        "Sign out"
+    })
+    .action(Action::SignOut)
+    .danger_if(true)
+    .disabled(state.login.busy)
 }
 
 /// A plain uppercase caption, which is almost all of them.
@@ -824,6 +835,26 @@ impl Row {
 #[cfg(test)]
 mod quota_retry_tests {
     use super::*;
+
+    #[test]
+    fn a_failed_sign_out_remains_visible_and_busy_sign_out_cannot_repeat() {
+        let mut state = State {
+            signed_in: true,
+            screen: Screen::Settings,
+            ..Default::default()
+        };
+        state.login.error = Some("Could not remove the saved login. Try signing out again.".into());
+        for banned in [false, true] {
+            state.lockout = banned.then(|| Lockout::Banned("fixture".into()));
+            state.signed_in = !banned;
+            let items = build(&state);
+            assert!(items.iter().any(|item| matches!(item, Item::Note(message) if Some(message) == state.login.error.as_ref())));
+            state.login.busy = true;
+            let items = build(&state);
+            assert!(items.iter().any(|item| matches!(item, Item::Group(rows) if rows.iter().any(|row| row.action == Some(Action::SignOut) && row.disabled))));
+            state.login.busy = false;
+        }
+    }
 
     #[test]
     fn relay_picker_distinguishes_game_estimates_from_first_leg_and_endpoint_changes() {
