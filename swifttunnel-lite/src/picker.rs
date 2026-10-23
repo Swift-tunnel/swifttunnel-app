@@ -21,20 +21,8 @@ const MAX_BYTES: usize = 64 * 1024;
 /// typed into it, so the answer has to be checked rather than assumed.
 const ALLOWED: [&str; 2] = ["json", "txt"];
 
-/// Show an open dialog and return the file's text.
-///
-/// Returns Err with something worth showing when the pick fails a check, and
-/// Ok(None) when the dialog was simply cancelled, which is not an error and
-/// should say nothing.
-pub fn read_fflag_file(owner: HWND) -> Result<Option<String>, String> {
-    let Some(path) = pick(owner) else {
-        return Ok(None);
-    };
-
-    read_fflag_path(&path).map(Some)
-}
-
-fn read_fflag_path(path: &std::path::Path) -> Result<String, String> {
+/// Read only on a worker: even a small file can wait on offline/cloud storage.
+pub fn read_fflag_path(path: &std::path::Path) -> Result<String, String> {
     let extension = path
         .extension()
         .and_then(|e| e.to_str())
@@ -114,7 +102,8 @@ mod tests {
     }
 }
 
-fn pick(owner: HWND) -> Option<std::path::PathBuf> {
+/// Keep the modal Windows dialog on its owner thread; read its result separately.
+pub fn pick_fflag_file(owner: HWND) -> Option<std::path::PathBuf> {
     // Two NUL-separated pairs, terminated by an empty one, which is the shape
     // this API has always wanted. Built rather than written as a literal so no
     // escape has to survive being edited.

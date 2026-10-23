@@ -511,11 +511,15 @@ fn roblox(state: &State) -> Vec<Item> {
                 .sub(custom_hint(&draft))
                 .right(Right::Switch(draft.custom_fflags))
                 .action(Action::Toggle(Flag::CustomFflags)),
-            Row::new("Import from file")
-                .sub("A .json or .txt file of flags")
-                .right(Right::Chevron)
-                .action(Action::ImportFflags)
-                .disabled(!draft.custom_fflags),
+            Row::new(if state.fflag_import.pending() {
+                "Reading file..."
+            } else {
+                "Import from file"
+            })
+            .sub("A .json or .txt file of flags")
+            .right(Right::Chevron)
+            .action(Action::ImportFflags)
+            .disabled(!draft.custom_fflags || state.roblox_busy || state.fflag_import.pending()),
         ]),
         Item::Gap(12),
         caption("Reset"),
@@ -558,7 +562,11 @@ fn reset_row(state: &State) -> Row {
             .right(Right::Chevron)
             .action(Action::ResetRoblox),
     };
-    row.disabled(state.roblox_busy || state.roblox_reset == ResetState::Running)
+    row.disabled(
+        state.roblox_busy
+            || state.fflag_import.is_busy()
+            || state.roblox_reset == ResetState::Running,
+    )
 }
 
 /// The control pinned to the bottom of a screen, outside the scroll.
@@ -588,6 +596,8 @@ pub fn footer(state: &State) -> Option<Item> {
                 "Applying..."
             }
             .into()
+        } else if state.fflag_import.is_busy() {
+            "Reading flags...".into()
         } else if !dirty {
             "No changes to apply".into()
         } else if state.roblox.running {
@@ -601,7 +611,7 @@ pub fn footer(state: &State) -> Option<Item> {
         } else {
             Variant::Outline
         },
-        disabled: state.roblox_busy || !dirty || !draft.ready(),
+        disabled: state.roblox_busy || state.fflag_import.is_busy() || !dirty || !draft.ready(),
     })
 }
 

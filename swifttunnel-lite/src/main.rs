@@ -27,6 +27,7 @@
 mod canvas;
 mod clipboard;
 mod engine;
+mod flag_import;
 mod fonts;
 mod game_location;
 mod gdi;

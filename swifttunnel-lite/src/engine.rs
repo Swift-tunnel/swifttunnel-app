@@ -390,6 +390,7 @@ impl Engine {
             }
         }
         state.sync_roblox_busy(self.shared.roblox_edits.is_busy());
+        state.finish_flag_import(self.shared.roblox_revision.load(Ordering::Acquire));
     }
 
     pub fn refresh_regions(&self) {
@@ -671,6 +672,9 @@ impl Engine {
     ///
     /// The first press only arms the row. This is the second.
     fn reset_roblox(&self, state: &mut State) {
+        if state.fflag_import.is_busy() {
+            return;
+        }
         match state.roblox_reset {
             ResetState::Running => return,
             ResetState::Idle => {
@@ -789,6 +793,9 @@ impl Engine {
     }
 
     fn apply_roblox(&self, state: &mut State) {
+        if state.fflag_import.is_busy() {
+            return;
+        }
         let draft = state.roblox_view();
         if !draft.ready() || !state.roblox_dirty() {
             return;
@@ -1227,19 +1234,34 @@ impl Engine {
     /// begin with, and pasting means opening it in something first and hoping
     /// nothing is trimmed on the way through.
     ///
-    /// The dialog is modal on purpose. It runs on the UI thread, so nothing
-    /// can repaint underneath it, and the file is small enough that reading it
-    /// is not worth a thread.
+    /// Windows owns the modal picker; disk access and validation run separately.
+    /// The UI keeps one pending read and discards a result after newer flag edits.
     fn import_fflags(&self, state: &mut State) {
-        let owner = self.shared.hwnd();
-        match crate::picker::read_fflag_file(owner) {
-            // Cancelled. Saying anything here would be noise.
-            Ok(None) => {}
-            Ok(Some(text)) => apply_fflag_text(state, text),
-            Err(reason) => state.edit_roblox(|d| {
-                d.fflag_ok = false;
-                d.fflag_note = Some(reason);
-            }),
+        if state.fflag_import.pending() || state.roblox_busy || !state.roblox_view().custom_fflags {
+            return;
+        }
+        let Some(path) = crate::picker::pick_fflag_file(self.shared.hwnd()) else {
+            return;
+        };
+        let baseline = state.roblox_view();
+        if self.shared.roblox_edits.is_busy() || !baseline.custom_fflags {
+            return;
+        }
+        let revision = self.shared.roblox_revision.load(Ordering::Acquire);
+        let shared = self.shared.clone();
+        if let Err(reason) = state.fflag_import.start(
+            baseline,
+            revision,
+            move || {
+                let text = crate::picker::read_fflag_path(&path)?;
+                let count = RobloxOptimizer::validate_custom_fflags(&text)?;
+                Ok(crate::flag_import::ImportedFlags { text, count })
+            },
+            move || shared.notify(),
+        ) {
+            state.edit_roblox(|draft| draft.fflag_note = Some(reason));
+        } else {
+            state.edit_roblox(|draft| draft.fflag_note = None);
         }
     }
 
@@ -2489,29 +2511,6 @@ fn read_roblox(intent: &RobloxSettingsConfig) -> Roblox {
         custom_json: effective.custom_fflags_json,
         fullscreen: current.fullscreen,
         error: None,
-    }
-}
-
-/// Take a custom FFlag payload off the clipboard and check it.
-///
-/// Checked here rather than at apply time so a bad paste is refused where it
-/// happened. The rules are core's, not this window's: valid JSON, a non-empty
-/// object under 8KB, and every key on Roblox's local client allowlist. Nothing
-/// outside that list can be written whatever is pasted.
-fn apply_fflag_text(state: &mut State, text: String) {
-    match RobloxOptimizer::validate_custom_fflags(&text) {
-        Ok(count) => state.edit_roblox(|d| {
-            d.custom_json = text;
-            d.fflag_ok = true;
-            d.fflag_note = Some(format!(
-                "{count} allowlisted flag{} ready. Apply to write them.",
-                if count == 1 { "" } else { "s" }
-            ));
-        }),
-        Err(reason) => state.edit_roblox(|d| {
-            d.fflag_ok = false;
-            d.fflag_note = Some(reason);
-        }),
     }
 }
 

@@ -342,7 +342,7 @@ pub struct Roblox {
 }
 
 /// Everything the three screens read.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct State {
     pub uninstall_busy: bool,
     pub installation_unknown: bool,
@@ -355,6 +355,7 @@ pub struct State {
     pub roblox_busy: bool,
     /// Pending Roblox edits. `None` means the screen mirrors the disk.
     pub roblox_draft: Option<RobloxDraft>,
+    pub fflag_import: crate::flag_import::FlagImport,
     /// The reset row's flow, kept out of `roblox` because that is replaced
     /// wholesale every time the client is read back off disk.
     pub roblox_reset: ResetState,
@@ -495,7 +496,29 @@ impl State {
     pub fn edit_roblox(&mut self, edit: impl FnOnce(&mut RobloxDraft)) {
         let mut draft = self.roblox_view();
         edit(&mut draft);
+        self.fflag_import.invalidate_after_edit(&draft);
         self.roblox_draft = Some(draft);
+    }
+
+    pub fn finish_flag_import(&mut self, revision: u64) {
+        if !self.fflag_import.pending() {
+            return;
+        }
+        let current = self.roblox_view();
+        if let Some(result) = self.fflag_import.poll(&current, revision) {
+            self.edit_roblox(|draft| match result {
+                Ok(imported) => {
+                    draft.custom_json = imported.text;
+                    draft.fflag_ok = true;
+                    draft.fflag_note = Some(format!(
+                        "{} allowlisted flag{} ready. Apply to write them.",
+                        imported.count,
+                        if imported.count == 1 { "" } else { "s" }
+                    ));
+                }
+                Err(reason) => draft.fflag_note = Some(format!("File not imported. {reason}")),
+            });
+        }
     }
 
     /// Whether there is anything to apply.
