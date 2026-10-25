@@ -528,43 +528,11 @@ const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
 /// Never truncate the live settings as a fallback. If Windows/antivirus holds
 /// it open, keep its contents and let the caller retry the failed save.
 fn replace_settings_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
-    let name = path
-        .file_name()
-        .ok_or("Invalid settings filename")?
-        .to_string_lossy();
-    let mut created = None;
-    for _ in 0..8 {
-        let sequence = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-        let temp = path.with_file_name(format!("{name}.{}.{sequence}.tmp", std::process::id()));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-        {
-            Ok(file) => {
-                created = Some((temp, file));
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(format!("Could not prepare settings save: {error}")),
-        }
-    }
-    let (temp, mut file) = created.ok_or("Could not prepare a unique settings save file")?;
-    let result = (|| {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, path)
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&temp);
-        return Err(format!(
-            "Could not replace settings. Previous settings were kept; retry Save: {error}"
-        ));
-    }
+    // Use the same owned, collision-resistant staging and replacement as
+    // other saved files instead of maintaining a second atomic-save routine.
+    crate::atomic_file::replace(path, bytes).map_err(|error| {
+        format!("Could not replace settings. Previous settings were kept; retry Save: {error}")
+    })?;
     info!("Saved settings to {:?}", path);
     Ok(())
 }
