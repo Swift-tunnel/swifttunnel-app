@@ -338,17 +338,17 @@ pub async fn apply_bootstrap_overrides(country_ban_bypass: bool) -> Result<(), S
         allocate_route_assist_pins(resolved)
     };
 
-    if let Ok(mut last) = last_applied_overrides().write() {
-        *last = overrides.clone();
-    }
-    tokio::task::spawn_blocking(move || write_overrides(&overrides))
-        .await
-        .map_err(|e| format!("Failed to join hosts repair task: {e}"))??;
-
-    COUNTRY_BAN_BYPASS_ROUTING.store(country_ban_bypass, Ordering::Relaxed);
-    set_active_bootstrap_ips(active_ips);
-    set_direct_only_bootstrap_ips(direct_only_ips);
-    Ok(())
+    commit_overrides(
+        || write_overrides(&overrides),
+        || {
+            if let Ok(mut last) = last_applied_overrides().write() {
+                *last = overrides.clone();
+            }
+            COUNTRY_BAN_BYPASS_ROUTING.store(country_ban_bypass, Ordering::Relaxed);
+            set_active_bootstrap_ips(active_ips);
+            set_direct_only_bootstrap_ips(direct_only_ips);
+        },
+    )
 }
 
 /// Merge relay-resolved Roblox IPs into the hosts-file pins and the active
@@ -388,18 +388,30 @@ pub async fn apply_relay_resolved_overrides(
         }
     }
 
-    let merged_for_write = merged.clone();
-    tokio::task::spawn_blocking(move || write_overrides(&merged_for_write))
-        .await
-        .map_err(|e| format!("Failed to join relay-resolved hosts write: {e}"))??;
+    commit_overrides(
+        || write_overrides(&merged),
+        || {
+            if let Ok(mut last) = last_applied_overrides().write() {
+                *last = merged.clone();
+            }
+            if let Ok(mut active) = active_bootstrap_ips().write() {
+                active.extend(new_ips);
+            }
+        },
+    )
+}
 
-    if let Ok(mut last) = last_applied_overrides().write() {
-        *last = merged;
-    }
-    if let Ok(mut active) = active_bootstrap_ips().write() {
-        active.extend(new_ips);
-    }
-    Ok(())
+fn commit_overrides(
+    write: impl FnOnce() -> Result<(), String>,
+    publish: impl FnOnce(),
+) -> Result<(), String> {
+    // Do not detach a queued writer from the connection that owns it. Its
+    // cancellation/cleanup must wait until the file and routing state agree.
+    crate::utils::blocking_step(|| {
+        write()?;
+        publish();
+        Ok(())
+    })
 }
 
 /// Enter full country-ban routing: mark the session as relaying every Roblox
@@ -1233,9 +1245,7 @@ pub(crate) static BOOTSTRAP_IP_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mute
 
 /// Remove any SwiftTunnel Roblox Proxy entries without blocking a Tokio worker.
 pub async fn remove_overrides_async() -> Result<(), String> {
-    tokio::task::spawn_blocking(remove_overrides)
-        .await
-        .map_err(|e| format!("Failed to join hosts cleanup task: {e}"))?
+    crate::utils::blocking_step(remove_overrides)
 }
 
 /// Called on app startup to clean up entries left by a previous crash.
@@ -1380,6 +1390,60 @@ fn flush_dns_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn cancelled_hosts_write_keeps_connection_ownership_through_state_publication() {
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let connection = Arc::new(tokio::sync::Mutex::new(()));
+        let state = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let (release, waiting) = std::sync::mpsc::channel();
+        let writer_connection = connection.clone();
+        let writer_state = state.clone();
+        let writer_started = started.clone();
+        let writer = tokio::spawn(async move {
+            let _connection = writer_connection.lock().await;
+            commit_overrides(
+                || {
+                    writer_started.notify_one();
+                    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+                    writer_state.store(1, Ordering::Release);
+                    Ok(())
+                },
+                || writer_state.store(2, Ordering::Release),
+            )
+        });
+        started.notified().await;
+        writer.abort();
+        assert!(
+            connection.try_lock().is_err(),
+            "cleanup must wait for the writer"
+        );
+        assert_eq!(state.load(Ordering::Acquire), 0);
+        release.send(()).unwrap();
+        let _ = writer.await;
+        let _cleanup = connection.lock().await;
+        assert_eq!(state.load(Ordering::Acquire), 2);
+        state.store(3, Ordering::Release);
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.load(Ordering::Acquire),
+            3,
+            "no detached writer can reapply stale pins"
+        );
+    }
+
+    #[test]
+    fn a_failed_hosts_write_does_not_publish_unapplied_route_ips() {
+        let published = std::cell::Cell::new(false);
+        assert_eq!(
+            commit_overrides(|| Err("locked file".into()), || published.set(true)),
+            Err("locked file".into()),
+        );
+        assert!(!published.get());
+        commit_overrides(|| Ok(()), || published.set(true)).unwrap();
+        assert!(published.get());
+    }
 
     #[test]
     fn hosts_path_uses_the_detected_windows_installation_without_a_c_drive_fallback() {
