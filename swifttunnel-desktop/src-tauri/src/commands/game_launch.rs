@@ -954,19 +954,47 @@ pub async fn restore_game_profile(state: &AppState) {
         return;
     }
     let optimizer = state.roblox_optimizer.clone();
+    let games = state.games.clone();
     let restored = tauri::async_runtime::spawn_blocking(move || {
         let _guard = optimizer.lock();
-        swifttunnel_core::roblox_game_profile::restore_launch_settings()
+        restore_profile_if_current(&games, generation, || {
+            swifttunnel_core::roblox_game_profile::restore_launch_settings()
+        })
     })
-    .await
-    .map_err(|error| error.to_string())
-    .and_then(|result| result);
+    .await;
+    let restored = match restored {
+        Ok(Some(result)) => result,
+        Ok(None) => return,
+        Err(error) => Err(error.to_string()),
+    };
     finish_profile_cleanup(
         &mut state.games.lock(),
         generation,
         restored,
         game_destination::clear,
     );
+}
+
+fn restore_profile_if_current(
+    games: &parking_lot::Mutex<games::GamesState>,
+    generation: u64,
+    restore: impl FnOnce() -> Result<bool, String>,
+) -> Option<Result<bool, String>> {
+    {
+        let current = games.lock();
+        // This check runs under the optimizer lock, immediately before file
+        // mutation. The earlier check can become stale while the worker waits
+        // behind a new launch preparing its own profile/journal.
+        if current.window_placement_generation != generation
+            || current.current.is_some()
+            || current.launch_started.is_some()
+        {
+            return None;
+        }
+    }
+    // Do not retain the library lock over slow file access. New launch
+    // preparation shares the caller's optimizer lock and must wait its turn.
+    Some(restore())
 }
 
 fn finish_profile_cleanup(
@@ -993,6 +1021,47 @@ fn finish_profile_cleanup(
 mod cleanup_completion_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn queued_cleanup_rechecks_launch_ownership_before_mutating_files() {
+        let games = std::sync::Arc::new(parking_lot::Mutex::new(games::GamesState::default()));
+        let generation = games.lock().window_placement_generation;
+        let optimizer = std::sync::Arc::new(parking_lot::Mutex::new(()));
+        let busy = optimizer.lock();
+        let worker_games = games.clone();
+        let worker_optimizer = optimizer.clone();
+        let (started, ready) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let _optimizer = worker_optimizer.lock();
+            restore_profile_if_current(&worker_games, generation, || {
+                panic!("old cleanup must not restore a replacement launch's files")
+            })
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        games.lock().begin_launch(RobloxClient::Standard);
+        drop(busy);
+        assert_eq!(worker.join().unwrap(), None);
+    }
+
+    #[test]
+    fn current_idle_cleanup_runs_and_preserves_restore_failures() {
+        let games = parking_lot::Mutex::new(games::GamesState::default());
+        let generation = games.lock().window_placement_generation;
+        assert_eq!(
+            restore_profile_if_current(&games, generation, || Ok(true)),
+            Some(Ok(true))
+        );
+        assert_eq!(
+            restore_profile_if_current(&games, generation, || Err("locked file".into())),
+            Some(Err("locked file".into()))
+        );
+        games.lock().cancel_window_placement();
+        assert_eq!(
+            restore_profile_if_current(&games, generation, || panic!("obsolete generation")),
+            None
+        );
+    }
 
     #[test]
     fn old_cleanup_cannot_clear_a_join_or_publish_its_error_into_the_new_session() {
