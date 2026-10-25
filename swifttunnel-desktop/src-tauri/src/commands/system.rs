@@ -331,12 +331,21 @@ fn extract_msi_to_dir(msi_path: &Path, extract_dir: &Path, log_path: &Path) -> R
 
 /// Recursively search `extract_dir` for `ndisrd_lwf.inf` (case-insensitive).
 /// Returns the parent directory of the matched file (which is the argument
-/// shape expected by `install_driver_from_package_dir`). Bounded depth to
-/// guard against symlink loops or unexpected tree layouts; WinpkFilter's
-/// admin-install layout nests to depth ~3.
+/// shape expected by `install_driver_from_package_dir`). Bound depth and total
+/// entries, and skip redirected files/folders. WinpkFilter's normal extracted
+/// layout is small and nests to depth ~3.
 #[cfg(windows)]
 fn find_inf_in_extract_dir(extract_dir: &Path) -> Result<PathBuf, String> {
+    find_inf_in_extract_dir_with_limit(extract_dir, 4096)
+}
+
+#[cfg(windows)]
+fn find_inf_in_extract_dir_with_limit(
+    extract_dir: &Path,
+    mut remaining: usize,
+) -> Result<PathBuf, String> {
     let target = swifttunnel_core::vpn::winpkfilter::DRIVER_INF_NAME;
+    reject_reparse_point(extract_dir)?;
     let canonical_extract_dir = fs::canonicalize(extract_dir).map_err(|e| {
         format!(
             "Failed to canonicalize extract dir {}: {}",
@@ -345,20 +354,35 @@ fn find_inf_in_extract_dir(extract_dir: &Path) -> Result<PathBuf, String> {
         )
     })?;
 
-    fn walk(dir: &Path, target: &str, depth: u32) -> Option<PathBuf> {
+    fn walk(
+        dir: &Path,
+        target: &str,
+        depth: u32,
+        remaining: &mut usize,
+    ) -> Result<Option<PathBuf>, String> {
         if depth > 6 {
-            return None;
+            return Ok(None);
         }
         let Ok(entries) = fs::read_dir(dir) else {
-            return None;
+            return Ok(None);
         };
 
         let mut subdirs = Vec::new();
-        for entry in entries.flatten() {
+        for entry in entries {
+            if *remaining == 0 {
+                return Err("The extracted driver package contains too many files. Retry Repair or use the official installer.".into());
+            }
+            *remaining -= 1;
+            let Ok(entry) = entry else {
+                continue;
+            };
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
             let path = entry.path();
+            if reject_reparse_point(&path).is_err() {
+                continue;
+            }
             if file_type.is_file() {
                 let matches = path
                     .file_name()
@@ -366,21 +390,21 @@ fn find_inf_in_extract_dir(extract_dir: &Path) -> Result<PathBuf, String> {
                     .map(|n| n.eq_ignore_ascii_case(target))
                     .unwrap_or(false);
                 if matches {
-                    return path.parent().map(|p| p.to_path_buf());
+                    return Ok(path.parent().map(|p| p.to_path_buf()));
                 }
-            } else if file_type.is_dir() {
+            } else if file_type.is_dir() && depth < 6 {
                 subdirs.push(path);
             }
         }
         for sub in subdirs {
-            if let Some(found) = walk(&sub, target, depth + 1) {
-                return Some(found);
+            if let Some(found) = walk(&sub, target, depth + 1, remaining)? {
+                return Ok(Some(found));
             }
         }
-        None
+        Ok(None)
     }
 
-    let found = walk(extract_dir, target, 0).ok_or_else(|| {
+    let found = walk(extract_dir, target, 0, &mut remaining)?.ok_or_else(|| {
         format!(
             "Could not locate {} under {}",
             target,
@@ -2697,6 +2721,42 @@ mod tests {
         let err = find_inf_in_extract_dir(&base).expect_err("should not descend past depth cap");
         assert!(err.contains("ndisrd_lwf.inf"));
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn find_inf_in_extract_dir_bounds_breadth_and_shares_one_recursive_budget() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let base = Fixture(unique_temp_dir("extract_budget"));
+        for index in 0..8 {
+            touch(&base.0.join(format!("other-{index}.inf")));
+        }
+        assert!(
+            find_inf_in_extract_dir_with_limit(&base.0, 4)
+                .unwrap_err()
+                .contains("too many files")
+        );
+
+        let nested = Fixture(unique_temp_dir("extract_shared_budget"));
+        for index in 0..3 {
+            touch(&nested.0.join(format!("dir-{index}")).join("other.inf"));
+        }
+        // Each directory is small. Only a single shared budget catches the
+        // cumulative work across root and child directory entries.
+        assert!(
+            find_inf_in_extract_dir_with_limit(&nested.0, 4)
+                .unwrap_err()
+                .contains("too many files")
+        );
+        assert!(
+            find_inf_in_extract_dir_with_limit(&nested.0, 6)
+                .unwrap_err()
+                .contains("Could not locate")
+        );
     }
 
     #[test]
