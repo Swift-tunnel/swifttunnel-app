@@ -28,7 +28,7 @@ pub(crate) struct ProcessEntry {
     pub name: String,
 }
 
-pub(crate) fn list() -> Result<Vec<ProcessEntry>, String> {
+fn visit_entries(mut visit: impl FnMut(&PROCESSENTRY32W) -> bool) -> Result<(), String> {
     let snapshot = OwnedHandle(
         unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
             .map_err(|error| format!("Could not read running processes: {error}"))?,
@@ -38,17 +38,10 @@ pub(crate) fn list() -> Result<Vec<ProcessEntry>, String> {
         ..Default::default()
     };
     let mut next = unsafe { Process32FirstW(snapshot.0, &mut entry) };
-    let mut entries = Vec::new();
     while next.is_ok() {
-        let length = entry
-            .szExeFile
-            .iter()
-            .position(|c| *c == 0)
-            .unwrap_or(entry.szExeFile.len());
-        entries.push(ProcessEntry {
-            pid: entry.th32ProcessID,
-            name: String::from_utf16_lossy(&entry.szExeFile[..length]),
-        });
+        if !visit(&entry) {
+            return Ok(());
+        }
         next = unsafe { Process32NextW(snapshot.0, &mut entry) };
     }
     if let Err(error) = next
@@ -58,15 +51,54 @@ pub(crate) fn list() -> Result<Vec<ProcessEntry>, String> {
             "Could not finish reading running processes: {error}"
         ));
     }
+    Ok(())
+}
+
+fn name_slice(buffer: &[u16]) -> &[u16] {
+    &buffer[..buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len())]
+}
+
+fn name_matches(buffer: &[u16], names: &[&str]) -> bool {
+    let fold = |unit: u16| {
+        if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+            unit + u16::from(b'a' - b'A')
+        } else {
+            unit
+        }
+    };
+    names.iter().any(|name| {
+        name_slice(buffer)
+            .iter()
+            .copied()
+            .map(fold)
+            .eq(name.encode_utf16().map(fold))
+    })
+}
+
+pub(crate) fn list() -> Result<Vec<ProcessEntry>, String> {
+    let mut entries = Vec::new();
+    visit_entries(|entry| {
+        entries.push(ProcessEntry {
+            pid: entry.th32ProcessID,
+            name: String::from_utf16_lossy(name_slice(&entry.szExeFile)),
+        });
+        true
+    })?;
     Ok(entries)
 }
 
 pub(crate) fn any_named(names: &[&str]) -> Result<bool, String> {
-    Ok(list()?.iter().any(|entry| {
-        names
-            .iter()
-            .any(|name| entry.name.eq_ignore_ascii_case(name))
-    }))
+    if names.is_empty() {
+        return Ok(false);
+    }
+    let mut found = false;
+    visit_entries(|entry| {
+        // Presence checks need neither a Vec of processes nor a String for
+        // every unrelated executable. Compare the native entry in place.
+        found = name_matches(&entry.szExeFile, names);
+        !found
+    })?;
+    Ok(found)
 }
 
 pub(crate) fn image_path(pid: u32) -> Result<Option<String>, String> {
@@ -175,6 +207,30 @@ pub(crate) fn terminate_named(names: &[&str]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presence_lookup_finds_this_process_and_rejects_an_absent_name() {
+        let executable = std::env::current_exe().unwrap();
+        let name = executable.file_name().unwrap().to_str().unwrap();
+        assert!(any_named(&[&name.to_ascii_uppercase()]).unwrap());
+        assert!(
+            !any_named(&[&format!("not-running-{:032x}.exe", rand::random::<u128>())]).unwrap()
+        );
+        assert!(!any_named(&[]).unwrap());
+    }
+
+    #[test]
+    fn native_name_comparison_is_exact_and_stops_at_the_nul() {
+        let raw: Vec<_> = "RobloxPlayerBeta.ExE\0ignored.exe".encode_utf16().collect();
+        assert!(name_matches(&raw, &["robloxplayerbeta.exe"]));
+        assert!(!name_matches(
+            &raw,
+            &["RobloxPlayer", "PlayerBeta.exe", "RobloxPlayerBeta.exe.old"]
+        ));
+        let unicode: Vec<_> = "app-漢.exe".encode_utf16().collect();
+        assert!(name_matches(&unicode, &["APP-漢.EXE"]));
+        assert!(!name_matches(&[0xd800, 0], &["RobloxPlayerBeta.exe"]));
+    }
     #[test]
     fn snapshot_finds_an_owned_child_and_termination_rechecks_its_image() {
         struct Child(std::process::Child);
