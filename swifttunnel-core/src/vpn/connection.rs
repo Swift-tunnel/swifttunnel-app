@@ -1067,68 +1067,67 @@ fn compute_cached_latency_improvement(
 /// Probe candidate relay servers in parallel using ICMP and return their
 /// averaged measurements.
 async fn probe_relay_candidates(candidates: &[(String, SocketAddr)]) -> Vec<RelayProbeMeasurement> {
-    use crate::vpn::servers::measure_latency_icmp;
+    probe_relay_candidates_with(candidates, crate::vpn::servers::measure_latency_icmp).await
+}
 
-    let mut tasks = Vec::new();
+async fn probe_relay_candidates_with(
+    candidates: &[(String, SocketAddr)],
+    probe: impl Fn(&str) -> Option<u32> + Send + Sync + 'static,
+) -> Vec<RelayProbeMeasurement> {
+    struct CancelProbes(Arc<AtomicBool>);
+    impl Drop for CancelProbes {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let mut tasks = tokio::task::JoinSet::new();
+    let cancelled = CancelProbes(Arc::new(AtomicBool::new(false)));
+    let probe = Arc::new(probe);
     for (region, addr) in candidates {
         let region = region.clone();
         let addr = *addr;
-        tasks.push(tokio::spawn(async move {
+        let cancelled = cancelled.0.clone();
+        let probe = probe.clone();
+        tasks.spawn_blocking(move || {
             let ip = addr.ip().to_string();
-            // Use ICMP ping — reliable for all server types.
-            // The previous UDP probe ([0u8; 1] to relay port 51821) never got responses
-            // because relay servers only respond to valid session ID packets.
-            let result = tokio::task::spawn_blocking(move || {
-                let mut samples = Vec::with_capacity(AUTO_ROUTING_PING_SAMPLES);
-                for _ in 0..AUTO_ROUTING_PING_SAMPLES {
-                    if let Some(ms) = measure_latency_icmp(&ip) {
-                        samples.push(ms);
-                    }
+            let mut samples = Vec::with_capacity(AUTO_ROUTING_PING_SAMPLES);
+            for _ in 0..AUTO_ROUTING_PING_SAMPLES {
+                // A native ICMP call has its own timeout. It cannot be aborted
+                // halfway through, but cancellation must stop the next sample.
+                if cancelled.load(Ordering::Acquire) {
+                    return None;
                 }
-                (average_probe_latency(&samples), samples.len())
-            })
-            .await;
-
-            match result {
-                Ok((latency_ms, successful)) => {
-                    match latency_ms {
-                        Some(latency_ms) => {
-                            log::info!(
-                                "Relay probe: {} ({}) = {}ms avg ({} of {} samples)",
-                                region,
-                                addr,
-                                latency_ms,
-                                successful,
-                                AUTO_ROUTING_PING_SAMPLES
-                            );
-                        }
-                        None => {
-                            log::info!(
-                                "Relay probe: {} ({}) = timeout (0 of {} samples)",
-                                region,
-                                addr,
-                                AUTO_ROUTING_PING_SAMPLES
-                            );
-                        }
-                    }
-                    RelayProbeMeasurement {
-                        region,
-                        addr,
-                        latency_ms,
-                    }
+                if let Some(ms) = probe(&ip) {
+                    samples.push(ms);
                 }
-                Err(_) => RelayProbeMeasurement {
-                    region,
-                    addr,
-                    latency_ms: None,
-                },
             }
-        }));
+            if cancelled.load(Ordering::Acquire) {
+                return None;
+            }
+            let latency_ms = average_probe_latency(&samples);
+            match latency_ms {
+                Some(ms) => log::info!(
+                    "Relay probe: {region} ({addr}) = {ms}ms avg ({} of {} samples)",
+                    samples.len(),
+                    AUTO_ROUTING_PING_SAMPLES
+                ),
+                None => log::info!(
+                    "Relay probe: {region} ({addr}) = timeout (0 of {} samples)",
+                    AUTO_ROUTING_PING_SAMPLES
+                ),
+            }
+            Some(RelayProbeMeasurement {
+                region,
+                addr,
+                latency_ms,
+            })
+        });
     }
 
-    let mut results = Vec::with_capacity(tasks.len());
-    for task in tasks {
-        if let Ok(measurement) = task.await {
+    let mut results = Vec::with_capacity(candidates.len());
+    while let Some(result) = tasks.join_next().await {
+        if let Ok(Some(measurement)) = result {
             results.push(measurement);
         }
     }
@@ -5504,6 +5503,70 @@ mod tests {
     #[test]
     fn test_auto_routing_probe_sample_count_is_five() {
         assert_eq!(AUTO_ROUTING_PING_SAMPLES, 5);
+    }
+
+    #[tokio::test]
+    async fn cancelled_relay_probe_stops_after_the_current_native_ping() {
+        struct Finished(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for Finished {
+            fn drop(&mut self) {
+                if let Some(send) = self.0.take() {
+                    let _ = send.send(());
+                }
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_calls = calls.clone();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let probe_started = started.clone();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let waiting = std::sync::Mutex::new(waiting);
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let completion = Finished(Some(done));
+        let batch = tokio::spawn(async move {
+            probe_relay_candidates_with(
+                &[("fixture".into(), parse_addr("127.0.0.1:51821"))],
+                move |_| {
+                    let _completion = &completion;
+                    probe_calls.fetch_add(1, Ordering::Relaxed);
+                    probe_started.notify_one();
+                    waiting
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))
+                        .unwrap();
+                    Some(10)
+                },
+            )
+            .await
+        });
+        started.notified().await;
+        batch.abort();
+        assert!(batch.await.unwrap_err().is_cancelled());
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), finished)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn relay_probe_keeps_averages_and_timeouts_when_the_batch_completes() {
+        let measured = parse_addr("127.0.0.1:51821");
+        let silent = parse_addr("127.0.0.2:51821");
+        let mut results = probe_relay_candidates_with(
+            &[("measured".into(), measured), ("silent".into(), silent)],
+            |ip| (ip == "127.0.0.1").then_some(12),
+        )
+        .await;
+        results.sort_by(|a, b| a.region.cmp(&b.region));
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            (results[0].addr, results[0].latency_ms),
+            (measured, Some(12))
+        );
+        assert_eq!((results[1].addr, results[1].latency_ms), (silent, None));
     }
 
     #[test]
