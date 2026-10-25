@@ -87,6 +87,17 @@ fn apply_banned_session_cleanup_settings(settings: &mut AppSettings) {
     settings.config.system_optimization.previous_power_plan = None;
 }
 
+fn persist_signed_out_settings(
+    settings: &parking_lot::Mutex<AppSettings>,
+    persist: impl FnOnce(&AppSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    // Keep the reconnect restriction in memory even if storage fails. The
+    // credentials have already been removed, so rolling it back is unsafe.
+    let mut current = settings.lock();
+    current.resume_vpn_on_startup = false;
+    persist(&current)
+}
+
 pub(crate) async fn emit_auth_state(app: &AppHandle, state: &AppState) {
     let auth = state.auth_manager.lock().await;
     let auth_state = auth.get_state();
@@ -188,6 +199,43 @@ mod tests {
                 .previous_power_plan
                 .is_none()
         );
+    }
+
+    #[test]
+    fn sign_out_persistence_cannot_overwrite_a_competing_preference_write() {
+        let settings = parking_lot::Mutex::new(AppSettings {
+            resume_vpn_on_startup: true,
+            idle_when_unfocused: true,
+            ..Default::default()
+        });
+        let mut disk = settings.lock().clone();
+        persist_signed_out_settings(&settings, |snapshot| {
+            // Model another settings writer arriving during the save. If it
+            // can enter, the logout snapshot would overwrite its disk commit.
+            if let Some(mut competing) = settings.try_lock() {
+                competing.idle_when_unfocused = false;
+            }
+            disk = snapshot.clone();
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            disk.idle_when_unfocused,
+            settings.lock().idle_when_unfocused
+        );
+        assert!(!disk.resume_vpn_on_startup);
+    }
+
+    #[test]
+    fn failed_sign_out_save_retains_the_reconnect_restriction_and_other_preferences() {
+        let settings = parking_lot::Mutex::new(AppSettings {
+            resume_vpn_on_startup: true,
+            idle_when_unfocused: false,
+            ..Default::default()
+        });
+        assert!(persist_signed_out_settings(&settings, |_| Err("locked file".into())).is_err());
+        assert!(!settings.lock().resume_vpn_on_startup);
+        assert!(!settings.lock().idle_when_unfocused);
     }
 }
 
@@ -309,22 +357,27 @@ pub async fn auth_complete_oauth(
 
 #[tauri::command]
 pub async fn auth_logout(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    let auth = state.auth_manager.lock().await;
-    let result = auth.logout().map_err(|e| e.to_string());
-    drop(auth);
-
-    if result.is_ok() {
-        let mut discord = state.discord_manager.lock();
-        discord.clear();
-
-        let mut settings = state.settings.lock();
-        settings.resume_vpn_on_startup = false;
-        let snapshot = settings.clone();
-        drop(settings);
-        if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
-            log::warn!("Failed to persist logout reconnect settings: {}", e);
-        }
-    }
+    let auth_manager = state.auth_manager.clone();
+    let discord_manager = state.discord_manager.clone();
+    let settings = state.settings.clone();
+    // Vault/file access can wait on Windows or storage. Keep it off the async
+    // executor, and retain account-action ordering through the final save.
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let auth = auth_manager.blocking_lock();
+        auth.logout().map_err(|e| e.to_string())?;
+        discord_manager.lock().clear();
+        persist_signed_out_settings(&settings, swifttunnel_core::settings::save_settings)
+            .map_err(|error| {
+                log::warn!("Failed to persist logout reconnect settings: {error}");
+                "Signed out, but automatic connection settings could not be saved. Close SwiftTunnel and try again.".to_string()
+            })
+    })
+    .await
+    .map_err(|error| {
+        log::warn!("Sign-out worker could not finish: {error}");
+        "Could not finish signing out. Close SwiftTunnel and try again.".to_string()
+    })
+    .and_then(|result| result);
 
     emit_auth_state(&app, &state).await;
     result
