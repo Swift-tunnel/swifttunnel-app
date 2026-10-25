@@ -27,6 +27,7 @@ function qualityColor(q: string): string {
     case "fair":
       return "var(--color-latency-fair)";
     case "poor":
+    case "bad":
       return "var(--color-latency-bad)";
     default:
       return "var(--color-text-muted)";
