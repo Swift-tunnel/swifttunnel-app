@@ -129,7 +129,16 @@ pub fn remove_all_run_entries() {
     // simply never came back after a restart. Removing a stale entry for a
     // product that is gone is still worth doing, so only a present client is
     // spared.
-    let spare = crate::installed_clients::other_client_still_installed().map(|other| {
+    let other = match crate::installed_clients::other_client_still_installed() {
+        Ok(other) => other,
+        Err(error) => {
+            log::warn!(
+                "Startup entries were left untouched because the other client's installation could not be checked: {error}"
+            );
+            return;
+        }
+    };
+    let spare = other.map(|other| {
         // The display names carry a space, the Run value names do not.
         if other == crate::installed_clients::FULL_APP {
             RUN_VALUE_APP

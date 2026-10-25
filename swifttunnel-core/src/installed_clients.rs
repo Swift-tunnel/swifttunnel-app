@@ -35,66 +35,144 @@ pub const LITE: &str = "SwiftTunnel Lite";
 /// still exist depending on where in the sequence this runs, so a count would
 /// flip the answer for reasons that have nothing to do with the other client.
 #[cfg(windows)]
-pub fn other_client_still_installed() -> Option<&'static str> {
+pub fn other_client_still_installed() -> Result<Option<&'static str>, String> {
     let exe = std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_default();
+        .map_err(|error| format!("Could not identify this SwiftTunnel executable: {error}"))?;
+    let name = exe
+        .file_name()
+        .ok_or("Could not identify this SwiftTunnel executable.")?;
 
-    let other = other_client_name(&exe);
-    product_is_registered(other).then_some(other)
+    let other = other_client_name(&name.to_string_lossy());
+    product_is_registered(other).map(|present| present.then_some(other))
 }
 
 #[cfg(not(windows))]
-pub fn other_client_still_installed() -> Option<&'static str> {
-    None
+pub fn other_client_still_installed() -> Result<Option<&'static str>, String> {
+    Ok(None)
+}
+
+#[cfg(any(windows, test))]
+const MAX_PRODUCTS_PER_VIEW: usize = 4096;
+
+#[cfg(any(windows, test))]
+fn scan_product_names(
+    display_name: &str,
+    names: impl IntoIterator<Item = std::io::Result<Option<String>>>,
+) -> std::io::Result<bool> {
+    for (index, name) in names.into_iter().enumerate() {
+        if index >= MAX_PRODUCTS_PER_VIEW {
+            return Err(std::io::Error::other(
+                "Too many installed-application records",
+            ));
+        }
+        if name?.is_some_and(|name| name.trim().eq_ignore_ascii_case(display_name)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(any(windows, test))]
+fn registration_in_views(
+    views: impl IntoIterator<Item = std::io::Result<bool>>,
+) -> std::io::Result<bool> {
+    let mut first_error = None;
+    for result in views {
+        match result {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    first_error.map_or(Ok(false), Err)
 }
 
 /// Whether a product with exactly this display name is registered.
 ///
 /// Exact, case-insensitive comparison on purpose, for the prefix reason above.
 #[cfg(windows)]
-pub fn product_is_registered(display_name: &str) -> bool {
+pub fn product_is_registered(display_name: &str) -> Result<bool, String> {
+    use std::io::ErrorKind;
     use winreg::RegKey;
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::enums::{
+        HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+    };
 
     const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
-    // A 32-bit install lands under WOW6432Node and a per-user one under HKCU.
-    // Missing either would tear down something the survivor still needs.
-    const UNINSTALL_WOW: &str = r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
-
-    for (root, path) in [
-        (HKEY_LOCAL_MACHINE, UNINSTALL),
-        (HKEY_LOCAL_MACHINE, UNINSTALL_WOW),
-        (HKEY_CURRENT_USER, UNINSTALL),
-    ] {
-        let Ok(key) = RegKey::predef(root).open_subkey(path) else {
-            continue;
+    // Select both registry views explicitly, including per-user installs.
+    // A missing hive/vanished product is normal; a denied or unreadable one
+    // cannot establish that the survivor no longer needs shared components.
+    let views = [
+        (HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY),
+        (HKEY_LOCAL_MACHINE, KEY_WOW64_32KEY),
+        (HKEY_CURRENT_USER, KEY_WOW64_64KEY),
+        (HKEY_CURRENT_USER, KEY_WOW64_32KEY),
+    ]
+    .into_iter()
+    .map(|(root, view)| {
+        let key = match RegKey::predef(root).open_subkey_with_flags(UNINSTALL, KEY_READ | view) {
+            Ok(key) => key,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
         };
-        for entry in key.enum_keys().flatten() {
-            let Ok(product) = key.open_subkey(&entry) else {
-                continue;
-            };
-            let name: String = product.get_value("DisplayName").unwrap_or_default();
-            if name.trim().eq_ignore_ascii_case(display_name) {
-                return true;
-            }
-        }
-    }
-    false
+        scan_product_names(
+            display_name,
+            key.enum_keys().map(|entry| {
+                let entry = entry?;
+                let product = match key.open_subkey_with_flags(entry, KEY_READ | view) {
+                    Ok(product) => product,
+                    Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                    Err(error) => return Err(error),
+                };
+                crate::registry_value::read::<String>(&product, "DisplayName")
+            }),
+        )
+    });
+    registration_in_views(views)
+        .map_err(|error| format!("Could not fully check SwiftTunnel installations: {error}"))
 }
 
 #[cfg(not(windows))]
-pub fn product_is_registered(_display_name: &str) -> bool {
-    false
+pub fn product_is_registered(_display_name: &str) -> Result<bool, String> {
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_registration_never_becomes_a_confirmed_absence() {
+        let denied = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(registration_in_views([Ok(false), Err(denied()), Ok(false)]).is_err());
+        assert!(registration_in_views([Ok(false), Ok(false)]).is_ok_and(|present| !present));
+        // A positively identified survivor is sufficient even if another
+        // registry view cannot be read.
+        assert!(registration_in_views([Err(denied()), Ok(true)]).unwrap());
+        assert!(scan_product_names(LITE, [Err(denied())]).is_err());
+        assert!(
+            scan_product_names(LITE, [Ok(None), Ok(Some(" SwiftTunnel Lite ".into()))]).unwrap()
+        );
+        assert!(!scan_product_names(FULL_APP, [Ok(Some(LITE.into()))]).unwrap());
+    }
+
+    #[test]
+    fn registration_scan_has_a_work_budget_and_stops_at_a_match() {
+        use std::cell::Cell;
+        let reads = Cell::new(0usize);
+        let names = (0..10_000).map(|_| {
+            reads.set(reads.get() + 1);
+            Ok(None)
+        });
+        assert!(scan_product_names(LITE, names).is_err());
+        assert_eq!(reads.get(), MAX_PRODUCTS_PER_VIEW + 1);
+        let names = std::iter::once(Ok(Some(FULL_APP.into()))).chain(std::iter::from_fn(|| {
+            panic!("a confirmed match must stop the registry scan")
+        }));
+        assert!(scan_product_names(FULL_APP, names).unwrap());
+    }
 
     /// Each client must look for the *other* one, never itself.
     ///

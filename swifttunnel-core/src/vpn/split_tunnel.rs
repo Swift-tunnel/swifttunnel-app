@@ -1278,7 +1278,10 @@ impl SplitTunnelDriver {
         // Whichever client is removed last takes the driver with it, so
         // stopping here costs nothing permanent.
         #[cfg(windows)]
-        if let Some(other) = crate::installed_clients::other_client_still_installed() {
+        if let Some(other) = crate::installed_clients::other_client_still_installed().map_err(|error| {
+            log::warn!("Driver removal deferred: {error}");
+            "The network driver was left installed because Windows could not check whether the other SwiftTunnel client still needs it. Retry cleanup from Windows Settings > Apps.".to_string()
+        })? {
             log::info!(
                 "Leaving the packet filter driver installed: {other} is still on this machine \
                  and shares it. It will be removed when the last client is."
