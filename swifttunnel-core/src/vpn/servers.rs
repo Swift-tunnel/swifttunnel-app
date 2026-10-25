@@ -812,9 +812,10 @@ impl DynamicServerList {
         self.regions.iter().find(|r| r.id == id)
     }
 
-    /// Get latency for a server
+    /// Get a recent latency for a server. Picker and Auto selection must use
+    /// the same expiry even while game-time polling is paused.
     pub fn get_latency(&self, region: &str) -> Option<u32> {
-        self.latencies.get(region).and_then(|l| l.latency_ms)
+        self.get_recent_latency(region)
     }
 
     pub fn get_recent_latency(&self, region: &str) -> Option<u32> {
@@ -993,6 +994,42 @@ mod tests {
     }
 
     // --- DynamicServerList ---
+
+    #[test]
+    fn expired_latency_cannot_win_region_selection_or_remain_visible() {
+        let _guard = RELAY_LOAD_TEST_LOCK.lock().unwrap();
+        let mut list = DynamicServerList::new_empty();
+        list.update(
+            vec![
+                make_server("fast-old", "192.0.2.1"),
+                make_server("fresh", "192.0.2.2"),
+            ],
+            vec![make_region("region", vec!["fast-old", "fresh"])],
+            ServerListSource::Api,
+        );
+        list.set_latency("fast-old", Some(1));
+        list.set_latency("fresh", Some(30));
+        list.latencies.get_mut("fast-old").unwrap().last_measured =
+            Instant::now() - Duration::from_secs(61);
+
+        assert_eq!(list.get_latency("fast-old"), None);
+        assert_eq!(list.get_recent_latency("fast-old"), None);
+        assert_eq!(list.get_region_best_latency("region"), Some(30));
+        assert_eq!(
+            crate::vpn::connect_policy::select_best_region_by_latency(&list).as_deref(),
+            Some("region")
+        );
+
+        list.latencies.get_mut("fresh").unwrap().last_measured =
+            Instant::now() - Duration::from_secs(61);
+        assert_eq!(list.get_region_best_latency("region"), None);
+        assert_eq!(
+            crate::vpn::connect_policy::select_best_region_by_latency(&list),
+            None
+        );
+        list.set_latency("fast-old", Some(12));
+        assert_eq!(list.get_region_best_latency("region"), Some(12));
+    }
 
     #[test]
     fn test_new_empty() {
