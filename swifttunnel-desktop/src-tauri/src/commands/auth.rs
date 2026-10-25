@@ -98,6 +98,16 @@ fn persist_signed_out_settings(
     persist(&current)
 }
 
+fn restore_global_after_temporary_settings(
+    pending: bool,
+    restore: impl FnOnce() -> Result<(), String>,
+) -> Result<bool, String> {
+    if pending {
+        return Ok(false);
+    }
+    restore().map(|()| true)
+}
+
 pub(crate) async fn emit_auth_state(app: &AppHandle, state: &AppState) {
     let auth = state.auth_manager.lock().await;
     let auth_state = auth.get_state();
@@ -132,44 +142,85 @@ pub(crate) async fn cleanup_banned_session(state: &AppState) -> bool {
         log::warn!("Failed to disconnect VPN after ban detection: {}", e);
     }
 
-    let roblox_pid = {
-        let mut monitor = state.performance_monitor.lock();
-        monitor.get_roblox_pid().unwrap_or(0)
+    // Disconnect uses the auth manager to settle usage, so never retain its
+    // lock across the await above. Restore work itself is synchronous and can
+    // wait on Windows commands or slow storage.
+    let operation = match super::optimizer::wait_for_config_change().await {
+        Ok(operation) => operation,
+        Err(error) => {
+            log::warn!("Ban cleanup: {error}");
+            return true;
+        }
     };
-
+    let auth = state.auth_manager.clone();
+    let performance = state.performance_monitor.clone();
+    let system = state.system_optimizer.clone();
+    let network = state.network_booster.clone();
+    let roblox = state.roblox_optimizer.clone();
+    let settings = state.settings.clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
+        // Waiting behind another apply must not restore settings for an
+        // account that has since signed out or signed in successfully.
+        if !is_auth_banned(&auth.blocking_lock().get_state()) {
+            return false;
+        }
+        let roblox_pid = performance.lock().get_roblox_pid().unwrap_or(0);
+        {
+            let mut optimizer = system.lock();
+            if let Err(error) = optimizer.restore(roblox_pid) {
+                log::warn!("Failed to restore system boosts after ban detection: {error}");
+            }
+            if let Err(error) = optimizer.cleanup_swifttunnel_power_plan_after_ban() {
+                log::warn!(
+                    "Failed to clean up SwiftTunnel power plan after ban detection: {error}"
+                );
+            }
+        }
+        if let Err(error) = network.lock().restore() {
+            log::warn!("Failed to restore network boosts after ban detection: {error}");
+        }
+        {
+            let optimizer = roblox.lock();
+            match restore_global_after_temporary_settings(
+                swifttunnel_core::roblox_game_profile::pending()
+                    || swifttunnel_core::roblox_launch_flags::pending(),
+                || {
+                    optimizer
+                        .restore_settings()
+                        .map_err(|error| error.to_string())
+                },
+            ) {
+                Ok(false) => {
+                    log::info!("Global Roblox restore deferred until per-game recovery finishes")
+                }
+                Err(error) => {
+                    log::warn!("Failed to restore Roblox boosts after ban detection: {error}")
+                }
+                Ok(true) => {}
+            }
+        }
+        // Protect only this short account/settings commit. A new login may
+        // occur during Windows restoration, but cannot inherit this late write.
+        let current_auth = auth.blocking_lock();
+        if !is_auth_banned(&current_auth.get_state()) {
+            return false;
+        }
+        let mut current = settings.lock();
+        apply_banned_session_cleanup_settings(&mut current);
+        if let Err(error) = swifttunnel_core::settings::save_settings(&current) {
+            log::warn!("Failed to persist boost cleanup after ban detection: {error}");
+        }
+        true
+    })
+    .await
     {
-        let mut optimizer = state.system_optimizer.lock();
-        if let Err(e) = optimizer.restore(roblox_pid) {
-            log::warn!("Failed to restore system boosts after ban detection: {}", e);
-        }
-        if let Err(e) = optimizer.cleanup_swifttunnel_power_plan_after_ban() {
-            log::warn!(
-                "Failed to clean up SwiftTunnel power plan after ban detection: {}",
-                e
-            );
+        Ok(banned) => banned,
+        Err(error) => {
+            log::warn!("Ban cleanup worker could not finish: {error}");
+            true
         }
     }
-    if let Err(e) = state.network_booster.lock().restore() {
-        log::warn!(
-            "Failed to restore network boosts after ban detection: {}",
-            e
-        );
-    }
-    if let Err(e) = state.roblox_optimizer.lock().restore_settings() {
-        log::warn!("Failed to restore Roblox boosts after ban detection: {}", e);
-    }
-
-    let snapshot = {
-        let mut settings = state.settings.lock();
-        apply_banned_session_cleanup_settings(&mut settings);
-        settings.clone()
-    };
-
-    if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
-        log::warn!("Failed to persist boost cleanup after ban detection: {}", e);
-    }
-
-    true
 }
 
 #[cfg(test)]
@@ -236,6 +287,29 @@ mod tests {
         assert!(persist_signed_out_settings(&settings, |_| Err("locked file".into())).is_err());
         assert!(!settings.lock().resume_vpn_on_startup);
         assert!(!settings.lock().idle_when_unfocused);
+    }
+
+    #[test]
+    fn global_restore_waits_for_per_game_recovery_and_does_not_hide_restore_errors() {
+        assert_eq!(
+            restore_global_after_temporary_settings(true, || panic!(
+                "temporary settings are still owned by recovery"
+            )),
+            Ok(false)
+        );
+        let restored = std::cell::Cell::new(false);
+        assert_eq!(
+            restore_global_after_temporary_settings(false, || {
+                restored.set(true);
+                Ok(())
+            }),
+            Ok(true)
+        );
+        assert!(restored.get());
+        assert_eq!(
+            restore_global_after_temporary_settings(false, || Err("locked backup".into())),
+            Err("locked backup".into())
+        );
     }
 }
 

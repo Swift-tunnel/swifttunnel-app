@@ -12,6 +12,15 @@ pub(super) fn begin_config_change() -> Result<tokio::sync::SemaphorePermit<'stat
     })
 }
 
+/// Mandatory account cleanup waits for an admitted apply/reset rather than
+/// restoring Windows halfway through that operation or silently skipping it.
+pub(super) async fn wait_for_config_change() -> Result<tokio::sync::SemaphorePermit<'static>, String>
+{
+    CONFIG_CHANGE.acquire().await.map_err(|_| {
+        "Could not finish restoring settings. Restart SwiftTunnel and try again.".into()
+    })
+}
+
 #[derive(Serialize)]
 pub struct PerformanceMetricsResponse {
     pub fps: f32,
@@ -731,8 +740,8 @@ mod tests {
         assert!(!settings.minimize_to_tray);
     }
 
-    #[test]
-    fn config_change_reservation_stays_with_the_worker_and_recovers_after_failure() {
+    #[tokio::test]
+    async fn config_change_reservation_stays_with_the_worker_and_recovers_after_failure() {
         use std::{sync::mpsc, time::Duration};
         let operation = begin_config_change().unwrap();
         assert!(begin_config_change().is_err());
@@ -746,9 +755,18 @@ mod tests {
         });
         ready.recv_timeout(Duration::from_secs(2)).unwrap();
         let refused_overlap = begin_config_change().is_err();
+        let mut cleanup = Box::pin(wait_for_config_change());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(5), &mut cleanup)
+                .await
+                .is_err()
+        );
         release.send(()).unwrap();
         assert!(worker.join().unwrap().is_err());
         assert!(refused_overlap);
+        let cleanup = cleanup.await.unwrap();
+        assert!(begin_config_change().is_err());
+        drop(cleanup);
         assert!(begin_config_change().is_ok());
         let failed = std::panic::catch_unwind(|| {
             let _operation = begin_config_change().unwrap();

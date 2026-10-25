@@ -609,6 +609,13 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                     state.runtime.spawn(async move {
                         let state = cleanup_app.state::<AppState>();
                         commands::game_launch::restore_game_profile(&state).await;
+                        // A ban may have deferred global Roblox restoration
+                        // while this journal still owned the temporary files.
+                        // The account check is inert for ordinary game exits.
+                        if !swifttunnel_core::roblox_game_profile::pending()
+                            && !swifttunnel_core::roblox_launch_flags::pending() {
+                            commands::auth::cleanup_banned_session(&state).await;
+                        }
                         state.games.lock().cleanup_scheduled = false;
                         let _ = cleanup_app.emit(commands::games::LIBRARY_CHANGED, ());
                     });
@@ -1006,7 +1013,8 @@ pub fn run() {
 
                     match &result {
                         Ok(Ok(())) | Ok(Err(AuthError::UserBanned(_))) => {
-                            commands::auth::cleanup_banned_session(&state).await;
+                            // Publish auth promptly. The single ban-gated
+                            // recovery branch below owns Windows cleanup.
                             commands::auth::emit_auth_state(&app_handle, &state).await;
                         }
                         Ok(Err(e)) => {
