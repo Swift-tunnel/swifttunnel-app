@@ -1768,7 +1768,7 @@ fn spawn_game_logs(shared: Arc<Shared>) {
                                 job_id,
                                 ..
                             } => {
-                                if !RobloxOptimizer::new().is_roblox_running() {
+                                if !RobloxOptimizer::player_is_running() {
                                     continue;
                                 }
                                 location.clear();
@@ -1816,7 +1816,7 @@ fn spawn_game_logs(shared: Arc<Shared>) {
                     // owns a lookup, and shutdown drops it with this loop.
                     if let Some(resolved) = location.advance(Duration::from_secs(1)).await {
                         if shared.stop.load(Ordering::Relaxed)
-                            || !RobloxOptimizer::new().is_roblox_running()
+                            || !RobloxOptimizer::player_is_running()
                         {
                             continue;
                         }
@@ -2101,7 +2101,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                 // something, not several times a second.
                 roblox_tick += 1;
                 if roblox_tick % 4 == 0 || roblox_tick == 1 {
-                    running = RobloxOptimizer::new().is_roblox_running();
+                    running = RobloxOptimizer::player_is_running();
                 }
                 let refresh = roblox_tick % 20 == 0;
                 // File/process reads can stall. Never hold the snapshot lock

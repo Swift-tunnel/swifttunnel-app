@@ -146,10 +146,6 @@ impl RobloxOptimizer {
         if let Ok(entries) = fs::read_dir(roblox_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !path.is_file() {
-                    continue;
-                }
-
                 let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
@@ -157,6 +153,11 @@ impl RobloxOptimizer {
                 let Some(index) = Self::parse_settings_file_index(file_name) else {
                     continue;
                 };
+                // Most root entries are logs, caches or version directories.
+                // Only candidate settings names need a filesystem metadata call.
+                if !path.is_file() {
+                    continue;
+                }
 
                 if latest_indexed
                     .as_ref()
@@ -1398,6 +1399,11 @@ impl RobloxOptimizer {
 
     /// Check whether a Roblox client process is currently running.
     pub fn is_roblox_running(&self) -> bool {
+        Self::player_is_running()
+    }
+
+    /// Presence-only callers do not need to discover any settings files.
+    pub fn player_is_running() -> bool {
         #[cfg(windows)]
         {
             match crate::process_snapshot::any_named(Self::ROBLOX_CLIENT_PROCESSES) {
