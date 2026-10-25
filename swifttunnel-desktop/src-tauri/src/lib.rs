@@ -271,30 +271,103 @@ fn reapply_saved_network_boosts(_state: &AppState) {}
 
 #[cfg(windows)]
 fn reapply_saved_roblox_fflags(state: &AppState) {
-    if swifttunnel_core::roblox_game_profile::pending()
-        || swifttunnel_core::roblox_launch_flags::pending()
-    {
-        return;
+    let result = reapply_startup_flags(
+        &state.roblox_optimizer,
+        &state.settings,
+        || {
+            swifttunnel_core::roblox_game_profile::pending()
+                || swifttunnel_core::roblox_launch_flags::pending()
+        },
+        |optimizer, config| {
+            info!("Reapplying saved Roblox Ultraboost state on startup");
+            optimizer
+                .reapply_saved_client_fflags(config)
+                .map_err(|error| error.to_string())
+        },
+    );
+    if let Err(error) = result {
+        warn!("Failed to reapply saved Roblox Ultraboost state on startup: {error}");
     }
-    let roblox_config = {
-        let settings = state.settings.lock();
-        settings.config.roblox_settings.clone()
+}
+
+#[cfg(windows)]
+fn reapply_startup_flags<T>(
+    optimizer: &parking_lot::Mutex<T>,
+    settings: &parking_lot::Mutex<swifttunnel_core::settings::AppSettings>,
+    pending: impl FnOnce() -> bool,
+    apply: impl FnOnce(&T, &swifttunnel_core::structs::RobloxSettingsConfig) -> Result<(), String>,
+) -> Result<(), String> {
+    let optimizer = optimizer.lock();
+    // Waiting for an editor or native launch can invalidate both the pending
+    // record check and the saved config. Read them only after admission.
+    if pending() {
+        return Ok(());
+    }
+    let config = settings.lock().config.roblox_settings.clone();
+    if !config.ultraboost {
+        return Ok(());
+    }
+    apply(&optimizer, &config)
+}
+
+#[cfg(all(test, windows))]
+mod startup_flag_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
     };
 
-    if !roblox_config.ultraboost {
-        return;
-    }
-
-    info!("Reapplying saved Roblox Ultraboost state on startup");
-    if let Err(e) = state
-        .roblox_optimizer
-        .lock()
-        .reapply_saved_client_fflags(&roblox_config)
-    {
-        warn!(
-            "Failed to reapply saved Roblox Ultraboost state on startup: {}",
-            e
-        );
+    #[test]
+    fn queued_startup_reapply_observes_new_launch_records_and_disabled_flags() {
+        for new_profile in [true, false] {
+            let optimizer = Arc::new(parking_lot::Mutex::new(()));
+            let held = optimizer.lock();
+            let settings = Arc::new(parking_lot::Mutex::new(
+                swifttunnel_core::settings::AppSettings::default(),
+            ));
+            settings.lock().config.roblox_settings.ultraboost = true;
+            let pending = Arc::new(AtomicBool::new(false));
+            let worker_optimizer = optimizer.clone();
+            let worker_settings = settings.clone();
+            let worker_pending = pending.clone();
+            let (started, ready) = mpsc::channel();
+            let task = std::thread::spawn(move || {
+                started.send(()).unwrap();
+                reapply_startup_flags(
+                    &worker_optimizer,
+                    &worker_settings,
+                    || worker_pending.load(Ordering::SeqCst),
+                    |_, _| panic!("queued startup work must not replace the new launch or setting"),
+                )
+            });
+            ready
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap();
+            if new_profile {
+                pending.store(true, Ordering::SeqCst);
+            } else {
+                settings.lock().config.roblox_settings.ultraboost = false;
+            }
+            drop(held);
+            task.join().unwrap().unwrap();
+        }
+        let settings = parking_lot::Mutex::new(swifttunnel_core::settings::AppSettings::default());
+        settings.lock().config.roblox_settings.ultraboost = true;
+        let called = AtomicBool::new(false);
+        reapply_startup_flags(
+            &parking_lot::Mutex::new(()),
+            &settings,
+            || false,
+            |_, config| {
+                assert!(config.ultraboost);
+                called.store(true, Ordering::SeqCst);
+                Err("fixture flag error".into())
+            },
+        )
+        .unwrap_err();
+        assert!(called.load(Ordering::SeqCst));
     }
 }
 
