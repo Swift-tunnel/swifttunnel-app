@@ -281,19 +281,58 @@ fn apply_disconnected_session_settings(settings: &mut swifttunnel_core::settings
     settings.resume_vpn_on_startup = false;
 }
 
-fn persist_session_settings(
+async fn persist_session_settings(
     state: &AppState,
     connected_region: Option<&str>,
 ) -> Result<(), String> {
-    let mut settings = state.settings.lock();
+    let observed = state.vpn_state_handle.borrow().clone();
+    let state_handle = state.vpn_state_handle.clone();
+    let settings = state.settings.clone();
+    let region = connected_region.map(str::to_owned);
+    tauri::async_runtime::spawn_blocking(move || {
+        persist_session_settings_with(
+            &settings,
+            region.as_deref(),
+            &observed,
+            || state_handle.borrow().clone(),
+            swifttunnel_core::settings::save_settings,
+        )
+    })
+    .await
+    .map_err(|error| format!("Connection settings save could not finish: {error}"))?
+}
+
+fn persist_session_settings_with(
+    settings: &parking_lot::Mutex<swifttunnel_core::settings::AppSettings>,
+    connected_region: Option<&str>,
+    observed: &swifttunnel_core::vpn::ConnectionState,
+    current: impl FnOnce() -> swifttunnel_core::vpn::ConnectionState,
+    persist: impl FnOnce(&swifttunnel_core::settings::AppSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    use swifttunnel_core::vpn::ConnectionState;
+    let mut settings = settings.lock();
+    // Inspect the live session only after acquiring the writer lock. A queued
+    // connect/disconnect save must never overwrite a newer session's intent.
+    // Clone and release the watch borrow before file I/O so state publication
+    // does not have to wait for storage.
+    let current = current();
+    if connected_region.is_some() {
+        if !matches!((observed, &current),
+            (ConnectionState::Connected { since: old, .. }, ConnectionState::Connected { since: new, .. }) if old == new)
+        {
+            return Ok(());
+        }
+    } else if matches!(current, ConnectionState::Connected { .. }) {
+        return Ok(());
+    }
     if let Some(region) = connected_region {
         apply_connected_session_settings(&mut settings, region);
     } else {
         apply_disconnected_session_settings(&mut settings);
     }
-    let snapshot = settings.clone();
-    drop(settings);
-    swifttunnel_core::settings::save_settings(&snapshot)
+    // Keep the safer in-memory intent after a failed write. All other writers
+    // use this same lock through persistence, so unrelated changes stay ordered.
+    persist(&settings)
 }
 
 fn vpn_error_is_user_banned(error: &VpnError) -> bool {
@@ -391,7 +430,7 @@ pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), Strin
     // Always persist the disconnected session. If disconnect failed the
     // driver is in an unknown state, so clearing `resume_vpn_on_startup` is
     // safer than letting the app auto-resume into it on next launch.
-    if let Err(e) = persist_session_settings(state, None) {
+    if let Err(e) = persist_session_settings(state, None).await {
         log::warn!("Failed to persist disconnected session settings: {}", e);
     }
 
@@ -411,7 +450,7 @@ async fn cleanup_terminal_vpn_error(state: &AppState) {
 
     state.discord_manager.lock().set_idle();
 
-    if let Err(e) = persist_session_settings(state, None) {
+    if let Err(e) = persist_session_settings(state, None).await {
         log::warn!("Failed to persist terminal VPN cleanup: {}", e);
     }
 }
@@ -730,7 +769,7 @@ pub async fn vpn_connect(
     }
 
     if result.is_ok()
-        && let Err(e) = persist_session_settings(&state, Some(&connect_region))
+        && let Err(e) = persist_session_settings(&state, Some(&connect_region)).await
     {
         log::warn!("Failed to persist connected session settings: {}", e);
     }
@@ -1381,6 +1420,107 @@ mod tests {
         };
         apply_disconnected_session_settings(&mut settings);
         assert!(!settings.resume_vpn_on_startup);
+    }
+
+    fn session_fixture(since: Instant) -> swifttunnel_core::vpn::ConnectionState {
+        swifttunnel_core::vpn::ConnectionState::Connected {
+            since,
+            server_region: "tokyo-01".into(),
+            server_endpoint: "192.0.2.1:51821".into(),
+            assigned_ip: "fixture".into(),
+            relay_auth_mode: "authenticated".into(),
+            split_tunnel_active: true,
+            tunneled_processes: Vec::new(),
+            relay_status: None,
+        }
+    }
+
+    #[test]
+    fn delayed_session_saves_cannot_revive_disconnects_or_change_a_replacement_session() {
+        use swifttunnel_core::{settings::AppSettings, vpn::ConnectionState};
+        let settings = parking_lot::Mutex::new(AppSettings::default());
+        let started = Instant::now();
+        let old = session_fixture(started);
+        let replacement = session_fixture(started + Duration::from_secs(1));
+        for (region, observed, current) in [
+            (Some("mumbai"), old.clone(), ConnectionState::Disconnected),
+            (Some("mumbai"), old.clone(), replacement.clone()),
+            (None, ConnectionState::Disconnected, replacement.clone()),
+        ] {
+            persist_session_settings_with(
+                &settings,
+                region,
+                &observed,
+                || current,
+                |_| panic!("stale connection intent must not be persisted"),
+            )
+            .unwrap();
+        }
+        let mut disk = settings.lock().clone();
+        persist_session_settings_with(
+            &settings,
+            Some("tokyo"),
+            &replacement,
+            || replacement.clone(),
+            |snapshot| {
+                disk = snapshot.clone();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(disk.resume_vpn_on_startup);
+        assert_eq!(disk.last_connected_region.as_deref(), Some("tokyo"));
+        persist_session_settings_with(
+            &settings,
+            None,
+            &replacement,
+            || ConnectionState::Disconnected,
+            |snapshot| {
+                disk = snapshot.clone();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!disk.resume_vpn_on_startup);
+    }
+
+    #[test]
+    fn session_save_keeps_unrelated_preferences_in_the_same_writer_order() {
+        use swifttunnel_core::{settings::AppSettings, vpn::ConnectionState};
+        let settings = parking_lot::Mutex::new(AppSettings {
+            resume_vpn_on_startup: true,
+            idle_when_unfocused: true,
+            ..Default::default()
+        });
+        let mut disk = settings.lock().clone();
+        persist_session_settings_with(
+            &settings,
+            None,
+            &ConnectionState::Disconnected,
+            || ConnectionState::Disconnected,
+            |snapshot| {
+                if let Some(mut competing) = settings.try_lock() {
+                    competing.idle_when_unfocused = false;
+                }
+                disk = snapshot.clone();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            disk.idle_when_unfocused,
+            settings.lock().idle_when_unfocused
+        );
+        assert!(!disk.resume_vpn_on_startup);
+        let result = persist_session_settings_with(
+            &settings,
+            None,
+            &ConnectionState::Disconnected,
+            || ConnectionState::Disconnected,
+            |_| Err("storage unavailable".into()),
+        );
+        assert!(result.is_err());
+        assert!(!settings.lock().resume_vpn_on_startup);
     }
 
     #[test]
