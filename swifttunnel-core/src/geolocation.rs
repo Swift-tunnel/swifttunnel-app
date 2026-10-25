@@ -76,6 +76,7 @@ impl RegionCache {
     }
 }
 static REGION_CACHE: LazyLock<Mutex<RegionCache>> = LazyLock::new(Default::default);
+static RESOLVER_COOLDOWN: Mutex<Option<Instant>> = Mutex::new(None);
 
 #[derive(Debug, Serialize)]
 struct GameServerRegionRequest {
@@ -278,12 +279,14 @@ async fn resolve_game_server_region_from_api(ip: Ipv4Addr) -> Option<GameServerR
             return None;
         }
     };
-    let response = client
-        .post(GAME_SERVER_REGION_API_URL)
-        .json(&GameServerRegionRequest { ip: ip.to_string() })
-        .send()
-        .await
-        .ok()?;
+    let response = resolver_response(
+        &RESOLVER_COOLDOWN,
+        client
+            .post(GAME_SERVER_REGION_API_URL)
+            .json(&GameServerRegionRequest { ip: ip.to_string() })
+            .send(),
+    )
+    .await?;
     if !response.status().is_success() {
         log::warn!(
             "SwiftTunnel game-server resolver returned status {} for {}",
@@ -295,6 +298,32 @@ async fn resolve_game_server_region_from_api(ip: Ipv4Addr) -> Option<GameServerR
     crate::http_body::read_json_bounded(response, 64 * 1024, "server location")
         .await
         .ok()
+}
+
+async fn resolver_response(
+    cooldown: &Mutex<Option<Instant>>,
+    fetch: impl std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+) -> Option<reqwest::Response> {
+    // Checked after the HTTP concurrency permit, so queued addresses also
+    // respect a retry window announced while they were waiting.
+    if cooldown.lock().is_some_and(|until| until > Instant::now()) {
+        return None;
+    }
+    let response = fetch.await.ok()?;
+    if matches!(response.status().as_u16(), 429 | 503) {
+        let delay = crate::http_client::retry_delay(response.headers());
+        let deadline = Instant::now() + delay;
+        let mut until = cooldown.lock();
+        *until = Some(until.map_or(deadline, |previous| previous.max(deadline)));
+        log::warn!(
+            "Game-server resolver returned {}; pausing location requests for {} seconds",
+            response.status(),
+            delay.as_secs()
+        );
+        // Headers are sufficient. Do not read a possibly broken error body.
+        return None;
+    }
+    Some(response)
 }
 
 fn resolve_api_response(
@@ -427,6 +456,77 @@ async fn cached_region_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resolver_throttling_blocks_retries_and_other_ips_until_expiry() {
+        use std::io::{Read, Write};
+        for status in [429, 503, 400, 200] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket.read(&mut [0; 4096]).unwrap();
+                write!(socket, "HTTP/1.1 {status} Fixture\r\nRetry-After: 67\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            let cooldown = Mutex::new(None);
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let response =
+                resolver_response(&cooldown, client.post(format!("http://{address}")).send()).await;
+            server.join().unwrap();
+            if matches!(status, 429 | 503) {
+                assert!(response.is_none());
+                let remaining = cooldown
+                    .lock()
+                    .unwrap()
+                    .saturating_duration_since(Instant::now());
+                assert!(remaining > Duration::from_secs(66));
+                assert!(remaining <= Duration::from_secs(67));
+                let blocked = resolver_response(&cooldown, async {
+                    panic!("another caller or address must not send during cooldown")
+                })
+                .await;
+                assert!(blocked.is_none());
+
+                // Cached successful locations bypass HTTP admission entirely.
+                let cache = Mutex::new(RegionCache::default());
+                let ip = Ipv4Addr::new(128, 116, 47, 33);
+                let resolved =
+                    GameServerRegionLookup::Resolved(RobloxRegion::Mumbai, "Mumbai".into());
+                cache.lock().put(ip, resolved.clone(), Instant::now());
+                assert_eq!(
+                    cached_region_lookup(&cache, ip, async {
+                        let _ = resolver_response(&cooldown, async {
+                            panic!("a cached location must not require a resolver request")
+                        })
+                        .await;
+                        GameServerRegionLookup::Failed
+                    })
+                    .await,
+                    resolved
+                );
+
+                *cooldown.lock() = Some(Instant::now() - Duration::from_secs(1));
+                let polled = std::sync::atomic::AtomicBool::new(false);
+                let invalid_request = client.get("://invalid").build().unwrap_err();
+                let _ = resolver_response(&cooldown, async {
+                    polled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    Err(invalid_request)
+                })
+                .await;
+                assert!(polled.load(std::sync::atomic::Ordering::Relaxed));
+            } else {
+                assert_eq!(response.unwrap().status().as_u16(), status);
+                assert!(cooldown.lock().is_none());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn cancelled_or_failed_region_requests_remain_retryable() {

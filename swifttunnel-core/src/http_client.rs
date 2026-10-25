@@ -4,7 +4,37 @@ use std::{
     collections::HashMap,
     hash::Hash,
     sync::{Arc, OnceLock, Weak},
+    time::Duration,
 };
+
+/// Retry-After for bounded background requests. Prefer the server's Date when
+/// the player's clock is incorrect; malformed/missing values use one minute.
+pub(crate) fn retry_delay(headers: &reqwest::header::HeaderMap) -> Duration {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    let delay = raw.and_then(|raw| {
+        if let Ok(seconds) = raw.parse::<u64>() {
+            return Some(Duration::from_secs(seconds));
+        }
+        let deadline = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+        let now = headers
+            .get(reqwest::header::DATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
+        Some(
+            (deadline.with_timezone(&chrono::Utc) - now)
+                .to_std()
+                .unwrap_or_default(),
+        )
+    });
+    delay
+        .unwrap_or(Duration::from_secs(60))
+        .clamp(Duration::from_secs(1), Duration::from_secs(300))
+}
 
 pub(crate) struct RequestSlots<K> {
     slots: HashMap<K, Weak<tokio::sync::Mutex<()>>>,
