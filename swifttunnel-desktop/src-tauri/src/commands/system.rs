@@ -851,6 +851,11 @@ fn launch_elevated_swifttunnel(exe_path: &str, args: &str) -> Result<(), String>
 }
 
 #[cfg(windows)]
+fn driver_repair_requires_reinstall(force: bool, broken: bool, removed: bool) -> bool {
+    (force || broken) && !removed
+}
+
+#[cfg(windows)]
 fn install_winpkfilter_driver_from_msi(
     app: &tauri::AppHandle,
     resource_dir: Option<&Path>,
@@ -880,26 +885,27 @@ fn install_winpkfilter_driver_from_msi(
     // to return 1603 trying to "repair" the stale state. Clean it up
     // first so the MSI install starts from a known-empty state.
     let mut cleaned_broken_install = false;
-    if let Some(published) = detect_broken_install() {
+    let broken_install = detect_broken_install();
+    if let Some(published) = &broken_install {
         log::warn!(
             "Detected broken WinpkFilter install ({}); cleaning up before retry",
             published
         );
         match swifttunnel_core::vpn::SplitTunnelDriver::remove_driver_for_uninstall() {
-            Ok(()) => {
-                cleaned_broken_install = true;
+            Ok(removed) => {
+                cleaned_broken_install = removed;
             }
             Err(e) => {
                 log::warn!("Pre-install cleanup failed (continuing anyway): {}", e);
             }
         }
     }
-    let use_reinstall_mode = force
-        && !cleaned_broken_install
-        && swifttunnel_core::vpn::winpkfilter::find_installed_driver_published_name()
-            .ok()
-            .flatten()
-            .is_some();
+    let use_reinstall_mode =
+        driver_repair_requires_reinstall(force, broken_install.is_some(), cleaned_broken_install)
+            && swifttunnel_core::vpn::winpkfilter::find_installed_driver_published_name()
+                .ok()
+                .flatten()
+                .is_some();
 
     let run_install = |passive: bool, log_string: &str| -> Result<(i32, String), String> {
         if swifttunnel_core::is_administrator() {
@@ -2904,6 +2910,25 @@ mod tests {
         assert!(args.contains("/qn"));
         assert!(!args.contains("/passive"));
         assert!(!args.contains("REINSTALL=ALL"));
+    }
+
+    #[test]
+    fn a_preserved_shared_driver_still_gets_repair_flags() {
+        // Cleanup may return successfully while preserving a shared package.
+        // A positively broken install needs repair even on the automatic path.
+        for force in [false, true] {
+            let requested = driver_repair_requires_reinstall(force, true, false);
+            let args = build_msiexec_install_args(
+                "C:\\fixture\\driver.msi",
+                "C:\\fixture\\install.log",
+                false,
+                requested,
+            );
+            assert!(args.contains("REINSTALL=ALL"));
+            assert!(args.contains("REINSTALLMODE=vamus"));
+        }
+        assert!(!driver_repair_requires_reinstall(true, true, true));
+        assert!(!driver_repair_requires_reinstall(false, false, false));
     }
 
     #[test]

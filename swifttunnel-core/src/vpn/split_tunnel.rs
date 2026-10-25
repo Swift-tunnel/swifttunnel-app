@@ -1266,7 +1266,9 @@ impl SplitTunnelDriver {
         }
     }
 
-    pub fn remove_driver_for_uninstall() -> Result<(), String> {
+    /// `false` means the driver was preserved for the other client; it does
+    /// not mean a removal took place. Repair callers must keep that distinction.
+    pub fn remove_driver_for_uninstall() -> Result<bool, String> {
         // The packet filter is shared between the full app and Lite, and one
         // machine can have both. Taking it out while the other client is still
         // installed leaves that client unable to connect at all, and nothing
@@ -1286,7 +1288,7 @@ impl SplitTunnelDriver {
                 "Leaving the packet filter driver installed: {other} is still on this machine \
                  and shares it. It will be removed when the last client is."
             );
-            return Ok(());
+            return Ok(false);
         }
 
         let mut issues = Vec::new();
@@ -1385,7 +1387,7 @@ impl SplitTunnelDriver {
         }
 
         if issues.is_empty() {
-            Ok(())
+            Ok(true)
         } else {
             Err(issues.join("; "))
         }
