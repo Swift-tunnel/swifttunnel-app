@@ -512,6 +512,21 @@ pub async fn games_forget(
     Ok(())
 }
 
+fn metadata_http_client() -> Result<&'static reqwest::Client, String> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())?;
+    // Share TLS/connection pools across saved games and joins. A failed build
+    // must leave initialization retryable rather than caching the error.
+    Ok(CLIENT.get_or_init(|| client))
+}
+
 /// Resolve a display name through public Roblox endpoints. Failure leaves the
 /// numeric place label; it never prevents a join or asks for a Roblox cookie.
 pub async fn refresh_name(
@@ -538,11 +553,7 @@ pub async fn refresh_name(
     if !needs_name {
         return Ok(false);
     }
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| e.to_string())?;
+    let http = metadata_http_client()?;
     let response = http
         .get(format!(
             "https://apis.roblox.com/universes/v1/places/{place_id}/universe"
