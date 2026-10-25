@@ -68,7 +68,13 @@ export const gamesLaunchPlan = (placeId: string, client: RobloxClient, jobId: st
 export const gamesLaunch = (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, safeLaunch = false) => invoke<void>("games_launch", { placeId, client, jobId, datacenterId, allowUnverified, safeLaunch });
 export const gamesFlags = (action: "preview" | "clean" | "undo") => invoke<FlagCleanupReport>("games_flags", { action });
 export const gamesSaveFlags = (enabled: boolean, json: string, expected: { custom_fflags_json: string; custom_fflags_enabled: boolean; ultraboost: boolean }) => invoke<BoostUpdateResult>("games_save_flags", { enabled, json, expectedJson: expected.custom_fflags_json, expectedEnabled: expected.custom_fflags_enabled, expectedUltraboost: expected.ultraboost });
-export const gamesNvidiaProfile = () => invoke<NvidiaDriverProfile>("games_nvidia_profile");
+let pendingNvidiaProfile: Promise<NvidiaDriverProfile> | null = null;
+export const gamesNvidiaProfile = (): Promise<NvidiaDriverProfile> => {
+  // Tab remounts share native work that is already running, without caching its result.
+  pendingNvidiaProfile ??= invoke<NvidiaDriverProfile>("games_nvidia_profile")
+    .finally(() => { pendingNvidiaProfile = null; });
+  return pendingNvidiaProfile;
+};
 export const gamesSaveNvidia = (changes: { id: number; value: number | null }[], expected: NvidiaDriverSetting[]) => invoke<NvidiaDriverProfile>("games_save_nvidia", { changes, expected });
 export const gamesRefreshMetadata = () => invoke<void>("games_refresh_metadata");
 export const vpnConnectGame = (region: string, gamePresets: string[]) => invoke<void>("vpn_connect", { region, gamePresets, gameRegion: true });

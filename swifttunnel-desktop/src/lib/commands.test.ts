@@ -29,6 +29,7 @@ import {
   vpnGetPing,
   vpnListNetworkAdapters,
   gamesLaunch,
+  gamesNvidiaProfile,
 } from "./commands";
 import { DEFAULT_SETTINGS } from "./settings";
 
@@ -40,6 +41,32 @@ describe("lib/commands", () => {
   });
   beforeEach(() => {
     invoke.mockReset();
+  });
+
+  it("shares a pending NVIDIA inspection across views and reads again after it completes", async () => {
+    const profile = { available: true, writable: true, reason: null, settings: [] };
+    let complete!: (value: typeof profile) => void;
+    invoke.mockReturnValueOnce(new Promise(resolve => { complete = resolve; }));
+    const first = gamesNvidiaProfile();
+    const reopened = gamesNvidiaProfile();
+    complete(profile);
+    await expect(Promise.all([first, reopened])).resolves.toEqual([profile, profile]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("games_nvidia_profile");
+
+    const refreshed = { ...profile, available: false, writable: false };
+    invoke.mockResolvedValueOnce(refreshed);
+    await expect(gamesNvidiaProfile()).resolves.toEqual(refreshed);
+    expect(invoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases a failed NVIDIA inspection so the user can retry", async () => {
+    invoke.mockRejectedValueOnce(new Error("Driver unavailable"));
+    await expect(gamesNvidiaProfile()).rejects.toThrow("Driver unavailable");
+    const profile = { available: false, writable: false, reason: "No NVIDIA driver", settings: [] };
+    invoke.mockResolvedValueOnce(profile);
+    await expect(gamesNvidiaProfile()).resolves.toEqual(profile);
+    expect(invoke).toHaveBeenCalledTimes(2);
   });
 
   it("updaterCheckChannel invokes backend with expected args", async () => {
