@@ -1970,7 +1970,9 @@ impl SplitTunnelDriver {
         log::info!("Closing split tunnel driver...");
 
         if let Some(mut interceptor) = self.parallel_interceptor.take() {
-            interceptor.stop();
+            // Stop can wait for driver threads and Windows state restoration.
+            // Keep the interceptor owned until its teardown and Drop finish.
+            crate::utils::blocking_step(move || interceptor.stop());
         }
 
         self.config = None;

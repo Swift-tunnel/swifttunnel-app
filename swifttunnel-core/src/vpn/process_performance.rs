@@ -165,6 +165,10 @@ impl GameProcessPerformanceManager {
     }
 
     pub fn cleanup_all(&mut self, reason: &str) {
+        crate::utils::blocking_step(|| self.cleanup_all_inner(reason));
+    }
+
+    fn cleanup_all_inner(&mut self, reason: &str) {
         self.failed_attempts.clear();
         let tracked: Vec<u32> = self.active_processes.keys().copied().collect();
         for pid in tracked {

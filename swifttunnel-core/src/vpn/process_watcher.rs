@@ -184,9 +184,10 @@ impl ProcessWatcher {
             // Stop once to unblock ProcessTrace. After joining, this watcher
             // no longer owns a session; Drop or a repeated stop must not send
             // another name-based stop at a newly started watcher.
-            stop_session();
-            // join() blocks until the worker exits — no need to sleep first.
-            let _ = handle.join();
+            crate::utils::blocking_step(|| {
+                stop_session();
+                let _ = handle.join();
+            });
         }
     }
 }

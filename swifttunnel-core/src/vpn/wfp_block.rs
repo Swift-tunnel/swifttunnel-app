@@ -8,6 +8,9 @@
 //!
 //! This eliminates the race condition where packets could bypass the VPN before
 //! the UDP table reflects the socket binding (0.5-2ms gap).
+//!
+//! Mutations can wait on the Windows filtering service. Keep their locks and
+//! handles owned across that wait while letting a multithreaded runtime progress.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -195,6 +198,10 @@ fn cleanup_stale_result() -> Result<usize, String> {
 /// killed. This remains as migration/recovery for users who already have a
 /// stale "SwiftTunnel Process Block" filter from an older build.
 pub fn cleanup_stale() {
+    crate::utils::blocking_step(cleanup_stale_inner);
+}
+
+fn cleanup_stale_inner() {
     match cleanup_stale_result() {
         Ok(deleted) if deleted > 0 => {
             log::info!("Removed {} stale SwiftTunnel WFP block filter(s)", deleted);
@@ -206,6 +213,10 @@ pub fn cleanup_stale() {
 
 /// Initialize WFP engine for temporary block filters
 pub fn init() -> Result<(), String> {
+    crate::utils::blocking_step(init_inner)
+}
+
+fn init_inner() -> Result<(), String> {
     {
         let state = WFP_STATE
             .lock()
@@ -380,6 +391,10 @@ fn nt_to_dos_path(nt_path: &str) -> Option<String> {
 /// The image_path should be the full NT path from ETW, e.g.:
 /// \Device\HarddiskVolume3\Users\test\AppData\Local\Roblox\...\RobloxPlayerBeta.exe
 pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
+    crate::utils::blocking_step(|| block_process_by_path_inner(image_path))
+}
+
+fn block_process_by_path_inner(image_path: &str) -> Result<(), String> {
     if image_path.is_empty() {
         return Err("Empty image path".to_string());
     }
@@ -492,6 +507,10 @@ pub fn block_process_by_path(image_path: &str) -> Result<(), String> {
 
 /// Remove the block filter for a process
 pub fn unblock_process_by_path(image_path: &str) -> Result<(), String> {
+    crate::utils::blocking_step(|| unblock_process_by_path_inner(image_path))
+}
+
+fn unblock_process_by_path_inner(image_path: &str) -> Result<(), String> {
     let mut state_guard = WFP_STATE
         .lock()
         .map_err(|e| format!("Lock failed: {}", e))?;
@@ -523,6 +542,10 @@ pub fn unblock_process_by_path(image_path: &str) -> Result<(), String> {
 
 /// Cleanup all WFP state
 pub fn cleanup() {
+    crate::utils::blocking_step(cleanup_inner);
+}
+
+fn cleanup_inner() {
     if let Ok(mut state_guard) = WFP_STATE.lock()
         && let Some(state) = state_guard.take()
     {

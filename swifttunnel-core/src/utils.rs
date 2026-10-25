@@ -1050,8 +1050,12 @@ mod tests {
         let task = tokio::spawn(async move {
             let _operation = worker_gate.lock().await;
             blocking_step(|| {
-                worker_started.notify_one();
-                waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+                // Native cleanup boundaries can nest, such as driver teardown
+                // removing a WFP filter. Both retain the outer operation owner.
+                blocking_step(|| {
+                    worker_started.notify_one();
+                    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+                });
             });
         });
         started.notified().await;
