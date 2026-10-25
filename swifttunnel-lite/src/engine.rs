@@ -277,10 +277,10 @@ impl Engine {
                 async move {
                     let auth = shared.auth.lock().await;
                     let _ = auth.refresh_profile().await;
-                    let state = auth.get_state();
-                    let reason = auth.get_user().and_then(|u| u.banned_reason);
                     drop(auth);
-                    shared.edit(|s| s.lockout = lockout_of(&state, reason));
+                    // Refresh can revoke the saved login or clear a previous
+                    // ban. Publish all account fields from the latest state.
+                    refresh_auth(&shared).await;
                     shared.notify();
                 }
             });
@@ -1213,9 +1213,9 @@ impl Engine {
                     let auth = shared.auth.lock().await;
                     auth.sign_in(&email, &password).await
                 };
-                if result.is_ok() {
-                    refresh_auth(&shared).await;
-                }
+                // A rejected login can still publish a confirmed ban in Core.
+                // Keep its account details and the lockout in sync on errors too.
+                refresh_auth(&shared).await;
                 shared.edit(|s| {
                     s.login_busy = false;
                     s.login_error = match &result {
@@ -2388,8 +2388,9 @@ async fn refresh_auth(shared: &Arc<Shared>) {
     let email = auth.get_user().map(|u| u.email);
     let auth_state = auth.get_state();
     let reason = auth.get_user().and_then(|u| u.banned_reason);
-    drop(auth);
 
+    // Retain account-action ordering through publication. A delayed refresh
+    // must not overwrite a newer login/logout after releasing this lock.
     shared.edit(|s| {
         s.signed_in = signed_in;
         s.email = email;
