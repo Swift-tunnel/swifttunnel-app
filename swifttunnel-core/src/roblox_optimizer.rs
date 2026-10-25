@@ -1128,10 +1128,39 @@ impl RobloxOptimizer {
     /// GlobalBasicSettings backup exists, restore it. Backs the Repair tab's
     /// "reset Roblox settings" fix.
     pub fn reset_swifttunnel_changes(&self) -> Result<()> {
+        self.prepare_global_settings_reset()?;
         self.reset_swifttunnel_changes_in_paths(
             Self::get_client_settings_paths_for_removal(),
             || Self::sync_gpu_preference(false),
         )
+    }
+
+    fn prepare_global_settings_reset(&self) -> Result<()> {
+        Self::prepare_global_settings_reset_with(
+            || !self.is_roblox_running(),
+            crate::roblox_game_profile::restore_launch_settings,
+            || crate::roblox_game_profile::pending() || crate::roblox_launch_flags::pending(),
+        )
+    }
+
+    fn prepare_global_settings_reset_with(
+        stopped: impl FnOnce() -> bool,
+        restore: impl FnOnce() -> std::result::Result<bool, String>,
+        pending: impl FnOnce() -> bool,
+    ) -> Result<()> {
+        if !stopped() {
+            anyhow::bail!("Close Roblox before resetting its settings.");
+        }
+        // Finish conditional per-game recovery before the explicit reset.
+        // Otherwise a delayed watcher can mistake a reset value for its old
+        // temporary override and restore the pre-reset setting over it.
+        restore().map_err(anyhow::Error::msg)?;
+        if pending() {
+            anyhow::bail!(
+                "Roblox's previous settings are still being restored. Wait a moment and retry Reset."
+            );
+        }
+        Ok(())
     }
 
     fn reset_swifttunnel_changes_in_paths(
@@ -1218,6 +1247,12 @@ impl RobloxOptimizer {
                     return report;
                 }
             }
+        }
+
+        if let Err(error) = self.prepare_global_settings_reset() {
+            warn!("Reset: temporary game settings could not be restored: {error}");
+            report.failures.push(error.to_string());
+            return report;
         }
 
         for client_settings in Self::get_client_settings_paths_for_removal() {
@@ -3070,6 +3105,59 @@ mod tests {
         );
         assert_eq!(fs::read(&settings).unwrap(), b"saved originals");
         assert_eq!(fs::read(&other).unwrap(), b"keep this file");
+    }
+
+    #[test]
+    fn global_reset_finishes_temporary_recovery_before_publishing_a_matching_value() {
+        use std::cell::Cell;
+        let fps = Cell::new(400);
+        let pending = Cell::new(true);
+        RobloxOptimizer::prepare_global_settings_reset_with(
+            || true,
+            || {
+                // The old temporary 400 FPS would restore to 600. A global
+                // reset also choosing 400 must happen after this record clears.
+                if pending.replace(false) && fps.get() == 400 {
+                    fps.set(600);
+                }
+                Ok(true)
+            },
+            || pending.get(),
+        )
+        .unwrap();
+        assert_eq!(fps.get(), 600);
+        fps.set(400);
+        if pending.get() && fps.get() == 400 {
+            fps.set(600);
+        }
+        assert_eq!(
+            fps.get(),
+            400,
+            "later recovery must not undo the user's reset"
+        );
+    }
+
+    #[test]
+    fn global_reset_stops_before_mutations_when_player_or_recovery_is_not_ready() {
+        assert!(
+            RobloxOptimizer::prepare_global_settings_reset_with(
+                || false,
+                || panic!("do not restore under a running player"),
+                || panic!("no recovery was started"),
+            )
+            .is_err()
+        );
+        let failure = RobloxOptimizer::prepare_global_settings_reset_with(
+            || true,
+            || Err("fixture unreadable recovery".into()),
+            || panic!("keep the recovery error"),
+        )
+        .unwrap_err();
+        assert_eq!(failure.to_string(), "fixture unreadable recovery");
+        assert!(
+            RobloxOptimizer::prepare_global_settings_reset_with(|| true, || Ok(false), || true,)
+                .is_err()
+        );
     }
 
     #[test]
