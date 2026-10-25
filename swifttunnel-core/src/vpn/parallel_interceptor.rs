@@ -7968,7 +7968,7 @@ where
         static FRAGMENT_BYPASS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static FRAGMENT_DECISIONS: std::cell::RefCell<std::collections::HashMap<FragmentKey, bool>>
             = std::cell::RefCell::new(std::collections::HashMap::new());
-        static LAST_LOG: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static LAST_LOG: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
     }
 
     let total = TOTAL.with(|c| {
@@ -8410,11 +8410,12 @@ where
         });
     }
 
-    // Log stats periodically
-    if total > 0 && total.is_multiple_of(200) {
+    // Keep support summaries independent of packet rate. Check the clock only
+    // at an occasional packet boundary, not on every cached decision.
+    if total > 0 && total.is_multiple_of(200) && log::log_enabled!(log::Level::Info) {
         let last = LAST_LOG.with(|c| c.get());
-        if total > last {
-            LAST_LOG.with(|c| c.set(total));
+        if last.is_none_or(|at| at.elapsed() >= Duration::from_secs(30)) {
+            LAST_LOG.with(|c| c.set(Some(Instant::now())));
             let snapshot_h = SNAPSHOT_HITS.with(|c| c.get());
             let snapshot_m = SNAPSHOT_MISSES.with(|c| c.get());
             let inline_h = INLINE_HITS.with(|c| c.get());
