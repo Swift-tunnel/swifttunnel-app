@@ -1089,12 +1089,7 @@ impl RobloxOptimizer {
 
         let settings_path = self.resolve_settings_path();
 
-        // Remove read-only if set (so we can restore)
-        if Self::is_readonly_path(&settings_path) {
-            let _ = Self::remove_readonly_path(&settings_path);
-        }
-
-        fs::copy(&self.backup_path, &settings_path)?;
+        self.restore_settings_backup(&settings_path)?;
 
         // Remove all FFlag optimizations when restoring
         if let Err(e) = self.remove_all_fflags() {
@@ -1104,6 +1099,28 @@ impl RobloxOptimizer {
         // Don't set read-only after restore - user is disabling optimizations
         info!("Settings restored successfully");
         Ok(())
+    }
+
+    fn replace_settings_file(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        crate::roblox_native_launch::safe_path(path).map_err(anyhow::Error::msg)?;
+        if Self::is_readonly_path(path) {
+            Self::remove_readonly_path(path)?;
+        }
+        crate::atomic_file::replace(path, bytes)?;
+        Ok(())
+    }
+
+    fn restore_settings_backup(&self, settings_path: &Path) -> Result<()> {
+        crate::roblox_native_launch::safe_path(&self.backup_path).map_err(anyhow::Error::msg)?;
+        // The backup writer has the same bound. Refuse an altered/oversized
+        // snapshot before changing the live file, and never truncate a shared
+        // file or expose a partial restore if writing fails.
+        let original = crate::utils::read_file_bounded(
+            &self.backup_path,
+            4 * 1024 * 1024,
+            "Roblox settings backup",
+        )?;
+        self.replace_settings_file(settings_path, &original)
     }
 
     /// Undo everything SwiftTunnel applied to the Roblox client, whether or not a
@@ -1129,10 +1146,7 @@ impl RobloxOptimizer {
 
         if self.backup_path.exists() {
             let settings_path = self.resolve_settings_path();
-            if Self::is_readonly_path(&settings_path) {
-                let _ = Self::remove_readonly_path(&settings_path);
-            }
-            if let Err(e) = fs::copy(&self.backup_path, &settings_path) {
+            if let Err(e) = self.restore_settings_backup(&settings_path) {
                 failures.push(format!("Could not restore settings backup: {e}"));
             }
         }
@@ -1286,12 +1300,9 @@ impl RobloxOptimizer {
     /// those with it for no reason.
     fn restore_global_basic_settings(&self) -> Result<bool> {
         let settings_path = self.resolve_settings_path();
-        if Self::is_readonly_path(&settings_path) {
-            let _ = Self::remove_readonly_path(&settings_path);
-        }
 
         if self.backup_path.exists() {
-            fs::copy(&self.backup_path, &settings_path)?;
+            self.restore_settings_backup(&settings_path)?;
             return Ok(true);
         }
 
@@ -1299,13 +1310,14 @@ impl RobloxOptimizer {
             return Ok(false);
         }
 
+        crate::roblox_native_launch::safe_path(&settings_path).map_err(anyhow::Error::msg)?;
         let content = crate::utils::read_text_file_bounded(
             &settings_path,
             4 * 1024 * 1024,
             "Roblox settings",
         )?;
         let content = Self::reset_forced_xml_values(&content, self);
-        fs::write(&settings_path, content)?;
+        self.replace_settings_file(&settings_path, content.as_bytes())?;
         Ok(true)
     }
 
@@ -3021,6 +3033,43 @@ mod tests {
                 .unwrap()
                 .contains(r#"<int name="FramerateCap">60</int>"#)
         );
+    }
+
+    #[test]
+    fn backup_restore_keeps_other_hardlinked_files_and_rejects_oversized_backups() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "swift-restore-isolation-{:016x}",
+            rand::random::<u64>()
+        )));
+        fs::create_dir(&dir.0).unwrap();
+        let settings = dir.0.join("GlobalBasicSettings.xml");
+        let other = dir.0.join("keep.xml");
+        fs::write(&other, b"keep this file").unwrap();
+        fs::hard_link(&other, &settings).unwrap();
+        let optimizer = optimizer_with_path(settings.clone());
+        fs::write(&optimizer.backup_path, b"saved originals").unwrap();
+        optimizer
+            .reset_swifttunnel_changes_in_paths(vec![], || Ok(()))
+            .unwrap();
+        assert_eq!(fs::read(&other).unwrap(), b"keep this file");
+        assert_eq!(fs::read(&settings).unwrap(), b"saved originals");
+
+        let oversized = fs::File::create(&optimizer.backup_path).unwrap();
+        oversized.set_len(4 * 1024 * 1024 + 1).unwrap();
+        drop(oversized);
+        assert!(
+            optimizer
+                .reset_swifttunnel_changes_in_paths(vec![], || Ok(()))
+                .is_err()
+        );
+        assert_eq!(fs::read(&settings).unwrap(), b"saved originals");
+        assert_eq!(fs::read(&other).unwrap(), b"keep this file");
     }
 
     #[test]
