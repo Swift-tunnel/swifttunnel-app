@@ -333,7 +333,9 @@ export function BoostTab() {
         if (report.flag_files_removed === 0) {
           addToast({
             type: "success",
-            message: `${closed}Roblox was already clean, nothing to remove.`,
+            message: report.settings_restored
+              ? `${closed}Roblox's FPS and graphics settings were reset.`
+              : `${closed}Roblox was already clean, nothing to remove.`,
           });
         } else {
           const where =

@@ -441,6 +441,19 @@ fn persist_roblox_reset(
     Ok(settings.config.roblox_settings.clone())
 }
 
+fn persist_completed_client_reset(
+    settings: &mut swifttunnel_core::settings::AppSettings,
+    report: &swifttunnel_core::roblox_optimizer::RobloxResetReport,
+    persist: impl FnOnce(&swifttunnel_core::settings::AppSettings) -> Result<(), String>,
+) -> Result<(), String> {
+    // A failed close or partial file reset is not confirmation that all
+    // saved overrides are off. Keep the old intent available for a retry.
+    if !report.failures.is_empty() {
+        return Ok(());
+    }
+    persist_roblox_reset(settings, persist).map(|_| ())
+}
+
 /// Reset all SwiftTunnel changes to the Roblox client — clears our FFlags
 /// (Ultraboost / custom), restores the GlobalBasicSettings backup (FPS, window,
 /// graphics) when present, and resets the saved Roblox config to defaults. Used
@@ -491,7 +504,11 @@ pub async fn boost_reset_roblox_client(
         // Ultraboost as on over a Roblox that no longer has a single flag in it.
         {
             let mut s = settings.lock();
-            persist_roblox_reset(&mut s, swifttunnel_core::settings::save_settings)?;
+            persist_completed_client_reset(
+                &mut s,
+                &report,
+                swifttunnel_core::settings::save_settings,
+            )?;
         }
 
         Ok(report)
@@ -845,6 +862,30 @@ mod tests {
         let restored = persist_roblox_reset(&mut settings, |_| Ok(())).unwrap();
         assert!(!restored.ultraboost);
         assert_eq!(settings.config.roblox_settings, restored);
+    }
+
+    #[test]
+    fn failed_or_partial_client_reset_cannot_publish_saved_defaults() {
+        for removed in [0, 2] {
+            let mut settings = AppSettings::default();
+            settings.config.roblox_settings.ultraboost = true;
+            settings.config.roblox_settings.target_fps = 650;
+            let before = serde_json::to_value(&settings).unwrap();
+            let report = swifttunnel_core::roblox_optimizer::RobloxResetReport {
+                flag_files_removed: removed,
+                failures: vec!["fixture close or file error".into()],
+                ..Default::default()
+            };
+            persist_completed_client_reset(&mut settings, &report, |_| {
+                panic!("a failed reset cannot confirm the entire section is off")
+            })
+            .unwrap();
+            assert_eq!(serde_json::to_value(settings).unwrap(), before);
+        }
+        let mut settings = AppSettings::default();
+        settings.config.roblox_settings.ultraboost = true;
+        persist_completed_client_reset(&mut settings, &Default::default(), |_| Ok(())).unwrap();
+        assert!(!settings.config.roblox_settings.ultraboost);
     }
 
     #[test]

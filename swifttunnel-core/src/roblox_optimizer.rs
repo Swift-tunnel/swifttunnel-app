@@ -1235,7 +1235,16 @@ impl RobloxOptimizer {
             }
         }
 
-        report.settings_restored = self.restore_global_basic_settings();
+        match self.restore_global_basic_settings() {
+            Ok(restored) => report.settings_restored = restored,
+            Err(error) => {
+                warn!("Reset: could not restore Roblox FPS and graphics settings: {error}");
+                report.failures.push(
+                    "Could not restore Roblox FPS and graphics settings. Close Roblox and retry."
+                        .into(),
+                );
+            }
+        }
 
         if let Err(e) = Self::sync_gpu_preference(false) {
             warn!("Reset: could not clear the Roblox GPU preference: {e}");
@@ -1275,32 +1284,29 @@ impl RobloxOptimizer {
     /// performance preset forces are reset: the file also holds volume, camera
     /// sensitivity and keybinds, and deleting it to be thorough would take
     /// those with it for no reason.
-    fn restore_global_basic_settings(&self) -> bool {
+    fn restore_global_basic_settings(&self) -> Result<bool> {
         let settings_path = self.resolve_settings_path();
         if Self::is_readonly_path(&settings_path) {
             let _ = Self::remove_readonly_path(&settings_path);
         }
 
         if self.backup_path.exists() {
-            match fs::copy(&self.backup_path, &settings_path) {
-                Ok(_) => return true,
-                Err(e) => warn!("Reset: could not restore the settings backup: {e}"),
-            }
+            fs::copy(&self.backup_path, &settings_path)?;
+            return Ok(true);
         }
 
         if !settings_path.exists() {
-            return false;
+            return Ok(false);
         }
 
-        let Ok(content) = crate::utils::read_text_file_bounded(
+        let content = crate::utils::read_text_file_bounded(
             &settings_path,
             4 * 1024 * 1024,
             "Roblox settings",
-        ) else {
-            return false;
-        };
+        )?;
         let content = Self::reset_forced_xml_values(&content, self);
-        fs::write(&settings_path, content).is_ok()
+        fs::write(&settings_path, content)?;
+        Ok(true)
     }
 
     /// Roblox's own defaults for the values a performance preset overrides.
@@ -2980,6 +2986,41 @@ mod tests {
             settings_path,
             backup_path,
         }
+    }
+
+    #[test]
+    fn full_reset_does_not_silently_replace_an_unreadable_original_with_defaults() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "swift-reset-failure-{:016x}",
+            rand::random::<u64>()
+        )));
+        fs::create_dir(&dir.0).unwrap();
+        let settings = dir.0.join("GlobalBasicSettings.xml");
+        let original = r#"<Properties><int name="FramerateCap">400</int></Properties>"#;
+        fs::write(&settings, original).unwrap();
+        let optimizer = optimizer_with_path(settings.clone());
+        fs::create_dir(&optimizer.backup_path).unwrap();
+        assert!(optimizer.restore_global_basic_settings().is_err());
+        assert_eq!(fs::read_to_string(&settings).unwrap(), original);
+
+        fs::remove_dir(&optimizer.backup_path).unwrap();
+        fs::write(&settings, [0xff]).unwrap();
+        assert!(optimizer.restore_global_basic_settings().is_err());
+        assert_eq!(fs::read(&settings).unwrap(), [0xff]);
+
+        fs::write(&settings, original).unwrap();
+        assert!(optimizer.restore_global_basic_settings().unwrap());
+        assert!(
+            fs::read_to_string(&settings)
+                .unwrap()
+                .contains(r#"<int name="FramerateCap">60</int>"#)
+        );
     }
 
     #[test]
