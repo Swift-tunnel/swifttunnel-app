@@ -200,6 +200,10 @@ pub struct SecureStorage {
 impl SecureStorage {
     /// Create a new SecureStorage instance
     pub fn new() -> Result<Self, AuthError> {
+        crate::utils::blocking_step(Self::initialize)
+    }
+
+    fn initialize() -> Result<Self, AuthError> {
         let data_dir = dirs::data_local_dir()
             .map(|d| d.join("SwiftTunnel"))
             .ok_or_else(|| {
@@ -503,14 +507,22 @@ impl SecureStorage {
 
     /// Store the authentication session (to BOTH file and keyring)
     pub fn store_session(&self, session: &AuthSession) -> Result<(), AuthError> {
-        info!("Storing auth session");
-        self.store_to_file(session)?;
-        let _ = self.store_to_keyring(session);
-        Ok(())
+        // Credential Manager and file operations can wait on Windows services.
+        // Keep both writes owned here without occupying an async worker.
+        crate::utils::blocking_step(|| {
+            info!("Storing auth session");
+            self.store_to_file(session)?;
+            let _ = self.store_to_keyring(session);
+            Ok(())
+        })
     }
 
     /// Load the authentication session (try file first, then keyring)
     pub fn load_session(&self) -> Result<Option<AuthSession>, AuthError> {
+        crate::utils::blocking_step(|| self.load_stored_session())
+    }
+
+    fn load_stored_session(&self) -> Result<Option<AuthSession>, AuthError> {
         if let Some(session) = self.load_from_file()? {
             info!("Loaded session from file storage");
             return Ok(Some(session));
@@ -534,6 +546,10 @@ impl SecureStorage {
 
     /// Clear the stored session (logout) - clears from BOTH storages
     pub fn clear_session(&self) -> Result<(), AuthError> {
+        crate::utils::blocking_step(|| self.clear_stored_session())
+    }
+
+    fn clear_stored_session(&self) -> Result<(), AuthError> {
         info!("Clearing auth session from all storage locations...");
 
         let file_result = self.clear_from_file();
