@@ -203,6 +203,83 @@ fn optional_registry_read<T>(read: std::io::Result<T>) -> Result<Option<T>> {
     }
 }
 
+fn network_registry_subkey(path: &str) -> Result<&str> {
+    path.strip_prefix("HKLM\\")
+        .filter(|key| !key.is_empty() && !key.contains('\0') && !key.ends_with('\\'))
+        .ok_or_else(|| anyhow::anyhow!("Unsupported network registry path"))
+}
+
+#[cfg(windows)]
+fn create_network_registry_key(path: &str) -> Result<winreg::RegKey> {
+    use winreg::{
+        RegKey,
+        enums::{HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY, KEY_WRITE},
+    };
+    let (key, _) = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .create_subkey_with_flags(network_registry_subkey(path)?, KEY_WRITE | KEY_WOW64_64KEY)?;
+    Ok(key)
+}
+
+#[cfg(windows)]
+fn delete_network_registry_value(path: &str, name: &str) -> Result<()> {
+    use winreg::{
+        RegKey,
+        enums::{HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, KEY_SET_VALUE, KEY_WOW64_64KEY},
+    };
+    if let Some(key) =
+        optional_registry_read(RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(
+            network_registry_subkey(path)?,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+        ))?
+    {
+        optional_registry_read(key.delete_value(name))?;
+        if crate::registry_value::exists(&key, name)? {
+            anyhow::bail!("{path}\\{name} was not removed");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn delete_network_registry_value(_path: &str, _name: &str) -> Result<()> {
+    anyhow::bail!("Network registry changes require Windows")
+}
+
+#[cfg(windows)]
+fn delete_network_registry_key(path: &str) -> Result<()> {
+    use winreg::{
+        RegKey,
+        enums::{HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY},
+    };
+    // Our QoS records are flat value-only keys. Unexpected child keys must
+    // fail cleanup instead of starting an unbounded recursive delete.
+    optional_registry_read(
+        RegKey::predef(HKEY_LOCAL_MACHINE)
+            .delete_subkey_with_flags(qos_registry_subkey(path)?, KEY_WOW64_64KEY),
+    )?;
+    Ok(())
+}
+
+fn qos_registry_subkey(path: &str) -> Result<&str> {
+    let subkey = network_registry_subkey(path)?;
+    let name = subkey
+        .strip_prefix(r"SOFTWARE\Policies\Microsoft\Windows\QoS\")
+        .ok_or_else(|| anyhow::anyhow!("Unsupported QoS policy path"))?;
+    if !REMOVED_QOS_POLICY_NAMES.contains(&name)
+        && !RELAY_QOS_EXECUTABLES
+            .iter()
+            .any(|exe| NetworkBooster::relay_qos_policy_name(exe) == name)
+    {
+        anyhow::bail!("Unsupported QoS policy name");
+    }
+    Ok(subkey)
+}
+
+#[cfg(not(windows))]
+fn delete_network_registry_key(_path: &str) -> Result<()> {
+    anyhow::bail!("Network registry changes require Windows")
+}
+
 pub struct NetworkBooster {
     nagle_registry_snapshot: HashMap<String, NagleRegistrySnapshot>,
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
@@ -366,15 +443,13 @@ impl NetworkBooster {
     fn query_registry_dword_checked(key_path: &str, value_name: &str) -> Result<Option<u32>> {
         use winreg::RegKey;
         use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
-        let subkey = key_path
-            .strip_prefix("HKLM\\")
-            .ok_or_else(|| anyhow::anyhow!("Unsupported network registry root"))?;
+        let subkey = network_registry_subkey(key_path)?;
         let key = optional_registry_read(
             RegKey::predef(HKEY_LOCAL_MACHINE)
                 .open_subkey_with_flags(subkey, KEY_READ | KEY_WOW64_64KEY),
         )?;
         match key {
-            Some(key) => optional_registry_read(key.get_value(value_name)),
+            Some(key) => crate::registry_value::read(&key, value_name).map_err(Into::into),
             None => Ok(None),
         }
     }
@@ -421,44 +496,10 @@ impl NetworkBooster {
     }
 
     fn set_registry_dword(key_path: &str, value_name: &str, value: u32) -> Result<()> {
-        let value_str = value.to_string();
-        let output = crate::utils::run_hidden_command_output_with_timeout(
-            "reg",
-            &[
-                "add",
-                key_path,
-                "/v",
-                value_name,
-                "/t",
-                "REG_DWORD",
-                "/d",
-                &value_str,
-                "/f",
-            ],
-            std::time::Duration::from_secs(15),
-        );
-
-        match output {
-            Ok(result) => {
-                if !result.status.success() {
-                    return Err(anyhow::anyhow!(
-                        "failed to set {}\\{} to {}",
-                        key_path,
-                        value_name,
-                        value
-                    ));
-                }
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "failed to set {}\\{} to {}: {}",
-                    key_path,
-                    value_name,
-                    value,
-                    e
-                ));
-            }
-        }
+        #[cfg(windows)]
+        create_network_registry_key(key_path)?.set_value(value_name, &value)?;
+        #[cfg(not(windows))]
+        anyhow::bail!("Network registry changes require Windows");
 
         match Self::query_registry_dword(key_path, value_name) {
             Some(actual) if actual == value => Ok(()),
@@ -480,22 +521,7 @@ impl NetworkBooster {
     fn restore_registry_dword(key_path: &str, value_name: &str, value: Option<u32>) -> Result<()> {
         match value {
             Some(saved) => Self::set_registry_dword(key_path, value_name, saved),
-            None => {
-                let _ = crate::utils::run_hidden_command_output_with_timeout(
-                    "reg",
-                    &["delete", key_path, "/v", value_name, "/f"],
-                    std::time::Duration::from_secs(15),
-                );
-                if Self::query_registry_dword_checked(key_path, value_name)?.is_none() {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!(
-                        "failed to restore {}\\{} to absent",
-                        key_path,
-                        value_name
-                    ))
-                }
-            }
+            None => delete_network_registry_value(key_path, value_name),
         }
     }
 
@@ -518,11 +544,9 @@ impl NetworkBooster {
     fn cleanup_removed_qos_policies() {
         for policy_name in REMOVED_QOS_POLICY_NAMES {
             let policy_path = Self::qos_policy_path(policy_name);
-            let _ = crate::utils::run_hidden_command_output_with_timeout(
-                "reg",
-                &["delete", &policy_path, "/f"],
-                std::time::Duration::from_secs(15),
-            );
+            if let Err(error) = delete_network_registry_key(&policy_path) {
+                warn!("Old QoS policy {policy_name} could not be removed: {error}");
+            }
         }
 
         if let Err(e) = Self::remove_legacy_roblox_priority_policy() {
@@ -545,43 +569,29 @@ impl NetworkBooster {
         )
     }
 
-    fn cleanup_relay_socket_qos_policies() {
+    fn cleanup_relay_socket_qos_policies() -> Result<()> {
+        let mut errors = Vec::new();
         for exe in RELAY_QOS_EXECUTABLES {
             let policy_name = Self::relay_qos_policy_name(exe);
             let policy_path = Self::qos_policy_path(&policy_name);
-            let _ = crate::utils::run_hidden_command_output_with_timeout(
-                "reg",
-                &["delete", &policy_path, "/f"],
-                std::time::Duration::from_secs(15),
-            );
+            if let Err(error) = delete_network_registry_key(&policy_path) {
+                errors.push(format!("{policy_name}: {error}"));
+            }
         }
+        if !errors.is_empty() {
+            anyhow::bail!("Could not remove relay QoS policies: {}", errors.join("; "));
+        }
+        Ok(())
     }
 
     fn set_registry_string(key_path: &str, value_name: &str, value: &str) -> Result<()> {
-        let output = crate::utils::run_hidden_command_output_with_timeout(
-            "reg",
-            &[
-                "add", key_path, "/v", value_name, "/t", "REG_SZ", "/d", value, "/f",
-            ],
-            std::time::Duration::from_secs(15),
-        );
-
-        match output {
-            Ok(result) if result.status.success() => Ok(()),
-            Ok(_) => Err(anyhow::anyhow!(
-                "failed to set {}\\{} to {}",
-                key_path,
-                value_name,
-                value
-            )),
-            Err(e) => Err(anyhow::anyhow!(
-                "failed to set {}\\{} to {}: {}",
-                key_path,
-                value_name,
-                value,
-                e
-            )),
+        #[cfg(windows)]
+        {
+            create_network_registry_key(key_path)?.set_value(value_name, &value)?;
+            Ok(())
         }
+        #[cfg(not(windows))]
+        anyhow::bail!("Network registry changes require Windows")
     }
 
     fn write_relay_qos_policy(policy_name: &str, exe: &str) -> Result<()> {
@@ -638,7 +648,7 @@ impl NetworkBooster {
     }
 
     fn remove_relay_socket_qos_policy(&mut self) -> Result<()> {
-        Self::cleanup_relay_socket_qos_policies();
+        Self::cleanup_relay_socket_qos_policies()?;
         self.restore_qos_registry_snapshot()
     }
 
@@ -920,7 +930,9 @@ pub fn cleanup_all_system_state() -> Result<()> {
     // 2. Delete SwiftTunnel QoS policies from older releases and the current
     // relay-scoped DSCP policy.
     NetworkBooster::cleanup_removed_qos_policies();
-    NetworkBooster::cleanup_relay_socket_qos_policies();
+    if let Err(error) = NetworkBooster::cleanup_relay_socket_qos_policies() {
+        warn!("Cleanup: relay QoS policy removal failed: {error}");
+    }
 
     info!(
         "Cleanup: leaving global TCP/QoS registry values untouched unless a persisted SwiftTunnel snapshot restored them"
@@ -986,6 +998,50 @@ impl Default for NetworkBooster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_registry_targets_keep_the_expected_hive_and_reject_malformed_paths() {
+        for path in [
+            NETWORK_SYSTEM_PROFILE_KEY,
+            TCPIP_QOS_KEY,
+            TCPIP_PARAMETERS_KEY,
+            &NetworkBooster::qos_policy_path("SwiftTunnel_RelaySocketQoS_SwiftTunnel"),
+        ] {
+            assert_eq!(
+                network_registry_subkey(path).unwrap(),
+                path.strip_prefix("HKLM\\").unwrap()
+            );
+        }
+        for path in [
+            "",
+            "HKLM",
+            "HKLM\\",
+            "HKCU\\Software\\SwiftTunnel",
+            "HKLM\\SOFTWARE\\",
+            "HKLM\\SOFT\0WARE",
+        ] {
+            assert!(network_registry_subkey(path).is_err(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn qos_key_removal_cannot_select_an_unrelated_or_parent_key() {
+        for policy in [
+            REMOVED_QOS_POLICY_NAMES[0],
+            "SwiftTunnel_RelaySocketQoS_SwiftTunnel",
+        ] {
+            let path = NetworkBooster::qos_policy_path(policy);
+            assert!(qos_registry_subkey(&path).is_ok());
+        }
+        for path in [
+            TCPIP_PARAMETERS_KEY,
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS",
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\OtherApp",
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\QoS\SwiftTunnel_RelaySocketQoS_SwiftTunnel\nested",
+        ] {
+            assert!(qos_registry_subkey(path).is_err(), "{path}");
+        }
+    }
 
     fn adapter_query_result(stdout: &str) -> crate::BoundedCommandOutput {
         crate::BoundedCommandOutput {
