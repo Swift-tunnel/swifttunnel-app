@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
+#[cfg(all(test, windows))]
+use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
 #[cfg(windows)]
-use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, SetFileAttributesW,
-};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, SetFileAttributesW};
 
 /// Current Roblox settings read from the XML file
 #[derive(Debug, Clone)]
@@ -331,13 +331,6 @@ impl RobloxOptimizer {
         value.trim().parse().ok()
     }
 
-    /// Remove read-only attribute from a file (Windows only)
-    #[cfg(windows)]
-    #[allow(dead_code)]
-    fn remove_readonly(&self) -> Result<()> {
-        Self::remove_readonly_path(&self.settings_path)
-    }
-
     #[cfg(windows)]
     fn remove_readonly_path(path: &Path) -> Result<()> {
         use std::ffi::OsStr;
@@ -359,15 +352,7 @@ impl RobloxOptimizer {
         Ok(())
     }
 
-    /// Set read-only attribute on a file (Windows only)
-    #[cfg(windows)]
-    #[allow(dead_code)]
-    fn set_readonly(&self) -> Result<()> {
-        Self::set_readonly_path(&self.settings_path)
-    }
-
-    #[cfg(windows)]
-    #[allow(dead_code)]
+    #[cfg(all(test, windows))]
     fn set_readonly_path(path: &Path) -> Result<()> {
         use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
@@ -384,15 +369,7 @@ impl RobloxOptimizer {
             )?;
         }
 
-        info!("Set read-only attribute on settings file to prevent Roblox from overwriting");
         Ok(())
-    }
-
-    /// Check if file is read-only (Windows only)
-    #[cfg(windows)]
-    #[allow(dead_code)]
-    fn is_readonly(&self) -> bool {
-        Self::is_readonly_path(&self.settings_path)
     }
 
     #[cfg(windows)]
@@ -406,11 +383,6 @@ impl RobloxOptimizer {
     }
 
     #[cfg(not(windows))]
-    fn remove_readonly(&self) -> Result<()> {
-        Self::remove_readonly_path(&self.settings_path)
-    }
-
-    #[cfg(not(windows))]
     fn remove_readonly_path(path: &Path) -> Result<()> {
         // On non-Windows, use permissions
         use std::os::unix::fs::PermissionsExt;
@@ -420,23 +392,13 @@ impl RobloxOptimizer {
         Ok(())
     }
 
-    #[cfg(not(windows))]
-    fn set_readonly(&self) -> Result<()> {
-        Self::set_readonly_path(&self.settings_path)
-    }
-
-    #[cfg(not(windows))]
+    #[cfg(all(test, not(windows)))]
     fn set_readonly_path(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(path)?.permissions();
         perms.set_mode(0o444); // r--r--r--
         fs::set_permissions(path, perms)?;
         Ok(())
-    }
-
-    #[cfg(not(windows))]
-    fn is_readonly(&self) -> bool {
-        Self::is_readonly_path(&self.settings_path)
     }
 
     #[cfg(not(windows))]
@@ -1034,12 +996,6 @@ impl RobloxOptimizer {
             width as u32,
             height as u32,
         ))
-    }
-
-    /// Backup current Roblox settings
-    #[allow(dead_code)]
-    fn backup_settings(&self) -> Result<()> {
-        self.backup_settings_for(&self.settings_path)
     }
 
     /// Snapshot Roblox's settings the first time, and only the first time.
@@ -1909,19 +1865,6 @@ impl RobloxOptimizer {
         ("Voidstrap-QA", &["VoidstrapMods", "ClientSettings"]),
     ];
 
-    /// Find the current Roblox version folder under LOCALAPPDATA.
-    /// Returns the path to the latest version-* directory with RobloxPlayerBeta.exe.
-    fn find_roblox_version_folder() -> Option<PathBuf> {
-        let local_app_data = std::env::var("LOCALAPPDATA").ok()?;
-        Self::find_roblox_version_folder_in(&PathBuf::from(local_app_data))
-    }
-
-    fn find_roblox_version_folder_in(local_app_data: &Path) -> Option<PathBuf> {
-        Self::find_roblox_version_folders_in(local_app_data)
-            .into_iter()
-            .next()
-    }
-
     /// A fingerprint of every Roblox client install on this machine.
     ///
     /// Changes when Roblox updates, because an update lands as a new
@@ -2096,16 +2039,6 @@ impl RobloxOptimizer {
         }
     }
 
-    /// Get the ClientSettings folder path (creates it if needed).
-    #[allow(dead_code)]
-    fn get_client_settings_path() -> Result<Option<PathBuf>> {
-        let version_folder = match Self::find_roblox_version_folder() {
-            Some(path) => path,
-            None => return Ok(None),
-        };
-        Self::get_client_settings_path_for_version(&version_folder)
-    }
-
     fn get_client_settings_paths(create_missing: bool) -> Result<Vec<PathBuf>> {
         let Some(local_app_data) = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from) else {
             return Ok(Vec::new());
@@ -2217,23 +2150,6 @@ impl RobloxOptimizer {
                 paths.push(client_settings);
             }
         }
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn get_client_settings_path_for_local_app_data(
-        local_app_data: &Path,
-    ) -> Result<Option<PathBuf>> {
-        let version_folder = match Self::find_roblox_version_folder_in(local_app_data) {
-            Some(path) => path,
-            None => return Ok(None),
-        };
-        Self::get_client_settings_path_for_version(&version_folder)
-    }
-
-    #[allow(dead_code)]
-    fn get_client_settings_path_for_version(version_folder: &Path) -> Result<Option<PathBuf>> {
-        Self::get_client_settings_path_for_version_checked(version_folder, true)
     }
 
     fn get_client_settings_paths_for_versions(
