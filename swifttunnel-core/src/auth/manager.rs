@@ -28,6 +28,26 @@ const OAUTH_LOGIN_PATH: &str = "/login";
 const MAX_REFRESH_RETRIES: u32 = 3;
 const TRANSIENT_REFRESH_BACKOFF: StdDuration = StdDuration::from_secs(30);
 
+#[derive(Clone, Copy)]
+enum RefreshPurpose {
+    Access,
+    ProfileCheck,
+}
+
+fn session_for_refresh(
+    state: AuthState,
+    purpose: RefreshPurpose,
+) -> Result<AuthSession, AuthError> {
+    match (state, purpose) {
+        (AuthState::LoggedIn(session), _)
+        | (AuthState::Banned(session), RefreshPurpose::ProfileCheck) => Ok(session),
+        (AuthState::Banned(session), RefreshPurpose::Access) => Err(AuthError::UserBanned(
+            AuthManager::ban_suffix(&session.user.banned_reason),
+        )),
+        _ => Err(AuthError::NotAuthenticated),
+    }
+}
+
 #[derive(Default)]
 struct RefreshBackoff {
     deadline: Option<Instant>,
@@ -372,15 +392,11 @@ impl AuthManager {
     /// - Retry logic with exponential backoff
     /// - Silent failure handling (keeps user logged in with stale data)
     pub async fn refresh_if_needed(&self) -> Result<(), AuthError> {
-        let session = match self.get_state() {
-            AuthState::LoggedIn(session) => session,
-            AuthState::Banned(session) => {
-                return Err(AuthError::UserBanned(Self::ban_suffix(
-                    &session.user.banned_reason,
-                )));
-            }
-            _ => return Err(AuthError::NotAuthenticated),
-        };
+        self.refresh_session_if_needed(RefreshPurpose::Access).await
+    }
+
+    async fn refresh_session_if_needed(&self, purpose: RefreshPurpose) -> Result<(), AuthError> {
+        let session = session_for_refresh(self.get_state(), purpose)?;
 
         // Check if refresh is needed (expired OR expiring soon)
         let needs_refresh = session.is_expired() || session.expires_soon();
@@ -567,16 +583,19 @@ impl AuthManager {
         // it matters, while leaving an alarming error in the log. Refresh first
         // and use the token that comes back.
         //
-        // The session is re-read afterwards because a refresh replaces it: the
-        // copy taken before would be the stale one.
-        let access_token = self.get_access_token().await?;
+        // Banned sessions may check their profile, but must not obtain an
+        // ordinary access token or become LoggedIn just to make this request.
+        // Only a successful server response can clear the saved ban. Expired
+        // sessions still follow the existing refresh/revocation/backoff rules.
+        self.refresh_session_if_needed(RefreshPurpose::ProfileCheck)
+            .await?;
 
         let session = match self.get_state() {
             AuthState::LoggedIn(session) | AuthState::Banned(session) => session,
             _ => return Ok(()),
         };
 
-        let profile = match self.client.fetch_user_profile(&access_token).await {
+        let profile = match self.client.fetch_user_profile(&session.access_token).await {
             Ok(profile) => profile,
             Err(AuthError::UserBanned(reason)) => {
                 let mut banned_session = session;
@@ -1017,6 +1036,142 @@ mod tests {
     use super::AuthManager;
     use crate::auth::types::{SupabaseAuthResponse, SupabaseUser};
     use url::form_urlencoded;
+
+    #[tokio::test]
+    async fn a_failed_ban_recheck_reaches_transport_without_unlocking_account_access() {
+        use super::*;
+        let storage_path = std::env::temp_dir().join(format!(
+            "swifttunnel-ban-recheck-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        assert!(!storage_path.exists());
+        let mut session = AuthManager::session_from_auth_response(
+            SupabaseAuthResponse {
+                access_token: "fixture-access".into(),
+                refresh_token: "fixture-refresh".into(),
+                expires_in: 3600,
+                expires_at: None,
+                token_type: "bearer".into(),
+                user: SupabaseUser {
+                    id: "fixture-user".into(),
+                    email: None,
+                },
+            },
+            "fixture@example.invalid".into(),
+            false,
+            true,
+            Some("fixture reason".into()),
+            None,
+        );
+        session.expires_at = Utc::now() + Duration::hours(1);
+        let original = AuthState::Banned(session);
+        let manager = AuthManager {
+            state: Arc::new(Mutex::new(original.clone())),
+            storage: SecureStorage::with_test_directory(storage_path.clone()),
+            client: AuthClient::unavailable_for_test(),
+            oauth_server: Arc::new(Mutex::new(None)),
+            refresh_backoff: Arc::new(Mutex::new(RefreshBackoff::default())),
+        };
+        assert!(matches!(
+            manager.get_access_token().await,
+            Err(AuthError::UserBanned(_))
+        ));
+        // A working recheck reaches the profile transport. The fixture never
+        // opens a socket or uses the machine's credential store.
+        assert!(matches!(
+            manager.refresh_profile().await,
+            Err(AuthError::NetworkError(_))
+        ));
+        assert_eq!(manager.get_state(), original);
+        assert!(matches!(
+            manager.get_access_token().await,
+            Err(AuthError::UserBanned(_))
+        ));
+        let AuthState::Banned(mut expired) = manager.get_state() else {
+            panic!("failed recheck must preserve the ban");
+        };
+        expired.expires_at = Utc::now() - Duration::seconds(1);
+        *manager.state.lock() = AuthState::Banned(expired.clone());
+        *manager.refresh_backoff.lock() = RefreshBackoff {
+            deadline: Some(Instant::now() + StdDuration::from_secs(30)),
+            rate_limited: true,
+        };
+        assert!(matches!(
+            manager.refresh_profile().await,
+            Err(AuthError::RateLimited(_))
+        ));
+        assert_eq!(manager.get_state(), AuthState::Banned(expired));
+        assert!(
+            !storage_path.exists(),
+            "no credential file should be written after failure"
+        );
+    }
+
+    #[test]
+    fn a_saved_ban_allows_only_a_profile_check_until_the_server_clears_it() {
+        use super::{AuthError, AuthSession, AuthState, RefreshPurpose, session_for_refresh};
+        use crate::auth::{http_client::UserProfileResponse, types::UserInfo};
+        let session = AuthSession {
+            access_token: "fixture-access".into(),
+            refresh_token: "fixture-refresh".into(),
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            user: UserInfo {
+                id: "fixture-user".into(),
+                email: "fixture@example.invalid".into(),
+                is_tester: false,
+                is_banned: true,
+                banned_reason: Some("fixture reason".into()),
+                banned_at: Some("2026-10-25T00:00:00Z".into()),
+            },
+        };
+        let state = AuthState::Banned(session.clone());
+        assert!(matches!(
+            session_for_refresh(state.clone(), RefreshPurpose::Access),
+            Err(AuthError::UserBanned(reason)) if reason == ": fixture reason"
+        ));
+        let for_check = session_for_refresh(state.clone(), RefreshPurpose::ProfileCheck).unwrap();
+        assert_eq!(for_check, session);
+        // Obtaining the session for the status request never publishes access.
+        assert!(matches!(state, AuthState::Banned(_)));
+        assert!(matches!(
+            session_for_refresh(state, RefreshPurpose::Access),
+            Err(AuthError::UserBanned(_))
+        ));
+
+        let profile = UserProfileResponse {
+            id: session.user.id.clone(),
+            full_name: None,
+            username: None,
+            is_admin: false,
+            is_tester: false,
+            is_banned: false,
+            banned_reason: None,
+            banned_at: None,
+        };
+        let updated = AuthManager::session_from_profile(for_check, profile);
+        assert!(!updated.user.is_banned);
+        assert!(updated.user.banned_reason.is_none());
+        assert!(updated.user.banned_at.is_none());
+        assert!(session_for_refresh(AuthState::LoggedIn(updated), RefreshPurpose::Access).is_ok());
+
+        for state in [
+            AuthState::LoggedOut,
+            AuthState::LoggingIn,
+            AuthState::Error("fixture".into()),
+            AuthState::AwaitingOAuthCallback(crate::auth::types::OAuthPendingState {
+                state: "fixture".into(),
+                started_at: chrono::Utc::now(),
+            }),
+        ] {
+            for purpose in [RefreshPurpose::Access, RefreshPurpose::ProfileCheck] {
+                assert!(matches!(
+                    session_for_refresh(state.clone(), purpose),
+                    Err(AuthError::NotAuthenticated)
+                ));
+            }
+        }
+    }
 
     #[test]
     fn failed_login_persistence_ends_logging_in_and_allows_a_later_retry() {

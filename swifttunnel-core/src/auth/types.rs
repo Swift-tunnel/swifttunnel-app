@@ -15,7 +15,8 @@ pub enum AuthState {
     AwaitingOAuthCallback(OAuthPendingState),
     /// Logged in with valid tokens
     LoggedIn(AuthSession),
-    /// Account is banned; tokens are kept only to display ban details and allow sign-out.
+    /// Account is banned. Retained tokens allow status rechecks and sign-out,
+    /// while ordinary authenticated access remains blocked.
     Banned(AuthSession),
     /// Error state
     Error(String),

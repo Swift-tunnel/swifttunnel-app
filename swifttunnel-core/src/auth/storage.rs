@@ -263,6 +263,14 @@ impl SecureStorage {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn with_test_directory(data_dir: PathBuf) -> Self {
+        Self {
+            keyring_entry: None,
+            data_dir,
+        }
+    }
+
     /// Bytes to mix into the session key alongside the machine id. The data
     /// directory is naturally per-user on Windows (`%LOCALAPPDATA%`), so
     /// using it as the bind distinguishes ordinary profile copies. The path

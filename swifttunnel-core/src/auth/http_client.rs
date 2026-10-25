@@ -254,6 +254,15 @@ where
 }
 
 impl AuthClient {
+    #[cfg(test)]
+    pub(super) fn unavailable_for_test() -> Self {
+        Self {
+            client: Err("fixture transport unavailable".into()),
+            direct_client: Err("fixture transport unavailable".into()),
+            device_hwid: None,
+        }
+    }
+
     /// Create a new AuthClient
     pub fn new() -> Self {
         let client = build_http_client(true);
