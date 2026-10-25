@@ -375,5 +375,5 @@ export function useOverlayDriver() {
       disposed = true;
       unlisten?.();
     };
-  }, []);
+  }, [overlay.enabled]);
 }
