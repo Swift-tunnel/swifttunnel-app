@@ -19,6 +19,7 @@ use super::{VpnError, VpnResult};
 use crate::auth::http_client::AuthClient;
 use crate::auth::types::{AuthError, RelayPreflightMode, RelayQueueFullMode, VpnConfig};
 use crate::settings::GameProcessPerformanceSettings;
+use crate::utils::blocking_step as blocking_driver_step;
 use crossbeam_channel::Receiver;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -30,20 +31,6 @@ use tokio::sync::{Mutex, watch};
 /// Lower = faster detection of new processes, slightly higher CPU
 /// 500ms balances detection speed with CPU usage
 const REFRESH_INTERVAL_MS: u64 = 500;
-
-/// Let other runtime tasks continue during synchronous driver and process tuning operations.
-/// Keep the operation on this stack so cancellation cannot abandon an owned
-/// driver halfway through configuration. Non-threaded callers retain their
-/// existing synchronous behavior instead of panicking in block_in_place.
-fn blocking_driver_step<T>(work: impl FnOnce() -> T) -> T {
-    if tokio::runtime::Handle::try_current()
-        .is_ok_and(|runtime| runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
-    {
-        tokio::task::block_in_place(work)
-    } else {
-        work()
-    }
-}
 
 /// How long after a successful connect we keep the local-connectivity watchdog
 /// armed. The point of the watchdog is specifically to catch *adapter-reset

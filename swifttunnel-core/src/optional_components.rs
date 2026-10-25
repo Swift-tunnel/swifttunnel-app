@@ -30,6 +30,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::utils::blocking_step;
 use sha2::{Digest, Sha256};
 
 /// Where components are served from.
@@ -327,11 +328,11 @@ pub async fn ensure_installed(component: &OptionalComponent) -> Result<PathBuf, 
     static INSTALL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _install = INSTALL.lock().await;
     let root = component_dir(component);
-    if is_installed(component) {
+    if blocking_step(|| is_installed(component)) {
         return Ok(root);
     }
 
-    let staging = Staging::create(&root)?;
+    let staging = blocking_step(|| Staging::create(&root))?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
@@ -362,45 +363,50 @@ pub async fn ensure_installed(component: &OptionalComponent) -> Result<PathBuf, 
 
         let bytes = read_component_body(response, file).await?;
 
-        let actual = sha256_of(&bytes);
-        if actual != file.sha256 {
-            return Err(ComponentError::HashMismatch {
-                file: file.relative_path.to_string(),
-                expected: file.sha256.to_string(),
-                actual,
-            });
-        }
+        blocking_step(|| {
+            let actual = sha256_of(&bytes);
+            if actual != file.sha256 {
+                return Err(ComponentError::HashMismatch {
+                    file: file.relative_path.to_string(),
+                    expected: file.sha256.to_string(),
+                    actual,
+                });
+            }
 
-        let dest = staging.path.join(file.relative_path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| ComponentError::Io {
-                context: format!("could not create {}", parent.display()),
+            let dest = staging.path.join(file.relative_path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|source| ComponentError::Io {
+                    context: format!("could not create {}", parent.display()),
+                    source,
+                })?;
+            }
+            std::fs::write(&dest, &bytes).map_err(|source| ComponentError::Io {
+                context: format!("could not write {}", dest.display()),
                 source,
             })?;
-        }
-        std::fs::write(&dest, &bytes).map_err(|source| ComponentError::Io {
-            context: format!("could not write {}", dest.display()),
-            source,
+            Ok(())
         })?;
     }
 
     // Swap in only after every file has been verified.
-    promote(&staging.path, &root)?;
+    blocking_step(|| {
+        promote(&staging.path, &root)?;
 
-    // Re-check after landing. A file that verified a moment ago and is now gone
-    // was taken by something else on the machine, and on Windows that is
-    // antivirus. Naming it lets the caller explain the failure instead of
-    // reporting a mystery.
-    for file in component.files {
-        let path = root.join(file.relative_path);
-        if !path.exists() {
-            return Err(ComponentError::Quarantined {
-                file: file.relative_path.to_string(),
-            });
+        // Re-check after landing. A file that verified a moment ago and is now gone
+        // was taken by something else on the machine, and on Windows that is
+        // antivirus. Naming it lets the caller explain the failure instead of
+        // reporting a mystery.
+        for file in component.files {
+            let path = root.join(file.relative_path);
+            if !path.exists() {
+                return Err(ComponentError::Quarantined {
+                    file: file.relative_path.to_string(),
+                });
+            }
         }
-    }
 
-    Ok(root)
+        Ok(root)
+    })
 }
 
 async fn read_component_body(
@@ -473,9 +479,11 @@ impl Staging {
 impl Drop for Staging {
     fn drop(&mut self) {
         // Only the unique directory created by this attempt is ours to remove.
-        if crate::roblox_native_launch::safe_path(&self.path).is_ok() {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+        blocking_step(|| {
+            if crate::roblox_native_launch::safe_path(&self.path).is_ok() {
+                let _ = std::fs::remove_dir_all(&self.path);
+            }
+        });
     }
 }
 fn component_io(context: &str, source: std::io::Error) -> ComponentError {

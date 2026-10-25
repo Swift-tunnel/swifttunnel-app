@@ -5,6 +5,19 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
+/// Keep synchronous OS/file work owned by its caller while allowing other
+/// tasks on a multithreaded runtime to continue. This does not cancel or put
+/// a time limit on the work. Non-threaded callers retain synchronous behavior.
+pub(crate) fn blocking_step<T>(work: impl FnOnce() -> T) -> T {
+    if tokio::runtime::Handle::try_current()
+        .is_ok_and(|runtime| runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+    {
+        tokio::task::block_in_place(work)
+    } else {
+        work()
+    }
+}
+
 /// Bound old local-text readers as well as HTTP responses. Metadata catches
 /// already oversized files; Take also protects against growth during reading.
 pub fn read_text_file_bounded(
@@ -1026,6 +1039,31 @@ mod error_chain_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn cancelling_a_blocking_step_keeps_its_operation_owned_until_it_returns() {
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let worker_gate = gate.clone();
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let worker_started = started.clone();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let task = tokio::spawn(async move {
+            let _operation = worker_gate.lock().await;
+            blocking_step(|| {
+                worker_started.notify_one();
+                waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+            });
+        });
+        started.notified().await;
+        task.abort();
+        assert!(
+            gate.try_lock().is_err(),
+            "the physical operation still owns admission"
+        );
+        release.send(()).unwrap();
+        let _ = task.await;
+        assert!(gate.try_lock().is_ok());
+    }
 
     #[cfg(windows)]
     #[test]
