@@ -163,6 +163,101 @@ fn parse_body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String>
         .map_err(|_| "The server directory returned an unexpected response.".into())
 }
 
+#[derive(Clone, Copy)]
+enum DirectoryService {
+    Rovalra,
+    Roblox,
+}
+
+impl DirectoryService {
+    fn for_url(url: &reqwest::Url) -> Result<Self, String> {
+        match url.host_str() {
+            Some("apis.rovalra.com") => Ok(Self::Rovalra),
+            Some("games.roblox.com") => Ok(Self::Roblox),
+            _ => Err("Unexpected server directory address.".into()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct DirectoryCooldowns([Option<Instant>; 2]);
+
+impl DirectoryCooldowns {
+    fn check(&self, service: DirectoryService, now: Instant) -> Result<(), String> {
+        if let Some(deadline) = self.0[service as usize] {
+            let remaining = deadline.saturating_duration_since(now);
+            if !remaining.is_zero() {
+                let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+                let suffix = if seconds == 1 { "" } else { "s" };
+                return Err(format!(
+                    "Server search is busy. Try again in {seconds} second{suffix}."
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn defer(&mut self, service: DirectoryService, now: Instant, delay: Duration) {
+        let deadline = now + delay.clamp(Duration::from_secs(1), Duration::from_secs(300));
+        let slot = &mut self.0[service as usize];
+        *slot = Some(slot.map_or(deadline, |previous| previous.max(deadline)));
+    }
+}
+
+fn retry_delay(headers: &reqwest::header::HeaderMap) -> Duration {
+    let raw = headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim);
+    let delay = raw.and_then(|raw| {
+        if let Ok(seconds) = raw.parse::<u64>() {
+            return Some(Duration::from_secs(seconds));
+        }
+        let deadline = chrono::DateTime::parse_from_rfc2822(raw).ok()?;
+        // Prefer the response's clock when parsing an HTTP date, since the
+        // player's Windows clock may be incorrect.
+        let now = headers
+            .get(reqwest::header::DATE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| chrono::DateTime::parse_from_rfc2822(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc))
+            .unwrap_or_else(chrono::Utc::now);
+        Some(
+            (deadline.with_timezone(&chrono::Utc) - now)
+                .to_std()
+                .unwrap_or_default(),
+        )
+    });
+    delay
+        .unwrap_or(Duration::from_secs(60))
+        .clamp(Duration::from_secs(1), Duration::from_secs(300))
+}
+
+async fn directory_response(
+    cooldowns: &Mutex<DirectoryCooldowns>,
+    service: DirectoryService,
+    fetch: impl std::future::Future<Output = Result<reqwest::Response, reqwest::Error>>,
+) -> Result<reqwest::Response, String> {
+    cooldowns
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .check(service, Instant::now())?;
+    let response = fetch
+        .await
+        .map_err(|_| "Could not reach the server directory. Try again shortly.".to_string())?;
+    if matches!(response.status().as_u16(), 429 | 503) {
+        // Record the cooldown before touching a potentially broken error body.
+        // New searches and other pages share it; the other service is separate.
+        let now = Instant::now();
+        let mut cooldowns = cooldowns.lock().unwrap_or_else(|p| p.into_inner());
+        cooldowns.defer(service, now, retry_delay(response.headers()));
+        cooldowns.check(service, now)?;
+    }
+    response
+        .error_for_status()
+        .map_err(|_| "Server information is temporarily unavailable.".to_string())
+}
+
 async fn json<T: serde::de::DeserializeOwned>(url: reqwest::Url) -> Result<T, String> {
     if rovalra_cacheable(&url) {
         let key = url.as_str().to_string();
@@ -206,21 +301,21 @@ async fn cached_json<T: serde::de::DeserializeOwned>(
 }
 
 async fn fetch_json_body(url: reqwest::Url) -> Result<Vec<u8>, String> {
-    let response = client()
-        .map_err(|error| {
-            log::warn!("Could not initialize the server-directory client: {error}");
-            "Could not prepare the server search. Restart SwiftTunnel and try again.".to_string()
-        })?
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| "Could not reach the server directory. Try again shortly.".to_string())?;
-    if response.status().as_u16() == 429 {
-        return Err("The server directory is busy. Wait a moment before searching again.".into());
-    }
-    let response = response
-        .error_for_status()
-        .map_err(|_| "Server information is temporarily unavailable.".to_string())?;
+    static COOLDOWNS: Mutex<DirectoryCooldowns> = Mutex::new(DirectoryCooldowns([None; 2]));
+    let service = DirectoryService::for_url(&url)?;
+    let response = directory_response(
+        &COOLDOWNS,
+        service,
+        client()
+            .map_err(|error| {
+                log::warn!("Could not initialize the server-directory client: {error}");
+                "Could not prepare the server search. Restart SwiftTunnel and try again."
+                    .to_string()
+            })?
+            .get(url)
+            .send(),
+    )
+    .await?;
     read_bounded(response, 512 * 1024, "server directory").await
 }
 fn relay_region(city: &str, country: &str) -> Option<&'static str> {
@@ -533,6 +628,125 @@ mod tests {
         sync::Arc,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn directory_cooldowns_expire_without_blocking_the_other_service() {
+        let now = Instant::now();
+        let mut cooldowns = DirectoryCooldowns::default();
+        cooldowns.defer(DirectoryService::Rovalra, now, Duration::from_secs(67));
+        cooldowns.defer(DirectoryService::Rovalra, now, Duration::from_secs(2));
+        assert!(
+            cooldowns
+                .check(DirectoryService::Rovalra, now)
+                .unwrap_err()
+                .contains("67 seconds")
+        );
+        assert!(cooldowns.check(DirectoryService::Roblox, now).is_ok());
+        assert!(
+            cooldowns
+                .check(
+                    DirectoryService::Rovalra,
+                    now + Duration::from_millis(66_001)
+                )
+                .unwrap_err()
+                .contains("1 second.")
+        );
+        assert!(
+            cooldowns
+                .check(DirectoryService::Rovalra, now + Duration::from_secs(67))
+                .is_ok()
+        );
+        cooldowns.defer(DirectoryService::Roblox, now, Duration::MAX);
+        assert!(
+            cooldowns
+                .check(DirectoryService::Roblox, now + Duration::from_secs(300))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn directory_retry_headers_support_seconds_and_http_dates_with_bounded_fallbacks() {
+        use reqwest::header::{DATE, HeaderMap, RETRY_AFTER};
+        let mut headers = HeaderMap::new();
+        assert_eq!(retry_delay(&headers), Duration::from_secs(60));
+        for (raw, seconds) in [
+            ("67", 67),
+            ("0", 1),
+            ("18446744073709551615", 300),
+            ("broken", 60),
+        ] {
+            headers.insert(RETRY_AFTER, raw.parse().unwrap());
+            assert_eq!(retry_delay(&headers), Duration::from_secs(seconds));
+        }
+        headers.insert(DATE, "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap());
+        headers.insert(
+            RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:29:07 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_delay(&headers), Duration::from_secs(67));
+        headers.insert(
+            RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:27:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(retry_delay(&headers), Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn throttled_directory_responses_stop_subsequent_fetches_before_reading_the_body() {
+        use std::io::{Read, Write};
+        for status in [429, 503, 400, 200] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                socket.read(&mut request).unwrap();
+                // The error body is intentionally truncated, so classification
+                // must use headers rather than waiting for/parsing its content.
+                write!(socket, "HTTP/1.1 {status} Fixture\r\nRetry-After: 67\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n").unwrap();
+            });
+            let cooldowns = Mutex::new(DirectoryCooldowns::default());
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(2))
+                .build()
+                .unwrap();
+            let result = directory_response(
+                &cooldowns,
+                DirectoryService::Rovalra,
+                client.get(format!("http://{address}")).send(),
+            )
+            .await;
+            server.join().unwrap();
+            if matches!(status, 429 | 503) {
+                assert!(result.unwrap_err().contains("67 seconds"));
+                let blocked = directory_response(&cooldowns, DirectoryService::Rovalra, async {
+                    panic!("a new page/search must not repeat the request during cooldown")
+                })
+                .await;
+                assert!(blocked.is_err());
+                assert!(
+                    cooldowns
+                        .lock()
+                        .unwrap()
+                        .check(DirectoryService::Roblox, Instant::now())
+                        .is_ok()
+                );
+            } else {
+                assert_eq!(result.is_ok(), status == 200);
+                assert!(
+                    cooldowns
+                        .lock()
+                        .unwrap()
+                        .check(DirectoryService::Rovalra, Instant::now())
+                        .is_ok()
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn overlapping_directory_searches_share_a_fetch_without_blocking_other_urls() {
