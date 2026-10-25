@@ -4,6 +4,7 @@
 //! it applies to Roblox browser/login/bootstrap traffic without taking
 //! ownership of Route Assist or relay routing.
 
+use crate::utils::blocking_step;
 use log::{debug, info, warn};
 use std::collections::HashSet;
 use std::fs;
@@ -13,7 +14,6 @@ use std::time::{Duration, Instant};
 
 const GOODBYEDPI_ENV_PATH: &str = "SWIFTTUNNEL_GOODBYEDPI_PATH";
 const GOODBYEDPI_EXE_NAME: &str = "goodbyedpi.exe";
-const HOSTLIST_NAME: &str = "roblox-hostlist.txt";
 /// HTTPS endpoint used to confirm a GoodbyeDPI mode actually defeats the DPI.
 /// This must be a real TLS request: a bare TCP connect to :443 succeeds even
 /// where the censor RST-injects *after* the TLS ClientHello (Egypt-style SNI
@@ -152,14 +152,16 @@ async fn start_for_roblox_inner() -> Result<Option<GoodbyeDpiGuard>, String> {
         return Ok(None);
     }
 
-    let (exe_path, verified_files) = match locate_goodbyedpi_executable(native_arch) {
+    let (exe_path, verified_files) = match blocking_step(|| {
+        locate_goodbyedpi_executable(native_arch)
+    }) {
         Some(found) => found,
         None => {
             // Not shipped in the installer any more, so the first user to turn
             // this on fetches it. Every failure here is survivable: the relay
             // already carries this traffic and needs none of it.
             match ensure_goodbyedpi_component(native_arch).await {
-                Ok(()) => match locate_goodbyedpi_executable(native_arch) {
+                Ok(()) => match blocking_step(|| locate_goodbyedpi_executable(native_arch)) {
                     Some(found) => found,
                     None => {
                         warn!(
@@ -176,7 +178,7 @@ async fn start_for_roblox_inner() -> Result<Option<GoodbyeDpiGuard>, String> {
         }
     };
 
-    let hostlist_path = write_roblox_hostlist()?;
+    let hostlist_path = blocking_step(write_roblox_hostlist)?;
     let mut pending_hostlist = PendingHostlist(Some(hostlist_path.clone()));
     let mut failures = Vec::new();
     let escalation_start = Instant::now();
@@ -192,7 +194,7 @@ async fn start_for_roblox_inner() -> Result<Option<GoodbyeDpiGuard>, String> {
             break;
         }
         let args = build_goodbyedpi_args(mode, &hostlist_path);
-        let child = match spawn_goodbyedpi(&exe_path, &args) {
+        let child = match blocking_step(|| spawn_goodbyedpi(&exe_path, &args)) {
             Ok(child) => child,
             Err(e) => {
                 failures.push(format!("-{mode}: {e}"));
@@ -351,6 +353,14 @@ fn locate_goodbyedpi_executable(arch: GoodbyeDpiNativeArch) -> Option<(PathBuf, 
 
 fn write_roblox_hostlist() -> Result<PathBuf, String> {
     let dir = goodbyedpi_data_dir();
+    write_roblox_hostlist_in(&dir)
+}
+
+fn write_roblox_hostlist_in(dir: &Path) -> Result<PathBuf, String> {
+    use std::io::Write;
+    crate::roblox_native_launch::safe_path(dir).map_err(|_| {
+        "The bypass helper folder is redirected. Repair SwiftTunnel and retry.".to_string()
+    })?;
     fs::create_dir_all(&dir).map_err(|e| {
         format!(
             "Failed to create GoodbyeDPI data directory {}: {e}",
@@ -358,14 +368,32 @@ fn write_roblox_hostlist() -> Result<PathBuf, String> {
         )
     })?;
 
-    let path = dir.join(HOSTLIST_NAME);
-    fs::write(&path, roblox_hostlist_contents()).map_err(|e| {
-        format!(
-            "Failed to write GoodbyeDPI Roblox hostlist {}: {e}",
-            path.display()
-        )
-    })?;
-    Ok(path)
+    // Never truncate the old fixed name or share cleanup with another startup.
+    // create_new also refuses an already-existing hard link or redirected file.
+    for _ in 0..8 {
+        let path = dir.join(format!(
+            "roblox-hostlist.{}.{:016x}.txt",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not prepare the bypass hostlist: {error}")),
+        };
+        let written = file.write_all(roblox_hostlist_contents().as_bytes());
+        drop(file);
+        if let Err(error) = written {
+            let _ = remove_hostlist_file(&path);
+            return Err(format!("Could not save the bypass hostlist: {error}"));
+        }
+        return Ok(path);
+    }
+    Err("Could not prepare a new bypass hostlist. Retry the connection.".into())
 }
 
 fn goodbyedpi_data_dir() -> PathBuf {
@@ -377,11 +405,14 @@ fn goodbyedpi_data_dir() -> PathBuf {
 }
 
 fn remove_hostlist_file(path: &Path) -> Result<(), std::io::Error> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
+    blocking_step(|| {
+        crate::roblox_native_launch::safe_path(path).map_err(std::io::Error::other)?;
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    })
 }
 
 fn spawn_goodbyedpi(exe_path: &Path, args: &[String]) -> Result<Child, String> {
@@ -406,52 +437,54 @@ fn spawn_goodbyedpi(exe_path: &Path, args: &[String]) -> Result<Child, String> {
 }
 
 fn stop_child_process(child: &mut Child, exe_path: &Path) {
-    match child.try_wait() {
-        Ok(Some(status)) => {
-            debug!(
-                "GoodbyeDPI helper already stopped (status: {}, exe: {})",
-                status,
-                exe_path.display()
-            );
-        }
-        Ok(None) => {
-            if let Err(e) = child.kill() {
+    blocking_step(|| {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                debug!(
+                    "GoodbyeDPI helper already stopped (status: {}, exe: {})",
+                    status,
+                    exe_path.display()
+                );
+            }
+            Ok(None) => {
+                if let Err(e) = child.kill() {
+                    warn!(
+                        "Failed to stop GoodbyeDPI helper pid={} exe={}: {}",
+                        child.id(),
+                        exe_path.display(),
+                        e
+                    );
+                    // Waiting after a failed termination could block shutdown forever.
+                    return;
+                }
+                let deadline = Instant::now() + Duration::from_secs(1);
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if Instant::now() < deadline => {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        result => {
+                            warn!(
+                                "GoodbyeDPI termination could not be confirmed within one second: pid={} exe={} result={result:?}",
+                                child.id(),
+                                exe_path.display()
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
                 warn!(
-                    "Failed to stop GoodbyeDPI helper pid={} exe={}: {}",
+                    "Failed to inspect GoodbyeDPI helper pid={} exe={}: {}",
                     child.id(),
                     exe_path.display(),
                     e
                 );
-                // Waiting after a failed termination could block shutdown forever.
-                return;
-            }
-            let deadline = Instant::now() + Duration::from_secs(1);
-            loop {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    result => {
-                        warn!(
-                            "GoodbyeDPI termination could not be confirmed within one second: pid={} exe={} result={result:?}",
-                            child.id(),
-                            exe_path.display()
-                        );
-                        break;
-                    }
-                }
             }
         }
-        Err(e) => {
-            warn!(
-                "Failed to inspect GoodbyeDPI helper pid={} exe={}: {}",
-                child.id(),
-                exe_path.display(),
-                e
-            );
-        }
-    }
+    });
 }
 
 async fn roblox_https_reachable() -> bool {
@@ -576,6 +609,40 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct HostlistFixture(PathBuf);
+    impl Drop for HostlistFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn hostlists_never_overwrite_existing_files_or_share_cleanup() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-hostlist-owner-{:016x}",
+            rand::random::<u64>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let _fixture = HostlistFixture(dir.clone());
+        let preserved = dir.join("keep.txt");
+        fs::write(&preserved, b"unrelated contents").unwrap();
+        let old_name = dir.join("roblox-hostlist.txt");
+        fs::hard_link(&preserved, &old_name).unwrap();
+
+        let first = write_roblox_hostlist_in(&dir).unwrap();
+        assert_eq!(fs::read(&preserved).unwrap(), b"unrelated contents");
+        let second = write_roblox_hostlist_in(&dir).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            fs::read_to_string(&second).unwrap(),
+            roblox_hostlist_contents()
+        );
+        drop(PendingHostlist(Some(first.clone())));
+        assert!(!first.exists());
+        assert!(second.exists());
+        assert_eq!(fs::read(&old_name).unwrap(), b"unrelated contents");
+    }
 
     #[tokio::test]
     async fn stalled_optional_startup_times_out_and_cleans_owned_files() {
