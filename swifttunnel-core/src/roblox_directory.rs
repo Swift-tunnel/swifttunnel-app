@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::Ipv4Addr,
-    sync::{Arc, LazyLock, Mutex, Weak},
+    sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 
@@ -107,7 +107,7 @@ const ROVALRA_CACHE_ENTRIES: usize = 32;
 #[derive(Default)]
 struct ResponseCache {
     entries: HashMap<String, (Instant, Arc<[u8]>)>,
-    requests: HashMap<String, Weak<tokio::sync::Mutex<()>>>,
+    requests: crate::http_client::RequestSlots<String>,
 }
 impl ResponseCache {
     fn get(&mut self, key: &str, now: Instant) -> Option<Arc<[u8]>> {
@@ -138,18 +138,10 @@ impl ResponseCache {
 
     fn request(&mut self, key: &str) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
         self.requests
-            .retain(|_, request| request.strong_count() > 0);
-        if let Some(request) = self.requests.get(key).and_then(Weak::upgrade) {
-            return Ok(request);
-        }
-        if self.requests.len() >= ROVALRA_CACHE_ENTRIES {
-            return Err(
-                "The server directory is busy. Wait a moment before searching again.".into(),
-            );
-        }
-        let request = Arc::new(tokio::sync::Mutex::new(()));
-        self.requests.insert(key.into(), Arc::downgrade(&request));
-        Ok(request)
+            .request(key.into(), ROVALRA_CACHE_ENTRIES)
+            .ok_or_else(|| {
+                "The server directory is busy. Wait a moment before searching again.".into()
+            })
     }
 }
 static ROVALRA_RESPONSES: LazyLock<Mutex<ResponseCache>> = LazyLock::new(Default::default);

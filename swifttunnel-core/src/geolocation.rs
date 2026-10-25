@@ -9,7 +9,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 
 const GAME_SERVER_REGION_API_URL: &str = "https://www.swifttunnel.net/api/vpn/game-server-region";
@@ -34,20 +35,47 @@ fn get_semaphore() -> &'static Semaphore {
 /// re-hitting the web resolver for the same server across reconnects. The
 /// resolver already caches server-side, but every client call still costs a
 /// backend request (and counts toward hosting limits), so this trims real load.
-const REGION_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+const REGION_CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
 const REGION_CACHE_MAX_ENTRIES: usize = 4096;
-/// Cached region lookups keyed by game-server IP, with the time each was
-/// resolved so entries can age out.
-type RegionCache = Arc<Mutex<HashMap<Ipv4Addr, (GameServerRegionLookup, std::time::Instant)>>>;
-
-static REGION_CACHE: std::sync::OnceLock<RegionCache> = std::sync::OnceLock::new();
-
-fn get_region_cache() -> Arc<Mutex<HashMap<Ipv4Addr, (GameServerRegionLookup, std::time::Instant)>>>
-{
-    REGION_CACHE
-        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
-        .clone()
+const REGION_REQUEST_MAX_ENTRIES: usize = 32;
+#[derive(Default)]
+struct RegionCache {
+    entries: HashMap<Ipv4Addr, (GameServerRegionLookup, Instant)>,
+    requests: crate::http_client::RequestSlots<Ipv4Addr>,
 }
+impl RegionCache {
+    fn get(&mut self, ip: Ipv4Addr, now: Instant) -> Option<GameServerRegionLookup> {
+        match self.entries.get(&ip) {
+            Some((value, at)) if now.saturating_duration_since(*at) < REGION_CACHE_TTL => {
+                Some(value.clone())
+            }
+            Some(_) => {
+                self.entries.remove(&ip);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn put(&mut self, ip: Ipv4Addr, result: GameServerRegionLookup, now: Instant) {
+        if !matches!(result, GameServerRegionLookup::Failed) {
+            self.entries
+                .retain(|_, (_, at)| now.saturating_duration_since(*at) < REGION_CACHE_TTL);
+            if self.entries.len() >= REGION_CACHE_MAX_ENTRIES
+                && !self.entries.contains_key(&ip)
+                && let Some(oldest) = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, (_, at))| *at)
+                    .map(|(ip, _)| *ip)
+            {
+                self.entries.remove(&oldest);
+            }
+            self.entries.insert(ip, (result, now));
+        }
+    }
+}
+static REGION_CACHE: LazyLock<Mutex<RegionCache>> = LazyLock::new(Default::default);
 
 #[derive(Debug, Serialize)]
 struct GameServerRegionRequest {
@@ -357,43 +385,205 @@ pub async fn lookup_game_server_region(ip: Ipv4Addr) -> GameServerRegionLookup {
             location,
         );
     }
-    // Serve a fresh cached answer if we have one — regions are stable, so this
-    // avoids re-resolving the same server on reconnects/new sessions.
-    {
-        let cache = get_region_cache();
-        let guard = cache.lock();
-        if let Some((cached, at)) = guard.get(&ip)
-            && at.elapsed() < REGION_CACHE_TTL
-        {
-            return cached.clone();
+    cached_region_lookup(&REGION_CACHE, ip, async {
+        match resolve_game_server_region_from_api(ip).await {
+            None => GameServerRegionLookup::Failed,
+            Some(response) => match resolve_api_response(ip, Some(response)) {
+                Some((region, location)) => GameServerRegionLookup::Resolved(region, location),
+                None => GameServerRegionLookup::NoRegion,
+            },
         }
-    }
+    })
+    .await
+}
 
-    let result = match resolve_game_server_region_from_api(ip).await {
-        None => GameServerRegionLookup::Failed,
-        Some(response) => match resolve_api_response(ip, Some(response)) {
-            Some((region, location)) => GameServerRegionLookup::Resolved(region, location),
-            None => GameServerRegionLookup::NoRegion,
-        },
+async fn cached_region_lookup(
+    cache: &Mutex<RegionCache>,
+    ip: Ipv4Addr,
+    fetch: impl std::future::Future<Output = GameServerRegionLookup>,
+) -> GameServerRegionLookup {
+    let request = {
+        let mut cache = cache.lock();
+        if let Some(cached) = cache.get(ip, Instant::now()) {
+            return cached;
+        }
+        let Some(request) = cache.requests.request(ip, REGION_REQUEST_MAX_ENTRIES) else {
+            return GameServerRegionLookup::Failed;
+        };
+        request
     };
-
-    // Cache definitive answers only; a transport-level Failed is worth retrying,
-    // so it is never cached.
-    if !matches!(result, GameServerRegionLookup::Failed) {
-        let cache = get_region_cache();
-        let mut guard = cache.lock();
-        if guard.len() >= REGION_CACHE_MAX_ENTRIES {
-            guard.clear();
-        }
-        guard.insert(ip, (result.clone(), std::time::Instant::now()));
+    // Hold this IP's ownership through response publication. Other addresses
+    // retain the existing two-request HTTP concurrency; cancellation or a
+    // transport failure must leave the address retryable.
+    let _request = request.lock().await;
+    if let Some(cached) = cache.lock().get(ip, Instant::now()) {
+        return cached;
     }
-
+    let result = fetch.await;
+    cache.lock().put(ip, result.clone(), Instant::now());
     result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_or_failed_region_requests_remain_retryable() {
+        use std::sync::Arc;
+        let cache = Arc::new(Mutex::new(RegionCache::default()));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let ip = Ipv4Addr::new(128, 116, 47, 33);
+        let owner_cache = cache.clone();
+        let owner_started = started.clone();
+        let owner = tokio::spawn(async move {
+            cached_region_lookup(&owner_cache, ip, async {
+                owner_started.notify_one();
+                std::future::pending().await
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        owner.abort();
+        assert!(owner.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                cached_region_lookup(&cache, ip, async { GameServerRegionLookup::Failed })
+            )
+            .await
+            .unwrap(),
+            GameServerRegionLookup::Failed
+        );
+        assert!(cache.lock().entries.is_empty());
+        assert_eq!(
+            cached_region_lookup(&cache, ip, async { GameServerRegionLookup::NoRegion }).await,
+            GameServerRegionLookup::NoRegion
+        );
+        assert_eq!(
+            cached_region_lookup(&cache, ip, async {
+                panic!("definitive negative answers should be cached")
+            })
+            .await,
+            GameServerRegionLookup::NoRegion
+        );
+    }
+
+    #[tokio::test]
+    async fn region_request_ownership_is_bounded_and_reclaims_finished_addresses() {
+        let cache = Mutex::new(RegionCache::default());
+        let mut held: Vec<_> = (1..=REGION_REQUEST_MAX_ENTRIES)
+            .map(|index| {
+                cache
+                    .lock()
+                    .requests
+                    .request(Ipv4Addr::from(index as u32), REGION_REQUEST_MAX_ENTRIES)
+                    .unwrap()
+            })
+            .collect();
+        let new_ip = Ipv4Addr::from((REGION_REQUEST_MAX_ENTRIES + 1) as u32);
+        assert_eq!(
+            cached_region_lookup(&cache, new_ip, async {
+                panic!("overload must not start HTTP work")
+            })
+            .await,
+            GameServerRegionLookup::Failed
+        );
+        held.pop();
+        assert_eq!(
+            cached_region_lookup(&cache, new_ip, async { GameServerRegionLookup::NoRegion }).await,
+            GameServerRegionLookup::NoRegion
+        );
+    }
+
+    #[test]
+    fn expired_region_answers_are_removed_without_turning_failures_into_long_lived_cache_entries() {
+        let mut cache = RegionCache::default();
+        let now = Instant::now();
+        let ip = Ipv4Addr::new(128, 116, 47, 33);
+        cache.put(ip, GameServerRegionLookup::NoRegion, now);
+        assert!(
+            cache
+                .get(ip, now + REGION_CACHE_TTL - Duration::from_millis(1))
+                .is_some()
+        );
+        assert!(cache.get(ip, now + REGION_CACHE_TTL).is_none());
+        assert!(cache.entries.is_empty());
+        cache.put(ip, GameServerRegionLookup::Failed, now);
+        assert!(cache.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_region_lookups_share_one_request_without_delaying_other_ips() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Mutex::new(RegionCache::default());
+        let calls = AtomicUsize::new(0);
+        let release = tokio::sync::Notify::new();
+        let ip = Ipv4Addr::new(128, 116, 47, 33);
+        let answer = GameServerRegionLookup::Resolved(RobloxRegion::Mumbai, "Mumbai".into());
+        let (first, duplicate, other) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(biased;
+                cached_region_lookup(&cache, ip, async {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    release.notified().await;
+                    answer.clone()
+                }),
+                cached_region_lookup(&cache, ip, async {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    GameServerRegionLookup::NoRegion
+                }),
+                async {
+                    let value = cached_region_lookup(&cache, Ipv4Addr::new(128, 116, 46, 33), async {
+                        GameServerRegionLookup::NoRegion
+                    }).await;
+                    release.notify_one();
+                    value
+                }
+            )
+        }).await.expect("another IP must not wait for this lookup");
+        assert_eq!(first, answer);
+        assert_eq!(duplicate, answer);
+        assert_eq!(other, GameServerRegionLookup::NoRegion);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_full_region_cache_evicts_one_old_answer_instead_of_clearing_every_location() {
+        let mut cache = RegionCache::default();
+        let now = Instant::now();
+        for index in 1..=REGION_CACHE_MAX_ENTRIES {
+            cache.put(
+                Ipv4Addr::from(index as u32),
+                GameServerRegionLookup::NoRegion,
+                now + Duration::from_millis(index as u64),
+            );
+        }
+        let added = Ipv4Addr::from((REGION_CACHE_MAX_ENTRIES + 1) as u32);
+        cache.put(
+            added,
+            GameServerRegionLookup::NoRegion,
+            now + Duration::from_secs(10),
+        );
+        assert_eq!(cache.entries.len(), REGION_CACHE_MAX_ENTRIES);
+        assert!(
+            cache
+                .get(Ipv4Addr::from(1), now + Duration::from_secs(10))
+                .is_none()
+        );
+        assert!(
+            cache
+                .get(Ipv4Addr::from(2), now + Duration::from_secs(10))
+                .is_some()
+        );
+        cache.put(
+            added,
+            GameServerRegionLookup::NoRegion,
+            now + Duration::from_secs(11),
+        );
+        assert_eq!(cache.entries.len(), REGION_CACHE_MAX_ENTRIES);
+    }
 
     #[test]
     fn test_is_roblox_game_server() {

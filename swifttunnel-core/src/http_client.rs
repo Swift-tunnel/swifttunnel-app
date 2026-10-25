@@ -1,6 +1,42 @@
-//! Reuse successful HTTP clients without making initialization failures permanent.
+//! Shared HTTP clients and bounded ownership of duplicate requests.
 
-use std::sync::OnceLock;
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, OnceLock, Weak},
+};
+
+pub(crate) struct RequestSlots<K> {
+    slots: HashMap<K, Weak<tokio::sync::Mutex<()>>>,
+}
+
+impl<K> Default for RequestSlots<K> {
+    fn default() -> Self {
+        Self {
+            slots: HashMap::new(),
+        }
+    }
+}
+
+impl<K: Eq + Hash> RequestSlots<K> {
+    pub(crate) fn request(&mut self, key: K, limit: usize) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.slots.retain(|_, slot| slot.strong_count() > 0);
+        if let Some(slot) = self.slots.get(&key).and_then(Weak::upgrade) {
+            return Some(slot);
+        }
+        if self.slots.len() >= limit {
+            return None;
+        }
+        let slot = Arc::new(tokio::sync::Mutex::new(()));
+        self.slots.insert(key, Arc::downgrade(&slot));
+        Some(slot)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
 
 pub(crate) fn cached_client(
     cache: &OnceLock<reqwest::Client>,
