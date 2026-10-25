@@ -473,10 +473,6 @@ impl RobloxOptimizer {
             return Ok(());
         }
 
-        if Self::is_readonly_path(&settings_path) {
-            Self::remove_readonly_path(&settings_path)?;
-        }
-
         let content = crate::utils::read_text_file_bounded(
             &settings_path,
             4 * 1024 * 1024,
@@ -493,7 +489,7 @@ impl RobloxOptimizer {
             return Ok(());
         }
 
-        fs::write(&settings_path, &updated)?;
+        self.replace_settings_file(&settings_path, updated.as_bytes())?;
         info!(
             "Restored Roblox launch window to {}x{} after it closed (fullscreen: {})",
             width, height, config.window_fullscreen
@@ -506,6 +502,7 @@ impl RobloxOptimizer {
         info!("Applying Roblox optimizations via GlobalBasicSettings");
         let settings_path = self.resolve_settings_path();
         let mut warnings: Vec<String> = Vec::new();
+        crate::roblox_native_launch::safe_path(&settings_path).map_err(anyhow::Error::msg)?;
 
         if !settings_path.exists() {
             return Err(anyhow::anyhow!(
@@ -891,7 +888,7 @@ impl RobloxOptimizer {
         );
 
         // Write updated content back
-        fs::write(settings_path, &content)?;
+        self.replace_settings_file(settings_path, content.as_bytes())?;
 
         // Note: We no longer set the file to read-only. Setting it read-only
         // caused Roblox to fail with "Failed to apply critical settings" because
@@ -1057,6 +1054,8 @@ impl RobloxOptimizer {
     /// Keeping the first snapshot means the file is what its name says: Roblox
     /// as it was before SwiftTunnel ever touched it.
     fn backup_settings_for(&self, settings_path: &Path) -> Result<()> {
+        crate::roblox_native_launch::safe_path(settings_path).map_err(anyhow::Error::msg)?;
+        crate::roblox_native_launch::safe_path(&self.backup_path).map_err(anyhow::Error::msg)?;
         if self.backup_path.exists() {
             return Ok(());
         }
@@ -1102,6 +1101,11 @@ impl RobloxOptimizer {
     }
 
     fn replace_settings_file(&self, path: &Path, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > 4 * 1024 * 1024 {
+            anyhow::bail!(
+                "Roblox settings are too large to save safely. The previous file was kept."
+            );
+        }
         crate::roblox_native_launch::safe_path(path).map_err(anyhow::Error::msg)?;
         if Self::is_readonly_path(path) {
             Self::remove_readonly_path(path)?;
@@ -2599,7 +2603,7 @@ impl RobloxOptimizer {
             }
         } else {
             let json = serde_json::to_string_pretty(&settings)?;
-            fs::write(&settings_path, json)?;
+            self.replace_settings_file(&settings_path, json.as_bytes())?;
         }
 
         info!("FFlag optimizations applied to ClientAppSettings.json");
@@ -2609,16 +2613,17 @@ impl RobloxOptimizer {
     fn read_client_app_settings(
         settings_path: &Path,
     ) -> Result<HashMap<String, serde_json::Value>> {
-        if !settings_path.exists() {
-            return Ok(HashMap::new());
-        }
-
-        let content = crate::utils::read_text_file_bounded(
+        crate::roblox_native_launch::safe_path(settings_path).map_err(anyhow::Error::msg)?;
+        let content = match crate::utils::read_text_file_bounded(
             settings_path,
             4 * 1024 * 1024,
             "Roblox settings",
-        )?;
-        serde_json::from_str(&content).map_err(|e| {
+        ) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+            Err(error) => return Err(error.into()),
+        };
+        serde_json::from_str(content.trim_start_matches('\u{feff}')).map_err(|e| {
             anyhow::anyhow!(
                 "Failed to parse ClientAppSettings.json at {}: {}",
                 settings_path.display(),
@@ -2645,11 +2650,10 @@ impl RobloxOptimizer {
         for client_settings in client_settings_paths {
             let settings_path = client_settings.join("ClientAppSettings.json");
 
-            if !settings_path.exists() {
-                continue;
-            }
-
             let result = (|| -> Result<()> {
+                if !settings_path.try_exists()? {
+                    return Ok(());
+                }
                 let mut settings = Self::read_client_app_settings(&settings_path)?;
 
                 // Remove all ultraboost FFlags
@@ -2672,7 +2676,7 @@ impl RobloxOptimizer {
                     Self::remove_empty_bootstrapper_client_settings_dir(&client_settings)?;
                 } else {
                     let json = serde_json::to_string_pretty(&settings)?;
-                    fs::write(&settings_path, json)?;
+                    self.replace_settings_file(&settings_path, json.as_bytes())?;
                 }
                 Ok(())
             })();
@@ -3105,6 +3109,117 @@ mod tests {
         );
         assert_eq!(fs::read(&settings).unwrap(), b"saved originals");
         assert_eq!(fs::read(&other).unwrap(), b"keep this file");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn xml_and_flag_edits_keep_live_bytes_when_atomic_replacement_is_blocked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "swift-roblox-edit-preserve-{:016x}",
+            rand::random::<u64>()
+        )));
+        fs::create_dir(&dir.0).unwrap();
+        let xml = dir.0.join("GlobalBasicSettings.xml");
+        let original = br#"<roblox><int name="FramerateCap">60</int></roblox>"#;
+        fs::write(&xml, original).unwrap();
+        let optimizer = optimizer_with_path(xml.clone());
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&xml)
+            .unwrap();
+        let config = RobloxSettingsConfig {
+            target_fps: 400,
+            window_width: 1280,
+            window_height: 720,
+            ..Default::default()
+        };
+        assert!(optimizer.apply_xml_settings(&xml, &config).is_err());
+        assert_eq!(fs::read(&xml).unwrap(), original);
+        assert!(optimizer.reapply_window_size(&config).is_err());
+        assert_eq!(fs::read(&xml).unwrap(), original);
+        drop(held);
+
+        let flags_dir = dir.0.join("ClientSettings");
+        fs::create_dir(&flags_dir).unwrap();
+        let flags = flags_dir.join("ClientAppSettings.json");
+        let original = format!(
+            r#"{{"UserFlag":true,"{}":"400"}}"#,
+            RobloxOptimizer::FPS_UNLOCK_FFLAG
+        );
+        fs::write(&flags, &original).unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&flags)
+            .unwrap();
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#"{"FFlagDebugSkyGray":true}"#.into(),
+            ..Default::default()
+        };
+        assert!(
+            optimizer
+                .apply_client_fflags_in_path(&config, &flags_dir)
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&flags).unwrap(), original);
+        assert!(
+            optimizer
+                .remove_all_fflags_in_paths(vec![flags_dir])
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&flags).unwrap(), original);
+        drop(held);
+    }
+
+    #[test]
+    fn settings_edits_reject_oversized_output_and_keep_unmanaged_bom_flags() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "swift-roblox-edit-bound-{:016x}",
+            rand::random::<u64>()
+        )));
+        fs::create_dir(&dir.0).unwrap();
+        let xml = dir.0.join("GlobalBasicSettings.xml");
+        let original = format!("<roblox>{}</roblox>", " ".repeat(4 * 1024 * 1024 - 17));
+        assert_eq!(original.len(), 4 * 1024 * 1024);
+        fs::write(&xml, &original).unwrap();
+        let optimizer = optimizer_with_path(xml.clone());
+        assert!(
+            optimizer
+                .apply_xml_settings(&xml, &RobloxSettingsConfig::default())
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&xml).unwrap(), original);
+
+        let flags_dir = dir.0.join("ClientSettings");
+        fs::create_dir(&flags_dir).unwrap();
+        let flags = flags_dir.join("ClientAppSettings.json");
+        fs::write(&flags, "\u{feff}{\"UserFlag\":true}").unwrap();
+        let config = RobloxSettingsConfig {
+            custom_fflags_enabled: true,
+            custom_fflags_json: r#"{"FFlagDebugSkyGray":true}"#.into(),
+            ..Default::default()
+        };
+        optimizer
+            .apply_client_fflags_in_path(&config, &flags_dir)
+            .unwrap();
+        let written = RobloxOptimizer::read_client_app_settings(&flags).unwrap();
+        assert_eq!(written.get("UserFlag"), Some(&serde_json::json!(true)));
+        assert!(written.contains_key("FFlagDebugSkyGray"));
     }
 
     #[test]
