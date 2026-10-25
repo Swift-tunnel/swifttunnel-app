@@ -9,11 +9,16 @@ pub(crate) struct RouteSample {
     rtt_ms: u32,
     age_ms: u64,
     samples: u32,
+    #[serde(skip, default = "Instant::now")]
+    received: Instant,
 }
 
 impl RouteSample {
     pub(crate) fn remaining_ms(&self) -> u64 {
-        330_000_u64.saturating_sub(self.age_ms)
+        330_000_u64.saturating_sub(
+            self.age_ms
+                .saturating_add(self.received.elapsed().as_millis() as u64),
+        )
     }
 }
 
@@ -54,7 +59,7 @@ pub(crate) fn estimates(
             let row = rows.next()?;
             if rows.next().is_some()
                 || row.samples != 2
-                || row.age_ms > 330_000
+                || row.remaining_ms() == 0
                 || row.rtt_ms > 2000
             {
                 return None;
@@ -144,13 +149,14 @@ pub(crate) async fn measure(ip: Ipv4Addr, access_token: &str) -> Vec<RouteSample
         if body.ip != ip || body.method != "icmp_two_leg" || body.routes.len() > 128 {
             return None;
         }
+        let received = Instant::now();
+        let request_age_ms = received.duration_since(started).as_millis() as u64;
         for row in &mut body.routes {
             if row.relay.len() > 64 {
                 return None;
             }
-            row.age_ms = row
-                .age_ms
-                .saturating_add(started.elapsed().as_millis() as u64);
+            row.age_ms = row.age_ms.saturating_add(request_age_ms);
+            row.received = received;
         }
         Some(body.routes)
     }
@@ -173,7 +179,40 @@ mod tests {
             rtt_ms: ms,
             age_ms: 0,
             samples: 2,
+            received: Instant::now(),
         }
+    }
+
+    #[test]
+    fn route_samples_expire_during_queued_lookup_or_auth_work() {
+        let servers = servers();
+        let expired = |id| RouteSample {
+            age_ms: 329_000,
+            received: Instant::now() - Duration::from_secs(2),
+            ..sample(id, 0)
+        };
+        let old_candidate = expired("mumbai");
+        assert_eq!(old_candidate.remaining_ms(), 0);
+        let samples = [sample("singapore", 5), old_candidate];
+        assert_eq!(estimates(&servers, &samples).len(), 1);
+        assert_eq!(
+            choose_path(&servers, &samples, servers[0].1)
+                .unwrap()
+                .address,
+            servers[0].1
+        );
+
+        // Losing the current measurement means there is no valid baseline
+        // from which to promise another relay is better.
+        assert!(
+            choose_path(
+                &servers,
+                &[expired("singapore"), sample("mumbai", 0)],
+                servers[0].1
+            )
+            .is_none()
+        );
+        assert!(sample("mumbai", 0).remaining_ms() > 0);
     }
     #[test]
     fn singapore_game_can_be_faster_via_mumbai() {

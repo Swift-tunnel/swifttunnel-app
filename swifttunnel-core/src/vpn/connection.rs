@@ -2492,11 +2492,18 @@ impl VpnConnection {
                                     }
                                 }
 
-                                // The auth handshake awaited , re-verify this lookup
-                                // still owns the route (and Auto Route wasn't
-                                // disabled meanwhile) before committing.
-                                let still_current =
-                                    router_for_lookup.lookup_commit_allowed(ip, session_epoch);
+                                // Authentication can outlast a nearly expired
+                                // measurement or a fleet update. Recheck both
+                                // route ownership and the measured choice.
+                                let still_measured = region_fallback
+                                    || router_for_lookup.measured_path(&path_samples).is_some_and(
+                                        |choice| {
+                                            choice.region == selected_region
+                                                && choice.address == selected_addr
+                                        },
+                                    );
+                                let still_current = still_measured
+                                    && router_for_lookup.lookup_commit_allowed(ip, session_epoch);
 
                                 match auth_result {
                                     SwitchAuthOutcome::Ok if still_current => {
@@ -2548,7 +2555,7 @@ impl VpnConnection {
                                     }
                                     SwitchAuthOutcome::Ok => {
                                         log::info!(
-                                            "Auto-routing: Discarding authenticated switch for {} (lookup no longer current or auto-routing disabled)",
+                                            "Auto-routing: Discarding authenticated switch for {} (lookup or measured choice no longer current)",
                                             ip
                                         );
                                     }
