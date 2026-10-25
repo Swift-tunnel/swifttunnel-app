@@ -262,6 +262,7 @@ fn init_logging() {
             .set_target_level(simplelog::LevelFilter::Error)
             .set_location_level(simplelog::LevelFilter::Off)
             .build(),
-        file,
+        // Publish complete lines immediately, coalescing formatting fragments.
+        std::io::LineWriter::new(file),
     );
 }

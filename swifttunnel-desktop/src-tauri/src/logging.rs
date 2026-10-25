@@ -72,6 +72,15 @@ fn file_config() -> Config {
         .build()
 }
 
+fn file_logger<W: std::io::Write + Send + 'static>(
+    level: LevelFilter,
+    writer: W,
+) -> Box<dyn SharedLogger> {
+    // Formatting emits many tiny writes, including individual timestamp
+    // components. A newline publishes the whole line without a timer/thread.
+    WriteLogger::new(level, file_config(), std::io::LineWriter::new(writer))
+}
+
 pub fn init() {
     let level = level_from_env();
 
@@ -89,7 +98,7 @@ pub fn init() {
     }
 
     match RollingLog::open(&path, &previous_log_file_path(), MAX_LOG_BYTES) {
-        Ok(file) => loggers.push(WriteLogger::new(level, file_config(), file)),
+        Ok(file) => loggers.push(file_logger(level, file)),
         Err(e) => {
             eprintln!(
                 "SwiftTunnel: could not open log file {}: {}",
@@ -105,6 +114,55 @@ pub fn init() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_lines_are_published_immediately_with_fewer_writer_calls() {
+        use log::Log;
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<(Vec<u8>, usize)>>);
+        impl Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let mut result = self.0.lock().unwrap();
+                result.0.extend_from_slice(bytes);
+                result.1 += 1;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let direct = Capture::default();
+        let buffered = Capture::default();
+        let original = WriteLogger::new(LevelFilter::Info, file_config(), direct.clone());
+        let logger = file_logger(LevelFilter::Info, buffered.clone());
+        let record = log::Record::builder()
+            .level(log::Level::Info)
+            .args(format_args!("Relay {} connected in {} ms", "Mumbai 05", 21))
+            .build();
+        original.log(&record);
+        logger.log(&record);
+        // No explicit flush or drop: the newline must already be visible,
+        // preserving the last complete line if the process then crashes.
+        let original = direct.0.lock().unwrap();
+        let result = buffered.0.lock().unwrap();
+        let body = |bytes: &[u8]| {
+            String::from_utf8_lossy(bytes)
+                .split_once(' ')
+                .unwrap()
+                .1
+                .to_owned()
+        };
+        assert_eq!(body(&result.0), body(&original.0));
+        assert!(result.0.ends_with(b"Relay Mumbai 05 connected in 21 ms\n"));
+        assert!(
+            result.1 * 3 < original.1,
+            "buffered={}, direct={}",
+            result.1,
+            original.1
+        );
+    }
 
     #[test]
     fn cap_stays_under_the_discord_attachment_limit() {
