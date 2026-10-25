@@ -191,6 +191,8 @@ pub struct GamesState {
     pub status: Option<String>,
     pub search: Option<ServerSearch>,
     pub launch_started: Option<std::time::Instant>,
+    /// Owned by the blocking native launch worker, not its awaiting IPC call.
+    pub native_launch_generation: Option<u64>,
     launch_resumed: Option<std::time::Instant>,
     pub launch_player_seen: bool,
     pub launch_updating: bool,
@@ -287,18 +289,40 @@ impl GamesState {
         true
     }
     pub fn launch_pending(&self) -> bool {
-        self.launch_started.is_some() && (!self.launch_player_seen || self.launch_updating)
+        self.native_launch_generation.is_some()
+            || self.launch_started.is_some() && (!self.launch_player_seen || self.launch_updating)
     }
 
     pub(crate) fn launch_request_in_progress(&self, now: std::time::Instant) -> bool {
-        self.launch_pending()
-            && (self.launch_updating
-                || self
-                    .launch_resumed
-                    .or(self.launch_started)
-                    .is_some_and(|at| {
-                        now.saturating_duration_since(at) < std::time::Duration::from_secs(60)
-                    }))
+        self.native_launch_generation.is_some()
+            || self.launch_pending()
+                && (self.launch_updating
+                    || self
+                        .launch_resumed
+                        .or(self.launch_started)
+                        .is_some_and(|at| {
+                            now.saturating_duration_since(at) < std::time::Duration::from_secs(60)
+                        }))
+    }
+
+    pub(crate) fn finish_native_launch(&mut self, generation: u64, success: bool) {
+        if self.native_launch_generation == Some(generation) {
+            self.native_launch_generation = None;
+        }
+        if self.window_placement_generation != generation {
+            return;
+        }
+        if success {
+            // Windows accepted creation now. File preparation and antivirus
+            // delays must not consume the player's one-minute opening window.
+            // Never revive a player the watcher already saw open/close.
+            if self.launch_started.is_some() && !self.launch_player_seen && !self.launch_updating {
+                self.launch_resumed = Some(std::time::Instant::now());
+            }
+        } else {
+            self.cancel_window_placement();
+            self.clear_launch();
+        }
     }
 
     pub fn clear_launch(&mut self) {
@@ -366,8 +390,9 @@ impl GamesState {
             log::info!("Roblox launch: player closed before game metadata was confirmed");
             return true;
         }
-        if now.saturating_duration_since(self.launch_resumed.unwrap_or(started))
-            > std::time::Duration::from_secs(60)
+        if self.native_launch_generation.is_none()
+            && now.saturating_duration_since(self.launch_resumed.unwrap_or(started))
+                > std::time::Duration::from_secs(60)
         {
             self.clear_launch();
             self.cancel_window_placement();

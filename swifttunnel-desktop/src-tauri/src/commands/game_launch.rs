@@ -28,8 +28,9 @@ pub struct LaunchPlan {
     pub relay_region: Option<String>,
 }
 
-struct LaunchGuard<'a> {
-    state: &'a AppState,
+struct LaunchGuard {
+    games: std::sync::Arc<parking_lot::Mutex<games::GamesState>>,
+    notify: Option<Box<dyn FnOnce() + Send>>,
     generation: u64,
     complete: bool,
 }
@@ -108,15 +109,243 @@ pub async fn games_suggest_server(
     .await
     .map(Some)
 }
-impl Drop for LaunchGuard<'_> {
+impl Drop for LaunchGuard {
     fn drop(&mut self) {
-        if !self.complete {
-            let mut games = self.state.games.lock();
-            if games.window_placement_generation == self.generation {
-                games.cancel_window_placement();
-                games.clear_launch();
+        self.games
+            .lock()
+            .finish_native_launch(self.generation, self.complete);
+        if let Some(notify) = self.notify.take() {
+            notify();
+        }
+    }
+}
+
+fn launch_with_recovery(
+    prepare: impl FnOnce() -> Result<(), String>,
+    launch: impl FnOnce() -> Result<(), String>,
+    restore: impl FnOnce() -> Result<bool, String>,
+) -> Result<(), String> {
+    if let Err(error) = prepare().and_then(|()| launch()) {
+        if let Err(restore_error) = restore() {
+            return Err(format!(
+                "{error} The previous settings could not be restored: {restore_error}"
+            ));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn validate_launch_connection(
+    connection: &ConnectionState,
+    requested: Option<&str>,
+    servers: &swifttunnel_core::vpn::servers::DynamicServerList,
+) -> Result<(), String> {
+    let ConnectionState::Connected { server_region, .. } = connection else {
+        return Err(
+            "Connect SwiftTunnel before starting this game's automatic connection profile.".into(),
+        );
+    };
+    if let Some(requested) = requested
+        && !servers.regions().iter().any(|region| {
+            region.id == requested
+                && (server_region == &region.id || region.servers.contains(server_region))
+        })
+    {
+        return Err("The current connection is not in this game's requested relay region. Reconnect before joining.".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod native_worker_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::sync::{Arc, mpsc};
+
+    #[tokio::test]
+    async fn abandoned_request_keeps_native_progress_owned_until_the_worker_finishes() {
+        let games = Arc::new(parking_lot::Mutex::new(games::GamesState::default()));
+        let generation = {
+            let mut games = games.lock();
+            let generation = games.begin_launch(RobloxClient::Standard);
+            games.native_launch_generation = Some(generation);
+            generation
+        };
+        let guard = LaunchGuard {
+            games: games.clone(),
+            notify: None,
+            generation,
+            complete: false,
+        };
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, waiting) = mpsc::channel();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let request = tokio::spawn(async move {
+            tauri::async_runtime::spawn_blocking(move || {
+                let mut guard = guard;
+                started.send(()).unwrap();
+                waiting.recv_timeout(Duration::from_secs(3)).unwrap();
+                guard.complete = true;
+                drop(guard);
+                done.send(()).unwrap();
+            })
+            .await
+            .unwrap();
+        });
+        ready.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        {
+            let mut games = games.lock();
+            let late = Instant::now() + Duration::from_secs(120);
+            assert!(games.launch_request_in_progress(late));
+            assert!(!games.track_launch(late, false, false));
+            assert!(games.warning.is_none());
+        }
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), finished)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut games = games.lock();
+        assert!(games.native_launch_generation.is_none());
+        // The ordinary player-observation deadline starts after the native
+        // handoff, rather than after the earlier file/preparation work.
+        assert!(games.launch_request_in_progress(Instant::now()));
+        assert!(games.track_launch(Instant::now() + Duration::from_secs(61), false, false));
+    }
+
+    #[test]
+    fn failed_native_work_releases_its_progress_without_clearing_a_newer_launch() {
+        let games = Arc::new(parking_lot::Mutex::new(games::GamesState::default()));
+        let generation = {
+            let mut games = games.lock();
+            let generation = games.begin_launch(RobloxClient::Standard);
+            games.native_launch_generation = Some(generation);
+            generation
+        };
+        let notified = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_state = games.clone();
+        let callback_notified = notified.clone();
+        drop(LaunchGuard {
+            games: games.clone(),
+            notify: Some(Box::new(move || {
+                assert!(callback_state.lock().native_launch_generation.is_none());
+                callback_notified.store(true, std::sync::atomic::Ordering::Release);
+            })),
+            generation,
+            complete: false,
+        });
+        assert!(games.lock().launch_started.is_none());
+        assert!(games.lock().native_launch_generation.is_none());
+        assert!(notified.load(std::sync::atomic::Ordering::Acquire));
+        let guard = LaunchGuard {
+            games: games.clone(),
+            notify: None,
+            generation,
+            complete: false,
+        };
+        let next = games.lock().begin_launch(RobloxClient::Standard);
+        games.lock().native_launch_generation = Some(next);
+        drop(guard);
+        assert_eq!(games.lock().native_launch_generation, Some(next));
+        assert!(games.lock().launch_started.is_some());
+    }
+
+    #[test]
+    fn final_connection_check_rejects_a_lost_or_changed_preferred_tunnel() {
+        use swifttunnel_core::vpn::servers::{
+            DynamicGamingRegion, DynamicServerList, ServerListSource,
+        };
+        let mut servers = DynamicServerList::new_empty();
+        servers.update(
+            Vec::new(),
+            vec![DynamicGamingRegion {
+                id: "fixture-native-region".into(),
+                name: "Fixture".into(),
+                description: String::new(),
+                country_code: "XX".into(),
+                servers: vec!["fixture-native-relay".into()],
+            }],
+            ServerListSource::Api,
+        );
+        let mut connection = ConnectionState::Connected {
+            since: Instant::now(),
+            server_region: "fixture-native-relay".into(),
+            server_endpoint: "192.0.2.1:51821".into(),
+            assigned_ip: "fixture".into(),
+            relay_auth_mode: "authenticated".into(),
+            split_tunnel_active: true,
+            tunneled_processes: Vec::new(),
+            relay_status: None,
+        };
+        assert!(
+            validate_launch_connection(&connection, Some("fixture-native-region"), &servers)
+                .is_ok()
+        );
+        if let ConnectionState::Connected { server_region, .. } = &mut connection {
+            *server_region = "some-other-relay".into();
+        }
+        assert!(
+            validate_launch_connection(&connection, Some("fixture-native-region"), &servers)
+                .is_err()
+        );
+        assert!(validate_launch_connection(&connection, None, &servers).is_ok());
+        assert!(
+            validate_launch_connection(&ConnectionState::Disconnected, None, &servers).is_err()
+        );
+    }
+
+    #[test]
+    fn preparation_and_process_errors_recover_before_returning_and_success_keeps_the_profile() {
+        for failed_stage in [None, Some("prepare"), Some("launch")] {
+            let steps = RefCell::new(Vec::new());
+            let result = launch_with_recovery(
+                || {
+                    steps.borrow_mut().push("prepare");
+                    if failed_stage == Some("prepare") {
+                        Err("prepare failed".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    steps.borrow_mut().push("launch");
+                    if failed_stage == Some("launch") {
+                        Err("launch failed".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    steps.borrow_mut().push("restore");
+                    Ok(true)
+                },
+            );
+            match failed_stage {
+                None => {
+                    assert!(result.is_ok());
+                    assert_eq!(*steps.borrow(), ["prepare", "launch"]);
+                }
+                Some("prepare") => {
+                    assert!(result.is_err());
+                    assert_eq!(*steps.borrow(), ["prepare", "restore"]);
+                }
+                Some(_) => {
+                    assert!(result.is_err());
+                    assert_eq!(*steps.borrow(), ["prepare", "launch", "restore"]);
+                }
             }
         }
+        assert_eq!(
+            launch_with_recovery(
+                || Ok(()),
+                || Err("launch failed".into()),
+                || Err("backup locked".into())
+            ),
+            Err("launch failed The previous settings could not be restored: backup locked".into())
+        );
     }
 }
 
@@ -586,20 +815,11 @@ pub async fn games_launch(
     }
     if plan.preferences.use_tunnel {
         let connection = state.vpn_state_handle.borrow().clone();
-        let ConnectionState::Connected { server_region, .. } = connection else {
-            return Err(
-                "Connect SwiftTunnel before starting this game's automatic connection profile."
-                    .into(),
-            );
-        };
-        if let Some(requested) = &plan.relay_region
-            && !state.server_list.lock().regions().iter().any(|region| {
-                region.id == *requested
-                    && (server_region == region.id || region.servers.contains(&server_region))
-            })
-        {
-            return Err("The current connection is not in this game's requested relay region. Reconnect before joining.".into());
-        }
+        validate_launch_connection(
+            &connection,
+            plan.relay_region.as_deref(),
+            &state.server_list.lock(),
+        )?;
     }
     let placement_generation = {
         let mut games = state.games.lock();
@@ -609,110 +829,138 @@ pub async fn games_launch(
         if games.launch_request_in_progress(std::time::Instant::now()) {
             return Err("A Roblox launch is already in progress.".into());
         }
-        games.begin_launch(client)
+        let generation = games.begin_launch(client);
+        games.native_launch_generation = Some(generation);
+        generation
     };
     game_destination::clear();
-    let mut launch_guard = LaunchGuard {
-        state: &state,
+    let launch_guard = LaunchGuard {
+        games: state.games.clone(),
+        notify: Some(Box::new({
+            let app = app.clone();
+            move || {
+                let _ = app.emit(games::LIBRARY_CHANGED, ());
+            }
+        })),
         generation: placement_generation,
         complete: false,
     };
     let profile = plan.preferences.clone();
-    let player = tauri::async_runtime::spawn_blocking(move || {
-        swifttunnel_core::roblox_native_launch::official_player_for(client)
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    let global = state.settings.lock().config.roblox_settings.clone();
-    let mut flags = if safe_launch.unwrap_or(false) {
-        std::collections::HashMap::new()
-    } else {
-        swifttunnel_core::roblox_optimizer::RobloxOptimizer::native_launch_flags(&global)
-            .map_err(|e| e.to_string())?
-    };
-    let lookup_place = place_id.clone();
-    let explicit_graphics = games::library_task(state.games.clone(), move |games| {
-        Ok(games
-            .library()?
-            .entry_for(&lookup_place, client)
-            .is_some_and(|e| e.preferences.graphics_quality.is_some()))
-    })
-    .await?;
-    if explicit_graphics {
-        flags.remove("DFIntDebugFRMQualityLevelOverride");
-    }
-    let profile_player = player.clone();
     let optimizer = state.roblox_optimizer.clone();
+    let settings = state.settings.clone();
+    let games = state.games.clone();
+    let connection = state.vpn_state_handle.clone();
+    let servers = state.server_list.clone();
+    let requested_region = plan.relay_region.clone();
+    let target_place = place_id.clone();
+    let target_job = plan.job_id.clone();
+    let target_center = plan.datacenter.as_ref().map(|center| center.id);
+    // The worker owns progress and recovery until Windows finishes creating
+    // the process. Dropping the awaiting IPC cannot release the launch early.
     tauri::async_runtime::spawn_blocking(move || {
-        let _guard = optimizer.lock();
-        match (|| {
-            let applied = swifttunnel_core::roblox_game_profile::apply_native(client, &profile)?;
-            swifttunnel_core::roblox_launch_flags::prepare(&profile_player, flags)?;
-            Ok::<_, String>(applied)
-        })() {
-            Ok(applied) => Ok(applied),
-            Err(error) => {
-                if let Err(restore_error) =
-                    swifttunnel_core::roblox_game_profile::restore_launch_settings()
-                {
-                    return Err(format!(
-                        "{error} The previous settings could not be restored: {restore_error}"
-                    ));
-                }
-                Err(error)
+        let mut launch_guard = launch_guard;
+        let optimizer = optimizer.lock();
+        let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
+        let global = settings.lock().config.roblox_settings.clone();
+        let mut flags = if safe_launch.unwrap_or(false) {
+            std::collections::HashMap::new()
+        } else {
+            swifttunnel_core::roblox_optimizer::RobloxOptimizer::native_launch_flags(&global)
+                .map_err(|error| error.to_string())?
+        };
+        {
+            let mut games = games.lock();
+            if games.window_placement_generation != placement_generation || games.current.is_some()
+            {
+                return Err("This Roblox launch was replaced. Try Play again.".into());
+            }
+            if games
+                .library()?
+                .entry_for(&target_place, client)
+                .is_some_and(|entry| entry.preferences.graphics_quality.is_some())
+            {
+                flags.remove("DFIntDebugFRMQualityLevelOverride");
             }
         }
+        // The initial preflight may be old after file/optimizer waits. Check
+        // again immediately before either temporary settings file is changed.
+        if optimizer.is_roblox_running() {
+            return Err("Close Roblox before starting another game.".into());
+        }
+        if profile.use_tunnel {
+            validate_launch_connection(
+                &connection.borrow().clone(),
+                requested_region.as_deref(),
+                &servers.lock(),
+            )?;
+        }
+        launch_with_recovery(
+            || {
+                swifttunnel_core::roblox_game_profile::apply_native(client, &profile)?;
+                swifttunnel_core::roblox_launch_flags::prepare(&player, flags)?;
+                Ok(())
+            },
+            || {
+                if profile.use_tunnel {
+                    validate_launch_connection(
+                        &connection.borrow().clone(),
+                        requested_region.as_deref(),
+                        &servers.lock(),
+                    )?;
+                }
+                {
+                    let games = games.lock();
+                    if games.window_placement_generation != placement_generation
+                        || games.current.is_some()
+                    {
+                        return Err("This Roblox launch was replaced. Try Play again.".into());
+                    }
+                    if let Some(job) = &target_job
+                        && let Some(search) = &games.search
+                        && search.place_id == target_place
+                        && Some(search.center.id) == target_center
+                        && search.fetched.elapsed() < Duration::from_secs(60)
+                        && let Some(server) =
+                            search.servers.iter().find(|server| &server.job_id == job)
+                        && let Some(ip) = server.ip
+                    {
+                        game_destination::register(ObservedGame {
+                            ip,
+                            job_id: job.clone(),
+                            location: Some(search.center.city.clone()),
+                            region: native_region(&search.center),
+                            prelaunch: true,
+                        });
+                    }
+                }
+                swifttunnel_core::roblox_native_launch::launch(
+                    &player,
+                    &target_place,
+                    target_job.as_deref(),
+                    client,
+                )
+                .map(|_| ())
+            },
+            || {
+                if let Some(job) = target_job.as_deref() {
+                    let games = games.lock();
+                    if games
+                        .current
+                        .as_ref()
+                        .is_none_or(|current| current.job_id != job)
+                    {
+                        game_destination::clear_for_session(job);
+                    }
+                }
+                swifttunnel_core::roblox_game_profile::restore_launch_settings()
+            },
+        )?;
+        // Completion belongs to the watcher after the process is handed off.
+        launch_guard.complete = true;
+        Ok::<_, String>(())
     })
     .await
     .map_err(|e| e.to_string())??;
-    if let Some(job) = &plan.job_id {
-        let games = state.games.lock();
-        if let Some(search) = &games.search
-            && search.place_id == place_id
-            && plan
-                .datacenter
-                .as_ref()
-                .is_some_and(|center| center.id == search.center.id)
-            && search.fetched.elapsed() < Duration::from_secs(60)
-            && let Some(server) = search.servers.iter().find(|s| &s.job_id == job)
-            && let Some(ip) = server.ip
-        {
-            game_destination::register(ObservedGame {
-                ip,
-                job_id: job.clone(),
-                location: Some(search.center.city.clone()),
-                region: native_region(&search.center),
-                prelaunch: true,
-            });
-        }
-    }
-    let launched = swifttunnel_core::roblox_native_launch::launch(
-        &player,
-        &place_id,
-        plan.job_id.as_deref(),
-        client,
-    )
-    .map(|_| ());
-    if let Err(error) = launched {
-        game_destination::clear();
-        let optimizer = state.roblox_optimizer.clone();
-        let restored = tauri::async_runtime::spawn_blocking(move || {
-            let _guard = optimizer.lock();
-            swifttunnel_core::roblox_game_profile::restore_launch_settings()
-        })
-        .await
-        .map_err(|error| error.to_string())
-        .and_then(|result| result);
-        if let Err(restore_error) = restored {
-            return Err(format!(
-                "{error} The previous settings could not be restored: {restore_error}"
-            ));
-        }
-        return Err(error);
-    }
-    // The watcher owns completion. Do not revive a launch it already saw close,
-    // or mistake an older session in the same place for this new launch.
-    launch_guard.complete = true;
     if plan.preferences.borderless || plan.preferences.monitor.is_some() {
         let monitor = state.performance_monitor.clone();
         let preferences = plan.preferences.clone();
@@ -789,7 +1037,6 @@ pub async fn games_launch(
             }
         });
     }
-    let _ = app.emit(games::LIBRARY_CHANGED, ());
     Ok(())
 }
 
@@ -937,7 +1184,10 @@ pub fn update_session_location(
 pub async fn restore_game_profile(state: &AppState) {
     let generation = {
         let games = state.games.lock();
-        if games.current.is_some() || games.launch_started.is_some() {
+        if games.current.is_some()
+            || games.launch_started.is_some()
+            || games.native_launch_generation.is_some()
+        {
             return;
         }
         games.window_placement_generation
@@ -988,6 +1238,7 @@ fn restore_profile_if_current(
         if current.window_placement_generation != generation
             || current.current.is_some()
             || current.launch_started.is_some()
+            || current.native_launch_generation.is_some()
         {
             return None;
         }

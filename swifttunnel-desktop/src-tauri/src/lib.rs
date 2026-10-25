@@ -572,7 +572,7 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                 }
                 let has_game = state.games.lock().current.is_some();
                 if !has_game { metadata_task.cancel(); }
-                let check_process = { let games = state.games.lock(); has_game || games.launch_started.is_some() || (swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending()) };
+                let check_process = { let games = state.games.lock(); has_game || games.launch_started.is_some() || games.native_launch_generation.is_some() || (swifttunnel_core::roblox_game_profile::pending() || swifttunnel_core::roblox_launch_flags::pending()) };
                 let running = check_process && state.performance_monitor.lock().poll_roblox_pid().is_some();
                 let updating = !running && state.games.lock().launch_started.is_some_and(|at|at.elapsed()<std::time::Duration::from_secs(600)) && swifttunnel_core::roblox_native_launch::updater_running();
                 if running { swifttunnel_core::vpn::game_destination::refresh(); }
@@ -597,7 +597,7 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
                     let _ = app.emit(commands::games::LIBRARY_CHANGED, ());
                 }
                 if !running && !updating && games.launch_started.is_none() && games.status.take().is_some() {let _=app.emit(commands::games::LIBRARY_CHANGED,());}
-                let idle = games.current.is_none() && games.launch_started.is_none() && !traffic
+                let idle = games.current.is_none() && games.launch_started.is_none() && games.native_launch_generation.is_none() && !traffic
                     && (!running || games.left_confirmed);
                 if idle { games.idle_since.get_or_insert(std::time::Instant::now()); } else { games.idle_since = None; }
                 let settled = games.idle_since.is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(5));
