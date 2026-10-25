@@ -235,42 +235,8 @@ impl FirewallFixer {
 
         info!("Removing SwiftTunnel Roblox firewall rules");
 
-        let executables = find_roblox_executables();
-
-        for (exe_name, _) in &executables {
-            // Remove outbound rule
-            let rule_name_out = format!("{} {} Out", FIREWALL_RULE_PREFIX, exe_name);
-            let _ = crate::utils::run_hidden_command_output_with_timeout(
-                "netsh",
-                &[
-                    "advfirewall",
-                    "firewall",
-                    "delete",
-                    "rule",
-                    &format!("name={}", rule_name_out),
-                    "dir=out",
-                ],
-                std::time::Duration::from_secs(15),
-            );
-
-            // Remove inbound rule
-            let rule_name_in = format!("{} {} In", FIREWALL_RULE_PREFIX, exe_name);
-            let _ = crate::utils::run_hidden_command_output_with_timeout(
-                "netsh",
-                &[
-                    "advfirewall",
-                    "firewall",
-                    "delete",
-                    "rule",
-                    &format!("name={}", rule_name_in),
-                    "dir=in",
-                ],
-                std::time::Duration::from_secs(15),
-            );
-
-            info!("Removed firewall rules for {}", exe_name);
-        }
-
+        // Rule names are shared across install paths and versions. The exact
+        // known-name pass also handles removed installs and legacy rules.
         Self::remove_swifttunnel_rules_by_prefix();
 
         self.rules_applied = false;
