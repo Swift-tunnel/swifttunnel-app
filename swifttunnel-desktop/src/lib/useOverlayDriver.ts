@@ -113,7 +113,17 @@ export function useOverlayDriver() {
         /* A stale foreground flag must not keep a topmost overlay visible. */
       }
       if (disposed) return;
-      const gameActive = metricsFresh && useBoostStore.getState().robloxRunning;
+      // Bind freshness and player identity to the metrics receipt, not to a
+      // later tunnel read. Those reads can wait behind connection work.
+      const b = useBoostStore.getState();
+      const metricsAt = performance.now();
+      const metricsCurrent = () => {
+        const latest = useBoostStore.getState();
+        return metricsFresh && b.processId === latest.processId
+          && b.robloxRunning === latest.robloxRunning
+          && performance.now() - metricsAt <= MAX_SAMPLE_AGE_MS;
+      };
+      const gameActive = metricsFresh && b.robloxRunning;
       const needsThroughput =
         cfgBefore.metrics.includes("upload") ||
         cfgBefore.metrics.includes("download");
@@ -127,7 +137,7 @@ export function useOverlayDriver() {
         }
       }
       if (disposed) return;
-      if (gameActive && needsPing && vpnBefore.state === "connected") {
+      if (gameActive && metricsCurrent() && needsPing && vpnBefore.state === "connected") {
         try {
           await fetchPing();
         } catch {
@@ -135,7 +145,6 @@ export function useOverlayDriver() {
         }
       }
       if (disposed) return;
-      const b = useBoostStore.getState();
       const vpn = useVpnStore.getState();
       const nowMs = performance.now();
       let tunnelRates: OverlayRates = {
@@ -186,10 +195,10 @@ export function useOverlayDriver() {
       if (metricsFresh) {
         if (!b.robloxRunning) sessionRef.current = null;
         else if (!sessionRef.current || sessionRef.current.pid !== b.processId)
-          sessionRef.current = { pid: b.processId, startedAt: nowMs };
+          sessionRef.current = { pid: b.processId, startedAt: metricsAt };
       }
       let monitor: OverlayMonitor | null = null;
-      if (metricsFresh && b.robloxRunning) {
+      if (metricsCurrent() && b.robloxRunning) {
         try {
           const value = await invoke<OverlayMonitor | null>(
             "overlay_game_monitor",
@@ -203,8 +212,7 @@ export function useOverlayDriver() {
       // Show only while Roblox is the FOREGROUND window (not just running) so
       // it never covers the desktop or apps you've alt-tabbed to.
       const latest = useBoostStore.getState();
-      const sampleCurrent = metricsFresh && b.processId === latest.processId
-        && b.robloxRunning === latest.robloxRunning && performance.now() - nowMs <= MAX_SAMPLE_AGE_MS;
+      const sampleCurrent = metricsCurrent();
       if (!sampleCurrent) {
         monitor = null;
         // A missed sample hides the bar, but does not end a known session.

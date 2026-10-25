@@ -143,6 +143,31 @@ describe("overlay polling under slow native calls", () => {
     expect(h.push.mock.calls[0][0]).toMatchObject({enabled:false,forceHide:true,values:{}});
   });
 
+  it.each(["throughput", "ping"] as const)("expires metrics while waiting for a slow %s read", async kind => {
+    const pending = deferred();
+    (kind === "throughput" ? h.throughput : h.ping).mockReturnValueOnce(pending.promise);
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(6000);
+    pending.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(h.push.mock.calls[0][0]).toMatchObject({enabled:false,forceHide:true,values:{}});
+    expect(h.invoke).not.toHaveBeenCalledWith("overlay_game_monitor");
+  });
+
+  it("does not attribute a metrics sample to a different player appearing during a tunnel read", async () => {
+    const pending = deferred();
+    h.throughput.mockReturnValueOnce(pending.promise);
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(0);
+    h.boostState.processId = 2;
+    pending.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(h.push.mock.calls[0][0]).toMatchObject({enabled:false,forceHide:true,values:{}});
+    expect(h.invoke).not.toHaveBeenCalledWith("overlay_game_monitor");
+  });
+
   it("keeps session elapsed time through a temporary metrics failure", async () => {
     h.overlay.metrics=["playtime"];
     h.metrics.mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValue(true);
