@@ -203,6 +203,20 @@ fn optional_registry_read<T>(read: std::io::Result<T>) -> Result<Option<T>> {
     }
 }
 
+fn run_network_migration(
+    completed: &mut bool,
+    force: bool,
+    cleanup: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if *completed && !force {
+        return Ok(());
+    }
+    *completed = false;
+    cleanup()?;
+    *completed = true;
+    Ok(())
+}
+
 fn network_registry_subkey(path: &str) -> Result<&str> {
     path.strip_prefix("HKLM\\")
         .filter(|key| !key.is_empty() && !key.contains('\0') && !key.ends_with('\\'))
@@ -285,6 +299,7 @@ pub struct NetworkBooster {
     network_throttling_snapshot: Option<NetworkThrottlingSnapshot>,
     qos_registry_snapshot: Option<QosRegistrySnapshot>,
     firewall_fixer: FirewallFixer,
+    legacy_qos_cleanup_done: bool,
 }
 
 pub struct NetworkApplyOutcome {
@@ -299,6 +314,7 @@ impl NetworkBooster {
             network_throttling_snapshot: None,
             qos_registry_snapshot: None,
             firewall_fixer: FirewallFixer::new(),
+            legacy_qos_cleanup_done: false,
         }
     }
 
@@ -357,7 +373,7 @@ impl NetworkBooster {
             };
         }
 
-        Self::cleanup_removed_qos_policies();
+        self.cleanup_removed_qos_policies(false);
 
         let relay_qos_requested = Self::relay_qos_requested(&requested_config);
         if relay_qos_requested {
@@ -541,16 +557,25 @@ impl NetworkBooster {
         Ok(())
     }
 
-    fn cleanup_removed_qos_policies() {
-        for policy_name in REMOVED_QOS_POLICY_NAMES {
-            let policy_path = Self::qos_policy_path(policy_name);
-            if let Err(error) = delete_network_registry_key(&policy_path) {
-                warn!("Old QoS policy {policy_name} could not be removed: {error}");
+    fn cleanup_removed_qos_policies(&mut self, force: bool) {
+        let result = run_network_migration(&mut self.legacy_qos_cleanup_done, force, || {
+            let mut failures = Vec::new();
+            for policy_name in REMOVED_QOS_POLICY_NAMES {
+                let policy_path = Self::qos_policy_path(policy_name);
+                if let Err(error) = delete_network_registry_key(&policy_path) {
+                    failures.push(format!("{policy_name}: {error}"));
+                }
             }
-        }
-
-        if let Err(e) = Self::remove_legacy_roblox_priority_policy() {
-            warn!("Removed QoS policy cleanup failed: {}", e);
+            if let Err(error) = Self::remove_legacy_roblox_priority_policy() {
+                failures.push(error.to_string());
+            }
+            if !failures.is_empty() {
+                anyhow::bail!("{}", failures.join("; "));
+            }
+            Ok(())
+        });
+        if let Err(error) = result {
+            warn!("Old QoS cleanup did not finish and will be retried: {error}");
         }
     }
 
@@ -660,7 +685,7 @@ impl NetworkBooster {
         let quoted_policy = Self::powershell_single_quote(policy_name);
         format!(
             "$ErrorActionPreference = 'Stop'; \
-             $policy = Get-NetQosPolicy -Name {quoted_policy} -ErrorAction SilentlyContinue; \
+             $policy = Get-NetQosPolicy -ErrorAction Stop | Where-Object {{ $_.Name -eq {quoted_policy} }}; \
              if ($null -eq $policy) {{ Write-Output 'SwiftTunnel:LegacyQoSAbsent'; exit 0; }} \
              Remove-NetQosPolicy -Name {quoted_policy} -Confirm:$false -ErrorAction Stop; \
              Write-Output 'SwiftTunnel:LegacyQoSRemoved'"
@@ -828,7 +853,7 @@ impl NetworkBooster {
             errors.push(format!("network throttling registry restore: {}", e));
         }
 
-        Self::cleanup_removed_qos_policies();
+        self.cleanup_removed_qos_policies(true);
         if let Err(e) = self.remove_relay_socket_qos_policy() {
             errors.push(format!("relay DSCP policy restore: {}", e));
         }
@@ -929,7 +954,7 @@ pub fn cleanup_all_system_state() -> Result<()> {
 
     // 2. Delete SwiftTunnel QoS policies from older releases and the current
     // relay-scoped DSCP policy.
-    NetworkBooster::cleanup_removed_qos_policies();
+    booster.cleanup_removed_qos_policies(true);
     if let Err(error) = NetworkBooster::cleanup_relay_socket_qos_policies() {
         warn!("Cleanup: relay QoS policy removal failed: {error}");
     }
@@ -1275,7 +1300,9 @@ mod tests {
     fn legacy_qos_removal_script_treats_missing_exact_policy_as_success() {
         let script = NetworkBooster::legacy_qos_policy_removal_script("RobloxPriority");
 
-        assert!(script.contains("Get-NetQosPolicy -Name 'RobloxPriority'"));
+        assert!(script.contains("Get-NetQosPolicy -ErrorAction Stop"));
+        assert!(script.contains("$_.Name -eq 'RobloxPriority'"));
+        assert!(!script.contains("SilentlyContinue"));
         assert!(script.contains("SwiftTunnel:LegacyQoSAbsent"));
         assert!(script.contains("exit 0"));
         assert!(!script.contains("RobloxPriority*"));
@@ -1285,8 +1312,70 @@ mod tests {
     fn legacy_qos_removal_script_escapes_policy_names() {
         let script = NetworkBooster::legacy_qos_policy_removal_script("Roblox'Priority");
 
-        assert!(script.contains("Get-NetQosPolicy -Name 'Roblox''Priority'"));
+        assert!(script.contains("$_.Name -eq 'Roblox''Priority'"));
         assert!(!script.contains("-Name 'Roblox'Priority'"));
+    }
+
+    #[test]
+    fn network_migration_skips_only_successful_automatic_repeats_and_retries_restore() {
+        let mut completed = false;
+        assert!(
+            run_network_migration(&mut completed, false, || anyhow::bail!("provider failed"))
+                .is_err()
+        );
+        assert!(!completed);
+        run_network_migration(&mut completed, false, || Ok(())).unwrap();
+        assert!(completed);
+        run_network_migration(&mut completed, false, || panic!("already completed")).unwrap();
+        assert!(
+            run_network_migration(&mut completed, true, || anyhow::bail!("restore failed"))
+                .is_err()
+        );
+        assert!(!completed);
+        run_network_migration(&mut completed, false, || Ok(())).unwrap();
+        run_network_migration(&mut completed, true, || Ok(())).unwrap();
+        assert!(completed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_qos_script_distinguishes_empty_results_from_provider_and_removal_failures() {
+        // Both policy commands are local functions. No real QoS provider,
+        // registry values, policies or network settings are queried or changed.
+        let get_empty = "function Get-NetQosPolicy { [CmdletBinding()] param([string]$Name) @() }";
+        let get_match = "function Get-NetQosPolicy { [CmdletBinding()] param([string]$Name) [pscustomobject]@{Name='OtherApp'}; [pscustomobject]@{Name='RobloxPriority'} }";
+        let get_failed = "function Get-NetQosPolicy { [CmdletBinding()] param([string]$Name) Write-Error -Category PermissionDenied -Message 'fixture provider failed' }";
+        let remove_ok = "function Remove-NetQosPolicy { [CmdletBinding()] param([string]$Name, [bool]$Confirm) Write-Output ('fixture-removed:'+$Name) }";
+        let remove_failed = "function Remove-NetQosPolicy { [CmdletBinding()] param([string]$Name, [bool]$Confirm) Write-Error 'fixture removal failed' }";
+        for (get, remove, success, marker) in [
+            (get_empty, remove_ok, true, "SwiftTunnel:LegacyQoSAbsent"),
+            (get_match, remove_ok, true, "fixture-removed:RobloxPriority"),
+            (get_failed, remove_ok, false, ""),
+            (get_match, remove_failed, false, ""),
+        ] {
+            let script = format!(
+                "$PSModuleAutoLoadingPreference='None'; Import-Module ($PSHOME + '\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop; {get}; {remove}; {}",
+                NetworkBooster::legacy_qos_policy_removal_script("RobloxPriority")
+            );
+            let output = crate::run_hidden_command_with_timeout(
+                "powershell",
+                &["-NoProfile", "-NonInteractive", "-Command", &script],
+                std::time::Duration::from_secs(8),
+            );
+            assert!(!output.timed_out);
+            assert_eq!(
+                output.success, success,
+                "{} / {}",
+                output.stdout, output.stderr
+            );
+            if success {
+                assert!(output.stdout.contains(marker), "{}", output.stdout);
+            } else {
+                assert!(!output.stdout.contains("SwiftTunnel:LegacyQoSAbsent"));
+                assert!(!output.stdout.contains("SwiftTunnel:LegacyQoSRemoved"));
+            }
+            assert!(!output.stdout.contains("fixture-removed:OtherApp"));
+        }
     }
 
     #[test]
