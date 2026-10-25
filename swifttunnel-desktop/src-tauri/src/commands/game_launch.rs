@@ -34,6 +34,24 @@ struct LaunchGuard {
     generation: u64,
     complete: bool,
 }
+
+fn launch_render_preferences(
+    game: &GamePreferences,
+    global: &swifttunnel_core::structs::RobloxSettingsConfig,
+) -> (
+    Option<u32>,
+    Option<swifttunnel_core::structs::GraphicsQuality>,
+) {
+    (
+        game.fps_cap.or(Some(if global.unlock_fps {
+            global.target_fps
+        } else {
+            60
+        })),
+        game.graphics_quality.or(Some(global.graphics_quality)),
+    )
+}
+
 #[tauri::command]
 pub async fn games_suggest_server(
     state: State<'_, AppState>,
@@ -347,6 +365,72 @@ mod native_worker_tests {
             Err("launch failed The previous settings could not be restored: backup locked".into())
         );
     }
+
+    #[tokio::test]
+    async fn queued_launch_uses_current_render_settings_without_changing_reviewed_route() {
+        use parking_lot::Mutex;
+        use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
+        for explicit in [false, true] {
+            let optimizer = Arc::new(Mutex::new(()));
+            let held = optimizer.lock();
+            let global = Arc::new(Mutex::new(RobloxSettingsConfig {
+                target_fps: 600,
+                graphics_quality: GraphicsQuality::Level1,
+                ..Default::default()
+            }));
+            let saved = Arc::new(Mutex::new(GamePreferences::default()));
+            let mut profile = GamePreferences {
+                datacenter_id: Some(1),
+                use_tunnel: true,
+                borderless: true,
+                ..Default::default()
+            };
+            (profile.fps_cap, profile.graphics_quality) =
+                launch_render_preferences(&saved.lock(), &global.lock());
+            assert_eq!(profile.fps_cap, Some(600));
+            let (queued, ready) = tokio::sync::oneshot::channel();
+            let worker_optimizer = optimizer.clone();
+            let worker_global = global.clone();
+            let worker_saved = saved.clone();
+            let task = tauri::async_runtime::spawn_blocking(move || {
+                let _ = queued.send(());
+                let _optimizer = worker_optimizer.lock();
+                (profile.fps_cap, profile.graphics_quality) =
+                    launch_render_preferences(&worker_saved.lock(), &worker_global.lock());
+                profile
+            });
+            ready.await.unwrap();
+            global.lock().target_fps = 900;
+            global.lock().graphics_quality = GraphicsQuality::Level10;
+            if explicit {
+                saved.lock().fps_cap = Some(400);
+                saved.lock().graphics_quality = Some(GraphicsQuality::Level4);
+            }
+            saved.lock().datacenter_id = Some(2);
+            drop(held);
+            let applied = task.await.unwrap();
+            assert_eq!(applied.fps_cap, Some(if explicit { 400 } else { 900 }));
+            assert_eq!(
+                applied.graphics_quality,
+                Some(if explicit {
+                    GraphicsQuality::Level4
+                } else {
+                    GraphicsQuality::Level10
+                })
+            );
+            assert_eq!(applied.datacenter_id, Some(1));
+            assert!(applied.use_tunnel && applied.borderless);
+        }
+        let global = RobloxSettingsConfig {
+            unlock_fps: false,
+            target_fps: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(
+            launch_render_preferences(&GamePreferences::default(), &global).0,
+            Some(60)
+        );
+    }
 }
 
 #[tauri::command]
@@ -641,14 +725,8 @@ pub async fn games_launch_plan(
         && launcher.matchmaker.applies(&place_id)
         && !preferences.skip_matchmaker;
     let global = state.settings.lock().config.roblox_settings.clone();
-    preferences.fps_cap = preferences.fps_cap.or(Some(if global.unlock_fps {
-        global.target_fps
-    } else {
-        60
-    }));
-    preferences.graphics_quality = preferences
-        .graphics_quality
-        .or(Some(global.graphics_quality));
+    (preferences.fps_cap, preferences.graphics_quality) =
+        launch_render_preferences(&preferences, &global);
     let mut target = launch_datacenter(
         &preferences,
         datacenter_id,
@@ -845,7 +923,7 @@ pub async fn games_launch(
         generation: placement_generation,
         complete: false,
     };
-    let profile = plan.preferences.clone();
+    let mut profile = plan.preferences.clone();
     let optimizer = state.roblox_optimizer.clone();
     let settings = state.settings.clone();
     let games = state.games.clone();
@@ -874,11 +952,17 @@ pub async fn games_launch(
             {
                 return Err("This Roblox launch was replaced. Try Play again.".into());
             }
-            if games
+            let saved_preferences = games
                 .library()?
                 .entry_for(&target_place, client)
-                .is_some_and(|entry| entry.preferences.graphics_quality.is_some())
-            {
+                .map(|entry| entry.preferences.clone())
+                .unwrap_or_default();
+            // The plan can predate a slow optimizer wait. Resolve the current
+            // game's overrides against the same global snapshot as its flags,
+            // while keeping the already reviewed route/window launch intent.
+            (profile.fps_cap, profile.graphics_quality) =
+                launch_render_preferences(&saved_preferences, &global);
+            if saved_preferences.graphics_quality.is_some() {
                 flags.remove("DFIntDebugFRMQualityLevelOverride");
             }
         }
