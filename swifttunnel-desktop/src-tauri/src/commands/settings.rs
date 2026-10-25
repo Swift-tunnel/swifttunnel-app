@@ -58,13 +58,13 @@ pub async fn settings_save(
     let fps_monitor = state.fps_monitor.clone();
     let app_handle = app.clone();
 
-    let result: Result<(), String> = tauri::async_runtime::spawn_blocking(move || {
+    let result: Result<bool, String> = tauri::async_runtime::spawn_blocking(move || {
         let mut new_settings = settings;
         new_settings.sanitize_in_place();
         let discord_enabled = new_settings.enable_discord_rpc;
         let wants_fps = overlay_wants_fps(&new_settings);
         let run_on_startup = new_settings.run_on_startup;
-        persist_preferences(
+        let routing_changed = persist_preferences(
             &settings_arc,
             new_settings,
             swifttunnel_core::settings::save_settings,
@@ -87,26 +87,29 @@ pub async fn settings_save(
             );
         }
 
-        Ok(())
+        Ok(routing_changed)
     })
     .await
     .map_err(|e| format!("Settings save task failed: {}", e))?;
-    result?;
+    if !result? {
+        // Display, overlay and other preferences must not wait behind a
+        // connection attempt just to republish unchanged routing settings.
+        return Ok(());
+    }
 
     // Push auto-routing settings to the live router so changes apply
     // mid-session instead of waiting for the next connect. Inert when
     // disconnected (no router) or for custom-relay sessions (no lookup task).
-    let (auto_routing_enabled, whitelisted_regions) = {
-        let s = state.settings.lock();
-        (s.auto_routing_enabled, s.whitelisted_regions.clone())
-    };
     let auto_router = {
         let vpn = state.vpn_connection.lock().await;
         vpn.auto_router().cloned()
     };
     if let Some(router) = auto_router {
-        router.set_enabled(auto_routing_enabled);
-        router.set_whitelisted_regions(whitelisted_regions);
+        // A connection may have held the lock while a later save completed.
+        // Publish current preferences, never the snapshot from before that wait.
+        let settings = state.settings.lock();
+        router.set_enabled(settings.auto_routing_enabled);
+        router.set_whitelisted_regions(settings.whitelisted_regions.clone());
     }
 
     Ok(())
@@ -116,13 +119,15 @@ fn persist_preferences(
     settings: &parking_lot::Mutex<AppSettings>,
     next: AppSettings,
     persist: impl FnOnce(&AppSettings) -> Result<(), String>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // Native background writers use this lock through their saves too. Keep
     // disk publication and its matching in-memory state in the same ordering.
     let mut current = settings.lock();
+    let routing_changed = current.auto_routing_enabled != next.auto_routing_enabled
+        || current.whitelisted_regions != next.whitelisted_regions;
     persist(&next)?;
     *current = next;
-    Ok(())
+    Ok(routing_changed)
 }
 
 fn overlay_wants_fps(settings: &AppSettings) -> bool {
@@ -646,6 +651,23 @@ pub async fn preset_save_to_downloads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_routing_preference_changes_need_the_connection_lock_after_saving() {
+        let settings = parking_lot::Mutex::new(AppSettings::default());
+        let mut next = settings.lock().clone();
+        next.minimize_to_tray = !next.minimize_to_tray;
+        assert!(!persist_preferences(&settings, next, |_| Ok(())).unwrap());
+
+        let mut next = settings.lock().clone();
+        next.auto_routing_enabled = !next.auto_routing_enabled;
+        assert!(persist_preferences(&settings, next, |_| Ok(())).unwrap());
+
+        let mut next = settings.lock().clone();
+        next.whitelisted_regions.push("mumbai".into());
+        assert!(persist_preferences(&settings, next.clone(), |_| Ok(())).unwrap());
+        assert!(!persist_preferences(&settings, next, |_| Ok(())).unwrap());
+    }
 
     #[test]
     fn a_background_writer_cannot_split_preference_persistence_from_publication() {
