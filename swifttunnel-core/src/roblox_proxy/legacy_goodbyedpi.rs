@@ -30,33 +30,100 @@ pub fn cleanup_for_uninstall() -> Result<(), String> {
     }
 }
 
-fn goodbyedpi_data_dir() -> PathBuf {
-    std::env::var_os("ProgramData")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("SwiftTunnel")
-        .join("goodbyedpi")
+#[cfg(windows)]
+fn goodbyedpi_data_dir() -> Result<PathBuf, String> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use windows::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_ProgramData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
+    };
+    // Cleanup is elevated. Never redirect it through ProgramData/TEMP env vars.
+    let native = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None) }
+        .map_err(|error| format!("Could not locate legacy helper data: {error}"))?;
+    if native.0.is_null() {
+        return Err("Windows did not return a shared data folder.".into());
+    }
+    let base = PathBuf::from(OsString::from_wide(unsafe { native.as_wide() }));
+    unsafe {
+        CoTaskMemFree(Some(native.0.cast()));
+    }
+    if !base.is_absolute() {
+        return Err("Windows returned an invalid shared data folder.".into());
+    }
+    Ok(base.join("SwiftTunnel").join("goodbyedpi"))
+}
+
+#[cfg(not(windows))]
+fn goodbyedpi_data_dir() -> Result<PathBuf, String> {
+    Err("Legacy Windows helper cleanup is available on Windows only.".into())
 }
 
 fn remove_goodbyedpi_data_dir() -> Result<(), String> {
-    remove_goodbyedpi_data_dir_at(&goodbyedpi_data_dir())
+    remove_goodbyedpi_data_dir_at(&goodbyedpi_data_dir()?)
 }
 
+const MAX_CLEANUP_ENTRIES: usize = 512;
+const MAX_CLEANUP_DEPTH: usize = 8;
+
 fn remove_goodbyedpi_data_dir_at(path: &Path) -> Result<(), String> {
-    match fs::remove_dir_all(path) {
-        Ok(()) => {
-            info!(
-                "Removed legacy GoodbyeDPI runtime directory {}",
-                path.display()
-            );
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!(
-            "Failed to remove legacy GoodbyeDPI runtime directory {}: {e}",
-            path.display()
-        )),
+    if !path.is_absolute() || path.file_name().is_none() {
+        return Err("Invalid legacy helper cleanup folder.".into());
     }
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+        Ok(meta) if !meta.is_dir() => return Err("Legacy helper data is not a directory.".into()),
+        Ok(_) => {}
+    }
+    // Inspect the whole small legacy layout before removing anything. An
+    // unexpected tree must not become unbounded recursive uninstall work.
+    fn inspect(
+        path: &Path,
+        depth: usize,
+        remaining: &mut usize,
+        plan: &mut Vec<(PathBuf, bool)>,
+    ) -> Result<(), String> {
+        if *remaining == 0 || depth > MAX_CLEANUP_DEPTH {
+            return Err(
+                "Legacy helper data contains too many files or nested folders; it was kept.".into(),
+            );
+        }
+        *remaining -= 1;
+        crate::roblox_native_launch::safe_path(path)?;
+        let meta = fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+        if meta.is_dir() {
+            for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                inspect(&entry.path(), depth + 1, remaining, plan)?;
+            }
+        } else if !meta.is_file() {
+            return Err("An unexpected legacy helper file was left untouched.".into());
+        }
+        plan.push((path.to_path_buf(), meta.is_dir()));
+        Ok(())
+    }
+    let mut plan = Vec::new();
+    let mut remaining = MAX_CLEANUP_ENTRIES;
+    inspect(path, 0, &mut remaining, &mut plan)?;
+    for (target, directory) in plan {
+        // Recheck each path immediately before its nonrecursive removal.
+        crate::roblox_native_launch::safe_path(&target)?;
+        let result = if directory {
+            fs::remove_dir(&target)
+        } else {
+            fs::remove_file(&target)
+        };
+        match result {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Could not remove legacy helper files: {error}")),
+        }
+    }
+    info!(
+        "Removed legacy GoodbyeDPI runtime directory {}",
+        path.display()
+    );
+    Ok(())
 }
 
 fn stop_managed_goodbyedpi_processes() -> Result<(), String> {
@@ -262,6 +329,83 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture() -> PathBuf {
+        let root = crate::test_support::recovery_directory()
+            .join(format!("legacy-cleanup-{:032x}", rand::random::<u128>()));
+        fs::create_dir(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn legacy_cleanup_removes_only_the_owned_tree_and_keeps_external_hardlinks() {
+        let root = fixture();
+        let outside = root.join("keep.txt");
+        fs::write(&outside, b"unrelated").unwrap();
+        let legacy = root.join("goodbyedpi");
+        fs::create_dir_all(legacy.join("x64")).unwrap();
+        fs::hard_link(&outside, legacy.join("x64").join("old.txt")).unwrap();
+        remove_goodbyedpi_data_dir_at(&legacy).unwrap();
+        assert!(!legacy.exists());
+        assert_eq!(fs::read(outside).unwrap(), b"unrelated");
+        assert!(remove_goodbyedpi_data_dir_at(Path::new("relative-folder")).is_err());
+    }
+
+    #[test]
+    fn oversized_or_deep_legacy_trees_are_preserved_before_any_deletion() {
+        let root = fixture();
+        let large = root.join("large");
+        fs::create_dir(&large).unwrap();
+        for index in 0..MAX_CLEANUP_ENTRIES {
+            fs::write(large.join(format!("{index}.txt")), b"keep").unwrap();
+        }
+        assert!(
+            remove_goodbyedpi_data_dir_at(&large)
+                .unwrap_err()
+                .contains("too many")
+        );
+        assert_eq!(fs::read_dir(&large).unwrap().count(), MAX_CLEANUP_ENTRIES);
+        let deep = root.join("deep");
+        let mut leaf = deep.clone();
+        for _ in 0..=MAX_CLEANUP_DEPTH {
+            leaf.push("child");
+        }
+        fs::create_dir_all(&leaf).unwrap();
+        fs::write(leaf.join("keep.txt"), b"keep").unwrap();
+        assert!(remove_goodbyedpi_data_dir_at(&deep).is_err());
+        assert!(leaf.join("keep.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn redirected_legacy_root_or_ancestor_is_left_untouched() {
+        let root = fixture();
+        let outside = root.join("outside");
+        fs::create_dir_all(outside.join("goodbyedpi")).unwrap();
+        fs::write(outside.join("goodbyedpi").join("keep.txt"), b"keep").unwrap();
+        let redirect = root.join("redirect");
+        // Junction creation requires no symlink privilege. Quote each path as
+        // a PowerShell literal; the fixture never names a real helper folder.
+        let literal = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "''"));
+        let script = format!(
+            "$ErrorActionPreference='Stop'; New-Item -ItemType Junction -Path {} -Target {} | Out-Null",
+            literal(&redirect),
+            literal(&outside)
+        );
+        let created = crate::run_hidden_command_with_timeout(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+            std::time::Duration::from_secs(10),
+        );
+        assert!(created.success, "{}", created.stderr);
+        assert!(remove_goodbyedpi_data_dir_at(&redirect).is_err());
+        assert!(remove_goodbyedpi_data_dir_at(&redirect.join("goodbyedpi")).is_err());
+        assert_eq!(
+            fs::read(outside.join("goodbyedpi").join("keep.txt")).unwrap(),
+            b"keep"
+        );
+        fs::remove_dir(redirect).unwrap();
+    }
 
     #[test]
     fn managed_goodbyedpi_roots_scope_to_install_dirs() {
