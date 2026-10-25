@@ -33,6 +33,22 @@ describe("stores/authStore", () => {
     is_tester: false, is_banned: false, banned_reason: null, banned_at: null,
   };
 
+  it("keeps an in-flight login busy when a status read reports logging_in", async () => {
+    let finish!: () => void;
+    commands.authLogin.mockReturnValue(new Promise<void>(resolve => { finish = resolve; }));
+    commands.authGetState.mockResolvedValue({ ...signedIn, state: "logging_in", email: null, user_id: null });
+    const store = await loadStore();
+    const loggingIn = store.getState().login("player@example.test", "fixture-password");
+    await store.getState().fetchState();
+    expect(store.getState().state).toBe("logging_in");
+    expect(store.getState().isLoading).toBe(true);
+    commands.authGetState.mockResolvedValue(signedIn);
+    finish();
+    await loggingIn;
+    expect(store.getState().state).toBe("logged_in");
+    expect(store.getState().isLoading).toBe(false);
+  });
+
   it.each([
     [{ message: "Login service unavailable" }, "Login service unavailable"],
     [{ error: "Please retry" }, "Please retry"],

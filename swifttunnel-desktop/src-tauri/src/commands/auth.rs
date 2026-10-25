@@ -109,10 +109,7 @@ fn restore_global_after_temporary_settings(
 }
 
 pub(crate) async fn emit_auth_state(app: &AppHandle, state: &AppState) {
-    let auth = state.auth_manager.lock().await;
-    let auth_state = auth.get_state();
-    let response = map_auth_state(auth_state);
-    drop(auth);
+    let response = map_auth_state(state.auth_state.get_state());
 
     let payload = AuthStateEvent {
         state: response.state,
@@ -323,9 +320,7 @@ pub(crate) async fn apply_ban_cleanup(app: &AppHandle, state: &AppState) -> bool
 
 #[tauri::command]
 pub async fn auth_get_state(state: State<'_, AppState>) -> Result<AuthStateResponse, String> {
-    let auth = state.auth_manager.lock().await;
-    let auth_state = auth.get_state();
-    Ok(map_auth_state(auth_state))
+    Ok(map_auth_state(state.auth_state.get_state()))
 }
 
 /// The forced-update ("please update") message if the server has locked this

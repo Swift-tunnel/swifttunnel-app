@@ -80,7 +80,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         isBanned: resp.is_banned,
         bannedReason: resp.banned_reason,
         bannedAt: resp.banned_at,
-        isLoading: false,
+        isLoading: resp.state === "logging_in",
         error: null,
       });
     } catch (e) {

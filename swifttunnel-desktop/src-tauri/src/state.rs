@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
-use swifttunnel_core::auth::AuthManager;
+use swifttunnel_core::auth::{AuthManager, AuthStateReader};
 use swifttunnel_core::discord_rpc::DiscordManager;
 use swifttunnel_core::fps_monitor::FpsMonitor;
 use swifttunnel_core::network_booster::NetworkBooster;
@@ -35,6 +35,8 @@ use tokio::sync::watch;
 pub struct AppState {
     pub games: Arc<Mutex<crate::commands::games::GamesState>>,
     pub auth_manager: Arc<tokio::sync::Mutex<AuthManager>>,
+    /// Status reads must not queue behind sign-in, profile HTTP or vault work.
+    pub auth_state: AuthStateReader,
     pub vpn_connection: Arc<tokio::sync::Mutex<VpnConnection>>,
     pub vpn_state_handle: watch::Receiver<ConnectionState>,
     pub split_tunnel_handle: Arc<RwLock<Option<Arc<tokio::sync::Mutex<SplitTunnelDriver>>>>>,
@@ -73,6 +75,7 @@ impl AppState {
         // (network, child processes, ACL repair, process scans) belongs in
         // the background startup task in lib.rs.
         let auth_manager = AuthManager::new().map_err(|e| format!("Failed to init auth: {}", e))?;
+        let auth_state = auth_manager.state_reader();
         let settings = swifttunnel_core::settings::load_settings();
         let roblox_optimizer = RobloxOptimizer::new();
 
@@ -92,6 +95,7 @@ impl AppState {
         Ok(Self {
             games: Arc::new(Mutex::new(crate::commands::games::GamesState::default())),
             auth_manager: Arc::new(tokio::sync::Mutex::new(auth_manager)),
+            auth_state,
             vpn_connection: Arc::new(tokio::sync::Mutex::new(vpn_connection)),
             vpn_state_handle,
             split_tunnel_handle: Arc::new(RwLock::new(None)),

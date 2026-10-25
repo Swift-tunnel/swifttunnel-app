@@ -91,6 +91,17 @@ pub struct AuthManager {
     refresh_backoff: Arc<Mutex<RefreshBackoff>>,
 }
 
+/// Read-only account state, independent of an owner's async operation lock.
+/// This cannot start API requests or change a session.
+#[derive(Clone)]
+pub struct AuthStateReader(Arc<Mutex<AuthState>>);
+
+impl AuthStateReader {
+    pub fn get_state(&self) -> AuthState {
+        self.0.lock().clone()
+    }
+}
+
 fn exhausted_refresh_result(expired: bool, last_error: AuthError) -> Result<(), AuthError> {
     // Access-token expiry and temporary refresh failures do not revoke the
     // saved refresh token. Keep it so a later request can recover online.
@@ -185,6 +196,10 @@ impl AuthManager {
     /// Get the current auth state
     pub fn get_state(&self) -> AuthState {
         self.state.lock().clone()
+    }
+
+    pub fn state_reader(&self) -> AuthStateReader {
+        AuthStateReader(self.state.clone())
     }
 
     /// Check if user is logged in
@@ -1106,6 +1121,14 @@ mod tests {
             !storage_path.exists(),
             "no credential file should be written after failure"
         );
+        // Holding the manager for an account operation must not delay status
+        // reads. The reader observes subsequent changes from the same manager.
+        let reader = manager.state_reader();
+        let operations = tokio::sync::Mutex::new(manager);
+        let account_operation = operations.lock().await;
+        assert!(matches!(reader.get_state(), AuthState::Banned(_)));
+        account_operation.cancel_login();
+        assert_eq!(reader.get_state(), AuthState::LoggedOut);
     }
 
     #[test]
