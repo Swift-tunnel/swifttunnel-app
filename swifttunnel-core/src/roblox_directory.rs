@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     net::Ipv4Addr,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex, Weak},
     time::{Duration, Instant},
 };
 
@@ -107,6 +107,7 @@ const ROVALRA_CACHE_ENTRIES: usize = 32;
 #[derive(Default)]
 struct ResponseCache {
     entries: HashMap<String, (Instant, Arc<[u8]>)>,
+    requests: HashMap<String, Weak<tokio::sync::Mutex<()>>>,
 }
 impl ResponseCache {
     fn get(&mut self, key: &str, now: Instant) -> Option<Arc<[u8]>> {
@@ -134,6 +135,22 @@ impl ResponseCache {
         }
         self.entries.insert(key, (now, body));
     }
+
+    fn request(&mut self, key: &str) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
+        self.requests
+            .retain(|_, request| request.strong_count() > 0);
+        if let Some(request) = self.requests.get(key).and_then(Weak::upgrade) {
+            return Ok(request);
+        }
+        if self.requests.len() >= ROVALRA_CACHE_ENTRIES {
+            return Err(
+                "The server directory is busy. Wait a moment before searching again.".into(),
+            );
+        }
+        let request = Arc::new(tokio::sync::Mutex::new(()));
+        self.requests.insert(key.into(), Arc::downgrade(&request));
+        Ok(request)
+    }
 }
 static ROVALRA_RESPONSES: LazyLock<Mutex<ResponseCache>> = LazyLock::new(Default::default);
 
@@ -147,16 +164,48 @@ fn parse_body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String>
 }
 
 async fn json<T: serde::de::DeserializeOwned>(url: reqwest::Url) -> Result<T, String> {
-    let cache_key = rovalra_cacheable(&url).then(|| url.as_str().to_string());
-    if let Some(key) = &cache_key {
-        let cached = ROVALRA_RESPONSES
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key, Instant::now());
-        if let Some(body) = cached {
+    if rovalra_cacheable(&url) {
+        let key = url.as_str().to_string();
+        cached_json(&ROVALRA_RESPONSES, &key, fetch_json_body(url)).await
+    } else {
+        parse_body(&fetch_json_body(url).await?)
+    }
+}
+
+async fn cached_json<T: serde::de::DeserializeOwned>(
+    responses: &Mutex<ResponseCache>,
+    key: &str,
+    fetch: impl std::future::Future<Output = Result<Vec<u8>, String>>,
+) -> Result<T, String> {
+    let request = {
+        let mut cache = responses.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(body) = cache.get(key, Instant::now()) {
+            drop(cache);
             return parse_body(&body);
         }
+        cache.request(key)?
+    };
+    // Keep each URL's admission until parsing and cache publication finish.
+    // Another URL stays independent; a cancelled or failed fetch is retryable.
+    let _request = request.lock().await;
+    let cached = responses
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(key, Instant::now());
+    if let Some(body) = cached {
+        return parse_body(&body);
     }
+    let bytes = fetch.await?;
+    let value = parse_body(&bytes)?;
+    responses.lock().unwrap_or_else(|p| p.into_inner()).put(
+        key.into(),
+        Arc::from(&bytes[..]),
+        Instant::now(),
+    );
+    Ok(value)
+}
+
+async fn fetch_json_body(url: reqwest::Url) -> Result<Vec<u8>, String> {
     let response = client()
         .map_err(|error| {
             log::warn!("Could not initialize the server-directory client: {error}");
@@ -172,16 +221,7 @@ async fn json<T: serde::de::DeserializeOwned>(url: reqwest::Url) -> Result<T, St
     let response = response
         .error_for_status()
         .map_err(|_| "Server information is temporarily unavailable.".to_string())?;
-    let bytes = read_bounded(response, 512 * 1024, "server directory").await?;
-    // Parse before keeping it, so a broken answer is never reused.
-    let value = parse_body(&bytes)?;
-    if let Some(key) = cache_key {
-        ROVALRA_RESPONSES
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .put(key, Arc::from(&bytes[..]), Instant::now());
-    }
-    Ok(value)
+    read_bounded(response, 512 * 1024, "server directory").await
 }
 fn relay_region(city: &str, country: &str) -> Option<&'static str> {
     match (city, country) {
@@ -493,6 +533,87 @@ mod tests {
         sync::Arc,
         time::{Duration, Instant},
     };
+
+    #[tokio::test]
+    async fn overlapping_directory_searches_share_a_fetch_without_blocking_other_urls() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = Mutex::new(ResponseCache::default());
+        let calls = AtomicUsize::new(0);
+        let release = tokio::sync::Notify::new();
+        let (first, second, independent) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(biased;
+            cached_json::<u32>(&cache, "same", async {
+                calls.fetch_add(1, Ordering::Relaxed);
+                release.notified().await;
+                Ok(b"7".to_vec())
+            }),
+            cached_json::<u32>(&cache, "same", async {
+                calls.fetch_add(1, Ordering::Relaxed);
+                Ok(b"8".to_vec())
+            }),
+            async {
+                let value = cached_json::<u32>(&cache, "other", async { Ok(b"9".to_vec()) }).await;
+                release.notify_one();
+                value
+            },
+            )
+        })
+        .await
+        .expect("independent searches must keep progressing");
+        assert_eq!(first, Ok(7));
+        assert_eq!(second, Ok(7));
+        assert_eq!(independent, Ok(9));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_invalid_or_cancelled_directory_fetches_leave_the_url_retryable() {
+        let cache = Arc::new(Mutex::new(ResponseCache::default()));
+        assert!(
+            cached_json::<u32>(&cache, "same", async { Err("offline".into()) })
+                .await
+                .is_err()
+        );
+        assert!(
+            cached_json::<u32>(&cache, "same", async { Ok(b"invalid".to_vec()) })
+                .await
+                .is_err()
+        );
+        assert!(cache.lock().unwrap().entries.is_empty());
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let owner_cache = cache.clone();
+        let owner_started = started.clone();
+        let owner = tokio::spawn(async move {
+            cached_json::<u32>(&owner_cache, "same", async {
+                owner_started.notify_one();
+                std::future::pending().await
+            })
+            .await
+        });
+        started.notified().await;
+        owner.abort();
+        assert!(owner.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            cached_json::<u32>(&cache, "same", async { Ok(b"3".to_vec()) }).await,
+            Ok(3)
+        );
+    }
+
+    #[test]
+    fn directory_request_ownership_is_bounded_and_reclaims_finished_urls() {
+        let mut cache = ResponseCache::default();
+        let mut held: Vec<_> = (0..ROVALRA_CACHE_ENTRIES)
+            .map(|i| cache.request(&format!("page-{i}")).unwrap())
+            .collect();
+        assert!(Arc::ptr_eq(&held[0], &cache.request("page-0").unwrap()));
+        assert!(cache.request("extra").is_err());
+        held.pop();
+        assert!(cache.request("extra").is_ok());
+        drop(held);
+        let _request = cache.request("next").unwrap();
+        assert_eq!(cache.requests.len(), 1);
+    }
 
     #[test]
     fn rovalra_responses_are_reused_for_sixty_seconds_then_fetched_again() {
