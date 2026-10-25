@@ -97,7 +97,7 @@ fn read_registry_string(hive_key: &str, value: &str) -> Option<String> {
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let key = hklm.open_subkey(hive_key).ok()?;
-    key.get_value::<String, _>(value).ok()
+    crate::registry_value::read(&key, value).ok().flatten()
 }
 
 #[cfg(windows)]
@@ -107,7 +107,7 @@ fn read_registry_u32(hive_key: &str, value: &str) -> Option<u32> {
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     let key = hklm.open_subkey(hive_key).ok()?;
-    key.get_value::<u32, _>(value).ok()
+    crate::registry_value::read(&key, value).ok().flatten()
 }
 
 #[cfg(windows)]
@@ -122,10 +122,24 @@ fn read_machine_guid() -> Option<String> {
 
 #[cfg(windows)]
 fn read_boot_volume_serial() -> Option<String> {
-    use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
     use windows::core::PCWSTR;
 
-    let root: Vec<u16> = "C:\\\0".encode_utf16().collect();
+    // Windows can live on E: or on a mounted volume. Query the volume for
+    // the trusted OS path, rather than an unrelated or absent C: drive.
+    let windows_directory = crate::utils::trusted_windows_root()?;
+    let path: Vec<u16> = windows_directory
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut root = vec![0u16; path.len() + 1];
+    unsafe { GetVolumePathNameW(PCWSTR(path.as_ptr()), &mut root) }.ok()?;
+    let length = root.iter().position(|unit| *unit == 0)?;
+    if length == 0 || root[length - 1] != u16::from(b'\\') {
+        return None;
+    }
     let mut serial: u32 = 0;
 
     // SAFETY: `root` is a NUL-terminated UTF-16 buffer that outlives the call,

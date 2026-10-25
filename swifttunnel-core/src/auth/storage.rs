@@ -61,7 +61,7 @@ fn read_machine_id() -> String {
 
     let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
     if let Ok(key) = hklm.open_subkey("SOFTWARE\\Microsoft\\Cryptography")
-        && let Ok(guid) = key.get_value::<String, _>("MachineGuid")
+        && let Ok(Some(guid)) = crate::registry_value::read(&key, "MachineGuid")
     {
         return guid;
     }
