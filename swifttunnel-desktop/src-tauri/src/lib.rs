@@ -6,6 +6,7 @@ mod harness;
 mod logging;
 mod session_metadata;
 mod single_client;
+mod startup_config;
 mod state;
 mod tray;
 mod window_restore;
@@ -218,51 +219,18 @@ fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
 
 #[cfg(windows)]
 fn reapply_saved_network_boosts(state: &AppState) {
-    let (requested_config, normalized_config_changed) = {
-        let mut settings = state.settings.lock();
-        let original = settings.config.network_settings.clone();
-        settings
-            .config
-            .network_settings
-            .normalize_legacy_master_boost();
-        (
-            settings.config.network_settings.clone(),
-            settings.config.network_settings != original,
-        )
-    };
-
-    if !requested_config.has_enabled_boosts() {
-        if normalized_config_changed {
-            let snapshot = state.settings.lock().clone();
-            if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
-                warn!("Failed to persist normalized network boost state: {}", e);
-            }
-        }
-        return;
-    }
-
-    info!("Reapplying saved network boost settings on startup");
-    let outcome = state
-        .network_booster
-        .lock()
-        .reconcile_optimizations_checked(&requested_config);
-
-    if !outcome.warnings.is_empty() {
-        warn!(
+    match startup_config::reapply_network(
+        &state.network_booster,
+        &state.settings,
+        |booster, config| booster.reconcile_optimizations_checked(config),
+        swifttunnel_core::settings::save_settings,
+    ) {
+        Ok(warnings) if !warnings.is_empty() => warn!(
             "Saved network boosts reapplied with warnings: {}",
-            outcome.warnings.join("; ")
-        );
-    }
-
-    if outcome.applied_config != requested_config || normalized_config_changed {
-        let snapshot = {
-            let mut settings = state.settings.lock();
-            settings.config.network_settings = outcome.applied_config;
-            settings.clone()
-        };
-        if let Err(e) = swifttunnel_core::settings::save_settings(&snapshot) {
-            warn!("Failed to persist reapplied network boost state: {}", e);
-        }
+            warnings.join("; ")
+        ),
+        Ok(_) => {}
+        Err(error) => warn!("Failed to persist reapplied network boost state: {error}"),
     }
 }
 
@@ -915,6 +883,11 @@ pub fn run() {
             let app_state = AppState::new(runtime.clone(), launched_from_startup)
                 .expect("Failed to initialize app state");
 
+            // Reserve before exposing command state. Startup must restore old
+            // records before any user apply can create a new recovery record.
+            let startup_config_operation = commands::optimizer::begin_config_change()
+                .map_err(std::io::Error::other)?;
+
             // ALL heavy startup work (stale network recovery, profile refresh,
             // boost/FFlag reapply) runs in the background task spawned below.
             // It used to run inline here — but setup blocks the event loop, so
@@ -993,12 +966,24 @@ pub fn run() {
                 //    file, adapter modes). vpn_connect waits on the signal so
                 //    a quick connect can't race the reset.
                 let recovery_handle = app_handle.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    // Staging may write the bundled driver package. Keep it
-                    // off the GUI thread and ahead of driver preflight.
-                    sync_runtime_assets(&recovery_handle);
-                    recover_stale_network_state();
-                }).await;
+                if let Err(error) = tokio::task::spawn_blocking(move || {
+                    startup_config::recover(startup_config_operation, || {
+                        // The worker retains settings admission through all
+                        // old-record recovery, even if its waiter disappears.
+                        sync_runtime_assets(&recovery_handle);
+                        recover_stale_network_state();
+                        if let Some(state) = recovery_handle.try_state::<AppState>() {
+                            state.sync_roblox_window_settings();
+                            state.system_optimizer.lock().recover_from_snapshot();
+                            state.network_booster.lock().recover_from_snapshot();
+                        }
+                    })
+                }).await {
+                    // Keep Connect's readiness signal false if the owned
+                    // worker panics, instead of connecting during partial reset.
+                    log::warn!("Startup settings recovery task failed: {error}");
+                    return;
+                }
                 let Some(state) = app_handle.try_state::<AppState>() else {
                     return;
                 };
@@ -1049,15 +1034,8 @@ pub fn run() {
                 // the network self-heal has run.
                 let _ = app_handle.emit(events::STARTUP_RECOVERY_COMPLETE, ());
 
-                // 2. These paths can run icacls/powercfg and wait for mutexes.
-                // They must not occupy an async worker while networking and
-                // commands are trying to finish startup.
-                let local_recovery_handle = app_handle.clone();
+                // 2. Runtime GPU recovery also belongs off async workers.
                 match tokio::task::spawn_blocking(move || {
-                    if let Some(state) = local_recovery_handle.try_state::<AppState>() {
-                        state.sync_roblox_window_settings();
-                        state.system_optimizer.lock().recover_from_snapshot();
-                    }
                     swifttunnel_core::vpn::process_performance::recover_gpu_preferences()
                 }).await {
                     Ok(Ok(_)) => {},
@@ -1108,35 +1086,33 @@ pub fn run() {
                     info!("Stored account is banned; clearing boosts after startup recovery");
                     commands::auth::cleanup_banned_session(&state).await;
                 } else {
-                    // Recover network booster state from persisted snapshot
-                    // (crash recovery), then reapply what the user had on.
-                    //
-                    // All three block, so they belong on a blocking thread and
-                    // not on a runtime worker. They ran inline here while they
-                    // were cheap, and v3.1.3 made the last one roughly ten
-                    // times heavier: reapplying FFlags went from reading one
-                    // directory to walking ten launcher roots, each with a
-                    // registry lookup, a read_dir, and a settings file written
-                    // per version folder found, all under the optimizer mutex.
-                    //
-                    // Starving a worker here does not look like a slow startup.
-                    // The server list fetch shares this runtime, so it never
-                    // resolves and the Connect tab renders "Could not load
-                    // regions", and Tauri commands stop returning so Windows
-                    // marks the window "not responding". Both were reported
-                    // within hours of 3.1.3, and neither reproduces on a fast
-                    // disk with only %LOCALAPPDATA%\Roblox present, which is
-                    // why it looked machine-specific rather than like a bug.
+                    // Crash recovery finished before config admission opened.
+                    // Reapply only the current preferences, under a fresh
+                    // reservation shared with user applies and account cleanup.
+                    // Network commands and launcher file scans can block, so
+                    // the physical worker retains this reservation too.
                     let handle = app_handle.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
+                    let operation = match commands::optimizer::wait_for_config_change().await {
+                        Ok(operation) => operation,
+                        Err(error) => {
+                            log::warn!("Startup boost reapply skipped: {error}");
+                            return;
+                        }
+                    };
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        let _operation = operation;
                         let Some(state) = handle.try_state::<AppState>() else {
                             return;
                         };
-                        state.network_booster.lock().recover_from_snapshot();
+                        if matches!(state.auth_manager.blocking_lock().get_state(), AuthState::Banned(_)) {
+                            return;
+                        }
                         reapply_saved_network_boosts(&state);
                         reapply_saved_roblox_fflags(&state);
                     })
-                    .await;
+                    .await {
+                        log::warn!("Startup boost reapply task failed: {error}");
+                    }
                 }
             });
 

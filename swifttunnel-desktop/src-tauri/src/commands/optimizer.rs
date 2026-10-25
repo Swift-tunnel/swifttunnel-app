@@ -6,7 +6,7 @@ use crate::state::AppState;
 
 static CONFIG_CHANGE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-pub(super) fn begin_config_change() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
+pub(crate) fn begin_config_change() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
     CONFIG_CHANGE.try_acquire().map_err(|_| {
         "Another settings change is running. Wait for it to finish, then retry.".to_string()
     })
@@ -14,7 +14,7 @@ pub(super) fn begin_config_change() -> Result<tokio::sync::SemaphorePermit<'stat
 
 /// Mandatory account cleanup waits for an admitted apply/reset rather than
 /// restoring Windows halfway through that operation or silently skipping it.
-pub(super) async fn wait_for_config_change() -> Result<tokio::sync::SemaphorePermit<'static>, String>
+pub(crate) async fn wait_for_config_change() -> Result<tokio::sync::SemaphorePermit<'static>, String>
 {
     CONFIG_CHANGE.acquire().await.map_err(|_| {
         "Could not finish restoring settings. Restart SwiftTunnel and try again.".into()
@@ -322,11 +322,15 @@ pub async fn boost_update_config(
 pub async fn boost_sync_effective_config(
     state: State<'_, AppState>,
 ) -> Result<BoostUpdateResult, String> {
+    // Files/registry values midway through recovery or apply do not describe
+    // the effective saved configuration. Wait before probing and publishing.
+    let operation = wait_for_config_change().await?;
     let settings = state.settings.clone();
     let network_booster = state.network_booster.clone();
     let roblox_optimizer = state.roblox_optimizer.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         let observed = {
             let s = settings.lock();
             s.config.clone()
