@@ -9,7 +9,7 @@ function text(value: string) {
   return {
     nodeValue: value,
     isConnected: true,
-    parentElement: { tagName: "SPAN", closest: () => null },
+    parentElement: { tagName: "SPAN", closest: (_selector: string): Element | null => null },
   };
 }
 
@@ -235,6 +235,31 @@ describe("runtime translation lifecycle", () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(walks).toBe(initialWalks);
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores changes inside protected UI and nested code instead of rescanning the page", async () => {
+    nodes.push(text("Connected"));
+    const i18n = await import("./i18n");
+    await i18n.applyLanguage("fr");
+    const initialWalks = walks;
+    const protectedText = text("A game title changed");
+    protectedText.parentElement.closest = selector => selector.includes("[data-no-translate]") ? {} as Element : null;
+    const codeText = text("NetworkProcessFlag");
+    codeText.parentElement.closest = selector => /\bcode\b/i.test(selector) ? {} as Element : null;
+    for (const node of [protectedText, codeText]) {
+      observeChanges([{ type: "characterData", target: node }]);
+      observeChanges([{ type: "childList", addedNodes: [node] }]);
+    }
+    await vi.advanceTimersByTimeAsync(500);
+    expect(walks).toBe(initialWalks);
+    expect(invoke).toHaveBeenCalledTimes(1);
+
+    // A later legitimate UI change still must not translate nested data/code.
+    nodes.push(protectedText, codeText, text("New setting"));
+    await i18n.applyLanguage("fr");
+    expect(protectedText.nodeValue).toBe("A game title changed");
+    expect(codeText.nodeValue).toBe("NetworkProcessFlag");
+    expect(nodes[nodes.length - 1].nodeValue).toBe("FR:New setting");
   });
 
   it("translates new controls mounted during an outstanding request", async () => {

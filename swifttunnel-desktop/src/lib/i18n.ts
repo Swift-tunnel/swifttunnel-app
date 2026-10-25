@@ -38,6 +38,13 @@ const SKIP_TAGS = new Set([
   "KBD",
   "SVG",
 ]);
+const SKIP_SCOPE_SELECTOR = `[data-no-translate],${[...SKIP_TAGS].join(",")}`;
+
+function translationAllowed(element: Element | null): boolean {
+  // Use the same ancestor rule for both collection and mutation admission.
+  // A span inside code, SVG or a protected game label is still data.
+  return !!element && !SKIP_TAGS.has(element.tagName) && !element.closest(SKIP_SCOPE_SELECTOR);
+}
 
 // Weak keys let removed tabs and replaced graph labels be collected. Remember
 // our last write too, so a later React update becomes the new source text.
@@ -158,9 +165,7 @@ function collectTextNodes(): Text[] {
     acceptNode(node) {
       const text = node as Text;
       const parent = text.parentElement;
-      if (!parent) return NodeFilter.FILTER_REJECT;
-      if (SKIP_TAGS.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
-      if (parent.closest("[data-no-translate]")) return NodeFilter.FILTER_REJECT;
+      if (!translationAllowed(parent)) return NodeFilter.FILTER_REJECT;
       // Already-translated nodes must always be revisited, otherwise switching
       // between two non-English languages (e.g. Arabic→French) would strand
       // them, since their current text no longer looks like the source.
@@ -341,9 +346,9 @@ function scheduleRetranslate() {
 }
 
 function addedNodeNeedsTranslation(node: Node): boolean {
-  if (node.nodeValue != null) return translatable(node.nodeValue);
+  if (node.nodeValue != null) return translationAllowed(node.parentElement) && translatable(node.nodeValue);
   const element = node as Element;
-  if (SKIP_TAGS.has(element.tagName) || element.closest?.("[data-no-translate]")) return false;
+  if (!translationAllowed(element)) return false;
   // Do not flatten a whole newly mounted page into one large string. A large
   // container can contain many valid short labels even when its total text
   // is over the per-label limit. Bound the observer's inspection work too.
@@ -351,8 +356,7 @@ function addedNodeNeedsTranslation(node: Node): boolean {
   for (let i = 0; i < 64; i++) {
     const text = walker.nextNode() as Text | null;
     if (!text) return false;
-    if (text.parentElement && !SKIP_TAGS.has(text.parentElement.tagName)
-      && !text.parentElement.closest("[data-no-translate]") && translatable(text.nodeValue ?? "")) return true;
+    if (translationAllowed(text.parentElement) && translatable(text.nodeValue ?? "")) return true;
   }
   return true;
 }
@@ -363,7 +367,7 @@ function ensureObserver() {
       // Counters change several times a second. They are data, not new UI
       // copy, so avoid rescanning the whole page after every ping/FPS update.
       const needsPass = records.some(record => record.type === "characterData"
-        ? translatable(record.target.nodeValue ?? "")
+        ? translationAllowed(record.target.parentElement) && translatable(record.target.nodeValue ?? "")
         : record.type === "childList" && Array.from(record.addedNodes).some(addedNodeNeedsTranslation));
       if (needsPass) scheduleRetranslate();
     });
