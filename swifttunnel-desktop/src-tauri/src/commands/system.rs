@@ -11,10 +11,7 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::sync::Mutex;
 #[cfg(windows)]
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-#[cfg(windows)]
-use ring::rand::SecureRandom;
+use std::time::Duration;
 #[cfg(windows)]
 use tauri::Manager;
 
@@ -104,22 +101,6 @@ fn ensure_overlay_window_must_stay_async() {
 }
 
 #[cfg(windows)]
-fn program_data_swifttunnel_dir() -> PathBuf {
-    let program_data =
-        std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-    PathBuf::from(program_data).join("SwiftTunnel")
-}
-
-#[cfg(windows)]
-fn random_hex(bytes_len: usize) -> Result<String, String> {
-    let mut bytes = vec![0u8; bytes_len];
-    ring::rand::SystemRandom::new()
-        .fill(&mut bytes)
-        .map_err(|_| "Failed to generate secure random bytes".to_string())?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-#[cfg(windows)]
 fn has_reparse_point(path: &Path) -> Result<bool, String> {
     use std::os::windows::fs::MetadataExt;
 
@@ -137,33 +118,6 @@ fn reject_reparse_point(path: &Path) -> Result<(), String> {
         ))
     } else {
         Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn harden_driver_work_dir_acl(path: &Path) -> Result<(), String> {
-    let path_string = path.to_string_lossy().to_string();
-    let output = swifttunnel_core::run_hidden_command_with_timeout(
-        "icacls",
-        &[
-            &path_string,
-            "/inheritance:r",
-            "/grant:r",
-            "*S-1-5-18:(OI)(CI)F",
-            "*S-1-5-32-544:(OI)(CI)F",
-        ],
-        Duration::from_secs(30),
-    );
-
-    if output.success {
-        Ok(())
-    } else {
-        let stderr = output.stderr.trim();
-        Err(format!(
-            "Failed to harden driver work directory ACLs for {}: {}",
-            path.display(),
-            stderr
-        ))
     }
 }
 
@@ -217,20 +171,6 @@ fn should_try_inf_fallback(exit_code: i32, stderr: &str) -> bool {
         return false;
     }
     exit_code == 1603
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn unique_extract_dir() -> PathBuf {
-    let suffix = random_hex(16).unwrap_or_else(|_| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos().to_string())
-            .unwrap_or_else(|_| "fallback".to_string())
-    });
-    program_data_swifttunnel_dir()
-        .join("driver-work")
-        .join(format!("extract-{suffix}"))
 }
 
 /// Extract an MSI's payload to a directory via `msiexec /a` (administrative
@@ -717,17 +657,6 @@ fn stage_winpkfilter_msi(
         _source: source,
         msi_path,
     })
-}
-
-#[cfg(windows)]
-#[allow(dead_code)]
-fn default_driver_install_log_path() -> PathBuf {
-    program_data_swifttunnel_dir()
-        .join("driver-work")
-        .join(format!(
-            "install-{}.log",
-            random_hex(16).unwrap_or_else(|_| "fallback".to_string())
-        ))
 }
 
 #[cfg(windows)]
@@ -1383,48 +1312,6 @@ fn probe_windows_firewall() -> WindowsRepairCommandOutput {
 }
 
 #[cfg(windows)]
-fn firewall_backup_path(extension: &str) -> Result<PathBuf, String> {
-    let dir = program_data_swifttunnel_dir().join("firewall-backups");
-    fs::create_dir_all(&dir).map_err(|e| {
-        format!(
-            "Failed to create Windows Firewall backup directory {}: {}",
-            dir.display(),
-            e
-        )
-    })?;
-    reject_reparse_point(&program_data_swifttunnel_dir())?;
-    reject_reparse_point(&dir)?;
-    harden_driver_work_dir_acl(&dir)?;
-
-    let probe_path = dir.join(format!("write-probe-{}.tmp", random_hex(8)?));
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe_path)
-        .map_err(|e| format!("Windows Firewall backup directory is not writeable: {e}"))?;
-    fs::remove_file(&probe_path).map_err(|e| {
-        format!(
-            "Failed to remove Windows Firewall backup write probe {}: {}",
-            probe_path.display(),
-            e
-        )
-    })?;
-
-    for _ in 0..8 {
-        let path = dir.join(format!(
-            "windows-firewall-before-reset-{}.{}",
-            random_hex(12)?,
-            extension
-        ));
-        if !path.exists() {
-            return Ok(path);
-        }
-    }
-
-    Err("Failed to allocate a unique Windows Firewall backup path".to_string())
-}
-
-#[cfg(windows)]
 fn path_is_non_empty_file(path: &Path) -> bool {
     path.metadata()
         .map(|metadata| metadata.is_file() && metadata.len() > 0)
@@ -1444,8 +1331,20 @@ fn firewall_backup_failed_message(export_summary: &str, reg_export_summary: &str
 }
 
 #[cfg(windows)]
-fn backup_windows_firewall_policy() -> Result<(String, String), String> {
-    let wfw_backup_path = firewall_backup_path("wfw")?;
+struct FirewallPolicyBackup {
+    path: String,
+    summary: String,
+    _workspace: swifttunnel_installer_cache::ProtectedWorkspace,
+}
+
+#[cfg(windows)]
+fn backup_windows_firewall_policy() -> Result<FirewallPolicyBackup, String> {
+    let cache = swifttunnel_installer_cache::InstallerCache::open()
+        .map_err(|e| format!("Could not prepare protected storage for the firewall backup: {e}"))?;
+    let work = cache
+        .workspace("firewall-backup")
+        .map_err(|e| format!("Could not prepare the firewall backup directory: {e}"))?;
+    let wfw_backup_path = work.path().join("windows-firewall-before-reset.wfw");
     let wfw_backup_path_string = wfw_backup_path.to_string_lossy().to_string();
     let export = run_windows_repair_command(
         "netsh",
@@ -1454,10 +1353,14 @@ fn backup_windows_firewall_policy() -> Result<(String, String), String> {
     );
     let export_summary = export.summary("netsh advfirewall export");
     if export.success && path_is_non_empty_file(&wfw_backup_path) {
-        return Ok((wfw_backup_path_string, format!("export: {export_summary}")));
+        return Ok(FirewallPolicyBackup {
+            path: wfw_backup_path_string,
+            summary: format!("export: {export_summary}"),
+            _workspace: work,
+        });
     }
 
-    let reg_backup_path = firewall_backup_path("reg")?;
+    let reg_backup_path = work.path().join("windows-firewall-before-reset.reg");
     let reg_backup_path_string = reg_backup_path.to_string_lossy().to_string();
     let reg_export = run_windows_repair_command(
         "reg",
@@ -1471,10 +1374,11 @@ fn backup_windows_firewall_policy() -> Result<(String, String), String> {
     );
     let reg_export_summary = reg_export.summary("reg export firewall policy");
     if reg_export.success && path_is_non_empty_file(&reg_backup_path) {
-        return Ok((
-            reg_backup_path_string,
-            firewall_registry_backup_summary(&export_summary, &reg_export_summary),
-        ));
+        return Ok(FirewallPolicyBackup {
+            path: reg_backup_path_string,
+            summary: firewall_registry_backup_summary(&export_summary, &reg_export_summary),
+            _workspace: work,
+        });
     }
 
     Err(firewall_backup_failed_message(
@@ -1620,7 +1524,11 @@ fn repair_windows_firewall_sync() -> Result<WindowsFirewallRepairResponse, Strin
     }
 
     let mut reset_output_parts = Vec::new();
-    let (backup_path_string, backup_summary) = backup_windows_firewall_policy()?;
+    let FirewallPolicyBackup {
+        path: backup_path_string,
+        summary: backup_summary,
+        _workspace: _backup_workspace,
+    } = backup_windows_firewall_policy()?;
     reset_output_parts.push(backup_summary);
 
     let reset =
@@ -2669,20 +2577,6 @@ mod tests {
             1603,
             "Start-Process : This command requires elevation."
         ));
-    }
-
-    #[test]
-    fn unique_extract_dir_lives_under_program_data_swifttunnel() {
-        let dir = unique_extract_dir();
-        let s = dir.to_string_lossy();
-        assert!(
-            s.contains("SwiftTunnel") && s.contains("driver-work") && s.contains("extract-"),
-            "unexpected extract dir: {}",
-            s
-        );
-        // Distinct nanos on consecutive calls.
-        let again = unique_extract_dir();
-        assert_ne!(dir, again);
     }
 
     #[test]
