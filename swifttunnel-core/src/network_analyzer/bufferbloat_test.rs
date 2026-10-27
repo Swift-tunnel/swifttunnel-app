@@ -162,7 +162,7 @@ async fn sample_latency(samples: usize) -> Result<u32, String> {
         }
     }
 
-    median_u32(&mut vals).ok_or_else(|| "All pings failed - no network connection".to_string())
+    median_u32(&mut vals).ok_or_else(|| "The test server didn't answer any pings. Check your connection; your network may block ping tests.".to_string())
 }
 
 fn median_u32(vals: &mut [u32]) -> Option<u32> {

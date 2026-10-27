@@ -102,7 +102,7 @@ pub async fn run_stability_test(
 
     // Calculate statistics
     if successful_pings.is_empty() {
-        let error_msg = "All pings failed - no network connection".to_string();
+        let error_msg = "The test server didn't answer any pings. Check your connection; your network may block ping tests.".to_string();
         error!("{}", error_msg);
         let _ = progress_tx.send(StabilityTestProgress::Error(error_msg.clone()));
         return Err(error_msg);
