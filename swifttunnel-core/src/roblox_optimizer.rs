@@ -16,6 +16,7 @@ use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, SetFileAttribut
 #[derive(Debug, Clone)]
 pub struct CurrentRobloxSettings {
     pub fps_cap: u32,
+    /// Saved menu preference (0 for Automatic, 1-10), not the engine's 0-21 scale.
     pub graphics_quality: i32,
     pub fullscreen: bool,
     pub window_size: Option<(u32, u32)>,
@@ -253,9 +254,16 @@ impl RobloxOptimizer {
         // Parse FPS cap
         let fps_cap = Self::extract_int_value(&content, "FramerateCap").unwrap_or(60);
 
-        // Parse graphics quality level
-        let graphics_quality =
-            Self::extract_int_value(&content, "GraphicsQualityLevel").unwrap_or(5);
+        // The saved menu preference is separate from the engine's current
+        // rendering level, especially while Automatic adapts to the device.
+        // Only accept a supported menu value from legacy files without it.
+        let graphics_quality = Self::extract_int_value(&content, "SavedQualityLevel")
+            .filter(|level| (0..=10).contains(level))
+            .or_else(|| {
+                Self::extract_int_value(&content, "GraphicsQualityLevel")
+                    .filter(|level| (0..=10).contains(level))
+            })
+            .unwrap_or(5);
 
         // Parse fullscreen
         let fullscreen = Self::extract_bool_value(&content, "Fullscreen").unwrap_or(false);
@@ -3896,6 +3904,57 @@ mod tests {
         assert_eq!(settings.window_size, None);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn current_settings_use_the_saved_menu_quality_instead_of_the_engine_level() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-saved-quality-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.xml");
+        let opt = optimizer_with_path(path.clone());
+        let results: Vec<_> = [(0, 11), (10, 21), (5, 10), (7, 14)]
+            .into_iter()
+            .map(|(saved, engine)| {
+                fs::write(&path, format!(
+                    r#"<roblox><int name="GraphicsQualityLevel">{engine}</int><token name="SavedQualityLevel">{saved}</token></roblox>"#
+                )).unwrap();
+                (saved, opt.read_current_settings().unwrap().graphics_quality)
+            }).collect();
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        for (saved, actual) in results {
+            assert_eq!(actual, saved, "saved quality preference must win");
+            assert_eq!(GraphicsQuality::from_level(actual).to_level(), saved);
+        }
+    }
+
+    #[test]
+    fn invalid_saved_quality_falls_back_to_supported_legacy_values() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-legacy-quality-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.xml");
+        let opt = optimizer_with_path(path.clone());
+        let mut results = Vec::new();
+        for (saved, engine, expected) in [(11, 8, 8), (-2, 0, 0), (99, 21, 5)] {
+            fs::write(&path, format!(
+                r#"<roblox><int name="GraphicsQualityLevel">{engine}</int><token name="SavedQualityLevel">{saved}</token></roblox>"#
+            )).unwrap();
+            results.push((
+                opt.read_current_settings().unwrap().graphics_quality,
+                expected,
+            ));
+        }
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        for (actual, expected) in results {
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

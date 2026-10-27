@@ -251,9 +251,10 @@ impl GraphicsQuality {
         }
     }
 
-    /// Create graphics quality from integer level (1-10)
+    /// Create graphics quality from the saved menu level (0 for Automatic, 1-10).
     pub fn from_level(level: i32) -> Self {
         match level {
+            0 => GraphicsQuality::Automatic,
             1 => GraphicsQuality::Level1,
             2 => GraphicsQuality::Level2,
             3 => GraphicsQuality::Level3,
@@ -791,6 +792,7 @@ mod tests {
 
     #[test]
     fn test_graphics_quality_from_level_valid() {
+        assert_eq!(GraphicsQuality::from_level(0), GraphicsQuality::Automatic);
         assert_eq!(GraphicsQuality::from_level(1), GraphicsQuality::Level1);
         assert_eq!(GraphicsQuality::from_level(5), GraphicsQuality::Level5);
         assert_eq!(GraphicsQuality::from_level(10), GraphicsQuality::Level10);
@@ -798,7 +800,6 @@ mod tests {
 
     #[test]
     fn test_graphics_quality_from_level_invalid() {
-        assert_eq!(GraphicsQuality::from_level(0), GraphicsQuality::Level5);
         assert_eq!(GraphicsQuality::from_level(-1), GraphicsQuality::Level5);
         assert_eq!(GraphicsQuality::from_level(11), GraphicsQuality::Level5);
         assert_eq!(GraphicsQuality::from_level(999), GraphicsQuality::Level5);
