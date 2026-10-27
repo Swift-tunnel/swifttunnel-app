@@ -96,6 +96,16 @@ export function GameLibraryPanel() {
     if (!place) { setError("Enter a Roblox game link or a numeric place ID."); return; }
     await run(async () => { await gamesAddFavourite(place, addClient); setInput(""); setAdding(false); setFilter("favourites"); });
   }
+  async function rejoinRecoveredGame() {
+    const previous = library?.recovery;
+    if (!previous) return;
+    const entry = entries.find(e => e.place_id === previous.place_id && e.client === previous.client)
+      ?? { place_id: previous.place_id, client: previous.client, name: `Place ${previous.place_id}`, job_id: previous.job_id, favourite: false, last_played: null };
+    await run(async () => {
+      await gamesDismissRecovery();
+      await prepare(entry, previous.job_id, null, false);
+    });
+  }
   async function launch(entry: RobloxGameEntry, plan: GameLaunchPlan, close: boolean, safe=false) {
     setReview(null);
     await run(async () => {
@@ -171,7 +181,7 @@ export function GameLibraryPanel() {
     {library && <section className="instrument"><Row anchorId="join_notifications" label="Join notifications" desc="Shows the server's location and ping when you join."><Toggle enabled={library.notify_joins} disabled={locked || !!loadError} ariaLabel="Server information notification" onChange={enabled => void run(() => gamesSetNotifications(enabled))} /></Row></section>}
     <GamePreferencesDialog entry={profile} onClose={() => setProfile(null)} onSaved={() => void refresh()} />
     <Dialog open={!!suggestion} onClose={()=>setSuggestion(null)} title="Matchmaker found a better server" description="Moving leaves your current game. Do nothing and you stay here."><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>setSuggestion(null)}>Stay here</Button><Button size="sm" onClick={()=>{if(suggestion&&active){const chosen=suggestion;setSuggestion(null);void prepare(active,chosen.job_id,chosen.datacenter?.id??null,false);}}}>Review {suggestion?.datacenter?.city}</Button></div></Dialog>
-    <Dialog open={!!library?.recovery} onClose={()=>void run(()=>gamesDismissRecovery())} title="Roblox closed unexpectedly" description="Want to rejoin the server you were in?"><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" onClick={()=>void run(()=>gamesDismissRecovery())}>Stay closed</Button><Button size="sm" disabled={busy} onClick={()=>{const previous=library?.recovery;const entry=entries.find(e=>e.place_id===previous?.place_id&&e.client===previous.client);if(entry&&previous){void gamesDismissRecovery().then(()=>prepare(entry,previous.job_id,null,false));}}}>Rejoin</Button></div></Dialog>
+    <Dialog open={!!library?.recovery} onClose={()=>{if(!busy)void run(()=>gamesDismissRecovery());}} title="Roblox closed unexpectedly" description="Want to rejoin the server you were in?"><div className="flex justify-end gap-2"><Button size="sm" variant="secondary" disabled={busy} onClick={()=>void run(()=>gamesDismissRecovery())}>Stay closed</Button><Button size="sm" disabled={busy} onClick={()=>void rejoinRecoveredGame()}>Rejoin</Button></div></Dialog>
     <GameServerDialog entry={servers} onClose={() => setServers(null)} onJoin={(entry, server, center) => { setServers(null); void prepare(entry, server.job_id, center.id, false); }} />
     <Dialog open={adding} onClose={() => { if (!busy) setAdding(false); }} title="Add a game" description="Paste its Roblox link or place ID.">
       <form onSubmit={e => { e.preventDefault(); void addFavourite(); }} className="flex flex-col gap-4">{error && <ErrorBanner tone="error">{error}</ErrorBanner>}
