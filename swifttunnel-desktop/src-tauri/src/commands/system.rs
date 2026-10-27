@@ -1744,8 +1744,10 @@ impl DriverCheckResponse {
         health: swifttunnel_core::vpn::SplitTunnelDriverHealth,
         error: String,
     ) -> Self {
-        let lower = error.to_ascii_lowercase();
-        let reboot_required = lower.contains("reboot") || lower.contains("marked for deletion");
+        let reboot_required = health.reboot_required
+            || health.status == swifttunnel_core::vpn::DriverHealthStatus::RebootRequired
+            || health.recommended_action == swifttunnel_core::vpn::DriverRecommendedAction::Reboot
+            || swifttunnel_core::vpn::error_messages::driver_reboot_pending(&error);
         let status = health.status;
         let recommended_action = health.recommended_action;
         let message = health.message;
@@ -2386,6 +2388,40 @@ mod tests {
             reboot_required: false,
             recommended_action: swifttunnel_core::vpn::DriverRecommendedAction::None,
         }
+    }
+
+    #[test]
+    fn driver_repair_failure_preserves_confirmed_reboot_health() {
+        let response = DriverCheckResponse::repair_failure(
+            swifttunnel_core::vpn::SplitTunnelDriverHealth {
+                ready: false,
+                status: swifttunnel_core::vpn::DriverHealthStatus::RebootRequired,
+                reboot_required: true,
+                recommended_action: swifttunnel_core::vpn::DriverRecommendedAction::Reboot,
+                ..ready_health()
+            },
+            "The driver self-test could not finish.".into(),
+        );
+        assert!(response.reboot_required);
+        assert_eq!(response.status, "reboot_required");
+        assert_eq!(response.recommended_action, "reboot");
+        assert!(response.message.contains("self-test"));
+    }
+
+    #[test]
+    fn driver_repair_failure_does_not_treat_reboot_history_as_pending_installation() {
+        let response = DriverCheckResponse::repair_failure(
+            swifttunnel_core::vpn::SplitTunnelDriverHealth {
+                ready: false,
+                status: swifttunnel_core::vpn::DriverHealthStatus::Missing,
+                recommended_action: swifttunnel_core::vpn::DriverRecommendedAction::Install,
+                ..ready_health()
+            },
+            "Driver install failed after reboot. No reboot required by the installer.".into(),
+        );
+        assert!(!response.reboot_required);
+        assert_eq!(response.status, "missing");
+        assert_eq!(response.recommended_action, "install");
     }
 
     fn preflight(

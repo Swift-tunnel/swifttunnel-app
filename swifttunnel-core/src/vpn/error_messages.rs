@@ -30,7 +30,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
                 || lc.contains("access is denied")
             {
                 admin_or_access_denied_message(crate::utils::is_administrator())
-            } else if is_winpkfilter_reboot_error(&lc) {
+            } else if driver_reboot_pending(msg) {
                 "Restart Windows to finish setting up SwiftTunnel's network filter, then connect again.\n\nIf this still appears after restarting, contact support with your log file.".to_string()
             } else if is_winpkfilter_repairable_setup_error(&lc) {
                 "SwiftTunnel could not finish setting up the Windows Packet Filter driver for your active network adapter.\n\nSwiftTunnel tried to repair this automatically. Restart Windows once, then connect again. If it still fails, contact support with your log file.".to_string()
@@ -155,7 +155,7 @@ pub fn driver_repair_error(message: &str) -> String {
         || lower.contains("access is denied")
     {
         admin_or_access_denied_message(crate::utils::is_administrator())
-    } else if is_winpkfilter_reboot_error(&lower) {
+    } else if driver_reboot_pending(message) {
         "Restart Windows to finish setting up SwiftTunnel's network driver, then connect again. If it still fails, contact support with your log.".to_string()
     } else {
         "SwiftTunnel couldn't reinstall its network driver. Restart Windows and try the driver repair once. If it still fails, contact support with your log.".to_string()
@@ -174,10 +174,11 @@ fn is_device_installation_service_unavailable(lower: &str) -> bool {
         || lower.contains("plug and play service is not available")
 }
 
-fn is_winpkfilter_reboot_error(lowercase_msg: &str) -> bool {
-    lowercase_msg.contains("reboot required to finish driver installation")
-        || lowercase_msg.contains("marked for deletion")
-        || (lowercase_msg.contains("reboot") && lowercase_msg.contains("driver"))
+/// Recognize the pending-installation markers produced by our driver helpers.
+/// Mentioning a past reboot does not mean that Windows requires another one.
+pub fn driver_reboot_pending(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("reboot required to finish ") || lower.contains("marked for deletion")
 }
 
 fn is_winpkfilter_repairable_setup_error(lowercase_msg: &str) -> bool {
@@ -274,6 +275,31 @@ pub fn short_error(error: &VpnError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reboot_guidance_uses_installation_markers_instead_of_reboot_history() {
+        for diagnostic in [
+            "Reboot required to finish driver installation. pnputil exited with code 3010.",
+            "Reboot required to finish WinpkFilter binding installation. netcfg exited with code 3010.",
+            "The driver service is still marked for deletion. A reboot may be required.",
+        ] {
+            assert!(driver_reboot_pending(diagnostic));
+            assert!(
+                user_friendly_error(&VpnError::SplitTunnelSetupFailed(diagnostic.into()))
+                    .contains("finish setting up")
+            );
+        }
+        for diagnostic in [
+            "Driver install failed after reboot",
+            "driver repair failed, no reboot required by installer",
+        ] {
+            assert!(!driver_reboot_pending(diagnostic));
+            assert!(
+                !user_friendly_error(&VpnError::SplitTunnelSetupFailed(diagnostic.into()))
+                    .contains("finish setting up")
+            );
+        }
+    }
 
     #[test]
     fn device_installation_failure_has_guidance_in_connect_and_repair() {
