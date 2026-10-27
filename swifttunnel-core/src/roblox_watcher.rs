@@ -516,6 +516,26 @@ struct TailedFile {
     observed_len: u64,
 }
 
+/// Discard only the captured tail's first partial line. A growing file must
+/// not extend startup work past that snapshot, even if no newline is written.
+fn skip_partial_line(reader: &mut impl BufRead, mut remaining: usize) -> std::io::Result<bool> {
+    while remaining > 0 {
+        let available = reader.fill_buf()?;
+        let available = &available[..available.len().min(remaining)];
+        if available.is_empty() {
+            return Ok(false);
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |at| at + 1);
+        reader.consume(consumed);
+        remaining -= consumed;
+        if newline.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl TailedFile {
     fn new(path: &Path) -> std::io::Result<Self> {
         let file = File::open(path)?;
@@ -523,25 +543,24 @@ impl TailedFile {
         let mut reader = BufReader::new(file);
 
         // Read last 64KB to catch current session
-        const TAIL_BYTES: i64 = 65536;
-        let file_size = reader.seek(SeekFrom::End(0))? as i64;
-        let start_pos = (file_size - TAIL_BYTES).max(0);
-        reader.seek(SeekFrom::Start(start_pos as u64))?;
+        const TAIL_BYTES: u64 = 65536;
+        let file_size = reader.seek(SeekFrom::End(0))?;
+        let start_pos = file_size.saturating_sub(TAIL_BYTES);
+        reader.seek(SeekFrom::Start(start_pos))?;
 
         // Skip first potentially incomplete line if not at file start
-        if start_pos > 0 {
-            reader.skip_until(b'\n')?;
-        }
+        let discarding_line =
+            start_pos > 0 && !skip_partial_line(&mut reader, (file_size - start_pos) as usize)?;
 
         Ok(Self {
             reader,
             path: path.to_path_buf(),
             pending_line: Vec::new(),
-            discarding_line: false,
-            initial_end: file_size as u64,
+            discarding_line,
+            initial_end: file_size,
             identity,
             reset_observed: false,
-            observed_len: file_size as u64,
+            observed_len: file_size,
         })
     }
 
@@ -871,6 +890,34 @@ mod tests {
         drop(writer);
         drop(tail);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn startup_tail_does_not_treat_a_skipped_old_line_continuation_as_a_new_event() {
+        use std::io::Write;
+        let (path, mut tail) = tail_fixture(&vec![b'x'; 128 * 1024]);
+        let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writer
+            .write_all(b"UDMUX Address = 198.51.100.10, Port = 54321\nnew complete line\n")
+            .unwrap();
+        let lines = tail.read_new_lines().unwrap();
+        drop(writer);
+        drop(tail);
+        fs::remove_file(path).unwrap();
+        assert_eq!(lines, ["new complete line"]);
+    }
+
+    #[test]
+    fn startup_line_skip_stops_at_the_captured_byte_limit() {
+        let mut bytes = vec![b'x'; 128 * 1024];
+        bytes.extend_from_slice(b"\nnew complete line\n");
+        let mut reader = BufReader::new(std::io::Cursor::new(bytes));
+        assert!(!skip_partial_line(&mut reader, 64 * 1024).unwrap());
+        assert_eq!(reader.stream_position().unwrap(), 64 * 1024);
+        assert!(skip_partial_line(&mut reader, 128 * 1024).unwrap());
+        let mut next = String::new();
+        reader.read_line(&mut next).unwrap();
+        assert_eq!(next, "new complete line\n");
     }
 
     #[test]
