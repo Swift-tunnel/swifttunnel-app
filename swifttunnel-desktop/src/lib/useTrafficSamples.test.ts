@@ -8,6 +8,9 @@ const h = vi.hoisted(() => ({
   live: true,
   bytesUp: 0,
   bytesDown: 0,
+  state: "connected",
+  connectedAt: 1 as number | null,
+  region: "mumbai-01",
 }));
 vi.mock("react", () => ({
   useEffect: (effect: () => void | (() => void)) => h.effects.push(effect),
@@ -17,7 +20,8 @@ vi.mock("react", () => ({
 vi.mock("./useLiveUpdates", () => ({ useLiveUpdates: () => h.live }));
 vi.mock("./commands", () => ({ vpnGetThroughput: h.native }));
 vi.mock("../stores/vpnStore", () => ({ useVpnStore: {
-  getState: () => ({ fetchThroughput: h.fetch, bytesUp: h.bytesUp, bytesDown: h.bytesDown }),
+  getState: () => ({ fetchThroughput: h.fetch, bytesUp: h.bytesUp, bytesDown: h.bytesDown,
+    state: h.state, connectedAt: h.connectedAt, region: h.region }),
 } }));
 import { useTrafficSamples } from "./useTrafficSamples";
 
@@ -33,6 +37,9 @@ describe("connection traffic sampling", () => {
     h.effects.length = 0;
     h.live = true;
     h.bytesUp = h.bytesDown = 0;
+    h.state = "connected";
+    h.connectedAt = 1;
+    h.region = "mumbai-01";
     h.fetch.mockResolvedValue(true);
     h.native.mockResolvedValue({ bytes_up: 0, bytes_down: 0 });
   });
@@ -98,5 +105,39 @@ describe("connection traffic sampling", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(h.history).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it("starts a fresh graph after reconnect even when the new counters are larger", async () => {
+    start();
+    await vi.advanceTimersByTimeAsync(0);
+    h.bytesUp = 1000;
+    await vi.advanceTimersByTimeAsync(500);
+    h.connectedAt = 2;
+    h.bytesUp = 50_000;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(h.history).toHaveBeenLastCalledWith([]);
+    h.bytesUp = 50_500;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(h.history.mock.lastCall?.[0]).toEqual([{ t: Date.now(), up: 1000, down: 0 }]);
+  });
+  it.each([true, false])("skips disconnected throughput polling (live %s)", async live => {
+    h.live = live;
+    h.state = "disconnected";
+    h.connectedAt = null;
+    start();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(h.fetch).not.toHaveBeenCalled();
+    expect(h.native).not.toHaveBeenCalled();
+  });
+  it("discards a read from a tunnel that ended while waiting", async () => {
+    start();
+    await vi.advanceTimersByTimeAsync(0);
+    let finish!: () => void;
+    h.fetch.mockReturnValueOnce(new Promise<boolean>(resolve => { finish = () => resolve(true); }));
+    await vi.advanceTimersByTimeAsync(500);
+    h.connectedAt = 2;
+    h.bytesUp = 1000;
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.history).toHaveBeenCalledTimes(1);
   });
 });

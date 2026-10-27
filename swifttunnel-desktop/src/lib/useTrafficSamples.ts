@@ -16,6 +16,7 @@ export function useTrafficSamples(showGraph: boolean): DataSample[] {
     let cancelled = false;
     let inFlight = false;
     let previous: { up: number; down: number; at: number } | null = null;
+    let session: { region: string | null; connectedAt: number } | null = null;
     samples.current = [];
     setHistory([]);
 
@@ -24,6 +25,19 @@ export function useTrafficSamples(showGraph: boolean): DataSample[] {
       // A hidden graph needs no history. Keep only its visible transfer totals
       // current, and leave the background window idle.
       if (!showGraph && !liveRef.current) return;
+      const before = useVpnStore.getState();
+      if (before.state !== "connected" || before.connectedAt === null) {
+        previous = null;
+        return;
+      }
+      if (session?.connectedAt !== before.connectedAt || session.region !== before.region) {
+        previous = null;
+        session = { region: before.region, connectedAt: before.connectedAt };
+        if (samples.current.length) {
+          samples.current = [];
+          if (liveRef.current) setHistory([]);
+        }
+      }
       inFlight = true;
       try {
         let totals: { up: number; down: number } | null = null;
@@ -38,6 +52,13 @@ export function useTrafficSamples(showGraph: boolean): DataSample[] {
           if (stats) totals = { up: stats.bytes_up, down: stats.bytes_down };
         }
         if (cancelled || !totals || !showGraph) return;
+        // Counter magnitudes cannot identify a reconnect. A new tunnel may
+        // already have larger totals, and a slow read may cross the switch.
+        const current = useVpnStore.getState();
+        if (current.state !== "connected" || current.connectedAt !== before.connectedAt || current.region !== before.region) {
+          previous = null;
+          return;
+        }
         const at = performance.now();
         if (previous && totals.up >= previous.up && totals.down >= previous.down) {
           const seconds = Math.max(1, at - previous.at) / 1000;
