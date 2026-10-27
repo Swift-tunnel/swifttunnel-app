@@ -46,7 +46,9 @@ impl CacheNote {
 #[cfg(windows)]
 mod platform;
 #[cfg(windows)]
-pub use platform::{windows_installer_path, InstallerCache, ProtectedInstaller};
+pub use platform::{
+    windows_installer_path, InstallerCache, ProtectedInstaller, ProtectedWorkspace,
+};
 
 #[cfg(test)]
 mod tests {

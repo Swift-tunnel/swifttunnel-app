@@ -33,6 +33,7 @@ use windows::{
 // Users can read a registered source, but only SYSTEM/Administrators can change it.
 const DIR_SD: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FRFX;;;BU)";
 const FILE_SD: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)";
+const WORK_SD: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 const CACHE_DIR: &str = "SwiftTunnelInstallerCache";
 const RECOVERY_CACHE_DIR: &str = "SwiftTunnelInstallerCache-Recovered";
 
@@ -209,6 +210,47 @@ pub struct ProtectedInstaller {
     _file: File,
     _cache: Arc<CacheInner>,
 }
+
+/// An owned work directory, protected at creation. Its parent handles stay
+/// open through installer use so an ancestor cannot be renamed or redirected.
+/// Dropping it preserves diagnostic files; cleanup is explicit after success.
+pub struct ProtectedWorkspace {
+    path: PathBuf,
+    _directory: File,
+    _cache: Arc<CacheInner>,
+}
+impl ProtectedWorkspace {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn cleanup(self) -> io::Result<()> {
+        if self.path.parent() != Some(self._cache.path.as_path()) {
+            return Err(denied("Workspace is outside its protected parent"));
+        }
+        // Only this freshly created child. The protected parent and all of
+        // its ancestors remain held through deletion; MSI sources are siblings.
+        drop(self._directory);
+        let result = std::fs::remove_dir_all(&self.path);
+        drop(self._cache);
+        result
+    }
+}
+
+fn workspace_name(label: &str) -> io::Result<String> {
+    if label.is_empty()
+        || label.len() > 32
+        || !label
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid workspace label",
+        ));
+    }
+    Ok(format!("work-{label}-{:032x}", rand::random::<u128>()))
+}
 impl ProtectedInstaller {
     pub fn path(&self) -> &Path {
         &self.path
@@ -303,6 +345,33 @@ impl InstallerCache {
             _file: file,
             _cache: self.inner.clone(),
         })
+    }
+
+    pub fn workspace(&self, label: &str) -> io::Result<ProtectedWorkspace> {
+        let sd = Descriptor::parse(WORK_SD)?;
+        for _ in 0..8 {
+            let path = self.inner.path.join(workspace_name(label)?);
+            let text = wide(&path);
+            match unsafe { CreateDirectoryW(PCWSTR(text.as_ptr()), Some(&sd.attributes())) } {
+                Ok(()) => {
+                    let directory = open_directory(&path, false)?;
+                    check_security(&directory, WORK_SD)?;
+                    return Ok(ProtectedWorkspace {
+                        path,
+                        _directory: directory,
+                        _cache: self.inner.clone(),
+                    });
+                }
+                Err(error)
+                    if error.code()
+                        == windows::Win32::Foundation::ERROR_ALREADY_EXISTS.to_hresult() => {}
+                Err(error) => return Err(win_error(error)),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "Could not create a unique workspace",
+        ))
     }
 
     fn publish(&self, destination: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
@@ -420,13 +489,32 @@ mod tests {
     }
     #[test]
     fn security_descriptors_parse_with_protected_dacls() {
-        for text in [DIR_SD, FILE_SD] {
+        for text in [DIR_SD, FILE_SD, WORK_SD] {
             let sd = Descriptor::parse(text).unwrap();
             let mut control = 0;
             let mut revision = 0;
             unsafe { GetSecurityDescriptorControl(sd.0, &mut control, &mut revision) }.unwrap();
             assert_ne!(control & 0x1000, 0);
         }
+    }
+    #[test]
+    fn workspace_labels_cannot_change_the_parent_or_name_a_device_path() {
+        for label in [
+            "",
+            "../driver",
+            "C:\\driver",
+            "driver/name",
+            ".",
+            "driver:stream",
+            "driver ",
+            "driver\\name",
+        ] {
+            assert!(workspace_name(label).is_err(), "{label}");
+        }
+        assert!(workspace_name(&"x".repeat(33)).is_err());
+        let name = workspace_name("driver").unwrap();
+        assert!(name.starts_with("work-driver-"));
+        assert_eq!(Path::new(&name).components().count(), 1);
     }
     #[test]
     fn refuses_reparse_points_hard_links_and_wrong_types() {
@@ -491,6 +579,24 @@ mod tests {
         assert!(OpenOptions::new().write(true).open(first.path()).is_err());
         let second = cache.stage("test.msi", b"other package").unwrap();
         assert_ne!(first.path(), second.path());
+        let work = cache.workspace("driver").unwrap();
+        let retained = cache.workspace("driver").unwrap();
+        assert_ne!(work.path(), retained.path());
+        let work_path = work.path().to_path_buf();
+        let retained_path = retained.path().to_path_buf();
+        std::fs::write(work.path().join("install.log"), b"owned fixture").unwrap();
+        assert!(std::fs::rename(work.path(), cache.inner.path.join("renamed-work")).is_err());
+        work.cleanup().unwrap();
+        assert!(!work_path.exists());
+        assert!(
+            first.path().is_file(),
+            "workspace cleanup must preserve the MSI source"
+        );
+        drop(retained);
+        assert!(
+            retained_path.is_dir(),
+            "failed operations retain diagnostics on drop"
+        );
         cache.write_note(CacheNote::LiteAttempt, b"3.1.6").unwrap();
         assert_eq!(cache.read_note(CacheNote::LiteAttempt).unwrap(), "3.1.6");
         let dir = cache.inner.path.clone();

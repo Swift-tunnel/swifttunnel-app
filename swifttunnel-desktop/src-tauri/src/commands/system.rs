@@ -168,40 +168,6 @@ fn harden_driver_work_dir_acl(path: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn create_secure_driver_work_dir(label: &str) -> Result<PathBuf, String> {
-    let base = program_data_swifttunnel_dir().join("driver-work");
-    fs::create_dir_all(&base).map_err(|e| {
-        format!(
-            "Failed to create driver work root {}: {}",
-            base.display(),
-            e
-        )
-    })?;
-    reject_reparse_point(&base)?;
-
-    for _ in 0..8 {
-        let dir = base.join(format!("{label}-{}", random_hex(16)?));
-        match fs::create_dir(&dir) {
-            Ok(()) => {
-                harden_driver_work_dir_acl(&dir)?;
-                reject_reparse_point(&dir)?;
-                return Ok(dir);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                return Err(format!(
-                    "Failed to create driver work directory {}: {}",
-                    dir.display(),
-                    e
-                ));
-            }
-        }
-    }
-
-    Err("Failed to allocate a unique driver work directory".to_string())
-}
-
-#[cfg(windows)]
 fn driver_install_success_exit_code(code: i32) -> bool {
     // 0 = success
     // 1638 = another version already installed
@@ -715,7 +681,8 @@ fn resolve_winpkfilter_msi(
 
 #[cfg(windows)]
 struct DriverInstallWorkspace {
-    root: PathBuf,
+    work: swifttunnel_installer_cache::ProtectedWorkspace,
+    _source: swifttunnel_installer_cache::ProtectedInstaller,
     msi_path: PathBuf,
     first_log_path: PathBuf,
     retry_log_path: PathBuf,
@@ -730,29 +697,24 @@ fn stage_winpkfilter_msi(
     reject_reparse_point(source_path)?;
     let data = swifttunnel_core::vpn::winpkfilter::read_validated_msi_file(source_path, pkg)?;
 
-    let root = create_secure_driver_work_dir("install")?;
-    let msi_path = root.join(pkg.msi_name);
-    let mut staged = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&msi_path)
-        .map_err(|e| format!("Failed to create staged MSI {}: {}", msi_path.display(), e))?;
-    use std::io::Write;
-    staged
-        .write_all(&data)
-        .map_err(|e| format!("Failed to write staged MSI {}: {}", msi_path.display(), e))?;
-    staged
-        .sync_all()
-        .map_err(|e| format!("Failed to flush staged MSI {}: {}", msi_path.display(), e))?;
-    drop(staged);
-    reject_reparse_point(&msi_path)?;
+    let cache = swifttunnel_installer_cache::InstallerCache::open()
+        .map_err(|e| format!("Could not prepare protected driver storage. Run SwiftTunnel as administrator and try again. ({e})"))?;
+    let source = cache
+        .stage(pkg.msi_name, &data)
+        .map_err(|e| format!("Could not save the verified driver installer: {e}"))?;
+    let work = cache
+        .workspace("driver")
+        .map_err(|e| format!("Could not prepare a protected driver work directory: {e}"))?;
+    let root = work.path();
+    let msi_path = source.path().to_path_buf();
     validate_winpkfilter_file(&msi_path, pkg)?;
 
     Ok(DriverInstallWorkspace {
         first_log_path: root.join("install.log"),
         retry_log_path: root.join("install.retry.log"),
         extract_dir: root.join("extract"),
-        root,
+        work,
+        _source: source,
         msi_path,
     })
 }
@@ -1062,9 +1024,9 @@ fn install_winpkfilter_driver_from_msi(
                 }
                 return Err(message);
             }
-            let _ = fs::remove_file(&first_log_path);
-            let _ = fs::remove_file(&retry_log_path);
-            let _ = fs::remove_dir_all(&workspace.root);
+            if let Err(error) = workspace.work.cleanup() {
+                log::debug!("Successful driver repair left diagnostic files: {error}");
+            }
             Ok(())
         }
         Err(e) if matches!(exit_code, 1641 | 3010) => {
