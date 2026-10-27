@@ -62,7 +62,9 @@ pub async fn boost_get_metrics(
             ram_total: metrics.ram_total,
             ping: metrics.ping,
             roblox_running: metrics.roblox_running,
-            roblox_foreground: swifttunnel_core::performance_monitor::foreground_window_is_roblox(),
+            roblox_foreground: swifttunnel_core::performance_monitor::foreground_window_is_roblox(
+                metrics.process_id.filter(|_| metrics.roblox_running),
+            ),
             process_id: metrics.process_id,
         }
     })
