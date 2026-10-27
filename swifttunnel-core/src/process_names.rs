@@ -95,6 +95,7 @@ pub fn process_name_matches_any_tunnel_app<'a>(
         .any(|app| process_name_matches_tunnel_app(process_name_lower, app))
 }
 
+#[cfg(any(not(windows), test))]
 pub fn is_roblox_process_name(process_name: &str) -> bool {
     // Process scans call this for every PID. Normalize once, rather than
     // allocating both names again for every candidate in the known list.

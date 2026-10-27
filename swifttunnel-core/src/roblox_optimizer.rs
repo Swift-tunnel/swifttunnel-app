@@ -1894,8 +1894,8 @@ impl RobloxOptimizer {
     /// Ultraboost was on, so somebody who launched Roblox directly for a few
     /// weeks lost their flags at the first update and had no way to know.
     ///
-    /// Deliberately just the folder names: cheap enough to poll, and it changes
-    /// exactly when a client is added or removed.
+    /// Include each version's location: the same build can be installed by
+    /// multiple launchers or moved to another drive. No file contents are read.
     pub fn install_fingerprint() -> String {
         Self::fingerprint_of(&Self::find_roblox_version_folders())
     }
@@ -1906,18 +1906,27 @@ impl RobloxOptimizer {
     /// and a test that went through it would pass or fail on whatever Roblox
     /// happens to be installed on the machine running it.
     fn fingerprint_of(folders: &[PathBuf]) -> String {
-        let mut names: Vec<String> = folders
+        let mut paths: Vec<String> = folders
             .iter()
-            .filter_map(|path| {
-                path.file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
+            .map(|path| {
+                #[cfg(windows)]
+                {
+                    let mut value = path.to_string_lossy().replace('/', "\\");
+                    value.make_ascii_lowercase();
+                    value
+                }
+                #[cfg(not(windows))]
+                {
+                    path.to_string_lossy().into_owned()
+                }
             })
             .collect();
         // Sorted, because the folder listing is ordered by modification time.
         // Without this an unchanged install could reorder between polls and
         // trigger a pointless reapply.
-        names.sort();
-        names.join("|")
+        paths.sort();
+        paths.dedup();
+        paths.join("|")
     }
 
     fn find_roblox_version_folders() -> Vec<PathBuf> {
@@ -2788,6 +2797,32 @@ mod tests {
             RobloxOptimizer::fingerprint_of(&[]),
             "",
             "no install at all is stable rather than a panic"
+        );
+    }
+
+    #[test]
+    fn the_install_fingerprint_tracks_the_location_of_each_copy_of_a_build() {
+        let a = PathBuf::from(r"C:\x\Roblox\Versions\version-aaa");
+        let b = PathBuf::from(r"D:\Fishstrap\Versions\version-aaa");
+        let moved = PathBuf::from(r"E:\Fishstrap\Versions\version-aaa");
+        assert_ne!(
+            RobloxOptimizer::fingerprint_of(&[a.clone(), b]),
+            RobloxOptimizer::fingerprint_of(&[a.clone(), moved]),
+            "moving a same-build installation changes the files needing flags"
+        );
+        assert_eq!(
+            RobloxOptimizer::fingerprint_of(std::slice::from_ref(&a)),
+            RobloxOptimizer::fingerprint_of(&[a.clone(), a]),
+            "duplicate launcher registrations must not trigger reapplication"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_install_fingerprint_ignores_windows_path_casing_and_separator_style() {
+        assert_eq!(
+            RobloxOptimizer::fingerprint_of(&[PathBuf::from(r"D:\Fishstrap\Versions\version-aaa")]),
+            RobloxOptimizer::fingerprint_of(&[PathBuf::from("d:/FISHSTRAP/versions/version-aaa")]),
         );
     }
 
