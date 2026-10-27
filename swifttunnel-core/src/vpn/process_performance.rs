@@ -361,9 +361,7 @@ impl GameProcessPerformanceManager {
                 unsafe {
                     let _ = CloseHandle(handle);
                 }
-            } else if crate::process_snapshot::list()
-                .is_ok_and(|processes| !processes.iter().any(|process| process.pid == pid))
-            {
+            } else if crate::process_snapshot::contains_pid(pid).is_ok_and(|present| !present) {
                 state.cpu_sets = None;
                 state.affinity = None;
             }

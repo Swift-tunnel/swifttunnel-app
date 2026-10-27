@@ -33,18 +33,19 @@ pub fn updater_running() -> bool {
     let base = PathBuf::from(root);
     #[cfg(windows)]
     {
-        let Ok(processes) = crate::process_snapshot::list() else {
+        let Ok(processes) = crate::process_snapshot::list_named(&[
+            "RobloxPlayerInstaller.exe",
+            "RobloxInstaller.exe",
+            "RobloxPlayerLauncher.exe",
+        ]) else {
             return false;
         };
-        processes
-            .iter()
-            .filter(|process| is_updater_name(&process.name))
-            .any(|process| {
-                crate::process_snapshot::image_path(process.pid)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|image| updater_image_is_installed(&base, Path::new(&image)))
-            })
+        processes.iter().any(|process| {
+            crate::process_snapshot::image_path(process.pid)
+                .ok()
+                .flatten()
+                .is_some_and(|image| updater_image_is_installed(&base, Path::new(&image)))
+        })
     }
     #[cfg(not(windows))]
     {
@@ -67,16 +68,6 @@ fn updater_image_is_installed(base: &Path, image: &Path) -> bool {
     // Process image paths and LOCALAPPDATA can preserve different casing.
     // Use the same case-insensitive, directory-bounded match as the player.
     client_for_image(base, image).is_some()
-}
-#[cfg(windows)]
-fn is_updater_name(name: &str) -> bool {
-    [
-        "RobloxPlayerInstaller.exe",
-        "RobloxInstaller.exe",
-        "RobloxPlayerLauncher.exe",
-    ]
-    .iter()
-    .any(|expected| name.eq_ignore_ascii_case(expected))
 }
 fn find_player(versions: &Path) -> Result<PathBuf, String> {
     let mut players = Vec::new();
@@ -144,9 +135,10 @@ pub fn running_client() -> Result<Option<RobloxClient>, String> {
     {
         let base = std::env::var_os("LOCALAPPDATA")
             .ok_or("Windows could not find the Roblox installation.")?;
-        for process in crate::process_snapshot::list()? {
-            if crate::process_names::is_roblox_player_process_name(&process.name)
-                && let Some(image) = crate::process_snapshot::image_path(process.pid)?
+        for process in
+            crate::process_snapshot::list_named(crate::process_names::ROBLOX_PLAYER_PROCESS_NAMES)?
+        {
+            if let Some(image) = crate::process_snapshot::image_path(process.pid)?
                 && let Some(client) = client_for_image(Path::new(&base), Path::new(&image))
             {
                 return Ok(Some(client));

@@ -75,16 +75,30 @@ fn name_matches(buffer: &[u16], names: &[&str]) -> bool {
     })
 }
 
-pub(crate) fn list() -> Result<Vec<ProcessEntry>, String> {
+pub(crate) fn list_named(names: &[&str]) -> Result<Vec<ProcessEntry>, String> {
     let mut entries = Vec::new();
+    if names.is_empty() {
+        return Ok(entries);
+    }
     visit_entries(|entry| {
-        entries.push(ProcessEntry {
-            pid: entry.th32ProcessID,
-            name: String::from_utf16_lossy(name_slice(&entry.szExeFile)),
-        });
+        if name_matches(&entry.szExeFile, names) {
+            entries.push(ProcessEntry {
+                pid: entry.th32ProcessID,
+                name: String::from_utf16_lossy(name_slice(&entry.szExeFile)),
+            });
+        }
         true
     })?;
     Ok(entries)
+}
+
+pub(crate) fn contains_pid(pid: u32) -> Result<bool, String> {
+    let mut found = false;
+    visit_entries(|entry| {
+        found = entry.th32ProcessID == pid;
+        !found
+    })?;
+    Ok(found)
 }
 
 pub(crate) fn any_named(names: &[&str]) -> Result<bool, String> {
@@ -267,14 +281,9 @@ pub(crate) fn terminate_named(names: &[&str]) -> Result<(), String> {
     let owner = process_owner(unsafe { windows::Win32::System::Threading::GetCurrentProcess() })?;
     let mut failures = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    for entry in list()? {
-        if names
-            .iter()
-            .any(|name| entry.name.eq_ignore_ascii_case(name))
-        {
-            if let Err(error) = terminate_entry(&entry, deadline, &owner) {
-                failures.push(error);
-            }
+    for entry in list_named(names)? {
+        if let Err(error) = terminate_entry(&entry, deadline, &owner) {
+            failures.push(error);
         }
     }
     if failures.is_empty() {
@@ -297,6 +306,27 @@ mod tests {
             !any_named(&[&format!("not-running-{:032x}.exe", rand::random::<u128>())]).unwrap()
         );
         assert!(!any_named(&[]).unwrap());
+    }
+
+    #[test]
+    fn filtered_snapshot_keeps_only_requested_images_and_can_check_an_exact_pid() {
+        let executable = std::env::current_exe().unwrap();
+        let name = executable.file_name().unwrap().to_str().unwrap();
+        let entries = list_named(&[&name.to_ascii_uppercase()]).unwrap();
+        assert!(entries.iter().any(|entry| entry.pid == std::process::id()));
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.name.eq_ignore_ascii_case(name))
+        );
+        assert!(contains_pid(std::process::id()).unwrap());
+        assert!(!contains_pid(u32::MAX).unwrap());
+        assert!(list_named(&[]).unwrap().is_empty());
+        assert!(
+            list_named(&[&format!("not-running-{:032x}.exe", rand::random::<u128>())])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -334,7 +364,7 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
-        let entry = list()
+        let entry = list_named(&["powershell.exe"])
             .unwrap()
             .into_iter()
             .find(|entry| entry.pid == child.0.id())
