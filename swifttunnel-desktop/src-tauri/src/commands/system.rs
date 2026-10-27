@@ -2019,6 +2019,12 @@ pub async fn system_reinstall_driver(
                     }
                     Err(e) => {
                         log::warn!("Bundled driver package reinstall failed: {}", e);
+                        if swifttunnel_core::vpn::error_messages::driver_reboot_pending(&e) {
+                            return Ok(DriverCheckResponse::repair_failure(
+                                swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
+                                e,
+                            ));
+                        }
                         reinstall_errors.push(format!("bundled package reinstall failed: {}", e));
                     }
                 }
@@ -2245,6 +2251,12 @@ pub async fn system_repair_driver(
                         }
                         Err(e) => {
                             log::warn!("Bundled driver package repair failed: {}", e);
+                            if swifttunnel_core::vpn::error_messages::driver_reboot_pending(&e) {
+                                return Ok(DriverCheckResponse::repair_failure(
+                                    swifttunnel_core::vpn::SplitTunnelDriver::health_check(),
+                                    e,
+                                ));
+                            }
                             repair_errors.push(format!("bundled package repair failed: {}", e));
                         }
                     }

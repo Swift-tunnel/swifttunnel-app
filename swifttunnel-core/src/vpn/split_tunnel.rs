@@ -36,6 +36,28 @@ const DRIVER_MSI_TIMEOUT: Duration = Duration::from_secs(600);
 const SERVICE_NAME: &str = "NDISRD";
 const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
 
+fn prepare_driver_reinstall(
+    remove_component: impl FnOnce() -> Result<(), String>,
+    remove_service: impl FnOnce() -> Result<(), String>,
+    remove_package: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if let Err(error) = remove_component() {
+        if super::error_messages::driver_reboot_pending(&error) {
+            // Windows has scheduled the old filter's removal. Removing its
+            // service/package and installing over it cannot complete that
+            // pending operation before restart.
+            return Err(error);
+        }
+        log::warn!("Failed to remove existing WinpkFilter network component: {error}");
+    }
+    remove_service().map_err(|error| {
+        format!("Failed to remove existing NDISRD service before reinstall: {error}")
+    })?;
+    remove_package().map_err(|error| {
+        format!("Failed to remove existing WinpkFilter package before reinstall: {error}")
+    })
+}
+
 fn run_driver_msi(action: &str, msi_path: &Path) -> std::io::Result<std::process::Output> {
     use std::ffi::OsStr;
     let installer = swifttunnel_installer_cache::windows_installer_path()?;
@@ -702,24 +724,11 @@ impl SplitTunnelDriver {
         )?;
 
         if force_reinstall {
-            if let Err(e) = super::winpkfilter::remove_installed_network_component() {
-                log::warn!(
-                    "Failed to remove existing WinpkFilter network component: {}",
-                    e
-                );
-            }
-            Self::cleanup_driver_service_for_uninstall().map_err(|e| {
-                format!(
-                    "Failed to remove existing NDISRD service before reinstall: {}",
-                    e
-                )
-            })?;
-            super::winpkfilter::remove_installed_driver_package().map_err(|e| {
-                format!(
-                    "Failed to remove existing WinpkFilter package before reinstall: {}",
-                    e
-                )
-            })?;
+            prepare_driver_reinstall(
+                super::winpkfilter::remove_installed_network_component,
+                Self::cleanup_driver_service_for_uninstall,
+                super::winpkfilter::remove_installed_driver_package,
+            )?;
         }
 
         log::info!(
@@ -2120,6 +2129,48 @@ impl Drop for SplitTunnelDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reinstall_stops_before_service_or_package_removal_when_windows_requires_restart() {
+        let pending = "Reboot required to finish WinpkFilter network component removal. netcfg exited with code 3010.";
+        assert_eq!(
+            prepare_driver_reinstall(
+                || Err(pending.into()),
+                || panic!("service removal must wait for restart"),
+                || panic!("package removal must wait for restart"),
+            )
+            .unwrap_err(),
+            pending
+        );
+    }
+
+    #[test]
+    fn reinstall_cleanup_preserves_step_order_and_propagates_service_failure() {
+        let steps = std::cell::RefCell::new(Vec::new());
+        prepare_driver_reinstall(
+            || {
+                steps.borrow_mut().push("component");
+                Err("component already unavailable".into())
+            },
+            || {
+                steps.borrow_mut().push("service");
+                Ok(())
+            },
+            || {
+                steps.borrow_mut().push("package");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(*steps.borrow(), ["component", "service", "package"]);
+        let error = prepare_driver_reinstall(
+            || Ok(()),
+            || Err("access denied by service policy".into()),
+            || panic!("a service failure must stop package removal"),
+        )
+        .unwrap_err();
+        assert!(error.contains("access denied by service policy"));
+    }
 
     /// The exact pair from the report that led here. The service was healthy;
     /// only the comparison was wrong, and every check rewrote the service
