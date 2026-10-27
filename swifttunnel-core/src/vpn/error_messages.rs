@@ -21,6 +21,8 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             let lc = msg.to_lowercase();
             if lc.contains("ipv6-only") {
                 "SwiftTunnel needs IPv4 connectivity to tunnel game traffic. Your network appears to be IPv6-only and is not supported.\n\nIf you're on a mobile hotspot or carrier network, ask your ISP to enable IPv4 (NAT64/DS-Lite is not enough) or switch to a different network.".to_string()
+            } else if is_device_installation_service_unavailable(&lc) {
+                device_installation_service_guidance()
             } else if lc.contains("timed out") || lc.contains("timeout") {
                 "Driver initialization timed out.\n\nPlease restart your computer and try again.".to_string()
             } else if lc.contains("administrator")
@@ -142,6 +144,36 @@ pub fn user_friendly_error(error: &VpnError) -> String {
     }
 }
 
+/// Guidance after an explicit driver reinstall. Both clients can use this
+/// without referring Lite users to Desktop's Repair tab.
+pub fn driver_repair_error(message: &str) -> String {
+    let lower = message.to_lowercase();
+    if is_device_installation_service_unavailable(&lower) {
+        device_installation_service_guidance()
+    } else if lower.contains("administrator")
+        || lower.contains("access denied")
+        || lower.contains("access is denied")
+    {
+        admin_or_access_denied_message(crate::utils::is_administrator())
+    } else if is_winpkfilter_reboot_error(&lower) {
+        "Restart Windows to finish setting up SwiftTunnel's network driver, then connect again. If it still fails, contact support with your log.".to_string()
+    } else {
+        "SwiftTunnel couldn't reinstall its network driver. Restart Windows and try the driver repair once. If it still fails, contact support with your log.".to_string()
+    }
+}
+
+fn device_installation_service_guidance() -> String {
+    "Windows couldn't install SwiftTunnel's network driver because its device installation services are unavailable. Restart Windows and try the driver repair once. If it still fails, contact support with your log.".to_string()
+}
+
+fn is_device_installation_service_unavailable(lower: &str) -> bool {
+    lower.contains("0xe0000223")
+        || lower.contains("0x800f0223")
+        || lower.contains("-536870365")
+        || lower.contains("no_configmgr_services")
+        || lower.contains("plug and play service is not available")
+}
+
 fn is_winpkfilter_reboot_error(lowercase_msg: &str) -> bool {
     lowercase_msg.contains("reboot required to finish driver installation")
         || lowercase_msg.contains("marked for deletion")
@@ -242,6 +274,29 @@ pub fn short_error(error: &VpnError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn device_installation_failure_has_guidance_in_connect_and_repair() {
+        for diagnostic in [
+            "netcfg failed with code 547: Error code: 0xe0000223",
+            "pnputil failed with code -536870365",
+            "HRESULT 0x800F0223",
+            "SPAPI_E_NO_CONFIGMGR_SERVICES",
+            "The Plug and Play service is not available on the remote machine.",
+        ] {
+            let connect = user_friendly_error(&VpnError::SplitTunnelSetupFailed(diagnostic.into()));
+            let repair = driver_repair_error(diagnostic);
+            assert_eq!(connect, repair);
+            assert!(repair.contains("device installation services are unavailable"));
+            assert!(repair.contains("contact support"));
+            assert!(!repair.contains(diagnostic));
+            assert!(!repair.contains("Repair tab"));
+        }
+        let unknown = driver_repair_error("unmapped installer failure 0xBADCAFE");
+        assert!(unknown.contains("driver repair"));
+        assert!(!unknown.contains("0xBADCAFE"));
+        assert!(!unknown.contains("Repair tab"));
+    }
 
     #[test]
     fn test_user_friendly_split_tunnel_not_available() {

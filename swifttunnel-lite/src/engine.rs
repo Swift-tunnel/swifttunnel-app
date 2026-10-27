@@ -32,7 +32,9 @@ use swifttunnel_core::vpn::connect_policy::{
 use swifttunnel_core::vpn::connection::{free_tier_grace_seconds, free_tier_quota};
 use swifttunnel_core::vpn::parallel_interceptor::list_network_adapters;
 use swifttunnel_core::vpn::servers::{self, DynamicServerList, ServerListSource};
-use swifttunnel_core::vpn::split_tunnel::{GamePreset, get_apps_for_preset_set};
+use swifttunnel_core::vpn::split_tunnel::{
+    DriverHealthStatus, GamePreset, SplitTunnelDriverHealth, get_apps_for_preset_set,
+};
 use swifttunnel_core::vpn::{ConnectionState, SplitTunnelDriver, VpnConnection};
 
 use crate::operation_gate::OperationGate;
@@ -1086,6 +1088,10 @@ impl Engine {
                                 &program_files,
                                 true,
                             )
+                            .map_err(|error| {
+                                log::warn!("Lite driver reinstall failed: {error}");
+                                swifttunnel_core::vpn::error_messages::driver_repair_error(&error)
+                            })
                         },
                     ));
                 let mut driver = read_driver();
@@ -2114,7 +2120,9 @@ fn spawn_poller(shared: Arc<Shared>) {
                         let before = (
                             s.tunnel.clone(),
                             s.roblox.clone(),
+                            s.driver.clone(),
                             s.free_tier_secs,
+                            s.free_tier_spent,
                             s.lockout.clone(),
                         );
 
@@ -2157,7 +2165,9 @@ fn spawn_poller(shared: Arc<Shared>) {
                             != (
                                 s.tunnel.clone(),
                                 s.roblox.clone(),
+                                s.driver.clone(),
                                 s.free_tier_secs,
+                                s.free_tier_spent,
                                 s.lockout.clone(),
                             )
                     })
@@ -2336,14 +2346,26 @@ fn maybe_reconnect(shared: &Arc<Shared>) {
 
 /// What core's health check says about the split tunnel driver.
 fn read_driver() -> Driver {
-    let health = SplitTunnelDriver::health_check();
+    driver_snapshot(SplitTunnelDriver::health_check())
+}
+
+fn driver_snapshot(health: SplitTunnelDriverHealth) -> Driver {
     Driver {
         ready: health.ready,
         status: if health.ready {
-            "Installed and bound".to_string()
+            "Installed and bound"
+        } else if health.reboot_required {
+            "Restart Windows to finish driver setup"
         } else {
-            health.message.clone()
-        },
+            match health.status {
+                DriverHealthStatus::Missing => "Use Reinstall driver below to install it",
+                DriverHealthStatus::VersionTooOld => "Use Reinstall driver below to update it",
+                DriverHealthStatus::NoAdapters => "Check your Wi-Fi or Ethernet connection",
+                DriverHealthStatus::RebootRequired => "Restart Windows to finish driver setup",
+                _ => "Use Reinstall driver below to repair it",
+            }
+        }
+        .to_string(),
         repairing: false,
         note: None,
     }
@@ -2616,6 +2638,32 @@ fn open_logs() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn driver_health_diagnostics_are_not_used_as_settings_copy() {
+        use swifttunnel_core::vpn::{
+            DriverHealthStatus, DriverRecommendedAction, SplitTunnelDriverHealth,
+        };
+        let health = SplitTunnelDriverHealth {
+            installed: false,
+            ready: false,
+            status: DriverHealthStatus::Missing,
+            message: "failed to open \\\\.\\NDISRD: 0x80070002".into(),
+            version: None,
+            reboot_required: false,
+            recommended_action: DriverRecommendedAction::Install,
+        };
+        let missing = super::driver_snapshot(health.clone());
+        assert!(!missing.ready);
+        assert!(missing.status.contains("Reinstall driver"));
+        assert!(!missing.status.contains("NDISRD"));
+        assert!(!missing.status.contains("0x"));
+        let reboot = super::driver_snapshot(SplitTunnelDriverHealth {
+            reboot_required: true,
+            ..health
+        });
+        assert!(reboot.status.contains("Restart Windows"));
+    }
+
     use super::split_message;
 
     #[test]
