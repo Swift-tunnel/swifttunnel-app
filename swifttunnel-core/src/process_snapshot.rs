@@ -215,20 +215,6 @@ fn terminate_entry(
     if std::time::Instant::now() >= deadline {
         return Err("Closing Roblox exceeded its deadline".into());
     }
-    let mut session = 0;
-    match unsafe {
-        windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(entry.pid, &mut session)
-    } {
-        Ok(()) if session != owner.session => return Ok(false),
-        Ok(()) => {}
-        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(false),
-        Err(error) => {
-            return Err(format!(
-                "Could not check {}'s Windows session: {error}",
-                entry.name
-            ));
-        }
-    }
     let handle = match unsafe {
         OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | PROCESS_SYNCHRONIZE,
@@ -252,6 +238,8 @@ fn terminate_entry(
     }
     // The app runs elevated. A same-named player in another account/session
     // is not ours to close. Check the token on the exact handle we terminate.
+    // TokenSessionId also avoids a PID-based precheck that can require broader
+    // process-query rights than the limited handle already used here.
     if process_owner(handle.0)? != *owner {
         return Ok(false);
     }
