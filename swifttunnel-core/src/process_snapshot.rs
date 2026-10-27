@@ -142,9 +142,92 @@ pub(crate) fn creation_time(handle: HANDLE) -> Result<u64, String> {
     Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
 }
 
-fn terminate_entry(entry: &ProcessEntry, deadline: std::time::Instant) -> Result<bool, String> {
+#[derive(Clone, PartialEq, Eq)]
+struct ProcessOwner {
+    sid: Vec<u8>,
+    session: u32,
+}
+
+fn process_owner(process: HANDLE) -> Result<ProcessOwner, String> {
+    use windows::Win32::Security::{
+        GetLengthSid, GetTokenInformation, IsValidSid, TOKEN_QUERY, TOKEN_USER, TokenSessionId,
+        TokenUser,
+    };
+    use windows::Win32::System::Threading::OpenProcessToken;
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
+        .map_err(|error| format!("Could not check the Windows account owning Roblox: {error}"))?;
+    let token = OwnedHandle(token);
+    let mut needed = 0;
+    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut needed) };
+    if needed < std::mem::size_of::<TOKEN_USER>() as u32 || needed > 64 * 1024 {
+        return Err(
+            "Windows could not confirm Roblox's account. Close Roblox yourself, then retry.".into(),
+        );
+    }
+    // TOKEN_USER contains a pointer, so keep its native output aligned.
+    let mut buffer = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+    let capacity = needed;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            capacity,
+            &mut needed,
+        )
+    }
+    .map_err(|error| format!("Could not read Roblox's Windows account: {error}"))?;
+    let start = buffer.as_ptr() as usize;
+    let end = start + capacity as usize;
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let address = user.User.Sid.0 as usize;
+    if address < start || address.checked_add(8).is_none_or(|value| value > end) {
+        return Err("Windows returned an invalid Roblox account identifier. Close Roblox yourself, then retry.".into());
+    }
+    if !unsafe { IsValidSid(user.User.Sid) }.as_bool() {
+        return Err("Windows returned an invalid Roblox account identifier. Close Roblox yourself, then retry.".into());
+    }
+    let length = unsafe { GetLengthSid(user.User.Sid) } as usize;
+    if address.checked_add(length).is_none_or(|value| value > end) {
+        return Err("Windows returned an invalid Roblox account identifier. Close Roblox yourself, then retry.".into());
+    }
+    let sid = unsafe { std::slice::from_raw_parts(user.User.Sid.0.cast::<u8>(), length) }.to_vec();
+    let mut session = 0u32;
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenSessionId,
+            Some((&mut session as *mut u32).cast()),
+            std::mem::size_of::<u32>() as u32,
+            &mut needed,
+        )
+    }
+    .map_err(|error| format!("Could not check Roblox's Windows session: {error}"))?;
+    Ok(ProcessOwner { sid, session })
+}
+
+fn terminate_entry(
+    entry: &ProcessEntry,
+    deadline: std::time::Instant,
+    owner: &ProcessOwner,
+) -> Result<bool, String> {
     if std::time::Instant::now() >= deadline {
         return Err("Closing Roblox exceeded its deadline".into());
+    }
+    let mut session = 0;
+    match unsafe {
+        windows::Win32::System::RemoteDesktop::ProcessIdToSessionId(entry.pid, &mut session)
+    } {
+        Ok(()) if session != owner.session => return Ok(false),
+        Ok(()) => {}
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "Could not check {}'s Windows session: {error}",
+                entry.name
+            ));
+        }
     }
     let handle = match unsafe {
         OpenProcess(
@@ -167,6 +250,11 @@ fn terminate_entry(entry: &ProcessEntry, deadline: std::time::Instant) -> Result
     {
         return Ok(false);
     }
+    // The app runs elevated. A same-named player in another account/session
+    // is not ours to close. Check the token on the exact handle we terminate.
+    if process_owner(handle.0)? != *owner {
+        return Ok(false);
+    }
     if let Err(error) = unsafe { TerminateProcess(handle.0, 1) } {
         let mut exit_code = 259;
         if unsafe { GetExitCodeProcess(handle.0, &mut exit_code) }.is_ok() && exit_code != 259 {
@@ -185,6 +273,10 @@ fn terminate_entry(entry: &ProcessEntry, deadline: std::time::Instant) -> Result
 }
 
 pub(crate) fn terminate_named(names: &[&str]) -> Result<(), String> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let owner = process_owner(unsafe { windows::Win32::System::Threading::GetCurrentProcess() })?;
     let mut failures = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     for entry in list()? {
@@ -192,7 +284,7 @@ pub(crate) fn terminate_named(names: &[&str]) -> Result<(), String> {
             .iter()
             .any(|name| entry.name.eq_ignore_ascii_case(name))
         {
-            if let Err(error) = terminate_entry(&entry, deadline) {
+            if let Err(error) = terminate_entry(&entry, deadline, &owner) {
                 failures.push(error);
             }
         }
@@ -233,6 +325,9 @@ mod tests {
     }
     #[test]
     fn snapshot_finds_an_owned_child_and_termination_rechecks_its_image() {
+        let owner =
+            process_owner(unsafe { windows::Win32::System::Threading::GetCurrentProcess() })
+                .unwrap();
         struct Child(std::process::Child);
         impl Drop for Child {
             fn drop(&mut self) {
@@ -263,19 +358,43 @@ mod tests {
                     pid: entry.pid,
                     name: "RobloxPlayerBeta.exe".into()
                 },
-                std::time::Instant::now() + std::time::Duration::from_secs(5)
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                &owner,
             )
             .unwrap()
         );
         assert!(child.0.try_wait().unwrap().is_none());
         // This calls the private single-entry helper, never termination by a
         // common executable name, so only our own helper process is stopped.
-        assert!(terminate_entry(&entry, std::time::Instant::now()).is_err());
+        assert!(terminate_entry(&entry, std::time::Instant::now(), &owner).is_err());
+        assert!(child.0.try_wait().unwrap().is_none());
+        let mut foreign = owner.clone();
+        foreign.session = foreign.session.wrapping_add(1);
+        assert!(
+            !terminate_entry(
+                &entry,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                &foreign
+            )
+            .unwrap()
+        );
+        assert!(child.0.try_wait().unwrap().is_none());
+        foreign = owner.clone();
+        *foreign.sid.last_mut().unwrap() ^= 1;
+        assert!(
+            !terminate_entry(
+                &entry,
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                &foreign
+            )
+            .unwrap()
+        );
         assert!(child.0.try_wait().unwrap().is_none());
         assert!(
             terminate_entry(
                 &entry,
-                std::time::Instant::now() + std::time::Duration::from_secs(5)
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+                &owner,
             )
             .unwrap()
         );
