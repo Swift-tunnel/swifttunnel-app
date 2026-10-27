@@ -1461,7 +1461,7 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
         let auth = shared.auth.lock().await;
         auth.get_access_token()
             .await
-            .map_err(|e| format!("Sign in again: {e}"))?
+            .map_err(|error| friendly_auth_error(&error))?
     };
 
     if settings.custom_relay_server.is_empty() {
@@ -2398,7 +2398,7 @@ async fn refresh_auth(shared: &Arc<Shared>) {
     });
 }
 
-/// Turn a core auth error into something worth showing on the sign-in screen.
+/// Turn a core auth error into guidance for sign-in and connection attempts.
 ///
 /// The raw Display of these leaks HTTP wording, and "error sending request for
 /// url" is not a thing to tell somebody whose password was wrong.
@@ -2406,6 +2406,9 @@ fn friendly_auth_error(error: &swifttunnel_core::auth::AuthError) -> String {
     use swifttunnel_core::auth::AuthError;
     match error {
         AuthError::InvalidCredentials => "Wrong email or password.".to_string(),
+        AuthError::NotAuthenticated | AuthError::RefreshTokenInvalid => {
+            "Sign in to SwiftTunnel, then connect again.".to_string()
+        }
         AuthError::ApiError(message) => message.clone(),
         AuthError::NetworkError(_) => {
             "Could not reach SwiftTunnel. Check your connection.".to_string()
@@ -2758,6 +2761,16 @@ mod tests {
             )),
             "Invalid authentication response"
         );
+        assert_eq!(
+            super::friendly_auth_error(&AuthError::NetworkError("connection timed out".into())),
+            "Could not reach SwiftTunnel. Check your connection."
+        );
+        assert_eq!(
+            super::friendly_auth_error(&AuthError::RateLimited(67)),
+            "Too many attempts. Try again in 67s."
+        );
+        assert!(super::friendly_auth_error(&AuthError::RefreshTokenInvalid).contains("Sign in"));
+        assert!(super::friendly_auth_error(&AuthError::NotAuthenticated).contains("Sign in"));
     }
 
     #[test]
