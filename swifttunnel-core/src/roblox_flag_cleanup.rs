@@ -68,16 +68,32 @@ fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     crate::atomic_file::replace(path, bytes).map_err(|e| e.to_string())
 }
 fn stopped() -> Result<(), String> {
-    let mut system = sysinfo::System::new();
-    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-    if system
-        .processes()
-        .values()
-        .any(|p| crate::process_names::is_roblox_process_name(&p.name().to_string_lossy()))
-    {
-        return Err("Close Roblox Player and Studio before changing flag files.".into());
+    #[cfg(windows)]
+    let running = crate::process_snapshot::any_named(crate::process_names::ROBLOX_PROCESS_NAMES);
+    #[cfg(not(windows))]
+    let running = {
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::new(),
+        );
+        Ok(system
+            .processes()
+            .values()
+            .any(|p| crate::process_names::is_roblox_process_name(&p.name().to_string_lossy())))
+    };
+    require_stopped(running)
+}
+fn require_stopped(running: Result<bool, String>) -> Result<(), String> {
+    match running {
+        Ok(false) => Ok(()),
+        Ok(true) => Err("Close Roblox Player and Studio before changing flag files.".into()),
+        Err(error) => {
+            log::warn!("Could not check Roblox processes before FastFlags cleanup: {error}");
+            Err("Couldn't check whether Roblox is running. Close Roblox Player and Studio, then try again.".into())
+        }
     }
-    Ok(())
 }
 struct Change {
     path: PathBuf,
@@ -285,6 +301,21 @@ pub fn undo() -> Result<FlagCleanupReport, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_requires_confirmed_process_absence_and_keeps_scan_errors_in_the_log() {
+        assert!(require_stopped(Ok(false)).is_ok());
+        assert!(
+            require_stopped(Ok(true))
+                .unwrap_err()
+                .contains("Close Roblox")
+        );
+        let error = require_stopped(Err("private native failure 0x1234".into())).unwrap_err();
+        assert!(error.contains("Couldn't check whether Roblox is running"));
+        assert!(error.contains("try again"));
+        assert!(!error.contains("0x1234"));
+    }
+
     #[test]
     fn interrupted_staging_file_does_not_block_the_next_flag_save() {
         let dir =
