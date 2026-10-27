@@ -251,8 +251,11 @@ impl RobloxOptimizer {
             "Roblox settings",
         )?;
 
-        // Parse FPS cap
-        let fps_cap = Self::extract_int_value(&content, "FramerateCap").unwrap_or(60);
+        // A damaged/edited negative XML value must not wrap into a huge saved
+        // unsigned cap during startup adoption or config reconciliation.
+        let fps_cap = Self::extract_int_value(&content, "FramerateCap")
+            .and_then(|cap| u32::try_from(cap).ok())
+            .unwrap_or(60);
 
         // The saved menu preference is separate from the engine's current
         // rendering level, especially while Automatic adapts to the device.
@@ -271,7 +274,7 @@ impl RobloxOptimizer {
             .and_then(|(x, y)| Self::sanitize_window_dimensions_from_xml(x, y));
 
         Ok(CurrentRobloxSettings {
-            fps_cap: fps_cap as u32,
+            fps_cap,
             graphics_quality,
             fullscreen,
             window_size,
@@ -3904,6 +3907,44 @@ mod tests {
         assert_eq!(settings.window_size, None);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_current_settings_never_wraps_a_negative_frame_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-read-frame-cap-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.xml");
+        let opt = optimizer_with_path(path.clone());
+        let results: Vec<_> = [
+            (-1, 60),
+            (i32::MIN, 60),
+            (0, 0),
+            (240, 240),
+            (99999, 99999),
+            (i32::MAX, i32::MAX as u32),
+        ]
+        .into_iter()
+        .map(|(stored, expected)| {
+            fs::write(
+                &path,
+                format!(r#"<roblox><int name="FramerateCap">{stored}</int></roblox>"#),
+            )
+            .unwrap();
+            (
+                stored,
+                expected,
+                opt.read_current_settings().unwrap().fps_cap,
+            )
+        })
+        .collect();
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        for (stored, expected, actual) in results {
+            assert_eq!(actual, expected, "stored frame cap {stored}");
+        }
     }
 
     #[test]
