@@ -36,6 +36,29 @@ const DRIVER_MSI_TIMEOUT: Duration = Duration::from_secs(600);
 const SERVICE_NAME: &str = "NDISRD";
 const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
 
+fn driver_service_open_failure(error: windows::core::Error) -> Result<(), String> {
+    use windows::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
+    };
+    use windows::core::HRESULT;
+    if error.code() == HRESULT::from_win32(ERROR_SERVICE_DOES_NOT_EXIST.0) {
+        log::debug!("NDISRD service is already absent");
+        Ok(())
+    } else if error.code() == HRESULT::from_win32(ERROR_SERVICE_MARKED_FOR_DELETE.0) {
+        Err(format!(
+            "The NDISRD driver service is still marked for deletion. Restart Windows before reinstalling. ({error})"
+        ))
+    } else if error.code() == HRESULT::from_win32(ERROR_ACCESS_DENIED.0) {
+        Err(format!(
+            "Access denied while opening the NDISRD driver service for cleanup: {error}"
+        ))
+    } else {
+        Err(format!(
+            "Could not open the NDISRD driver service for cleanup: {error}"
+        ))
+    }
+}
+
 fn prepare_driver_reinstall(
     remove_component: impl FnOnce() -> Result<(), String>,
     remove_service: impl FnOnce() -> Result<(), String>,
@@ -1804,8 +1827,9 @@ impl SplitTunnelDriver {
 
                     let _ = CloseServiceHandle(service);
                 }
-                Err(_) => {
-                    log::debug!("NDISRD service not found (already removed or never installed)");
+                Err(error) => {
+                    let _ = CloseServiceHandle(scm);
+                    return driver_service_open_failure(error);
                 }
             }
 
@@ -2129,6 +2153,35 @@ impl Drop for SplitTunnelDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn driver_service_cleanup_only_treats_confirmed_absence_as_success() {
+        use windows::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE, ERROR_SERVICE_DOES_NOT_EXIST,
+            ERROR_SERVICE_MARKED_FOR_DELETE,
+        };
+        let missing = windows::core::Error::from(windows::core::HRESULT::from_win32(
+            ERROR_SERVICE_DOES_NOT_EXIST.0,
+        ));
+        assert!(driver_service_open_failure(missing).is_ok());
+        for code in [
+            ERROR_ACCESS_DENIED,
+            ERROR_SERVICE_MARKED_FOR_DELETE,
+            ERROR_INVALID_HANDLE,
+        ] {
+            let result = driver_service_open_failure(windows::core::Error::from(
+                windows::core::HRESULT::from_win32(code.0),
+            ));
+            let message = result.expect_err("an unreadable service is not an absent service");
+            if code == ERROR_SERVICE_MARKED_FOR_DELETE {
+                assert!(super::super::error_messages::driver_reboot_pending(
+                    &message
+                ));
+            } else if code == ERROR_ACCESS_DENIED {
+                assert!(message.contains("Access denied"));
+            }
+        }
+    }
 
     #[test]
     fn reinstall_stops_before_service_or_package_removal_when_windows_requires_restart() {
