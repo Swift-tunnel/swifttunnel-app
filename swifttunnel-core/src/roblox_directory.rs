@@ -411,7 +411,22 @@ fn parse_servers(
         warning: None,
     })
 }
-async fn public_roster(place: &str) -> Result<(HashMap<String, PublicServer>, bool), String> {
+async fn public_roster(
+    place: &str,
+    target: Option<&str>,
+) -> Result<(HashMap<String, PublicServer>, bool), String> {
+    collect_public_roster(place, target, json::<PublicPage>).await
+}
+
+async fn collect_public_roster<F>(
+    place: &str,
+    target: Option<&str>,
+    mut fetch: impl FnMut(reqwest::Url) -> F,
+) -> Result<(HashMap<String, PublicServer>, bool), String>
+where
+    F: std::future::Future<Output = Result<PublicPage, String>>,
+{
+    let target = target.map(str::to_ascii_lowercase);
     let mut cursor: Option<String> = None;
     let mut roster = HashMap::new();
     for _ in 0..3 {
@@ -425,7 +440,7 @@ async fn public_roster(place: &str) -> Result<(HashMap<String, PublicServer>, bo
         if let Some(cursor) = &cursor {
             url.query_pairs_mut().append_pair("cursor", cursor);
         }
-        let page: PublicPage = json(url).await?;
+        let page = fetch(url).await?;
         if page.data.len() > 100 || page.next_cursor.as_ref().is_some_and(|c| c.len() > 1024) {
             return Err("Unexpected Roblox server-list response.".into());
         }
@@ -437,6 +452,12 @@ async fn public_roster(place: &str) -> Result<(HashMap<String, PublicServer>, bo
         }
         if page.next_cursor.is_none() {
             return Ok((roster, true));
+        }
+        // Rejoin and the final launch check need one exact server, not the
+        // whole directory. Later pages cannot improve that positive result
+        // and a timeout/throttle there used to discard it altogether.
+        if target.as_ref().is_some_and(|job| roster.contains_key(job)) {
+            return Ok((roster, false));
         }
         if page.next_cursor == cursor {
             return Ok((roster, false));
@@ -518,7 +539,7 @@ impl ServerLookup {
                 .append_pair("cursor", &cursor.to_string());
         }
         let directory = if self.roster.is_none() {
-            let (directory, roster) = tokio::join!(json(url), public_roster(place));
+            let (directory, roster) = tokio::join!(json(url), public_roster(place, None));
             self.roster = Some(roster);
             directory
         } else {
@@ -536,7 +557,7 @@ pub async fn availability(place: &str, job: &str) -> Result<Availability, String
     if !valid_place_id(place) || !valid_job_id(job) {
         return Err("Invalid Roblox game or server ID.".into());
     }
-    let (roster, _) = public_roster(place).await?;
+    let (roster, _) = public_roster(place, Some(job)).await?;
     Ok(match roster.get(&job.to_ascii_lowercase()) {
         Some(row) if row.playing < row.capacity => Availability::Available,
         Some(_) => Availability::Full,
@@ -842,6 +863,76 @@ mod tests {
     }
     use super::*;
     const JOB: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    #[tokio::test]
+    async fn exact_server_check_stops_before_an_unnecessary_later_failure() {
+        let mut requests = 0;
+        let (roster, complete) = collect_public_roster("1818", Some(JOB), |_| {
+            requests += 1;
+            std::future::ready(if requests == 1 {
+                Ok(PublicPage {
+                    data: vec![PublicServer {
+                        id: JOB.to_ascii_uppercase(),
+                        playing: 2,
+                        capacity: 10,
+                    }],
+                    next_cursor: Some("more-servers".into()),
+                })
+            } else {
+                Err("A later page was throttled.".into())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(requests, 1);
+        assert_eq!(roster[JOB].playing, 2);
+        assert!(!complete, "finding one server does not complete the roster");
+    }
+
+    #[tokio::test]
+    async fn exact_server_check_keeps_the_page_budget_when_the_job_is_absent() {
+        let mut requests = 0;
+        let (roster, complete) = collect_public_roster("1818", Some(JOB), |url| {
+            requests += 1;
+            let expected = (requests > 1).then(|| format!("page-{}", requests - 1));
+            assert_eq!(
+                url.query_pairs()
+                    .find(|(k, _)| k == "cursor")
+                    .map(|(_, v)| v.into_owned()),
+                expected
+            );
+            std::future::ready(Ok(PublicPage {
+                data: Vec::new(),
+                next_cursor: Some(format!("page-{requests}")),
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(requests, 3);
+        assert!(roster.is_empty());
+        assert!(!complete);
+    }
+
+    #[tokio::test]
+    async fn full_roster_search_still_visits_later_pages() {
+        let mut requests = 0;
+        let (roster, complete) = collect_public_roster("1818", None, |_| {
+            requests += 1;
+            std::future::ready(Ok(PublicPage {
+                data: vec![PublicServer {
+                    id: JOB.into(),
+                    playing: requests,
+                    capacity: 10,
+                }],
+                next_cursor: (requests == 1).then(|| "more-servers".into()),
+            }))
+        })
+        .await
+        .unwrap();
+        assert_eq!(requests, 2);
+        assert!(complete);
+        assert_eq!(roster[JOB].playing, 2);
+    }
     fn center() -> Datacenter {
         Datacenter {
             id: 7,
