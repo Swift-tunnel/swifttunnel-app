@@ -3973,10 +3973,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_optimizations_inserts_and_sanitizes_window_settings() {
-        let dir = std::env::temp_dir().join("roblox_opt_test_apply_window");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+    fn apply_xml_settings_inserts_and_sanitizes_window_settings() {
+        let dir = std::env::temp_dir().join(format!(
+            "roblox-opt-test-apply-window-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&dir).unwrap();
 
         let path = dir.join("settings.xml");
         let xml = r#"<roblox>
@@ -3998,7 +4000,9 @@ mod tests {
             ..Default::default()
         };
 
-        opt.apply_optimizations(&config).unwrap();
+        // Exercise only the private XML fixture. The full optimization entry
+        // point also updates installed FastFlags files and GPU preferences.
+        opt.apply_xml_settings(&path, &config).unwrap();
 
         let updated = fs::read_to_string(&path).unwrap();
         assert!(updated.contains(r#"<int name="FramerateCap">240</int>"#));
