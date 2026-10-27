@@ -38,9 +38,10 @@ pub fn build(state: &State) -> Vec<Item> {
             [
                 Item::Note(warning.clone()),
                 Item::Group(vec![
-                    Row::new("Retry saving settings")
+                    Row::new("Retry settings")
                         .right(Right::Chevron)
-                        .action(Action::RetrySettingsSave),
+                        .action(Action::RetrySettingsSave)
+                        .disabled(state.startup_busy),
                 ]),
                 Item::Gap(12),
             ],
@@ -670,7 +671,8 @@ fn settings(state: &State) -> Vec<Item> {
         Item::Group(vec![
             Row::new("Start with Windows")
                 .right(Right::Switch(state.run_on_startup))
-                .action(Action::Toggle(Flag::RunOnStartup)),
+                .action(Action::Toggle(Flag::RunOnStartup))
+                .disabled(state.startup_busy),
             Row::new("Close to tray")
                 .right(Right::Switch(state.close_to_tray))
                 .action(Action::Toggle(Flag::CloseToTray)),
@@ -860,6 +862,35 @@ impl Row {
 #[cfg(test)]
 mod quota_retry_tests {
     use super::*;
+
+    #[test]
+    fn startup_setup_disables_duplicate_toggles_and_retry_while_busy() {
+        let state = State {
+            screen: Screen::Settings,
+            startup_busy: true,
+            settings_warning: Some("Couldn't finish Windows startup setup.".into()),
+            ..Default::default()
+        };
+        let items = build(&state);
+        for expected in [
+            Action::Toggle(Flag::RunOnStartup),
+            Action::RetrySettingsSave,
+        ] {
+            let row = items
+                .iter()
+                .filter_map(|item| {
+                    if let Item::Group(rows) = item {
+                        Some(rows)
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .find(|row| row.action.as_ref() == Some(&expected))
+                .unwrap();
+            assert!(row.disabled);
+        }
+    }
 
     #[test]
     fn failed_settings_saves_offer_retry_across_normal_screens_and_clear_after_recovery() {

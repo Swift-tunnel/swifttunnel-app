@@ -345,6 +345,7 @@ pub struct Roblox {
 #[derive(Debug, Default)]
 pub struct State {
     pub settings_warning: Option<String>,
+    pub startup_busy: bool,
     pub uninstall_busy: bool,
     pub installation_unknown: bool,
     pub screen: Screen,

@@ -60,6 +60,7 @@ const DEFAULT_FRAME_CAP: u32 = 60;
 
 /// What the background threads have found.
 struct Snapshot {
+    startup_failure: Option<(bool, String)>,
     installation: Option<crate::uninstall::Installed>,
     uninstall_note: Option<String>,
     uninstall_busy: bool,
@@ -119,6 +120,7 @@ struct Shared {
     /// One update check/download at a time, whether manual or automatic.
     update_busy: OperationGate,
     roblox_edits: OperationGate,
+    startup_edits: OperationGate,
     roblox_revision: AtomicU64,
     /// Set when the user pressed Disconnect, so auto-reconnect knows the
     /// tunnel went down on purpose and leaves it down.
@@ -232,6 +234,7 @@ impl Engine {
             settings,
             settings_save_signal,
             snapshot: RwLock::new(Snapshot {
+                startup_failure: None,
                 installation: None,
                 uninstall_note: None,
                 uninstall_busy: false,
@@ -258,6 +261,7 @@ impl Engine {
             busy: OperationGate::default(),
             update_busy: OperationGate::default(),
             roblox_edits: OperationGate::default(),
+            startup_edits: OperationGate::default(),
             roblox_revision: AtomicU64::new(0),
             intentional_disconnect: AtomicBool::new(false),
             was_connected: AtomicBool::new(false),
@@ -322,12 +326,19 @@ impl Engine {
 
     /// Copy everything the screens read out of the snapshot and the settings.
     pub fn fill(&self, state: &mut State) {
+        state.startup_busy = self.shared.startup_edits.is_busy();
         state.settings_warning = self
             .shared
             .settings_save_signal
             .warning()
             .map(str::to_owned);
         if let Ok(snapshot) = self.shared.snapshot.read() {
+            if state.settings_warning.is_none() {
+                state.settings_warning = snapshot
+                    .startup_failure
+                    .as_ref()
+                    .map(|(_, message)| message.clone());
+            }
             state.uninstall_note = snapshot.uninstall_note.clone();
             state.standalone = matches!(
                 snapshot.installation,
@@ -432,6 +443,15 @@ impl Engine {
 
             Action::RetrySettingsSave => {
                 let _ = self.shared.settings_save_signal.try_send(());
+                let pending = self
+                    .shared
+                    .snapshot
+                    .read()
+                    .ok()
+                    .and_then(|s| s.startup_failure.as_ref().map(|(enabled, _)| *enabled));
+                if let Some(enabled) = pending {
+                    self.change_startup(enabled);
+                }
             }
 
             Action::PickAutoRegion => {
@@ -606,20 +626,7 @@ impl Engine {
             }),
             Flag::CountryBan => self.settings(|s| s.enable_country_ban = !s.enable_country_ban),
             Flag::RunOnStartup => {
-                // Written to the registry, not just to the settings file. This
-                // switch saved a boolean and did nothing else for as long as it
-                // has existed.
-                let enabled = !self
-                    .shared
-                    .settings
-                    .read()
-                    .map(|s| s.run_on_startup)
-                    .unwrap_or(false);
-                if let Err(error) = sync_run_on_startup(RUN_VALUE_LITE, enabled) {
-                    log::warn!("could not change the startup entry: {error}");
-                    return;
-                }
-                self.settings(|s| s.run_on_startup = enabled);
+                self.change_startup(!state.run_on_startup);
             }
             Flag::CloseToTray => self.settings(|s| s.minimize_to_tray = !s.minimize_to_tray),
             Flag::AutoReconnect => self.settings(|s| s.auto_reconnect = !s.auto_reconnect),
@@ -1356,6 +1363,45 @@ impl Engine {
         });
     }
 
+    fn change_startup(&self, enabled: bool) {
+        let Some(operation) = self.shared.startup_edits.try_enter() else {
+            return;
+        };
+        self.shared.notify();
+        let shared = self.shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("lite-startup-settings".into())
+            .spawn(move || {
+                if shared.stop.load(Ordering::Relaxed) { return; }
+                let result = apply_startup_preference(&shared.settings, enabled, |value| {
+                    sync_run_on_startup(RUN_VALUE_LITE, value)
+                });
+                match result {
+                    Ok(()) => {
+                        let _ = shared.settings_save_signal.try_send(());
+                        shared.edit(|s| s.startup_failure = None);
+                    }
+                    Err(error) => {
+                        log::warn!("Could not change the startup entry: {error}");
+                        shared.edit(|s| s.startup_failure = Some((enabled,
+                            "Couldn't finish Windows startup setup. Retry settings, or restart SwiftTunnel.".into())));
+                    }
+                }
+                drop(operation);
+                shared.notify();
+            });
+        if let Err(error) = spawned {
+            log::warn!("Could not start the startup-settings worker: {error}");
+            self.shared.edit(|s| {
+                s.startup_failure = Some((
+                    enabled,
+                    "Couldn't start Windows startup setup. Retry settings.".into(),
+                ))
+            });
+            self.shared.notify();
+        }
+    }
+
     /// Change a setting and write the file.
     ///
     /// Wake one writer immediately. Changes while a save is running collapse
@@ -1369,6 +1415,26 @@ impl Engine {
         }
         let _ = self.shared.settings_save_signal.try_send(());
     }
+}
+
+fn apply_startup_preference(
+    settings: &RwLock<AppSettings>,
+    enabled: bool,
+    apply: impl FnOnce(bool) -> Result<(), String>,
+) -> Result<(), String> {
+    // Confirm the shared snapshot can be read, but never hold it during an OS
+    // call. A failed registration must not publish a successful checkbox.
+    drop(
+        settings
+            .read()
+            .map_err(|_| "Could not read startup preferences.")?,
+    );
+    apply(enabled)?;
+    settings
+        .write()
+        .map_err(|_| "Could not update startup preferences.")?
+        .run_on_startup = enabled;
+    Ok(())
 }
 
 impl Drop for Engine {
@@ -1393,6 +1459,7 @@ impl Engine {
                 // Repair/install may be past its disconnect phase while still
                 // changing the shared driver. Do not exit underneath it.
                 let _operation = shared.busy.enter_for_shutdown();
+                let _startup_settings = shared.startup_edits.enter_for_shutdown();
                 let result = shared.runtime.block_on(async {
                     let mut vpn = shared.vpn.lock().await;
                     let idle =
@@ -2651,6 +2718,37 @@ fn open_logs() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn startup_setup_publishes_only_success_and_releases_settings_during_windows_work() {
+        use super::*;
+        let settings = RwLock::new(AppSettings::default());
+        let before = settings.read().unwrap().run_on_startup;
+        let requested = !before;
+        let error = apply_startup_preference(&settings, requested, |enabled| {
+            assert_eq!(enabled, requested);
+            let mut concurrent = settings
+                .try_write()
+                .expect("Windows work must not hold the UI's settings lock");
+            concurrent.minimize_to_tray = false;
+            Err("private Windows registration failure".into())
+        })
+        .unwrap_err();
+        assert!(error.contains("registration failure"));
+        assert_eq!(settings.read().unwrap().run_on_startup, before);
+        apply_startup_preference(&settings, requested, |enabled| {
+            assert_eq!(enabled, requested);
+            assert!(settings.try_write().is_ok());
+            Ok(())
+        })
+        .unwrap();
+        let published = settings.read().unwrap();
+        assert_eq!(published.run_on_startup, requested);
+        assert!(
+            !published.minimize_to_tray,
+            "preserve unrelated edits made during Windows work"
+        );
+    }
+
     #[test]
     fn driver_health_diagnostics_are_not_used_as_settings_copy() {
         use swifttunnel_core::vpn::{
