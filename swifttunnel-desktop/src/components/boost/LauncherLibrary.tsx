@@ -75,7 +75,9 @@ export function GameLibraryPanel() {
   const [failedEntry, setFailedEntry] = useState<RobloxGameEntry | null>(null);
   useEffect(() => { void refresh().then(() => { void gamesRefreshMetadata().catch(() => {}); }); }, [refresh]);
   useEffect(()=>{
-    if(!pendingAction||!library)return;
+    // Tray/shortcut requests bypass the disabled card controls. Keep the
+    // latest request queued until connection preparation and launch finish.
+    if(!pendingAction||!library||busy||library.launch_pending)return;
     useGameLibraryStore.getState().requestAction(null);
     if(pendingAction==="favourites"){setFilter("favourites");return;}
     if(pendingAction==="copy"){const current=library.current;if(current)void run(()=>navigator.clipboard.writeText(gameShareUrl(current.place_id,current.job_id,current.client)),"Join link copied.");return;}
@@ -83,7 +85,7 @@ export function GameLibraryPanel() {
     const place=pendingAction.startsWith("play:")?parsePlaceInput(pendingAction.slice(5)):null;
     const entry=place?(library.entries.find(e=>e.place_id===place&&e.client==="standard")??{place_id:place,name:`Place ${place}`,client:"standard" as const,job_id:null,last_played:null,favourite:false}):pendingAction==="rejoin"?last:null;
     if(entry)void prepare(entry,pendingAction==="rejoin"?entry.job_id:null,null,pendingAction!=="rejoin");
-  },[pendingAction,library]);
+  },[pendingAction,library,busy]);
 
   async function run(action: () => Promise<unknown>, after?: string) {
     setBusy(true); setError(null); setNotice(null);
