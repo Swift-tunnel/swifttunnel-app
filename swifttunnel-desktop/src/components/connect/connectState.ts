@@ -1,4 +1,5 @@
 import type { DriverCheckResponse } from "../../lib/types";
+import { formatDriverSetupMessage } from "../../lib/driverMessages";
 
 export function stateLabel(state: string): string {
   switch (state) {
@@ -148,10 +149,10 @@ export function resolveConnectStatus(input: {
 
   if (input.driverStatus && !input.driverStatus.ready) {
     const status = input.driverStatus;
-    const text =
+    const text = formatDriverSetupMessage(
       input.driverSetupError ||
       status.message ||
-      "Split tunnel driver is not ready.";
+      "Split tunnel driver is not ready.");
 
     if (
       status.reboot_required ||
@@ -240,7 +241,7 @@ export function resolveConnectStatus(input: {
   if (input.driverSetupState === "error") {
     return {
       kind: "text",
-      text: input.driverSetupError || "Driver install failed.",
+      text: formatDriverSetupMessage(input.driverSetupError || "Driver install failed."),
     };
   }
 
@@ -251,5 +252,5 @@ export function resolveConnectStatus(input: {
     };
   }
 
-  return { kind: "text", text: input.vpnError || stateLabel(input.vpnState) };
+  return { kind: "text", text: formatDriverSetupMessage(input.vpnError || stateLabel(input.vpnState)) };
 }

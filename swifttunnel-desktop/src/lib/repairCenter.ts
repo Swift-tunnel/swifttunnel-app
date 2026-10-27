@@ -33,6 +33,7 @@ import type {
   StartupRegistrationSnapshot,
 } from "./commands";
 import { formatErrorMessage } from "./errors";
+import { formatDriverSetupMessage } from "./driverMessages";
 
 export interface RepairContext {
   settings: AppSettings;
@@ -340,7 +341,7 @@ export async function runDriverReinstall(
           ? "Restart Windows, then try connecting again."
           : !admin.is_admin
             ? "Relaunch SwiftTunnel as Administrator, then run the reinstall again."
-            : "Reboot Windows and run the reinstall again. If it still fails, copy this result and the log file for support.",
+            : driverNextStep(after, status),
       changed: true,
       reversible: false,
       ranAt: deps.now(),
@@ -1341,7 +1342,7 @@ function driverNextStep(
   if (driver.reboot_required) {
     return "Restart Windows, then run the driver check again.";
   }
-  return driver.message || "Copy this result and the log file for support.";
+  return formatDriverSetupMessage(driver.message) || "Copy this result and the log file for support.";
 }
 
 function driverEntries(driver: DriverCheckResponse): RepairEntry[] {

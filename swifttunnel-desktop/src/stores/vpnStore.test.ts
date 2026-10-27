@@ -617,6 +617,19 @@ describe("stores/vpnStore", () => {
     );
   });
 
+  it("explains a failed Plug and Play installation without starting a relay connection", async () => {
+    systemCheckDriver.mockResolvedValueOnce(driverStatus({ installed: false, ready: false, status: "missing", recommended_action: "install" }));
+    const diagnostic = "Split tunnel driver not available (Windows Packet Filter driver): failed to open NDISRD. Repair failed: netcfg failed with code 547: Error code: 0xe0000223.; pnputil failed with code -536870365: The Plug and Play service is not available on the remote machine.";
+    systemRepairDriver.mockResolvedValueOnce(driverStatus({ installed: false, ready: false, status: "missing", message: diagnostic, recommended_action: "install" }));
+    const store = await loadStore();
+    await store.getState().connect("us-east", ["roblox"]);
+    expect(vpnConnect).not.toHaveBeenCalled();
+    expect(store.getState().error).toContain("device installation services are unavailable");
+    expect(store.getState().driverSetupError).toBe(store.getState().error);
+    expect(store.getState().error).not.toContain("0xe0000223");
+    expect(store.getState().driverStatus?.message).toBe(diagnostic);
+  });
+
   it("keeps adapter-choice preflight visible instead of returning to silent ready", async () => {
     systemCheckDriver.mockResolvedValueOnce(driverStatus());
     vpnPreflightBinding.mockResolvedValueOnce({

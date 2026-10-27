@@ -28,6 +28,7 @@ import { reportError, formatErrorMessage as getErrorMessage } from "../lib/error
 import { notify } from "../lib/notifications";
 import { useSettingsStore } from "./settingsStore";
 import { useServerStore } from "./serverStore";
+import { formatDriverSetupMessage as cleanDriverSetupMessage, isWindowsDriverInstallerFailureMessage } from "../lib/driverMessages";
 
 type DriverSetupState =
   | "idle"
@@ -39,35 +40,6 @@ type DriverSetupState =
 
 const FULL_COUNTRY_BAN_ROBLOX_RUNNING_MESSAGE =
   "Close Roblox before connecting with Full Country Ban. Then connect SwiftTunnel and reopen Roblox so login and game traffic use the bypass.";
-
-// Points at Repair rather than at a reboot on purpose: "restart Windows" asks
-// the user to give up their session on a hunch, and most of these failures are
-// a wedged driver service that "Reinstall driver" clears in place. That action
-// tells them itself if a restart really is needed to finish.
-const WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE =
-  "Windows could not install SwiftTunnel's split-tunnel driver because Windows networking/driver services are not responding cleanly. Open the Repair tab and run \"Reinstall driver\". If that does not fix it, contact support with the log file.";
-
-function isWindowsDriverInstallerFailureMessage(message: string): boolean {
-  const haystack = message.toLowerCase();
-  return (
-    (haystack.includes("netcfg failed with code 1753") ||
-      haystack.includes("0x800106d9") ||
-      haystack.includes("msiexec code 1603") ||
-      haystack.includes("there are no more endpoints available from the endpoint mapper") ||
-      haystack.includes("driver file not found, cannot create ndisrd service")) &&
-    (haystack.includes("winpkfilter") ||
-      haystack.includes("windows packet filter") ||
-      haystack.includes("nt_ndisrd") ||
-      haystack.includes("ndisrd"))
-  );
-}
-
-function cleanDriverSetupMessage(message: string): string {
-  if (isWindowsDriverInstallerFailureMessage(message)) {
-    return WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE;
-  }
-  return message;
-}
 
 function isRebootRequiredMessage(
   vpnError: string | null,
@@ -88,7 +60,8 @@ function isPendingDriverInstallReboot(status: DriverCheckResponse): boolean {
     return false;
   }
 
-  const message = driverStatusMessage(status).toLowerCase();
+  // Reboot policy reads diagnostics, never the wording chosen for the UI.
+  const message = status.message.toLowerCase();
   return (
     message.includes("reboot required to finish driver installation") ||
     message.includes("reboot required to finish winpkfilter") ||
@@ -396,7 +369,7 @@ async function failoverRelayAfterDeadSession(
 
 function bindingRepairFailedStatus(reason: string): DriverCheckResponse {
   const message = isWindowsDriverInstallerFailureMessage(reason)
-    ? WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE
+    ? cleanDriverSetupMessage(reason)
     : "SwiftTunnel repaired the split-tunnel driver, but Windows still has not attached the network filter to the active adapter. Restart Windows once, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: " +
       reason;
 
@@ -413,7 +386,7 @@ function bindingRepairFailedStatus(reason: string): DriverCheckResponse {
 
 function driverRebootRequiredStatus(reason: string): DriverCheckResponse {
   const message = isWindowsDriverInstallerFailureMessage(reason)
-    ? WINDOWS_DRIVER_INSTALLER_FAILURE_MESSAGE
+    ? cleanDriverSetupMessage(reason)
     : "Restart Windows once to finish setting up SwiftTunnel's network driver, then connect again. If it still fails after restarting, contact support with this result.\n\nDetails: " +
       reason;
 

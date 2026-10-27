@@ -302,6 +302,18 @@ describe("repair center logic", () => {
     expect(deps.systemRepairDriver).not.toHaveBeenCalled();
   });
 
+  it.each(["repair", "reinstall"])("keeps %s driver diagnostics in details and explains the device-service failure in the next step", async mode => {
+    const diagnostic = "WinpkFilter netcfg failed with code 547: 0xe0000223; pnputil failed with code -536870365: The Plug and Play service is not available on the remote machine.";
+    const failed = { ...missingDriver, message: diagnostic };
+    const deps = makeDeps({ systemCheckDriver: vi.fn().mockResolvedValue(missingDriver),
+      systemRepairDriver: vi.fn().mockResolvedValue(failed), systemReinstallDriver: vi.fn().mockResolvedValue(failed) });
+    const report = mode === "repair" ? await runRepairIssue("driver", deps, { settings: DEFAULT_SETTINGS }) : await runDriverReinstall(deps);
+    expect(report.status).toBe("failed");
+    expect(report.nextStep).toContain("device installation services are unavailable");
+    expect(report.nextStep).not.toContain("0xe0000223");
+    expect(report.entries.some(entry => entry.value === diagnostic)).toBe(true);
+  });
+
   it("does not run driver repair when Windows requires a reboot first", async () => {
     const deps = makeDeps({
       systemCheckDriver: vi.fn().mockResolvedValue({
