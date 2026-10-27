@@ -287,9 +287,9 @@ describe("lib/commands", () => {
   });
 
   it("settingsSave invokes backend with typed settings payload", async () => {
-    invoke.mockResolvedValue(undefined);
+    invoke.mockResolvedValue({ warning: null });
 
-    await expect(settingsSave(DEFAULT_SETTINGS)).resolves.toBeUndefined();
+    await expect(settingsSave(DEFAULT_SETTINGS)).resolves.toEqual({ warning: null });
     expect(invoke).toHaveBeenCalledWith("settings_save", {
       settings: DEFAULT_SETTINGS,
     });

@@ -6,9 +6,10 @@ import { ErrorBanner } from "./ErrorBanner";
 /** A failed save must remain recoverable after a toast or tab disappears. */
 export function SettingsSaveNotice() {
   const error = useSettingsStore((state) => state.saveError);
+  const warning = useSettingsStore((state) => state.saveWarning);
   const save = useSettingsStore((state) => state.save);
   const [saving, setSaving] = useState(false);
-  if (!error) return null;
+  if (!error && !warning) return null;
 
   async function retry() {
     if (saving) return;
@@ -22,7 +23,7 @@ export function SettingsSaveNotice() {
     }
   }
 
-  return <ErrorBanner action={<Button size="sm" variant="secondary" disabled={saving} onClick={() => void retry()}>{saving ? "Saving..." : "Retry saving"}</Button>}>
-    Settings could not be saved: {error}. Some changes may already be active. Retry saving before closing SwiftTunnel.
+  return <ErrorBanner tone={error ? "error" : "warning"} action={<Button size="sm" variant="secondary" disabled={saving} onClick={() => void retry()}>{saving ? "Saving..." : error ? "Retry saving" : "Retry startup setup"}</Button>}>
+    {error ? <>Settings could not be saved: {error}. Some changes may already be active. Retry saving before closing SwiftTunnel.</> : warning}
   </ErrorBanner>;
 }

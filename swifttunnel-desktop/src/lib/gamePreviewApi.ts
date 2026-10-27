@@ -56,7 +56,7 @@ export async function previewInvoke<T>(command: string, args: Record<string, unk
     case "boost_get_metrics": result = { roblox_running: running, roblox_foreground: false, fps: 0, cpu_usage: 0, ram_usage: 0, ram_total: 0, ping: 0, process_id: null }; break;
     case "boost_close_roblox": running = false; library.current = null; break;
     case "games_scan_imports": result = { sources: [{ source: "Fishstrap", accepted: 2, json: '{"FFlagDebugGraphicsPreferD3D11":"True","DFIntTextureQualityOverride":"0"}', skipped: ["FFlagOldUnsupportedFlag: unsupported or ignored by Roblox"], error: null }], fps_cap: 240, graphics_quality: "Level5" }; break;
-    case "settings_save": break;
+    case "settings_save": result = { warning: null }; break;
     case "games_flags": result = { files_changed: 2, flags_removed: 7, skipped: [], can_undo: true }; break;
     case "games_save_flags": {
       const { useSettingsStore } = await import("../stores/settingsStore");

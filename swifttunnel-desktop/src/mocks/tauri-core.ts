@@ -416,7 +416,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   },
 
   settings_load: () => MOCK_SETTINGS,
-  settings_save: () => {},
+  settings_save: () => ({ warning: null }),
 
   updater_check_channel: (args: unknown) => {
     const channel =

@@ -13,6 +13,11 @@ pub struct NetworkDiagnosticsBundleResponse {
     pub folder_path: String,
 }
 
+#[derive(Serialize)]
+pub struct SettingsSaveResult {
+    warning: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 struct DiagnosticsCommand {
     title: &'static str,
@@ -52,13 +57,13 @@ pub async fn settings_save(
     state: State<'_, AppState>,
     app: AppHandle,
     settings: AppSettings,
-) -> Result<(), String> {
+) -> Result<SettingsSaveResult, String> {
     let settings_arc = state.settings.clone();
     let discord_manager = state.discord_manager.clone();
     let fps_monitor = state.fps_monitor.clone();
     let app_handle = app.clone();
 
-    let result: Result<bool, String> = tauri::async_runtime::spawn_blocking(move || {
+    let result: Result<(bool, Option<String>), String> = tauri::async_runtime::spawn_blocking(move || {
         let mut new_settings = settings;
         new_settings.sanitize_in_place();
         let discord_enabled = new_settings.enable_discord_rpc;
@@ -80,21 +85,25 @@ pub async fn settings_save(
         // present trace entirely.
         fps_monitor.set_enabled(wants_fps);
 
-        if let Err(e) = crate::autostart::sync_run_on_startup(&app_handle, run_on_startup) {
+        let warning = if let Err(e) = crate::autostart::sync_run_on_startup(&app_handle, run_on_startup) {
             log::warn!(
                 "Failed to sync startup registration after settings save: {}",
                 e
             );
-        }
+            Some("Your settings were saved, but Windows startup could not be updated. Retry startup setup or use Startup login in Repair.".to_string())
+        } else {
+            None
+        };
 
-        Ok(routing_changed)
+        Ok((routing_changed, warning))
     })
     .await
     .map_err(|e| format!("Settings save task failed: {}", e))?;
-    if !result? {
+    let (routing_changed, warning) = result?;
+    if !routing_changed {
         // Display, overlay and other preferences must not wait behind a
         // connection attempt just to republish unchanged routing settings.
-        return Ok(());
+        return Ok(SettingsSaveResult { warning });
     }
 
     // Push auto-routing settings to the live router so changes apply
@@ -112,7 +121,7 @@ pub async fn settings_save(
         router.set_whitelisted_regions(settings.whitelisted_regions.clone());
     }
 
-    Ok(())
+    Ok(SettingsSaveResult { warning })
 }
 
 fn persist_preferences(

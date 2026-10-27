@@ -29,6 +29,7 @@ interface SettingsStore {
   activeTab: TabId;
   isLoaded: boolean;
   saveError: string | null;
+  saveWarning: string | null;
 
   // Actions
   load: () => Promise<void>;
@@ -47,6 +48,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   activeTab: "connect",
   isLoaded: false,
   saveError: null,
+  saveWarning: null,
 
   load: async () => {
     try {
@@ -81,8 +83,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         if (pendingSave === next) pendingSave = null;
         try {
           const { settings, activeTab } = get();
-          await settingsSave(structuredClone({ ...settings, current_tab: activeTab }));
-          set({ saveError: null });
+          const result = await settingsSave(structuredClone({ ...settings, current_tab: activeTab }));
+          set({ saveError: null, saveWarning: result?.warning ?? null });
         } catch (error) {
           set({ saveError: formatErrorMessage(error) });
           reportError("Failed to save settings", error);

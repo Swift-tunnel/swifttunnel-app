@@ -225,8 +225,9 @@ export const networkCancelTest = (testId: string) =>
 
 export const settingsLoad = () => invoke<AppSettings>("settings_load");
 
+export interface SettingsSaveResult { warning: string | null; }
 export const settingsSave = (settings: AppSettings) =>
-  invoke<void>("settings_save", { settings });
+  invoke<SettingsSaveResult>("settings_save", { settings });
 
 export const settingsGenerateNetworkDiagnosticsBundle = () =>
   invoke<NetworkDiagnosticsBundleResponse>(

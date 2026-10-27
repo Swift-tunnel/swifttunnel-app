@@ -28,6 +28,17 @@ async function loadStore() {
 }
 
 describe("stores/settingsStore", () => {
+  it("keeps a startup warning visible after preferences save and clears it after retry", async () => {
+    const warning = "Your settings were saved, but Windows startup could not be updated. Retry startup setup.";
+    settingsSave.mockResolvedValueOnce({ warning }).mockResolvedValueOnce({ warning: null });
+    const store = await loadStore();
+    await expect(store.getState().save(true)).resolves.toBeUndefined();
+    expect(store.getState().saveError).toBeNull();
+    expect(store.getState().saveWarning).toBe(warning);
+    await store.getState().save(true);
+    expect(store.getState().saveWarning).toBeNull();
+  });
+
   it("orders a full client reset with saves and refreshes only the reset section", async () => {
     let release!: () => void;
     const order: string[] = [];
