@@ -112,11 +112,10 @@ fn flag_plan(level: Option<i32>) -> Result<Vec<FlagOverride>, String> {
     }
     Ok(output)
 }
-fn apply_flag(flag: &FlagOverride, restore: bool) -> Result<(), String> {
+fn apply_flag(flag: &FlagOverride, restore: bool, allowed: &[PathBuf]) -> Result<(), String> {
     if restore && !flag.path.exists() {
         return Ok(());
     }
-    let allowed = RobloxOptimizer::existing_client_flag_files().map_err(|e| e.to_string())?;
     if !allowed.contains(&flag.path) {
         log::warn!(
             "Game profile recovery flag path no longer matches an installed flag file: {}",
@@ -361,8 +360,11 @@ fn apply_inner(
         &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
     )?;
     write(&path, xml.as_bytes())?;
-    for flag in &journal.flags {
-        apply_flag(flag, false)?;
+    if !journal.flags.is_empty() {
+        let allowed = RobloxOptimizer::existing_client_flag_files().map_err(|e| e.to_string())?;
+        for flag in &journal.flags {
+            apply_flag(flag, false, &allowed)?;
+        }
     }
     Ok(true)
 }
@@ -433,14 +435,34 @@ pub fn restore() -> Result<bool, String> {
     if restored != xml {
         write(&path, restored.as_bytes())?;
     }
+    restore_flags(&journal, || {
+        RobloxOptimizer::existing_client_flag_files().map_err(|e| e.to_string())
+    })?;
+    fs::remove_file(journal_path).map_err(|e| {
+        log::warn!("Game profile restored but recovery record could not be removed: {e}");
+        "Your Roblox settings were restored, but cleanup failed. Restart SwiftTunnel. If it happens again, contact support.".to_string()
+    })?;
+    Ok(true)
+}
+
+fn restore_flags(
+    journal: &Journal,
+    discover: impl FnOnce() -> Result<Vec<PathBuf>, String>,
+) -> Result<(), String> {
+    // Native FPS/graphics profiles have no legacy flag originals to recover.
+    // An unrelated launcher's files cannot help that recovery or block it.
+    if journal.flags.is_empty() {
+        return Ok(());
+    }
+    let allowed = discover()?;
     for flag in &journal.flags {
-        apply_flag(flag, true)?;
+        apply_flag(flag, true, &allowed)?;
     }
     // A strap may copy its modifications into a new Roblox version during
     // launch. Restore a copy only when it was created during this profile and
     // its entire contents still match our temporary file exactly.
-    for path in RobloxOptimizer::existing_client_flag_files().map_err(|e| e.to_string())? {
-        if journal.flags.iter().any(|f| f.path == path) {
+    for path in &allowed {
+        if journal.flags.iter().any(|f| &f.path == path) {
             continue;
         }
         let created = fs::metadata(&path)
@@ -459,19 +481,15 @@ pub fn restore() -> Result<bool, String> {
             .find(|f| !f.applied_hash.is_empty() && actual_hash == f.applied_hash)
         {
             let copy = FlagOverride {
-                path,
+                path: path.clone(),
                 before: template.before.clone(),
                 applied: template.applied.clone(),
                 applied_hash: template.applied_hash.clone(),
             };
-            apply_flag(&copy, true)?;
+            apply_flag(&copy, true, &allowed)?;
         }
     }
-    fs::remove_file(journal_path).map_err(|e| {
-        log::warn!("Game profile restored but recovery record could not be removed: {e}");
-        "Your Roblox settings were restored, but cleanup failed. Restart SwiftTunnel. If it happens again, contact support.".to_string()
-    })?;
-    Ok(true)
+    Ok(())
 }
 
 fn validate_journal(journal: &Journal) -> Result<(), String> {
@@ -529,6 +547,88 @@ fn valid_flag_value(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xml_only_profile_recovery_never_inspects_other_launchers_flags() {
+        let journal = Journal {
+            client: RobloxClient::Standard,
+            fields: vec![Override {
+                property: Property::Fps,
+                before: Some(144),
+                applied: 240,
+            }],
+            flags: Vec::new(),
+            created_at: 0,
+        };
+        assert!(
+            restore_flags(&journal, || {
+                panic!("an FPS-only profile must not inspect unrelated FastFlags files")
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn legacy_flag_recovery_reuses_discovery_and_preserves_changed_values() {
+        struct Files(PathBuf);
+        impl Drop for Files {
+            fn drop(&mut self) {
+                for name in ["original.json", "changed.json", "copy.json"] {
+                    let _ = fs::remove_file(self.0.join(name));
+                }
+                let _ = fs::remove_dir(&self.0);
+            }
+        }
+        let files = Files(std::env::temp_dir().join(format!(
+            "swift-profile-flags-{:032x}",
+            rand::random::<u128>()
+        )));
+        fs::create_dir(&files.0).unwrap();
+        let original = files.0.join("original.json");
+        let changed = files.0.join("changed.json");
+        let copy = files.0.join("copy.json");
+        let applied = serde_json::to_vec_pretty(&serde_json::json!({
+            QUALITY_FLAG: 5, "FFlagDebugSkyGray": true,
+        }))
+        .unwrap();
+        fs::write(&original, &applied).unwrap();
+        fs::write(&copy, &applied).unwrap();
+        let external = serde_json::to_vec_pretty(&serde_json::json!({
+            QUALITY_FLAG: 7, "FFlagDebugSkyGray": false,
+        }))
+        .unwrap();
+        fs::write(&changed, &external).unwrap();
+        let journal = Journal {
+            client: RobloxClient::Standard,
+            fields: Vec::new(),
+            flags: [original.clone(), changed.clone()]
+                .into_iter()
+                .map(|path| FlagOverride {
+                    path,
+                    before: serde_json::Value::from(10),
+                    applied: Some(serde_json::Value::from(5)),
+                    applied_hash: checksum(&applied),
+                })
+                .collect(),
+            created_at: 0,
+        };
+        let discoveries = std::cell::Cell::new(0);
+        restore_flags(&journal, || {
+            discoveries.set(discoveries.get() + 1);
+            Ok(vec![original.clone(), changed.clone(), copy.clone()])
+        })
+        .unwrap();
+        assert_eq!(discoveries.get(), 1);
+        for path in [original, copy] {
+            let restored: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(restored[QUALITY_FLAG], 10);
+            assert_eq!(restored["FFlagDebugSkyGray"], true);
+        }
+        assert_eq!(fs::read(changed).unwrap(), external);
+        assert!(restore_flags(&journal, || Err("discovery failed".into())).is_err());
+    }
+
     #[test]
     fn game_without_overrides_restores_the_previous_profile_before_returning() {
         let restored = std::cell::Cell::new(false);
