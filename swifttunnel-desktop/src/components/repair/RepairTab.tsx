@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useToastStore } from "../../stores/toastStore";
 import { beginRepair, saveRepairRun, useRepairStore } from "../../stores/repairStore";
 import { cancelPendingConnectForRepair } from "../../stores/vpnStore";
 import { prepareRepair } from "../../lib/repairPreflight";
+import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { SupportToolsSection } from "../support/SupportToolsSection";
 import { RepairGuidance } from "./RepairGuidance";
 import { formatErrorMessage } from "../../lib/errors";
@@ -99,13 +100,14 @@ export function RepairTab() {
 
   const busy = running || restarting || reinstalling;
   const total = REPAIR_ISSUES.length;
+  const stepStartedAt = useRef(0);
   useEffect(() => {
     setElapsed(0);
-    if (!busy) return;
-    const started = Date.now();
-    const timer = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
-    return () => window.clearInterval(timer);
+    stepStartedAt.current = performance.now();
   }, [busy, currentStep]);
+  useFocusAwareInterval(() => {
+    setElapsed(Math.floor((performance.now() - stepStartedAt.current) / 1000));
+  }, 1000, { enabled: busy });
 
   async function runFullRepair() {
     if (!beginRepair("repair")) return;
