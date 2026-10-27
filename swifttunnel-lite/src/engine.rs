@@ -322,6 +322,11 @@ impl Engine {
 
     /// Copy everything the screens read out of the snapshot and the settings.
     pub fn fill(&self, state: &mut State) {
+        state.settings_warning = self
+            .shared
+            .settings_save_signal
+            .warning()
+            .map(str::to_owned);
         if let Ok(snapshot) = self.shared.snapshot.read() {
             state.uninstall_note = snapshot.uninstall_note.clone();
             state.standalone = matches!(
@@ -424,6 +429,10 @@ impl Engine {
 
         match action {
             Action::Primary => self.primary(state),
+
+            Action::RetrySettingsSave => {
+                let _ = self.shared.settings_save_signal.try_send(());
+            }
 
             Action::PickAutoRegion => {
                 if matches!(state.tunnel.status, Status::Connected | Status::Working) {
@@ -1999,6 +2008,7 @@ fn spawn_poller(shared: Arc<Shared>) {
             let mut since: Option<Instant> = None;
             let mut roblox_tick: u32 = 0;
             let mut running = false;
+            let mut last_settings_warning = None;
 
             while !shared.stop.load(Ordering::Relaxed) {
                 // A second while the session timer is ticking, five when the
@@ -2115,6 +2125,9 @@ fn spawn_poller(shared: Arc<Shared>) {
                 let refreshed_roblox = (refresh && !shared.roblox_edits.is_busy())
                     .then(|| read_roblox(&roblox_intent));
 
+                let settings_warning = shared.settings_save_signal.warning();
+                let settings_changed = settings_warning != last_settings_warning;
+                last_settings_warning = settings_warning;
                 let changed = shared
                     .edit(|s| {
                         let before = (
@@ -2177,7 +2190,7 @@ fn spawn_poller(shared: Arc<Shared>) {
                 // one-second heartbeat keeps the session timer moving while
                 // connected; this is for everything else, and asking for a
                 // repaint that changes no pixels is pure waste.
-                if changed {
+                if changed || settings_changed {
                     shared.notify();
                 }
 

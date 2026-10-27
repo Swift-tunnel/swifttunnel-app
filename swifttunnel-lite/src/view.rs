@@ -67,6 +67,8 @@ pub enum Action {
     SignIn,
     /// Reinstall the split tunnel driver.
     RepairDriver,
+    /// Retry the latest settings snapshot after a failed background save.
+    RetrySettingsSave,
     /// Show the log file in Explorer.
     OpenLogs,
     /// Remove Lite from the machine.

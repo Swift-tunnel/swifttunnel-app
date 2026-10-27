@@ -1,6 +1,7 @@
 //! One settings writer, with a bounded wake-up queue and current snapshots.
 use std::sync::{
     Arc, RwLock,
+    atomic::{AtomicU8, Ordering},
     mpsc::{self, SyncSender},
 };
 use std::thread::JoinHandle;
@@ -11,14 +12,31 @@ enum SaveRequest {
     Flush(SyncSender<Result<(), String>>),
 }
 
-pub struct SaveSignal(SyncSender<SaveRequest>);
+pub struct SaveSignal {
+    sender: SyncSender<SaveRequest>,
+    // Only the latest outcome is needed. Full failure details stay in logs.
+    outcome: Arc<AtomicU8>,
+}
 impl SaveSignal {
+    pub fn warning(&self) -> Option<&'static str> {
+        match self.outcome.load(Ordering::Acquire) {
+            0 => None,
+            1 => {
+                Some("Couldn't save your settings. Check disk space and folder access, then retry.")
+            }
+            _ => Some("Settings saving stopped. Restart SwiftTunnel and try again."),
+        }
+    }
+
     pub fn try_send(&self, _: ()) -> Result<(), mpsc::TrySendError<()>> {
-        self.0
+        self.sender
             .try_send(SaveRequest::Changed)
             .map_err(|error| match error {
                 mpsc::TrySendError::Full(_) => mpsc::TrySendError::Full(()),
-                mpsc::TrySendError::Disconnected(_) => mpsc::TrySendError::Disconnected(()),
+                mpsc::TrySendError::Disconnected(_) => {
+                    self.outcome.store(2, Ordering::Release);
+                    mpsc::TrySendError::Disconnected(())
+                }
             })
     }
 
@@ -29,9 +47,10 @@ impl SaveSignal {
         let (completed, done) = mpsc::sync_channel(1);
         let mut request = SaveRequest::Flush(completed);
         loop {
-            match self.0.try_send(request) {
+            match self.sender.try_send(request) {
                 Ok(()) => break,
                 Err(mpsc::TrySendError::Disconnected(_)) => {
+                    self.outcome.store(2, Ordering::Release);
                     return Err("Settings saving has stopped.".into());
                 }
                 Err(mpsc::TrySendError::Full(unsent)) => request = unsent,
@@ -52,9 +71,18 @@ pub fn start(
     persist: impl Fn(&AppSettings) -> Result<(), String> + Send + 'static,
 ) -> std::io::Result<(SaveSignal, JoinHandle<()>)> {
     let (sender, receiver) = mpsc::sync_channel(1);
+    let outcome = Arc::new(AtomicU8::new(0));
+    let worker_outcome = outcome.clone();
     let worker = std::thread::Builder::new()
         .name("lite-settings-save".into())
         .spawn(move || {
+            struct Stopped(Arc<AtomicU8>);
+            impl Drop for Stopped {
+                fn drop(&mut self) {
+                    self.0.store(2, Ordering::Release);
+                }
+            }
+            let _stopped = Stopped(worker_outcome.clone());
             while let Ok(request) = receiver.recv() {
                 let snapshot = settings
                     .read()
@@ -66,12 +94,13 @@ pub fn start(
                 if let Err(error) = &result {
                     log::warn!("Could not save settings: {error}");
                 }
+                worker_outcome.store(u8::from(result.is_err()), Ordering::Release);
                 if let SaveRequest::Flush(completed) = request {
                     let _ = completed.try_send(result);
                 }
             }
         })?;
-    Ok((SaveSignal(sender), worker))
+    Ok((SaveSignal { sender, outcome }, worker))
 }
 
 #[cfg(test)]
@@ -134,7 +163,36 @@ mod tests {
         worker.join().unwrap();
         let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
-        assert!(SaveSignal(sender).flush(Duration::from_secs(2)).is_err());
+        let signal = SaveSignal {
+            sender,
+            outcome: Arc::new(AtomicU8::new(0)),
+        };
+        assert!(signal.flush(Duration::from_secs(2)).is_err());
+        assert!(signal.try_send(()).is_err());
+        assert!(signal.warning().unwrap().contains("Restart SwiftTunnel"));
+    }
+
+    #[test]
+    fn save_failures_remain_visible_until_a_successful_retry() {
+        let first = std::sync::atomic::AtomicBool::new(true);
+        let (signal, worker) = start(Arc::new(RwLock::new(AppSettings::default())), move |_| {
+            if first.swap(false, Ordering::AcqRel) {
+                Err("private disk failure: 0x1234".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+        assert!(signal.warning().is_none());
+        assert!(signal.flush(Duration::from_secs(2)).is_err());
+        let warning = signal.warning().unwrap();
+        assert!(warning.contains("Couldn't save your settings"));
+        assert!(warning.contains("retry"));
+        assert!(!warning.contains("0x1234"));
+        signal.flush(Duration::from_secs(2)).unwrap();
+        assert!(signal.warning().is_none());
+        drop(signal);
+        worker.join().unwrap();
     }
 
     #[test]

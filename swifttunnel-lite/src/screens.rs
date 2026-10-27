@@ -22,7 +22,7 @@ pub fn build(state: &State) -> Vec<Item> {
         return locked_out(state, lockout);
     }
 
-    match state.push {
+    let mut items = match state.push {
         Push::Regions => regions(state),
         Push::Relays => relays(state),
         Push::Adapters => adapters(state),
@@ -31,7 +31,22 @@ pub fn build(state: &State) -> Vec<Item> {
             Screen::Roblox => roblox(state),
             Screen::Settings => settings(state),
         },
+    };
+    if let Some(warning) = &state.settings_warning {
+        items.splice(
+            0..0,
+            [
+                Item::Note(warning.clone()),
+                Item::Group(vec![
+                    Row::new("Retry saving settings")
+                        .right(Right::Chevron)
+                        .action(Action::RetrySettingsSave),
+                ]),
+                Item::Gap(12),
+            ],
+        );
     }
+    items
 }
 
 /// The screen shown instead of everything else.
@@ -845,6 +860,34 @@ impl Row {
 #[cfg(test)]
 mod quota_retry_tests {
     use super::*;
+
+    #[test]
+    fn failed_settings_saves_offer_retry_across_normal_screens_and_clear_after_recovery() {
+        for screen in [Screen::Connect, Screen::Roblox, Screen::Settings] {
+            let mut state = State {
+                screen,
+                settings_warning: Some(
+                    "Couldn't save your settings. Check disk space, then retry.".into(),
+                ),
+                ..Default::default()
+            };
+            let items = build(&state);
+            assert!(
+                items
+                    .iter()
+                    .any(|item| matches!(item, Item::Note(text) if text.contains("Couldn't save")))
+            );
+            assert!(items.iter().any(|item| matches!(item, Item::Group(rows)
+                if rows.iter().any(|row| row.action == Some(Action::RetrySettingsSave)))));
+            state.settings_warning = None;
+            assert!(
+                !build(&state)
+                    .iter()
+                    .any(|item| matches!(item, Item::Group(rows)
+                if rows.iter().any(|row| row.action == Some(Action::RetrySettingsSave))))
+            );
+        }
+    }
 
     #[test]
     fn a_failed_sign_out_remains_visible_and_busy_sign_out_cannot_repeat() {

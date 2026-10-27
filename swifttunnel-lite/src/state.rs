@@ -344,6 +344,7 @@ pub struct Roblox {
 /// Everything the three screens read.
 #[derive(Debug, Default)]
 pub struct State {
+    pub settings_warning: Option<String>,
     pub uninstall_busy: bool,
     pub installation_unknown: bool,
     pub screen: Screen,
