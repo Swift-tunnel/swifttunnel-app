@@ -74,6 +74,7 @@ struct Snapshot {
     /// which left the router unable to tell one relay from another.
     server_list: DynamicServerList,
     adapters: Vec<AdapterRow>,
+    adapter_error: Option<String>,
     roblox: Roblox,
     /// The reset row's two-press flow, and what the last reset found.
     ///
@@ -121,6 +122,7 @@ struct Shared {
     update_busy: OperationGate,
     roblox_edits: OperationGate,
     startup_edits: OperationGate,
+    adapter_scan: OperationGate,
     roblox_revision: AtomicU64,
     /// Set when the user pressed Disconnect, so auto-reconnect knows the
     /// tunnel went down on purpose and leaves it down.
@@ -249,6 +251,7 @@ impl Engine {
                 server_list: DynamicServerList::new_empty(),
                 regions: Vec::new(),
                 adapters: Vec::new(),
+                adapter_error: None,
                 tunnel: Tunnel::default(),
                 free_tier_secs: None,
                 free_tier_spent: false,
@@ -262,6 +265,7 @@ impl Engine {
             update_busy: OperationGate::default(),
             roblox_edits: OperationGate::default(),
             startup_edits: OperationGate::default(),
+            adapter_scan: OperationGate::default(),
             roblox_revision: AtomicU64::new(0),
             intentional_disconnect: AtomicBool::new(false),
             was_connected: AtomicBool::new(false),
@@ -292,23 +296,28 @@ impl Engine {
             });
         }
 
-        // Once at startup, so the Settings row can put a name to a saved GUID
-        // rather than showing "Manual" until somebody opens the picker.
+        // Recovery is independent of adapter discovery. A slow recovery must
+        // not hold up the picker or start another scan when it opens.
         {
             let shared = shared.clone();
-            std::thread::spawn(move || {
-                if let Err(error) =
-                    swifttunnel_core::vpn::process_performance::recover_gpu_preferences()
-                {
-                    log::warn!("Runtime GPU recovery has pending originals: {error}");
-                }
-                let rows = list_adapters();
-                shared.edit(|s| s.adapters = rows);
-                shared.notify();
-            });
+            if let Err(error) = std::thread::Builder::new()
+                .name("lite-gpu-recovery".into())
+                .spawn(move || {
+                    if let Err(error) =
+                        swifttunnel_core::vpn::process_performance::recover_gpu_preferences()
+                    {
+                        log::warn!("Runtime GPU recovery has pending originals: {error}");
+                    }
+                    shared.notify();
+                })
+            {
+                log::warn!("Could not start runtime GPU recovery: {error}");
+            }
         }
 
-        Ok(Engine { shared })
+        let engine = Engine { shared };
+        engine.refresh_adapters();
+        Ok(engine)
     }
 
     /// Publish the window handle so background work can ask for a repaint.
@@ -327,6 +336,7 @@ impl Engine {
     /// Copy everything the screens read out of the snapshot and the settings.
     pub fn fill(&self, state: &mut State) {
         state.startup_busy = self.shared.startup_edits.is_busy();
+        state.adapter_busy = self.shared.adapter_scan.is_busy();
         state.settings_warning = self
             .shared
             .settings_save_signal
@@ -361,6 +371,7 @@ impl Engine {
             state.uninstall_busy = snapshot.uninstall_busy;
             state.regions = snapshot.regions.clone();
             state.adapters = snapshot.adapters.clone();
+            state.adapter_error = snapshot.adapter_error.clone();
             state.roblox = snapshot.roblox.clone();
             state.roblox_reset = snapshot.roblox_reset;
             state.roblox_reset_note = snapshot.roblox_reset_note.clone();
@@ -419,11 +430,30 @@ impl Engine {
 
     pub fn refresh_adapters(&self) {
         let shared = self.shared.clone();
-        std::thread::spawn(move || {
-            let rows = list_adapters();
-            shared.edit(|s| s.adapters = rows);
-            shared.notify();
-        });
+        let notify = self.shared.clone();
+        let result = spawn_adapter_scan(
+            &self.shared.adapter_scan,
+            list_adapters,
+            move |result| {
+                shared.edit(|s| match result {
+                    Ok(rows) => {
+                        s.adapters = rows;
+                        s.adapter_error = None;
+                    }
+                    Err(error) => {
+                        log::warn!("Could not list Lite network adapters: {error}");
+                        s.adapter_error = Some(ADAPTER_SCAN_ERROR.into());
+                    }
+                });
+            },
+            move || notify.notify(),
+        );
+        if let Err(error) = result {
+            log::warn!("Could not start Lite adapter discovery: {error}");
+            self.shared
+                .edit(|s| s.adapter_error = Some(ADAPTER_SCAN_ERROR.into()));
+        }
+        self.shared.notify();
     }
 
     /// Carry out one action from the window.
@@ -2620,9 +2650,30 @@ fn read_roblox(intent: &RobloxSettingsConfig) -> Roblox {
     }
 }
 
-fn list_adapters() -> Vec<AdapterRow> {
-    list_network_adapters()
-        .unwrap_or_default()
+const ADAPTER_SCAN_ERROR: &str = "Couldn't refresh network adapters. Reopen this picker to retry. If it keeps failing, restart SwiftTunnel.";
+
+fn spawn_adapter_scan(
+    gate: &OperationGate,
+    scan: impl FnOnce() -> Result<Vec<AdapterRow>, String> + Send + 'static,
+    publish: impl FnOnce(Result<Vec<AdapterRow>, String>) + Send + 'static,
+    notify: impl FnOnce() + Send + 'static,
+) -> std::io::Result<bool> {
+    let Some(operation) = gate.try_enter() else {
+        return Ok(false);
+    };
+    std::thread::Builder::new()
+        .name("lite-adapters".into())
+        .spawn(move || {
+            publish(scan());
+            drop(operation);
+            notify();
+        })?;
+    Ok(true)
+}
+
+fn list_adapters() -> Result<Vec<AdapterRow>, String> {
+    Ok(list_network_adapters()
+        .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|a| a.is_up && a.kind != "loopback" && a.kind != "tunnel")
         .map(|a| AdapterRow {
@@ -2638,7 +2689,7 @@ fn list_adapters() -> Vec<AdapterRow> {
             },
             guid: a.guid,
         })
-        .collect()
+        .collect())
 }
 
 impl Engine {
@@ -2718,6 +2769,66 @@ fn open_logs() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn adapter_scans_hold_one_reservation_through_publication_and_allow_retry() {
+        use super::*;
+        use std::sync::mpsc;
+        let gate = OperationGate::default();
+        let (started, waiting) = mpsc::channel();
+        let (release, resume) = mpsc::channel();
+        let (published, result) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        assert!(
+            spawn_adapter_scan(
+                &gate,
+                move || {
+                    started.send(()).unwrap();
+                    resume.recv_timeout(Duration::from_secs(3)).unwrap();
+                    Err("private scan failure".into())
+                },
+                move |value| {
+                    published.send(value).unwrap();
+                },
+                move || {
+                    finished.send(()).unwrap();
+                }
+            )
+            .unwrap()
+        );
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let duplicate = spawn_adapter_scan(
+            &gate,
+            || panic!("duplicate scan"),
+            |_| panic!("duplicate publication"),
+            || panic!("duplicate completion"),
+        )
+        .unwrap();
+        release.send(()).unwrap();
+        assert!(
+            result
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_err()
+        );
+        done.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!duplicate);
+        assert!(!gate.is_busy());
+        let (finished, done) = mpsc::channel();
+        assert!(
+            spawn_adapter_scan(
+                &gate,
+                || Ok(vec![]),
+                |value| assert!(value.unwrap().is_empty()),
+                move || {
+                    finished.send(()).unwrap();
+                }
+            )
+            .unwrap()
+        );
+        done.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!gate.is_busy());
+    }
+
     #[test]
     fn startup_setup_publishes_only_success_and_releases_settings_during_windows_work() {
         use super::*;

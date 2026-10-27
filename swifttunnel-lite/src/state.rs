@@ -353,6 +353,8 @@ pub struct State {
     pub tunnel: Tunnel,
     pub regions: Vec<RegionRow>,
     pub adapters: Vec<AdapterRow>,
+    pub adapter_busy: bool,
+    pub adapter_error: Option<String>,
     pub roblox: Roblox,
     pub roblox_busy: bool,
     /// Pending Roblox edits. `None` means the screen mirrors the disk.

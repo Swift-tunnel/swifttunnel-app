@@ -816,7 +816,14 @@ fn adapters(state: &State) -> Vec<Item> {
         );
     }
 
-    vec![Item::Back("Network adapter".into()), Item::Group(rows)]
+    let mut items = vec![Item::Back("Network adapter".into())];
+    if state.adapter_busy {
+        items.push(Item::Note("Refreshing network adapters...".into()));
+    } else if let Some(error) = &state.adapter_error {
+        items.push(Item::Note(error.clone()));
+    }
+    items.push(Item::Group(rows));
+    items
 }
 
 // ── Formatting ──────────────────────────────────────────────────────────────
