@@ -209,9 +209,9 @@ fn note_server_served_us(base: &str) {
 
 /// HTTP client for authentication API calls
 pub struct AuthClient {
-    client: Result<Client, String>,
-    direct_client: Result<Client, String>,
-    device_hwid: Option<String>,
+    client: OnceLock<Result<Client, String>>,
+    direct_client: OnceLock<Result<Client, String>>,
+    device_hwid: OnceLock<Option<String>>,
 }
 
 fn build_http_client(use_system_proxy: bool) -> Result<Client, String> {
@@ -257,40 +257,36 @@ impl AuthClient {
     #[cfg(test)]
     pub(super) fn unavailable_for_test() -> Self {
         Self {
-            client: Err("fixture transport unavailable".into()),
-            direct_client: Err("fixture transport unavailable".into()),
-            device_hwid: None,
+            client: OnceLock::from(Err("fixture transport unavailable".into())),
+            direct_client: OnceLock::from(Err("fixture transport unavailable".into())),
+            device_hwid: OnceLock::from(None),
         }
     }
 
     /// Create a new AuthClient
     pub fn new() -> Self {
-        let client = build_http_client(true);
-        let direct_client = build_http_client(false);
-
+        // This constructor runs before Desktop's first window. Build TLS/proxy
+        // transports and read device identity only when an API request needs
+        // them. The direct fallback usually never needs to be constructed.
         Self {
-            client,
-            direct_client,
-            device_hwid: desktop_hwid(),
+            client: OnceLock::new(),
+            direct_client: OnceLock::new(),
+            device_hwid: OnceLock::new(),
         }
     }
 
     #[cfg(test)]
     fn with_device_hwid(device_hwid: Option<String>) -> Self {
-        let client = build_http_client(true);
-        let direct_client = build_http_client(false);
-
         Self {
-            client,
-            direct_client,
-            device_hwid,
+            device_hwid: OnceLock::from(device_hwid),
+            ..Self::new()
         }
     }
 
     fn add_common_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         // Report the running build so the server can lock out old versions.
         let request = request.header("X-SwiftTunnel-Version", client_version());
-        let request = match &self.device_hwid {
+        let request = match self.device_hwid.get_or_init(desktop_hwid) {
             Some(hwid) => request.header("X-SwiftTunnel-HWID", hwid),
             None => request,
         };
@@ -374,7 +370,13 @@ impl AuthClient {
     where
         F: Fn(&Client, &str) -> reqwest::RequestBuilder,
     {
-        match send_using_client(&self.client, base, build_request).await {
+        match send_using_client(
+            self.client.get_or_init(|| build_http_client(true)),
+            base,
+            build_request,
+        )
+        .await
+        {
             Ok(response) => {
                 if response.status().is_success() {
                     note_server_served_us(base);
@@ -393,19 +395,23 @@ impl AuthClient {
                 // Same treatment on the fallback path. A machine behind a proxy
                 // reaches the API only this way, so leaving it out would mean
                 // the update gate could never lift for those users.
-                send_using_client(&self.direct_client, base, build_request)
-                    .await
-                    .inspect(|response| {
-                        if response.status().is_success() {
-                            note_server_served_us(base);
-                        }
-                    })
-                    .map_err(|direct_error| {
-                        format!(
-                            "{}. Direct retry also failed: {}",
-                            primary_error, direct_error
-                        )
-                    })
+                send_using_client(
+                    self.direct_client.get_or_init(|| build_http_client(false)),
+                    base,
+                    build_request,
+                )
+                .await
+                .inspect(|response| {
+                    if response.status().is_success() {
+                        note_server_served_us(base);
+                    }
+                })
+                .map_err(|direct_error| {
+                    format!(
+                        "{}. Direct retry also failed: {}",
+                        primary_error, direct_error
+                    )
+                })
             }
         }
     }
@@ -415,7 +421,7 @@ impl AuthClient {
             "exchange_token": exchange_token,
             "state": state,
         });
-        if let Some(hwid) = &self.device_hwid {
+        if let Some(hwid) = self.device_hwid.get_or_init(desktop_hwid) {
             payload["device_hwid"] = json!(hwid);
         }
         payload
@@ -1172,9 +1178,9 @@ mod client_initialization_tests {
     #[tokio::test]
     async fn unavailable_clients_report_failure_without_starting_a_request() {
         let client = AuthClient {
-            client: failed_client(),
-            direct_client: failed_client(),
-            device_hwid: None,
+            client: OnceLock::from(failed_client()),
+            direct_client: OnceLock::from(failed_client()),
+            device_hwid: OnceLock::from(None),
         };
         let result = client
             .send_to_fixed_url("owned test", |_| panic!("must not build a network request"))
@@ -1206,23 +1212,29 @@ mod client_initialization_tests {
                 .unwrap()
         };
         let client = AuthClient {
-            client: if primary_failed {
+            client: OnceLock::from(if primary_failed {
                 failed_client()
             } else {
                 Ok(working())
-            },
+            }),
             direct_client: if primary_failed {
-                Ok(working())
+                OnceLock::from(Ok(working()))
             } else {
-                failed_client()
+                OnceLock::new()
             },
-            device_hwid: None,
+            device_hwid: OnceLock::from(None),
         };
         let result = client
             .send_to_fixed_url("owned loopback test", |client| client.get(&url))
             .await;
         // Both sides have deadlines, so a regression cannot strand an owned listener.
         server.await.unwrap().unwrap();
+        if !primary_failed {
+            assert!(
+                client.direct_client.get().is_none(),
+                "a primary response must leave the fallback transport uninitialized"
+            );
+        }
         result.unwrap()
     }
 
