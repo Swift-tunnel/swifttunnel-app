@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as motion from "framer-motion/m";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -84,6 +84,18 @@ export function ConnectTab() {
   );
 
   const isConnected = vpnState === "connected";
+  const regionRows = useMemo(() => regions.map(region => ({
+    region,
+    estimatedLatency: regionGameEstimate(region.servers, servers, previews),
+    // Use the same current measurement for display and ordering.
+    latency: isConnected && settings.selected_region === region.id && ping !== null
+      ? ping : relayLatencies.get(region.id) ?? null,
+  })).sort((a, b) => {
+    const first = a.estimatedLatency ?? a.latency ?? Infinity;
+    const second = b.estimatedLatency ?? b.latency ?? Infinity;
+    // Stable ties preserve fleet order, including regions not measured yet.
+    return first === second ? 0 : first - second;
+  }), [regions, servers, previews, relayLatencies, isConnected, settings.selected_region, ping]);
   const isIdle = vpnState === "disconnected" || vpnState === "error";
   const isTransitioning = !isConnected && !isIdle;
   const isConnectBusy = isConnectActionBusy({ vpnState, driverSetupState });
@@ -497,7 +509,7 @@ export function ConnectTab() {
               disabled={isConnected || isTransitioning}
               onClick={selectAutoRoute}
             />
-            {regions.map((r, idx) => (
+            {regionRows.map(({ region: r, estimatedLatency, latency }, idx) => (
               <RegionRow
                 key={r.id}
                 region={r}
@@ -511,12 +523,8 @@ export function ConnectTab() {
                 // differently and refresh on different schedules, so leaving
                 // the probe here put a stale number next to the live one and
                 // made the same relay look like two different pings.
-                estimatedLatency={regionGameEstimate(r.servers, servers, previews)}
-                latency={
-                  isConnected && settings.selected_region === r.id && ping !== null
-                    ? ping
-                    : getLatency(r.id)
-                }
+                estimatedLatency={estimatedLatency}
+                latency={latency}
                 disabled={isConnected || isTransitioning}
                 onSelect={() => selectRegion(r.id)}
                 isLast={idx === regions.length - 1}
@@ -534,7 +542,7 @@ export function ConnectTab() {
 
         {hasRegions && settings.auto_routing_enabled && (
           <WhitelistPanel
-            regions={regions}
+            regions={regionRows.map(row => row.region)}
             whitelisted={settings.whitelisted_regions}
             disabled={isConnected || isTransitioning}
             onChange={(next) => {
