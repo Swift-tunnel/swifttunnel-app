@@ -474,11 +474,13 @@ impl SplitTunnelDriver {
     pub fn health_check() -> SplitTunnelDriverHealth {
         use super::winpkfilter::{MIN_DRIVER_VERSION, format_version};
 
-        let installed_evidence = Self::driver_install_evidence();
         let driver = match ndisapi::Ndisapi::new("NDISRD") {
             Ok(driver) => driver,
             Err(e) => {
-                let installed = installed_evidence;
+                // An open device is already stronger evidence than a file,
+                // service or driver-store listing. Only a failed open needs
+                // that extra discovery to choose installation versus repair.
+                let installed = Self::driver_install_evidence();
                 let status = if installed {
                     DriverHealthStatus::ServiceUnavailable
                 } else {
