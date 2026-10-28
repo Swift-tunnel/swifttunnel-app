@@ -8,6 +8,7 @@ mod runtime_assets;
 mod session_metadata;
 mod single_client;
 mod startup_config;
+mod startup_failure;
 mod state;
 mod tray;
 mod window_restore;
@@ -778,6 +779,23 @@ pub fn run() {
             // (X-SwiftTunnel-Version). Set before any auth/relay-ticket call.
             swifttunnel_core::auth::set_client_version(app.package_info().version.to_string());
 
+            // Finish required initialization before optional installer work starts.
+            // Setup errors otherwise panic inside Tauri's Ready event handler.
+            let runtime = Arc::new(tokio::runtime::Runtime::new().unwrap_or_else(|error| {
+                startup_failure::abort(startup_failure::Stage::Engine, error)
+            }));
+            let app_state = AppState::new(runtime.clone(), launched_from_startup)
+                .unwrap_or_else(|error| {
+                    startup_failure::abort(startup_failure::Stage::Account, error)
+                });
+
+            // Reserve before exposing command state. Startup must restore old
+            // records before any user apply can create a new recovery record.
+            let startup_config_operation = commands::optimizer::begin_config_change()
+                .unwrap_or_else(|error| {
+                    startup_failure::abort(startup_failure::Stage::Settings, error)
+                });
+
             // Clear an orphaned registration now, while the machine is healthy.
             //
             // A registration whose cached package has gone cannot be upgraded
@@ -797,7 +815,9 @@ pub fn run() {
             // Off the main thread and best effort. It reads the registry and
             // touches nothing when there is no orphan, but it must never delay
             // a window appearing or stop the app starting if it fails.
-            std::thread::spawn(|| {
+            if let Err(error) = std::thread::Builder::new()
+                .name("installer-maintenance".into())
+                .spawn(|| {
                 match swifttunnel_msi_repair::repair() {
                     Ok(cleared) if !cleared.is_empty() => {
                         log::warn!(
@@ -832,7 +852,10 @@ pub fn run() {
                     Ok(_) => log::debug!("no installer source needed preserving"),
                     Err(error) => log::warn!("could not preserve the installer source: {error}"),
                 }
-            });
+                })
+            {
+                log::warn!("Could not start optional installer maintenance: {error}");
+            }
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_icon(APP_ICON.clone());
@@ -844,17 +867,6 @@ pub fn run() {
             // use and applies WS_EX_NOACTIVATE there, which is what stops a
             // topmost window activating on click and knocking Roblox out of
             // the foreground.
-
-            let runtime =
-                Arc::new(tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime"));
-
-            let app_state = AppState::new(runtime.clone(), launched_from_startup)
-                .expect("Failed to initialize app state");
-
-            // Reserve before exposing command state. Startup must restore old
-            // records before any user apply can create a new recovery record.
-            let startup_config_operation = commands::optimizer::begin_config_change()
-                .map_err(std::io::Error::other)?;
 
             // ALL heavy startup work (stale network recovery, profile refresh,
             // boost/FFlag reapply) runs in the background task spawned below.
@@ -1089,7 +1101,7 @@ pub fn run() {
             Ok(())
         })
         .build(ctx)
-        .expect("error while building tauri application")
+        .unwrap_or_else(|error| startup_failure::abort(startup_failure::Stage::Window, error))
         .run(|_app, event| {
             match event {
                 tauri::RunEvent::WindowEvent {
