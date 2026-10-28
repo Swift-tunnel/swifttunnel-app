@@ -381,13 +381,23 @@ fn spawn_roblox_version_watcher(app: tauri::AppHandle) {
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(60));
 
+                let Some(state) = app.try_state::<AppState>() else {
+                    continue;
+                };
+                // Without saved flags there is nothing to restore. Avoid
+                // enumerating Roblox installs every minute while flags are off.
+                let requested = {
+                    let settings = state.settings.lock();
+                    let config = &settings.config.roblox_settings;
+                    config.ultraboost || config.custom_fflags_enabled
+                };
+                if !requested {
+                    continue;
+                }
                 let current = RobloxOptimizer::install_fingerprint();
                 if current == last_seen {
                     continue;
                 }
-                let Some(state) = app.try_state::<AppState>() else {
-                    continue;
-                };
                 // Launch/reset/flag work uses this lock. Check temporary state
                 // and read the saved config only after any earlier apply finishes.
                 let optimizer = state.roblox_optimizer.lock();
