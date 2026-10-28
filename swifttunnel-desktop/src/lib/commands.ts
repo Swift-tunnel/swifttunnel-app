@@ -83,7 +83,12 @@ export const gamesSaveLauncherConfig = (config: LauncherConfig): Promise<void> =
   pendingLauncherSave = saving;
   return saving;
 };
-export const gamesDisplays = () => invoke<GameDisplay[]>("games_displays");
+let pendingDisplays: Promise<GameDisplay[]> | null = null;
+export const gamesDisplays = (): Promise<GameDisplay[]> => {
+  pendingDisplays ??= invoke<GameDisplay[]>("games_displays")
+    .finally(() => { pendingDisplays = null; });
+  return pendingDisplays;
+};
 export const gamesCreateShortcut = (placeId: string, name: string) => invoke<string>("games_create_shortcut", { placeId, name });
 export const gamesStartupTarget = () => invoke<string | null>("games_startup_target");
 export const gamesDismissRecovery = () => invoke<void>("games_dismiss_recovery");

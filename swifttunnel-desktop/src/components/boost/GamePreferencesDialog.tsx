@@ -31,13 +31,15 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
   const [error, setError] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState(false);
   const [displays,setDisplays]=useState<GameDisplay[]>([]);
+  const [displayError, setDisplayError] = useState(false);
   const globalFps = useSettingsStore(s => s.settings.config.roblox_settings.target_fps);
   useEffect(() => {
     if (!entry) return;
     let disposed = false;
     setPreferences(defaultGamePreferences(entry)); setError(null); setCenters([]); setCatalogError(false);
+    setDisplays([]); setDisplayError(false);
     void gamesDatacenters().then(rows => { if (!disposed) setCenters(rows); }).catch(() => { if (!disposed) setCatalogError(true); });
-    void gamesDisplays().then(rows=>{if(!disposed)setDisplays(rows);}).catch(()=>{});
+    void gamesDisplays().then(rows=>{if(!disposed)setDisplays(rows);}).catch(()=>{if(!disposed)setDisplayError(true);});
     return () => { disposed = true; };
   }, [entry]);
   async function save() {
@@ -93,6 +95,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
         </Setting>
       </Group>
       <Group title="Window">
+        {displayError && <p className="px-3.5 py-2.5 text-[11.5px] leading-relaxed text-text-muted">Displays could not load. Reopen game settings to retry.</p>}
         <Setting label="Borderless window">
           <Toggle enabled={!!preferences.borderless} disabled={busy} ariaLabel="Borderless window" onChange={borderless => patch({ borderless })} />
         </Setting>
