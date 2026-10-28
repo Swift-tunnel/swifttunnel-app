@@ -181,10 +181,15 @@ impl Shared {
 
     fn automatic_updates_allowed(&self) -> bool {
         !self.stop.load(Ordering::Relaxed)
+            && settings::settings_load_error().is_none()
             && self
                 .settings
                 .read()
                 .is_ok_and(|settings| settings.update_settings.auto_check)
+            // Roblox can be running directly while the tunnel is disconnected.
+            // Check afresh before checking/downloading and at installer handoff;
+            // the UI snapshot can be up to twenty seconds behind while idle.
+            && !RobloxOptimizer::player_is_running()
     }
 
     // Called only on exit/update workers, never the GUI thread.
