@@ -724,7 +724,10 @@ fn launch_elevated_swifttunnel(exe_path: &Path, args: &str) -> Result<(), String
     if code > 32 {
         Ok(())
     } else if code == 5 {
-        Err("Administrator restart was canceled at the UAC prompt.".to_string())
+        Err(
+            "Windows did not allow the restart. Try again, or close and reopen SwiftTunnel."
+                .to_string(),
+        )
     } else {
         Err(format!(
             "Failed to relaunch SwiftTunnel as Administrator (ShellExecute code {}).",
