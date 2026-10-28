@@ -475,10 +475,13 @@ fn spawn_roblox_version_watcher(app: tauri::AppHandle) {
 }
 
 fn spawn_roblox_window_size_watcher(app: tauri::AppHandle) {
+    use swifttunnel_core::roblox_optimizer::RobloxOptimizer;
+
     let _ = std::thread::Builder::new()
         .name("roblox-window-size-watcher".into())
         .spawn(move || {
             let mut was_running = false;
+            let mut retry_after: Option<std::time::Instant> = None;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(2000));
 
@@ -486,10 +489,23 @@ fn spawn_roblox_window_size_watcher(app: tauri::AppHandle) {
                     continue;
                 };
 
-                let ro = state.roblox_optimizer.lock();
-                let running = ro.is_roblox_running();
+                // Share ordinary discovery with metrics and launch tracking.
+                // No settings lock or separate full snapshot for an idle tick.
+                let running = state.performance_monitor.lock().poll_roblox_pid().is_some();
+                if running {
+                    retry_after = None;
+                }
 
                 if was_running && !running {
+                    if retry_after.is_some_and(|at| std::time::Instant::now() < at) {
+                        continue;
+                    }
+                    let ro = state.roblox_optimizer.lock();
+                    // Cached presence is sufficient for polling, never for a
+                    // file write. The native check also fails closed on errors.
+                    if RobloxOptimizer::player_is_running() {
+                        continue;
+                    }
                     if swifttunnel_core::roblox_game_profile::pending()
                         || swifttunnel_core::roblox_launch_flags::pending()
                     {
@@ -503,6 +519,11 @@ fn spawn_roblox_window_size_watcher(app: tauri::AppHandle) {
                     };
                     if let Err(e) = ro.reapply_window_size(&config) {
                         log::warn!("Could not restore Roblox window size after exit: {e}");
+                        // Locked files and a temporarily unavailable disk must
+                        // not permanently consume this exit transition.
+                        retry_after =
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+                        continue;
                     }
                 }
 
