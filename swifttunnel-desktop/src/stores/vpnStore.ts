@@ -245,7 +245,7 @@ const clearedSessionTelemetry = {
 const autoRepairedBindingSignatures = new Set<string>();
 const autoRepairedFirewallSignatures = new Set<string>();
 let relayFailoverInFlight = false;
-let lastRelayFailoverAt = 0;
+let lastRelayFailoverAt: number | null = null;
 
 export function cancelPendingConnectForRepair(): void {
   nextConnectAttempt();
@@ -319,7 +319,7 @@ async function failoverRelayAfterDeadSession(
   connect: (region: string, gamePresets: string[]) => Promise<void>,
 ): Promise<void> {
   if (relayFailoverInFlight || repairIsBusy()) return;
-  if (Date.now() - lastRelayFailoverAt < 5_000) return;
+  if (lastRelayFailoverAt !== null && performance.now() - lastRelayFailoverAt < 5_000) return;
 
   const attempt = connectAttemptSeq;
   const revision = sessionRevision;
@@ -357,7 +357,7 @@ async function failoverRelayAfterDeadSession(
       await settingsStore.save(true);
     }
     if (!stillCurrent()) return;
-    lastRelayFailoverAt = Date.now();
+    lastRelayFailoverAt = performance.now();
     await notify(
       "SwiftTunnel",
       `Relay stopped responding. Reconnecting to another ${locationName} relay.`,

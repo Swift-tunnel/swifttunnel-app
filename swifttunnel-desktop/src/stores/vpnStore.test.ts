@@ -170,6 +170,30 @@ describe("stores/vpnStore", () => {
     expect(useSettingsStore.getState().settings.selected_region).toBe("tokyo");
   });
 
+  it.each([-3_600_000, 3_600_000])("keeps relay failover cooldown stable after a wall-clock change of %i ms", async jump => {
+    const wall = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    const elapsed = vi.spyOn(performance, "now").mockReturnValue(10);
+    try {
+      const { store, connect } = await failoverFixture();
+      const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+      store.getState().handleStateEvent(deadRelayEvent);
+      await settle();
+      expect(connect).toHaveBeenCalledTimes(1);
+      wall.mockReturnValue(1_000_000 + jump);
+      elapsed.mockReturnValue(1010);
+      store.getState().handleStateEvent(deadRelayEvent);
+      await settle();
+      expect(connect).toHaveBeenCalledTimes(1);
+      elapsed.mockReturnValue(5011);
+      store.getState().handleStateEvent(deadRelayEvent);
+      await settle();
+      expect(connect).toHaveBeenCalledTimes(2);
+    } finally {
+      wall.mockRestore();
+      elapsed.mockRestore();
+    }
+  });
+
   it("does not claim disconnect succeeded when state verification fails", async () => {
     const store = await loadStore();
     store.setState({ state: "connected", region: "singapore", serverEndpoint: "1.2.3.4:51821", splitTunnelActive: true });
