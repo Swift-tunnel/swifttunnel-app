@@ -101,7 +101,18 @@ export const gamesForget = async (placeId: string, client: RobloxClient) => {
 export const gamesSetNotifications = (enabled: boolean) => invoke<void>("games_set_notifications", { enabled });
 export const gamesScanImports = () => invoke<RobloxImportPreview>("games_scan_imports");
 export const gamesDatacenters = () => invoke<RobloxDatacenter[]>("games_datacenters");
-export const gamesSearchServers = (placeId: string, datacenterId: number, cursor: number | null = null) => invoke<RobloxServerPage>("games_search_servers", { placeId, datacenterId, cursor });
+const pendingServerSearches = new Map<string, Promise<RobloxServerPage>>();
+export const gamesSearchServers = (placeId: string, datacenterId: number, cursor: number | null = null): Promise<RobloxServerPage> => {
+  const key = JSON.stringify([placeId, datacenterId, cursor]);
+  const pending = pendingServerSearches.get(key);
+  if (pending) return pending;
+  // Share in-flight work, including through a dialog remount. Completed
+  // searches are never cached here; a later Refresh checks availability again.
+  const search = invoke<RobloxServerPage>("games_search_servers", { placeId, datacenterId, cursor })
+    .finally(() => { pendingServerSearches.delete(key); });
+  pendingServerSearches.set(key, search);
+  return search;
+};
 export const gamesSetPreferences = (placeId: string, client: RobloxClient, preferences: GamePreferences): Promise<void> => {
   if (pendingGamePreferencesSave) return Promise.reject(new Error("Game settings are still being saved. Wait a moment, then retry Save."));
   const saving = invoke<void>("games_set_preferences", { placeId, client, preferences }).finally(() => {
