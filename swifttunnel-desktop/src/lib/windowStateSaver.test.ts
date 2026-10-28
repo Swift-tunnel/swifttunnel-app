@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createWindowStateSaver } from "./windowStateSaver";
 import type { WindowState } from "./types";
+import { createCloseToTrayHandler } from "./closeToTray";
 
 const old: WindowState = { x: 10, y: 20, width: 1000, height: 700, maximized: false };
 const latest: WindowState = { ...old, x: 300, width: 1200 };
@@ -10,6 +11,19 @@ function deferred<T>() {
   return { promise, resolve };
 }
 describe("window state persistence", () => {
+  it("starts geometry capture before Close-to-tray hides the window", async () => {
+    const order: string[] = [];
+    const saver = createWindowStateSaver({
+      read: async () => { order.push("read"); return old; },
+      persist: async () => {}, onError: vi.fn(),
+    });
+    const handler = createCloseToTrayHandler({
+      persistWindowState: saver.save,
+      hide: async () => { order.push("hide"); }, close: vi.fn(),
+    });
+    await handler({ preventDefault: vi.fn() });
+    expect(order).toEqual(["read", "hide"]);
+  });
   it("bounds pending geometry reads and never saves an obsolete snapshot after a newer movement", async () => {
     const first = deferred<WindowState>();
     const read = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValue(latest);

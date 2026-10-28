@@ -15,7 +15,12 @@ export function createWindowStateSaver(options: {
     if (task) return task;
     // Reserve admission before the read starts. Each completed round consumes
     // at most one newer request, rather than building a geometry IPC backlog.
-    task = Promise.resolve().then(async () => {
+    let complete!: () => void;
+    let fail!: (error: unknown) => void;
+    const pending = new Promise<void>((resolve, reject) => { complete = resolve; fail = reject; });
+    task = pending;
+    // Begin geometry capture before Close-to-tray can hide the window.
+    const work = (async () => {
       try {
         while (requested && !disposed) {
           requested = false;
@@ -32,8 +37,9 @@ export function createWindowStateSaver(options: {
         // cannot attach itself to a completed task and lose its follow-up.
         task = null;
       }
-    });
-    return task;
+    })();
+    void work.then(complete, fail);
+    return pending;
   }
   return {
     invalidate() { revision += 1; },
