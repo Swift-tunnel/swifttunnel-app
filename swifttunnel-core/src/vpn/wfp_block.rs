@@ -341,39 +341,7 @@ fn nt_to_dos_path(nt_path: &str) -> Option<String> {
     if nt_path.starts_with(r"\Device\HarddiskVolume") || nt_path.starts_with(r"\Device\Mup") {
         // Build the volume → drive letter mapping
         let drive_map = build_drive_mapping();
-
-        // Find the matching volume device
-        for (device_path, drive_letter) in &drive_map {
-            if nt_path.starts_with(device_path) {
-                // Extract the path after the device prefix
-                let rest = nt_path.strip_prefix(device_path)?;
-                // rest starts with '\' like \Users\...
-                return Some(format!("{}:{}", drive_letter, rest));
-            }
-        }
-
-        // Fallback: try to parse the volume number directly
-        // This handles cases where QueryDosDevice might not return expected results
-        if let Some(rest) = nt_path.strip_prefix(r"\Device\HarddiskVolume")
-            && let Some((num_str, path)) = rest.split_once('\\')
-            && let Ok(vol_num) = num_str.parse::<u32>()
-        {
-            // Search for this volume number in our mapping
-            for (device_path, drive_letter) in &drive_map {
-                if device_path.contains(&format!("HarddiskVolume{}", vol_num)) {
-                    return Some(format!("{}:\\{}", drive_letter, path));
-                }
-            }
-            // Don't guess C:\ — games on D:\ would silently get a
-            // mismatched WFP block filter. The caller already handles
-            // None by falling back to speculative tunneling.
-            log::warn!(
-                "nt_to_dos_path: Could not map volume {} to drive letter, returning None",
-                vol_num
-            );
-        }
-
-        None
+        device_path_to_dos(nt_path, &drive_map)
     } else if nt_path.starts_with(r"\??\") {
         // Already a DOS-style path with \??\ prefix
         Some(nt_path.strip_prefix(r"\??\")?.to_string())
@@ -383,6 +351,16 @@ fn nt_to_dos_path(nt_path: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn device_path_to_dos(nt_path: &str, drive_map: &HashMap<String, char>) -> Option<String> {
+    drive_map.iter().find_map(|(device_path, drive_letter)| {
+        // Volume1 must never match Volume10. Unmapped volumes remain unknown;
+        // the caller can continue with speculative tunneling instead.
+        let rest = nt_path.strip_prefix(device_path)?;
+        rest.starts_with('\\')
+            .then(|| format!("{drive_letter}:{rest}"))
+    })
 }
 
 /// Add a temporary block filter for a process by its full image path
@@ -584,4 +562,44 @@ fn cleanup_inner() {
 /// Check if WFP blocking is initialized
 pub fn is_initialized() -> bool {
     WFP_STATE.lock().map(|s| s.is_some()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drive_mapping_requires_the_complete_device_name() {
+        let volume_one = HashMap::from([(r"\Device\HarddiskVolume1".into(), 'C')]);
+        assert_eq!(
+            device_path_to_dos(
+                r"\Device\HarddiskVolume10\Games\RobloxPlayerBeta.exe",
+                &volume_one
+            ),
+            None
+        );
+        let volume_ten = HashMap::from([(r"\Device\HarddiskVolume10".into(), 'E')]);
+        assert_eq!(
+            device_path_to_dos(
+                r"\Device\HarddiskVolume1\Games\RobloxPlayerBeta.exe",
+                &volume_ten
+            ),
+            None
+        );
+        let both = HashMap::from([
+            (r"\Device\HarddiskVolume1".into(), 'C'),
+            (r"\Device\HarddiskVolume10".into(), 'E'),
+        ]);
+        assert_eq!(
+            device_path_to_dos(
+                r"\Device\HarddiskVolume10\Games\RobloxPlayerBeta.exe",
+                &both
+            ),
+            Some(r"E:\Games\RobloxPlayerBeta.exe".into())
+        );
+        assert_eq!(
+            device_path_to_dos(r"\Device\HarddiskVolume1\Games\RobloxPlayerBeta.exe", &both),
+            Some(r"C:\Games\RobloxPlayerBeta.exe".into())
+        );
+    }
 }
