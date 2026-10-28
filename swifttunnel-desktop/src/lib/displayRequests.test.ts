@@ -4,7 +4,7 @@ const h = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
 import { gamesDisplays } from "./commands";
 const displays: GameDisplay[] = [{ id: "display-one", left: 0, top: 0, width: 1920, height: 1080, primary: true }];
-beforeEach(() => h.invoke.mockReset().mockResolvedValue(displays));
+beforeEach(() => { h.invoke.mockReset().mockResolvedValue(displays); });
 
 it("shares pending display discovery through dialog remounts but checks again on a later open", async () => {
   let finish!: (value: GameDisplay[]) => void;

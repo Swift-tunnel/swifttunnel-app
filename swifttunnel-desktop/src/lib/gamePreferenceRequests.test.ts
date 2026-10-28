@@ -11,7 +11,7 @@ function deferred() {
   const promise = new Promise<void>((ok, fail) => { resolve = ok; reject = fail; });
   return { promise, resolve, reject };
 }
-beforeEach(() => h.invoke.mockReset().mockResolvedValue(undefined));
+beforeEach(() => { h.invoke.mockReset().mockResolvedValue(undefined); });
 
 it("waits for the game's save before reopening the library or planning Play", async () => {
   const pending = deferred();

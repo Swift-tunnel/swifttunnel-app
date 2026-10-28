@@ -13,7 +13,7 @@ function deferred() {
   const promise = new Promise<void>((ok, fail) => { resolve = ok; reject = fail; });
   return { promise, resolve, reject };
 }
-beforeEach(() => h.invoke.mockReset().mockResolvedValue(config));
+beforeEach(() => { h.invoke.mockReset().mockResolvedValue(config); });
 
 it("waits for a pending Matchmaker save before a remount reads or Play plans", async () => {
   const pending = deferred();

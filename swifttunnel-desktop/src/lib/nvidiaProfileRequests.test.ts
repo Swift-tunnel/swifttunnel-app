@@ -10,7 +10,7 @@ function deferred() {
   const promise = new Promise<NvidiaDriverProfile>((ok, fail) => { resolve = ok; reject = fail; });
   return { promise, resolve, reject };
 }
-beforeEach(() => h.invoke.mockReset().mockResolvedValue(nextProfile));
+beforeEach(() => { h.invoke.mockReset().mockResolvedValue(nextProfile); });
 
 it("makes a reopened panel read after a pending Apply, instead of displaying an older profile", async () => {
   const pending = deferred();

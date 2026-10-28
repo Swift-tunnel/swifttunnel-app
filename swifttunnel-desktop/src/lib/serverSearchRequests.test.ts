@@ -9,7 +9,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 const page: RobloxServerPage = { servers: [], next_cursor: null, warning: null };
-beforeEach(() => h.invoke.mockReset().mockResolvedValue(page));
+beforeEach(() => { h.invoke.mockReset().mockResolvedValue(page); });
 
 it("shares an identical pending server search across repeated clicks or dialog remounts", async () => {
   const pending = deferred(); h.invoke.mockReturnValue(pending.promise);

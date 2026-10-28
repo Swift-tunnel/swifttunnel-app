@@ -4,7 +4,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
 import { settingsGenerateNetworkDiagnosticsBundle, systemCopyLogToClipboard } from "./commands";
 const copied = { file_path: "fixture.log" };
 const report = { file_path: "fixture.txt", folder_path: "fixture-folder" };
-beforeEach(() => h.invoke.mockReset());
+beforeEach(() => { h.invoke.mockReset(); });
 
 it("shares a pending report through Repair and Settings but creates a fresh report later", async () => {
   let finish!: (value: typeof report) => void;
