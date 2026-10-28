@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Dialog, ErrorBanner, Field, Icon, Panel, Row, Segmented, Select, SliderInput, Toggle, CONTROL_WIDTH, compactFieldClass, fieldClass } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
@@ -14,6 +14,7 @@ function FlagSection({ title, desc, children }: { title: string; desc?: string; 
   </Panel>;
 }
 export function FastFlagsPanel() {
+  const saving = useRef(false);
   const saved = useSettingsStore(s => s.settings.config.roblox_settings);
   const [baseline, setBaseline] = useState(saved);
   const [enabled, setEnabled] = useState(saved.custom_fflags_enabled);
@@ -53,7 +54,8 @@ export function FastFlagsPanel() {
     if (next && !Object.keys(flags).length) setFlags(flagPreset("balanced"));
   }
   async function save(close = false) {
-    if (validation || busy) return;
+    if (validation || saving.current) return;
+    saving.current = true;
     setBusy(true); setError(null); setNotice(null);
     try {
       if (close) await boostCloseRoblox();
@@ -64,7 +66,7 @@ export function FastFlagsPanel() {
       if (result.warnings.length) { setError(result.warnings.join("\n")); setNotice("Saved, but some files could not be updated."); return; }
       setNotice(enabled ? "Saved. They apply the next time Roblox opens." : "FastFlags turned off. Roblox is back on its defaults.");
     } catch (e) { setError(formatErrorMessage(e)); }
-    finally { setBusy(false); }
+    finally { saving.current = false; setBusy(false); }
   }
   const renderer = RENDERER_FLAGS.find(k => flagBool(flags, k)) ?? "default";
   const rows = Object.entries(flags).filter(([key]) => key.toLowerCase().includes(search.toLowerCase()));
