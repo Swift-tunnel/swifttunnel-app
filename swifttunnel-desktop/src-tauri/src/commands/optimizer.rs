@@ -534,19 +534,13 @@ pub async fn boost_clean_ram(
 ) -> Result<RamCleanResultResponse, String> {
     #[cfg(windows)]
     {
-        // Exclude Roblox PID to avoid stutters; foreground PID is excluded inside core.
-        let roblox_pid = {
-            let mut monitor = state.performance_monitor.lock();
-            monitor.get_roblox_pid().unwrap_or(0)
-        };
-
-        let mut exclude_pids: Vec<u32> = Vec::new();
-        if roblox_pid != 0 {
-            exclude_pids.push(roblox_pid);
-        }
-
+        let performance_monitor = state.performance_monitor.clone();
         let app_handle = app.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
+            // The fresh exclusion scan can block too. Keep it with the cleanup
+            // worker rather than blocking the async command executor first.
+            let roblox_pid = performance_monitor.lock().get_roblox_pid();
+            let exclude_pids: Vec<u32> = roblox_pid.into_iter().collect();
             swifttunnel_core::ram_cleaner::clean_ram(
                 &exclude_pids,
                 |stage, snapshot, trimmed, current, warning| {

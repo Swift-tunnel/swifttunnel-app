@@ -107,8 +107,11 @@ pub struct PerformanceMonitor {
     system: System,
     last_full_scan: Option<std::time::Instant>,
     last_metrics: PerformanceMetrics,
+    last_metrics_sample: Option<(std::time::Instant, Option<u32>)>,
     #[cfg(test)]
     full_scans: usize,
+    #[cfg(test)]
+    metric_samples: usize,
 }
 
 impl PerformanceMonitor {
@@ -120,35 +123,63 @@ impl PerformanceMonitor {
             system: System::new(),
             last_full_scan: None,
             last_metrics: PerformanceMetrics::default(),
+            last_metrics_sample: None,
             #[cfg(test)]
             full_scans: 0,
+            #[cfg(test)]
+            metric_samples: 0,
         }
     }
 
     /// Update performance metrics
     pub fn update_metrics(&mut self, metrics: &mut PerformanceMetrics) {
+        self.update_metrics_at(metrics, std::time::Instant::now());
+    }
+
+    fn update_metrics_at(&mut self, metrics: &mut PerformanceMetrics, now: std::time::Instant) {
         // Keep the last known Roblox PID across calls. Overlay polling creates a
         // fresh `PerformanceMetrics` each tick, while full process scans are
         // intentionally throttled; without this cache most ticks briefly looked
         // like "Roblox not running" and cleared the FPS target.
         *metrics = self.last_metrics.clone();
 
-        metrics.process_id = self.refresh_player(false, true);
+        let sample_due = self.last_metrics_sample.is_none_or(|(at, _)| {
+            now.saturating_duration_since(at) >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL
+        });
+        // Presence remains fresh even when another consumer just sampled the
+        // CPU counters. Do not overwrite their baseline with a near-zero gap.
+        metrics.process_id = self.refresh_player(false, sample_due);
+        let player_changed = self
+            .last_metrics_sample
+            .is_some_and(|(_, pid)| pid != metrics.process_id);
+        if player_changed && !sample_due && metrics.process_id.is_some() {
+            // Presence-only discovery may have found a different player. Its
+            // first sample must not inherit the previous player's CPU/RAM.
+            metrics.process_id = self.refresh_player(false, true);
+        }
         metrics.roblox_running = metrics.process_id.is_some();
-        if let Some(process) = metrics
-            .process_id
-            .and_then(|pid| self.system.process(sysinfo::Pid::from_u32(pid)))
-        {
-            metrics.cpu_usage = normalize_process_cpu(process.cpu_usage());
-            metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
-        } else {
+        if sample_due || player_changed {
+            if let Some(process) = metrics
+                .process_id
+                .and_then(|pid| self.system.process(sysinfo::Pid::from_u32(pid)))
+            {
+                metrics.cpu_usage = normalize_process_cpu(process.cpu_usage());
+                metrics.ram_usage = process.memory() as f64 / 1024.0 / 1024.0;
+            } else {
+                metrics.cpu_usage = 0.0;
+                metrics.ram_usage = 0.0;
+            }
+            self.system.refresh_memory();
+            metrics.ram_total = self.system.total_memory() as f64 / 1024.0 / 1024.0;
+            self.last_metrics_sample = Some((now, metrics.process_id));
+            #[cfg(test)]
+            {
+                self.metric_samples += 1;
+            }
+        } else if !metrics.roblox_running {
             metrics.cpu_usage = 0.0;
             metrics.ram_usage = 0.0;
         }
-
-        // Get total system RAM
-        self.system.refresh_memory();
-        metrics.ram_total = self.system.total_memory() as f64 / 1024.0 / 1024.0;
         self.last_metrics = metrics.clone();
     }
 
@@ -269,6 +300,39 @@ impl Default for PerformanceMonitor {
 #[cfg(test)]
 mod polling_tests {
     use super::*;
+
+    #[test]
+    fn overlapping_metrics_consumers_share_a_sample_without_deferring_the_next_due_sample() {
+        let mut monitor = PerformanceMonitor::new();
+        let now = std::time::Instant::now();
+        monitor.last_full_scan = Some(now);
+        let mut metrics = PerformanceMetrics::default();
+        monitor.update_metrics_at(&mut metrics, now);
+        for _ in 0..20 {
+            monitor.update_metrics_at(&mut metrics, now);
+        }
+        assert_eq!(monitor.metric_samples, 1);
+        monitor.update_metrics_at(&mut metrics, now + sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+        assert_eq!(monitor.metric_samples, 2);
+    }
+
+    #[test]
+    fn a_cached_metrics_sample_does_not_keep_a_gone_or_reused_player_alive() {
+        let mut monitor = PerformanceMonitor::new();
+        let now = std::time::Instant::now();
+        monitor.last_full_scan = Some(now);
+        monitor.last_metrics_sample = Some((now, Some(std::process::id())));
+        monitor.last_metrics.process_id = Some(std::process::id());
+        monitor.last_metrics.roblox_running = true;
+        monitor.last_metrics.cpu_usage = 70.0;
+        monitor.last_metrics.ram_usage = 512.0;
+        let mut metrics = PerformanceMetrics::default();
+        monitor.update_metrics_at(&mut metrics, now);
+        assert!(metrics.process_id.is_none());
+        assert!(!metrics.roblox_running);
+        assert_eq!(metrics.cpu_usage, 0.0);
+        assert_eq!(metrics.ram_usage, 0.0);
+    }
 
     #[test]
     #[ignore = "manual host-dependent process polling benchmark"]
