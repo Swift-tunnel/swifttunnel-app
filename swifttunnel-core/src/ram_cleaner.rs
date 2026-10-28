@@ -194,13 +194,11 @@ where
         // itself in RAM: trimming working sets and purging the standby list
         // evicts the OS's own disk cache, every page refetches over the LAN,
         // and the whole machine freezes. Reported by Vietnamese internet-cafe
-        // users; covers both the manual cleaner and auto-clean on game join.
-        if crate::diskless::system_is_diskless() {
+        // users. Unknown storage must not be treated as a confirmed local disk.
+        if let Some(reason) = crate::diskless::ram_clean_skip_reason() {
             let snapshot = windows_impl::get_system_memory_snapshot()?;
-            let reason = "Skipped on this PC: it boots from the network (internet-cafe \
-                          diskless setup), and cleaning would freeze it"
-                .to_string();
-            warn!("RAM clean skipped: diskless/network-booted system");
+            let reason = reason.to_string();
+            warn!("RAM clean skipped: {reason}");
             on_progress("done", snapshot, 0, None, Some(reason.clone()));
             return Ok(RamCleanResult {
                 before: snapshot,
