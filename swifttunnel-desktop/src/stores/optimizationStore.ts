@@ -56,6 +56,21 @@ function busyOutcome(def: OptTarget, opts?: OptOptions): OptOutcome {
   return { ok: false, requiresReboot: false };
 }
 
+function unavailableOutcome(opts?: OptOptions): OptOutcome {
+  if (!opts?.silent) useToastStore.getState().addToast({
+    type: "warning",
+    message: "Read optimization status first. Use Retry status check in Optimize.",
+  });
+  return { ok: false, requiresReboot: false };
+}
+
+function activeIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some(id => typeof id !== "string")) {
+    throw new Error("Optimization status is unavailable. Retry before changing tweaks.");
+  }
+  return value;
+}
+
 export const useOptimizationStore = create<OptimizationStore>((set, get) => {
   const revisions = new Map<string, number>();
   let loadRequest = 0;
@@ -114,11 +129,8 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
       const before = new Map(revisions);
       set({ loading: true, loadError: null });
       try {
-        const active = await optimizationGetActive();
+        const active = activeIds(await optimizationGetActive());
         if (request !== loadRequest) return;
-        if (!Array.isArray(active) || active.some((id) => typeof id !== "string")) {
-          throw new Error("Optimization status is unavailable. Retry before changing tweaks.");
-        }
         const status: Record<string, OptStatus> = {};
         for (const id of active) status[id] = "active";
         for (const [id, current] of Object.entries(get().status)) {
@@ -138,6 +150,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
 
     activate: async (def, opts) => {
       if (blockedByBatch(opts)) return busyOutcome({ ...def, name: "An optimization batch" }, opts);
+      if (!get().loaded) return unavailableOutcome(opts);
       if (isBusy(get().status[def.id])) return busyOutcome(def, opts);
       if (get().status[def.id] === "active") {
         return { ok: true, requiresReboot: false };
@@ -183,9 +196,13 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
         // available for recovery instead of hiding it as an inactive tweak.
         let needsRevert = false;
         try {
-          needsRevert = (await optimizationGetActive()).includes(def.id);
-        } catch {
-          // The original failure remains visible, including its recovery step.
+          needsRevert = activeIds(await optimizationGetActive()).includes(def.id);
+        } catch (statusError) {
+          // Failed apply is not proof that nothing changed. Stop this batch
+          // and other controls until a new status read resolves rollback state.
+          ++loadRequest;
+          set({ loaded: false, loading: false, loadError: "Could not confirm which tweaks changed. Use Retry status check before changing more." });
+          reportError("Could not check optimization recovery state", statusError, { dedupeKey: "optimization-recovery" });
         }
         setStatus(def.id, needsRevert ? "active" : "inactive");
         const message = formatErrorMessage(error);
@@ -202,6 +219,7 @@ export const useOptimizationStore = create<OptimizationStore>((set, get) => {
 
     deactivate: async (def, opts) => {
       if (blockedByBatch(opts)) return busyOutcome({ ...def, name: "An optimization batch" }, opts);
+      if (!get().loaded) return unavailableOutcome(opts);
       const current = get().status[def.id];
       if (isBusy(current)) return busyOutcome(def, opts);
       if (current !== "active") {

@@ -10,7 +10,7 @@ import { useOptimizationStore } from "./optimizationStore";
 
 beforeEach(() => {
   vi.resetAllMocks();
-  useOptimizationStore.setState({ status: {}, loaded: false, loading: false, loadError: null, errors: {}, restartRequired: false, batch: null });
+  useOptimizationStore.setState({ status: {}, loaded: true, loading: false, loadError: null, errors: {}, restartRequired: false, batch: null });
   commands.optimizationApply.mockRejectedValue(new Error("Rollback record kept; revert to recover"));
 });
 
@@ -58,6 +58,7 @@ it("keeps a batch exclusive across unsubscription and blocks opposite and indivi
 });
 
 it("does not start a batch with unreadable status or a single change still running", async () => {
+  useOptimizationStore.setState({ loaded: false });
   expect(await useOptimizationStore.getState().runBatch([target], "apply")).toBeNull();
   useOptimizationStore.setState({ loaded: true });
   const applying = deferred<{ requires_reboot: boolean }>();
@@ -158,6 +159,48 @@ it("keeps Revert available when a failed apply left a rollback record", async ()
   commands.optimizationGetActive.mockResolvedValue(["test"]);
   expect(await useOptimizationStore.getState().activate({ id: "test", name: "Test" })).toEqual({ ok: false, requiresReboot: false });
   expect(useOptimizationStore.getState().status.test).toBe("active");
+});
+
+it("pauses further changes when a failed apply's recovery status cannot be read", async () => {
+  useOptimizationStore.setState({ loaded: true });
+  commands.optimizationGetActive.mockRejectedValue(new Error("snapshot storage unavailable"));
+  expect((await useOptimizationStore.getState().activate(target)).ok).toBe(false);
+  expect(useOptimizationStore.getState().loaded).toBe(false);
+  expect(useOptimizationStore.getState().loadError).toContain("Retry status check");
+  commands.optimizationApply.mockClear();
+  commands.optimizationRevert.mockClear();
+  expect((await useOptimizationStore.getState().activate({ id: "second", name: "Second" })).ok).toBe(false);
+  expect((await useOptimizationStore.getState().deactivate(target)).ok).toBe(false);
+  expect(commands.optimizationApply).not.toHaveBeenCalled();
+  expect(commands.optimizationRevert).not.toHaveBeenCalled();
+  commands.optimizationGetActive.mockResolvedValue([target.id]);
+  commands.optimizationRevert.mockResolvedValue({ requires_reboot: false });
+  await useOptimizationStore.getState().loadActive();
+  expect(useOptimizationStore.getState().loadError).toBeNull();
+  expect((await useOptimizationStore.getState().deactivate(target)).ok).toBe(true);
+});
+
+it("stops submitting remaining batch work after recovery status becomes unknown", async () => {
+  useOptimizationStore.setState({ loaded: true });
+  commands.optimizationGetActive.mockRejectedValue(new Error("snapshot storage unavailable"));
+  const result = await useOptimizationStore.getState().runBatch([target, { id: "second", name: "Second" }], "apply");
+  expect(result).toEqual({ changed: 0, failed: 2, reboot: 0 });
+  expect(commands.optimizationApply.mock.calls.map(([id]) => id)).toEqual([target.id]);
+  expect(useOptimizationStore.getState().batch).toBeNull();
+  expect(useOptimizationStore.getState().loaded).toBe(false);
+});
+
+it("does not let an earlier status read clear the recovery pause", async () => {
+  const earlier = deferred<string[]>();
+  commands.optimizationGetActive.mockReturnValueOnce(earlier.promise)
+    .mockRejectedValueOnce(new Error("snapshot storage unavailable"));
+  const loading = useOptimizationStore.getState().loadActive();
+  await useOptimizationStore.getState().activate(target);
+  earlier.resolve([]);
+  await loading;
+  expect(useOptimizationStore.getState().loaded).toBe(false);
+  expect(useOptimizationStore.getState().loading).toBe(false);
+  expect(useOptimizationStore.getState().loadError).toContain("Retry status check");
 });
 
 it("leaves a tweak inactive when no changes or rollback record remain", async () => {
