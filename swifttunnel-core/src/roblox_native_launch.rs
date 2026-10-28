@@ -115,18 +115,24 @@ pub fn safe_path(path: &Path) -> Result<(), String> {
 }
 
 fn client_for_image(base: &Path, image: &Path) -> Option<RobloxClient> {
-    let image = image
-        .to_string_lossy()
-        .replace('/', "\\")
-        .to_ascii_lowercase();
+    if !base.is_absolute()
+        || !image.is_absolute()
+        || image
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return None;
+    }
     [RobloxClient::Standard, RobloxClient::Vng]
         .into_iter()
         .find(|client| {
-            let root = installation_root(base, *client)
-                .to_string_lossy()
-                .replace('/', "\\")
-                .to_ascii_lowercase();
-            image.starts_with(&format!("{}\\", root.trim_end_matches('\\')))
+            let root = installation_root(base, *client);
+            let mut image = image.components();
+            root.components().all(|part| {
+                image.next().is_some_and(|candidate| {
+                    crate::utils::same_path_part(part.as_os_str(), candidate.as_os_str())
+                })
+            }) && image.next().is_some()
         })
 }
 
@@ -192,6 +198,40 @@ pub fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn client_detection_accepts_unicode_casing_but_requires_a_bounded_absolute_path() {
+        let base = Path::new(r"E:\Users\Élodie\AppData\Local");
+        assert_eq!(
+            client_for_image(
+                base,
+                Path::new(
+                    r"e:\users\éLODIE\appdata\local\ROBLOX\Versions\version-test\RobloxPlayerBeta.exe"
+                )
+            ),
+            Some(RobloxClient::Standard)
+        );
+        assert_eq!(
+            client_for_image(
+                base,
+                Path::new(r"E:/Users/éLODIE/AppData/Local/robloxpcvng/RobloxInstaller.exe")
+            ),
+            Some(RobloxClient::Vng)
+        );
+        for invalid in [
+            r"E:\Users\Élodie\AppData\Local\Roblox-other\RobloxPlayerBeta.exe",
+            r"F:\Users\Élodie\AppData\Local\Roblox\RobloxPlayerBeta.exe",
+            r"E:\Users\Élodie\AppData\Local\Roblox\..\Downloads\RobloxPlayerBeta.exe",
+            r"E:Users\Élodie\AppData\Local\Roblox\RobloxPlayerBeta.exe",
+            r"E:\Users\Élodie\AppData\Local\Roblox",
+        ] {
+            assert_eq!(
+                client_for_image(base, Path::new(invalid)),
+                None,
+                "{invalid}"
+            );
+        }
+    }
     #[cfg(windows)]
     #[test]
     fn updater_paths_follow_windows_casing_without_accepting_sibling_folders() {
