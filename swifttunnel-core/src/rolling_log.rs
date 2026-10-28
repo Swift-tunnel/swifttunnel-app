@@ -3,6 +3,9 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+const REOPEN_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct RollingLog {
     path: PathBuf,
@@ -10,6 +13,7 @@ pub struct RollingLog {
     file: Option<File>,
     size: u64,
     max: u64,
+    reopen_after: Option<Instant>,
     #[cfg(windows)]
     _writer_lock: File,
 }
@@ -46,6 +50,7 @@ impl RollingLog {
             file: Some(file),
             size,
             max,
+            reopen_after: None,
             #[cfg(windows)]
             _writer_lock: writer_lock,
         };
@@ -55,6 +60,30 @@ impl RollingLog {
             eprintln!("SwiftTunnel: could not trim previous log ({error})");
         }
         Ok(writer)
+    }
+
+    fn ensure_active_file(&mut self) -> io::Result<()> {
+        if self.file.is_some() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if self.reopen_after.is_some_and(|at| now < at) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "log reopen retry pending",
+            ));
+        }
+        // A busy or unavailable directory must not cause an open attempt for
+        // every log line. Never repeat the archive step just to reopen a file.
+        self.reopen_after = Some(now + REOPEN_RETRY_INTERVAL);
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        self.size = file.metadata()?.len();
+        self.file = Some(file);
+        self.reopen_after = None;
+        Ok(())
     }
 
     fn rotate(&mut self) -> io::Result<()> {
@@ -127,8 +156,9 @@ impl Write for RollingLog {
         if bytes.is_empty() {
             return Ok(0);
         }
+        self.ensure_active_file()?;
         let count = bytes.len().min(self.max.min(usize::MAX as u64) as usize);
-        if self.size + count as u64 > self.max {
+        if count as u64 > self.max.saturating_sub(self.size) {
             self.rotate()?;
         }
         let file = self
@@ -151,6 +181,84 @@ impl Write for RollingLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn logging_recovers_after_a_rotation_reopen_was_temporarily_blocked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = Fixture::new();
+        let mut log = dir.open();
+        log.write_all(b"12345678").unwrap();
+        // Rotation closes its handle before reopening it. Insert a competing
+        // reader at that boundary, with no changes to real file permissions.
+        log.file.take();
+        let blocker = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.current())
+            .unwrap();
+        assert!(log.rotate().is_err());
+        assert!(log.file.is_none());
+        drop(blocker);
+        log.write_all(b"x").unwrap();
+        assert_eq!(std::fs::read(dir.current()).unwrap(), b"12345678x");
+    }
+
+    #[test]
+    fn recovery_after_archiving_does_not_discard_the_preserved_log() {
+        let dir = Fixture::new();
+        let mut log = dir.open();
+        log.write_all(b"12345678").unwrap();
+        log.file.take();
+        // State after archiving succeeded but creation of the new log failed.
+        std::fs::rename(dir.current(), dir.previous()).unwrap();
+        log.write_all(b"x").unwrap();
+        assert_eq!(std::fs::read(dir.current()).unwrap(), b"x");
+        assert_eq!(std::fs::read(dir.previous()).unwrap(), b"12345678");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_reopens_back_off_without_postponing_the_next_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = Fixture::new();
+        let mut log = dir.open();
+        log.file.take();
+        let blocker = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.current())
+            .unwrap();
+        assert!(log.write(b"x").is_err());
+        let retry = log.reopen_after;
+        assert!(retry.is_some());
+        assert_eq!(
+            log.write(b"x").unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(log.reopen_after, retry);
+        drop(blocker);
+        assert_eq!(
+            log.write(b"x").unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        // Advance only the fixture's retry deadline, never the system clock.
+        log.reopen_after = Some(Instant::now() - REOPEN_RETRY_INTERVAL);
+        log.write_all(b"x").unwrap();
+        assert!(log.reopen_after.is_none());
+        assert_eq!(std::fs::read(dir.current()).unwrap(), b"x");
+    }
+
+    #[test]
+    fn a_recovered_file_is_remeasured_before_enforcing_the_size_limit() {
+        let dir = Fixture::new();
+        let mut log = dir.open();
+        log.file.take();
+        std::fs::write(dir.current(), b"legacy oversized 1234567890abcdef").unwrap();
+        log.write_all(b"x").unwrap();
+        assert_eq!(std::fs::read(dir.previous()).unwrap(), b"1234567890abcdef");
+        assert_eq!(std::fs::read(dir.current()).unwrap(), b"x");
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {
