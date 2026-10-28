@@ -312,10 +312,15 @@ export interface SettingsSaveResult { warning: string | null; }
 export const settingsSave = (settings: AppSettings) =>
   invoke<SettingsSaveResult>("settings_save", { settings });
 
-export const settingsGenerateNetworkDiagnosticsBundle = () =>
-  invoke<NetworkDiagnosticsBundleResponse>(
-    "settings_generate_network_diagnostics_bundle",
-  );
+let pendingDiagnosticExport: Promise<NetworkDiagnosticsBundleResponse> | null = null;
+export const settingsGenerateNetworkDiagnosticsBundle = () => {
+  if (!pendingDiagnosticExport) {
+    pendingDiagnosticExport = invoke<NetworkDiagnosticsBundleResponse>(
+      "settings_generate_network_diagnostics_bundle",
+    ).finally(() => { pendingDiagnosticExport = null; });
+  }
+  return pendingDiagnosticExport;
+};
 
 export const presetSaveToDownloads = (fileName: string, contents: string) =>
   invoke<NetworkDiagnosticsBundleResponse>("preset_save_to_downloads", {
@@ -445,8 +450,14 @@ export interface CopyLogFileResponse {
   file_path: string;
 }
 
-export const systemCopyLogToClipboard = () =>
-  invoke<CopyLogFileResponse>("system_copy_log_to_clipboard");
+let pendingLogCopy: Promise<CopyLogFileResponse> | null = null;
+export const systemCopyLogToClipboard = () => {
+  if (!pendingLogCopy) {
+    pendingLogCopy = invoke<CopyLogFileResponse>("system_copy_log_to_clipboard")
+      .finally(() => { pendingLogCopy = null; });
+  }
+  return pendingLogCopy;
+};
 
 // ── Optimization tab ──
 

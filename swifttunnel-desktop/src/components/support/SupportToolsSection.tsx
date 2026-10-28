@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { formatErrorMessage } from "../../lib/errors";
 import { COMMUNITY_URL } from "../../lib/maintenance";
 import { useToastStore } from "../../stores/toastStore";
@@ -11,6 +11,13 @@ import { Button, InfoIcon, Row, Tooltip } from "../ui";
 import { SupportSection } from "./SupportSection";
 
 export function SupportToolsSection() {
+  const mounted = useRef(true);
+  const generating = useRef(false);
+  const copying = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const addToast = useToastStore((s) => s.addToast);
   const [isGeneratingDiagnostics, setIsGeneratingDiagnostics] = useState(false);
   const [diagnosticsPath, setDiagnosticsPath] = useState<string | null>(null);
@@ -20,47 +27,54 @@ export function SupportToolsSection() {
   const [copyLogError, setCopyLogError] = useState<string | null>(null);
 
   async function generateDiagnosticsBundle() {
-    if (isGeneratingDiagnostics) return;
+    if (!mounted.current || generating.current) return;
+    generating.current = true;
     setIsGeneratingDiagnostics(true);
     setDiagnosticsError(null);
     setDiagnosticsPath(null);
 
     try {
       const response = await settingsGenerateNetworkDiagnosticsBundle();
+      if (!mounted.current) return;
       setDiagnosticsPath(response.file_path);
       addToast({ type: "success", message: "Diagnostics bundle generated" });
 
       try {
         await systemOpenUrl(response.folder_path);
       } catch (openError) {
+        if (!mounted.current) return;
         setDiagnosticsError(
           `Bundle saved at the path shown below, but its folder could not open: ${formatErrorMessage(openError)}`,
         );
       }
     } catch (error) {
-      setDiagnosticsError(formatErrorMessage(error));
+      if (mounted.current) setDiagnosticsError(formatErrorMessage(error));
     } finally {
-      setIsGeneratingDiagnostics(false);
+      generating.current = false;
+      if (mounted.current) setIsGeneratingDiagnostics(false);
     }
   }
 
   async function copyLogToClipboard() {
-    if (isCopyingLog) return;
+    if (!mounted.current || copying.current) return;
+    copying.current = true;
     setIsCopyingLog(true);
     setCopyLogError(null);
     setCopyLogPath(null);
 
     try {
       const response = await systemCopyLogToClipboard();
+      if (!mounted.current) return;
       setCopyLogPath(response.file_path);
       addToast({
         type: "success",
         message: "Log file copied, paste it into Discord or email.",
       });
     } catch (error) {
-      setCopyLogError(formatErrorMessage(error));
+      if (mounted.current) setCopyLogError(formatErrorMessage(error));
     } finally {
-      setIsCopyingLog(false);
+      copying.current = false;
+      if (mounted.current) setIsCopyingLog(false);
     }
   }
 
