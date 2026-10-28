@@ -1670,6 +1670,26 @@ fn spawn_installation_lookup(shared: Arc<Shared>) {
     }
 }
 
+/// Dropping this future stops its owned download when activity changes.
+async fn download_while_idle<T>(
+    download: impl std::future::Future<Output = T>,
+    mut allowed: impl FnMut() -> bool,
+    check_every: Duration,
+) -> Option<T> {
+    if !allowed() {
+        return None;
+    }
+    tokio::pin!(download);
+    loop {
+        tokio::select! {
+            result = &mut download => return Some(result),
+            _ = tokio::time::sleep(check_every) => {
+                if !allowed() { return None; }
+            }
+        }
+    }
+}
+
 /// Check for automatic updates in the background and hand off only while idle.
 fn spawn_auto_update(shared: Arc<Shared>) {
     // Long enough that a launch is not competing with a download, short enough
@@ -1756,12 +1776,27 @@ fn spawn_auto_update(shared: Arc<Shared>) {
             shared.notify();
 
             let staged = shared.runtime.block_on(async {
-                swifttunnel_core::lite_update::download_verified(&update).await
+                download_while_idle(
+                    swifttunnel_core::lite_update::download_verified(&update),
+                    || {
+                        !shared.busy.is_busy()
+                            && shared.connection_is_idle()
+                            && shared.automatic_updates_allowed()
+                    },
+                    Duration::from_secs(2),
+                )
+                .await
             });
 
             let staged = match staged {
-                Ok(path) => path,
-                Err(error) => {
+                Some(Ok(path)) => path,
+                None => {
+                    log::debug!("auto-update: activity or preferences changed, download cancelled");
+                    shared.edit(|s| s.update = UpdateState::Idle);
+                    shared.notify();
+                    continue;
+                }
+                Some(Err(error)) => {
                     // Includes a failed signature or hash. Deliberately quiet:
                     // the build still works, and the update screen is there if
                     // the server ever refuses it.
@@ -2774,6 +2809,81 @@ fn open_logs() {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn automatic_download_is_not_polled_while_busy_and_a_new_game_drops_active_work() {
+        use super::*;
+        use std::sync::atomic::AtomicUsize;
+        let called = AtomicUsize::new(0);
+        let result = download_while_idle(
+            async {
+                called.fetch_add(1, Ordering::Relaxed);
+            },
+            || false,
+            Duration::from_millis(10),
+        )
+        .await;
+        assert!(result.is_none());
+        assert_eq!(called.load(Ordering::Relaxed), 0);
+
+        struct DropSignal(Arc<AtomicBool>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let allowed = Arc::new(AtomicBool::new(true));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let gate = allowed.clone();
+        let signal = dropped.clone();
+        let owner = tokio::spawn(async move {
+            download_while_idle(
+                async move {
+                    let _signal = DropSignal(signal);
+                    let _ = started.send(());
+                    std::future::pending::<()>().await;
+                },
+                || gate.load(Ordering::Acquire),
+                Duration::from_millis(10),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        allowed.store(false, Ordering::Release);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "the download future must not remain detached"
+        );
+        assert_eq!(
+            download_while_idle(
+                async { Ok::<_, &str>("verified") },
+                || true,
+                Duration::from_millis(10)
+            )
+            .await,
+            Some(Ok("verified"))
+        );
+        assert_eq!(
+            download_while_idle(
+                async { Err::<(), _>("signature mismatch") },
+                || true,
+                Duration::from_millis(10)
+            )
+            .await,
+            Some(Err("signature mismatch"))
+        );
+    }
+
     #[test]
     fn adapter_scans_hold_one_reservation_through_publication_and_allow_retry() {
         use super::*;
