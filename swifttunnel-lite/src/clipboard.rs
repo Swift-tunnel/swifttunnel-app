@@ -11,6 +11,87 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::CF_UNICODETEXT;
 
+/// One clipboard read owned by the window. Windows may wait on a delayed
+/// renderer, so never perform it in the window's input-message handler.
+pub struct Reader {
+    pending: Option<std::sync::mpsc::Receiver<Option<String>>>,
+    alive: std::sync::Arc<std::sync::Mutex<bool>>,
+}
+
+impl Default for Reader {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            alive: std::sync::Arc::new(std::sync::Mutex::new(true)),
+        }
+    }
+}
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        // Synchronize with posting, never with the slow clipboard read. Once
+        // the window is gone its HWND may belong to an unrelated new window.
+        *self.alive.lock().unwrap_or_else(|error| error.into_inner()) = false;
+    }
+}
+
+impl Reader {
+    pub fn start(
+        &mut self,
+        read: impl FnOnce() -> Option<String> + Send + 'static,
+        notify: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<bool> {
+        use std::sync::mpsc::TryRecvError;
+        if let Some(pending) = &self.pending
+            && matches!(pending.try_recv(), Err(TryRecvError::Empty))
+        {
+            return Ok(false);
+        }
+        self.pending = None;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let alive = self.alive.clone();
+        std::thread::Builder::new()
+            .name("clipboard-read".into())
+            .spawn(move || {
+                struct Notify<F: FnOnce()>(Option<F>);
+                impl<F: FnOnce()> Drop for Notify<F> {
+                    fn drop(&mut self) {
+                        if let Some(notify) = self.0.take() {
+                            notify();
+                        }
+                    }
+                }
+                // Even a worker unwind must let the window retire its pending read.
+                let _notify = Notify(Some(move || {
+                    let alive = alive.lock().unwrap_or_else(|error| error.into_inner());
+                    if *alive {
+                        notify();
+                    }
+                }));
+                let _ = sender.try_send(read());
+            })?;
+        self.pending = Some(receiver);
+        Ok(true)
+    }
+
+    /// None means still pending; Some(None) means no usable text was returned.
+    pub fn take(&mut self) -> Option<Option<String>> {
+        use std::sync::mpsc::TryRecvError;
+        let result = self.pending.as_ref()?.try_recv();
+        match result {
+            Err(TryRecvError::Empty) => None,
+            Ok(text) => {
+                self.pending = None;
+                Some(text)
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.pending = None;
+                Some(None)
+            }
+        }
+    }
+}
+
 /// Whatever text is on the clipboard, or `None` if there is none.
 ///
 /// The limit counts UTF-16 units. Overlong, unterminated or malformed input
@@ -78,6 +159,78 @@ fn decode_text(units: &[u16], limit: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pending_read_does_not_block_input_or_admit_another_worker() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let mut reader = Reader::default();
+        let (started, ready) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let (posted, notified) = mpsc::channel();
+        assert!(
+            reader
+                .start(
+                    move || {
+                        let _ = started.send(());
+                        let _ = wait.recv_timeout(Duration::from_secs(2));
+                        Some("fixture text".into())
+                    },
+                    move || {
+                        let _ = posted.send(());
+                    }
+                )
+                .unwrap()
+        );
+        ready.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(reader.take(), None);
+        assert!(!reader.start(|| panic!("duplicate worker"), || {}).unwrap());
+        let _ = release.send(());
+        notified.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(reader.take(), Some(Some("fixture text".into())));
+        let (posted, notified) = mpsc::channel();
+        assert!(
+            reader
+                .start(
+                    || None,
+                    move || {
+                        let _ = posted.send(());
+                    }
+                )
+                .unwrap()
+        );
+        notified.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(reader.take(), Some(None));
+    }
+
+    #[test]
+    fn dropping_the_window_does_not_wait_for_the_read_or_notify_a_reused_handle() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let mut reader = Reader::default();
+        let (started, ready) = mpsc::channel();
+        let (release, wait) = mpsc::channel();
+        let (posted, notified) = mpsc::channel();
+        reader
+            .start(
+                move || {
+                    let _ = started.send(());
+                    let _ = wait.recv_timeout(Duration::from_secs(2));
+                    None
+                },
+                move || {
+                    let _ = posted.send(());
+                },
+            )
+            .unwrap();
+        ready.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(reader);
+        let _ = release.send(());
+        assert!(matches!(
+            notified.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
+    }
 
     #[test]
     fn short_unterminated_and_overlong_text_is_not_read_or_truncated() {

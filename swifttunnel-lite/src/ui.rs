@@ -55,6 +55,7 @@ const MOUSE_LEAVE: u32 = 0x02A3;
 
 const TICK_TIMER: usize = 1;
 const TICK_MS: u32 = 1000;
+const WM_CLIPBOARD_READY: u32 = WM_APP + 4;
 
 pub struct App {
     engine: Option<Engine>,
@@ -93,6 +94,8 @@ pub struct App {
     /// Set by the tray's Quit item, so WM_CLOSE stops hiding and closes.
     quitting: bool,
     quit_pending: bool,
+    clipboard: crate::clipboard::Reader,
+    pending_paste: Option<(FieldId, crate::state::TextField)>,
 }
 
 impl App {
@@ -831,6 +834,8 @@ fn new_app(engine: Option<Engine>, dpi: i32) -> Box<App> {
         tray: None,
         quitting: false,
         quit_pending: false,
+        clipboard: crate::clipboard::Reader::default(),
+        pending_paste: None,
         content_area: RECT::default(),
         hot_rect: None,
         focus_rect: None,
@@ -1016,9 +1021,89 @@ fn login_field(app: &mut App, email: bool) -> &mut crate::state::TextField {
     }
 }
 
+fn apply_clipboard_reply(app: &mut App, text: Option<String>) -> bool {
+    let Some((target, original)) = app.pending_paste.take() else {
+        return false;
+    };
+    if app.state.focus != Some(target)
+        || app.state.signed_in
+        || app.state.login.busy
+        || app.state.lockout != Some(crate::state::Lockout::SignedOut)
+        || *login_field(app, target == FieldId::Email) != original
+    {
+        return false;
+    }
+    if let Some(text) = text {
+        login_field(app, target == FieldId::Email).paste_login(&text, target == FieldId::Email);
+        app.state.login.error = None;
+    } else {
+        app.state.login.error =
+            Some("Could not read clipboard text. Copy it again or type it here.".into());
+    }
+    true
+}
+
 #[cfg(test)]
 mod preview_tests {
     use super::*;
+
+    fn clipboard_fixture(target: FieldId) -> Box<App> {
+        let mut app = new_app(None, 96);
+        app.state.lockout = Some(crate::state::Lockout::SignedOut);
+        app.state.signed_in = false;
+        app.state.focus = Some(target);
+        login_field(&mut app, target == FieldId::Email).insert("fixture", 128);
+        app.pending_paste = Some((
+            target,
+            login_field(&mut app, target == FieldId::Email).clone(),
+        ));
+        app
+    }
+
+    #[test]
+    fn pending_clipboard_reply_uses_the_original_matching_login_field() {
+        let mut app = clipboard_fixture(FieldId::Password);
+        assert!(apply_clipboard_reply(&mut app, Some(" text".into())));
+        assert_eq!(app.state.login.password.text, "fixture text");
+        assert!(app.pending_paste.is_none());
+        assert!(!apply_clipboard_reply(&mut app, Some("duplicate".into())));
+        assert_eq!(app.state.login.password.text, "fixture text");
+    }
+
+    #[test]
+    fn pending_clipboard_reply_cannot_replace_edits_selection_or_a_new_account_state() {
+        let changes: [fn(&mut App); 6] = [
+            |app| app.state.login.password.insert("new", 128),
+            |app| app.state.login.password.select_all(),
+            |app| app.state.focus = Some(FieldId::Email),
+            |app| app.state.login.busy = true,
+            |app| app.state.signed_in = true,
+            |app| app.state.lockout = Some(crate::state::Lockout::Banned("fixture".into())),
+        ];
+        for change in changes {
+            let mut app = clipboard_fixture(FieldId::Password);
+            change(&mut app);
+            let before = app.state.login.password.clone();
+            assert!(!apply_clipboard_reply(&mut app, Some("late reply".into())));
+            assert_eq!(app.state.login.password, before);
+            assert!(app.pending_paste.is_none());
+        }
+    }
+
+    #[test]
+    fn pending_clipboard_failure_has_a_next_step_without_replacing_the_field() {
+        let mut app = clipboard_fixture(FieldId::Email);
+        assert!(apply_clipboard_reply(&mut app, None));
+        assert_eq!(app.state.login.email.text, "fixture");
+        assert!(
+            app.state
+                .login
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("Copy it again")
+        );
+    }
 
     #[test]
     fn preview_renders_an_owned_bitmap_without_a_live_engine_or_account() {
@@ -1340,6 +1425,41 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     let ctrl = ctrl_held();
                     let shift = shift_held();
                     let key = wparam.0 as u32;
+                    if key == 0x56 && ctrl {
+                        let original = login_field(app, email).clone();
+                        let owner = hwnd.0 as usize;
+                        match app.clipboard.start(
+                            || crate::clipboard::text(256),
+                            move || {
+                                let _ = PostMessageW(
+                                    Some(HWND(owner as *mut c_void)),
+                                    WM_CLIPBOARD_READY,
+                                    WPARAM(0),
+                                    LPARAM(0),
+                                );
+                            },
+                        ) {
+                            Ok(true) => {
+                                app.pending_paste = Some((
+                                    if email {
+                                        FieldId::Email
+                                    } else {
+                                        FieldId::Password
+                                    },
+                                    original,
+                                ))
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                log::warn!("Could not start clipboard read: {error}");
+                                app.state.login.error =
+                                    Some("Could not read the clipboard. Try pasting again.".into());
+                                app.rebuild(client_of(hwnd));
+                                repaint_from_focus(hwnd, app);
+                            }
+                        }
+                        return LRESULT(0);
+                    }
                     let mut changed = true;
                     let field = login_field(app, email);
                     match key {
@@ -1370,16 +1490,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             field.move_to(end, shift);
                         }
                         0x2E => field.delete(),
-                        // Ctrl-A selects everything, ctrl-V pastes.
+                        // Ctrl-A selects everything. Ctrl-V runs off-thread above.
                         0x41 if ctrl => field.select_all(),
-                        0x56 if ctrl => {
-                            if let Some(text) = crate::clipboard::text(256) {
-                                field.paste_login(&text, email);
-                            }
-                        }
                         _ => changed = false,
                     }
                     if changed {
+                        app.pending_paste = None;
                         app.state.login.error = None;
                         app.rebuild(client_of(hwnd));
                         repaint_from_focus(hwnd, app);
@@ -1393,6 +1509,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             // replace what is in one without holding backspace down.
             WM_LBUTTONDBLCLK => {
                 if let Some(app) = app_of(hwnd) {
+                    app.pending_paste = None;
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     if let Some(Action::Focus(id)) = app.action_at(x, y)
@@ -1454,6 +1571,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     if changed {
                         // A keystroke clears the last failure: the message was
                         // about what was typed before, not what is there now.
+                        app.pending_paste = None;
                         app.state.login.error = None;
                         app.rebuild(client_of(hwnd));
                         repaint_from_focus(hwnd, app);
@@ -1494,6 +1612,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
             WM_LBUTTONDOWN => {
                 if let Some(app) = app_of(hwnd) {
+                    app.pending_paste = None;
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     let action = app.action_at(x, y);
@@ -1594,6 +1713,27 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         app.rebuild(client_of(hwnd));
                     }
                     sync_timer(hwnd, app, visible);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+
+            WM_CLIPBOARD_READY => {
+                if let Some(app) = app_of(hwnd)
+                    && let Some(text) = app.clipboard.take()
+                {
+                    if !app.quit_pending && on_screen(hwnd) && apply_clipboard_reply(app, text) {
+                        app.rebuild(client_of(hwnd));
+                        repaint_from_focus(hwnd, app);
+                    } else {
+                        app.pending_paste = None;
+                    }
+                }
+                LRESULT(0)
+            }
+
+            WM_KILLFOCUS => {
+                if let Some(app) = app_of(hwnd) {
+                    app.pending_paste = None;
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
