@@ -1994,7 +1994,7 @@ impl RobloxOptimizer {
                 r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{project}"
             ))
             .ok()?;
-        let location: String = key.get_value("InstallLocation").ok()?;
+        let location: String = crate::registry_value::read(&key, "InstallLocation").ok()??;
         let path = PathBuf::from(location.trim());
         path.is_dir().then_some(path)
     }
@@ -2007,7 +2007,7 @@ impl RobloxOptimizer {
     /// Every launcher root on this machine: the recorded location where there
     /// is one, the default underneath LOCALAPPDATA otherwise.
     fn launcher_roots() -> Vec<PathBuf> {
-        let local_app_data = std::env::var("LOCALAPPDATA").ok().map(PathBuf::from);
+        let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
         let mut roots = Vec::new();
 
         for project in Self::ROBLOX_INSTALL_ROOTS {

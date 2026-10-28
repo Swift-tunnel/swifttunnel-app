@@ -3432,34 +3432,11 @@ pub struct StartupRegistrationSnapshot {
 
 #[cfg(windows)]
 fn read_startup_registration() -> Result<StartupRegistrationSnapshot, String> {
-    use crate::autostart::{RUN_KEY_PATH, RUN_VALUE_NAME};
-    use std::io::ErrorKind;
-    use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
-
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let run_key = match hkcu.open_subkey(RUN_KEY_PATH) {
-        Ok(key) => key,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            return Ok(StartupRegistrationSnapshot {
-                exists: false,
-                value: None,
-            });
-        }
-        Err(e) => return Err(format!("Failed to open startup registry key: {e}")),
-    };
-
-    match run_key.get_value::<String, _>(RUN_VALUE_NAME) {
-        Ok(value) => Ok(StartupRegistrationSnapshot {
-            exists: true,
-            value: Some(value),
-        }),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(StartupRegistrationSnapshot {
-            exists: false,
-            value: None,
-        }),
-        Err(e) => Err(format!("Failed to read startup registry value: {e}")),
-    }
+    let value = swifttunnel_core::autostart::registered_command(crate::autostart::RUN_VALUE_NAME)?;
+    Ok(StartupRegistrationSnapshot {
+        exists: value.is_some(),
+        value,
+    })
 }
 
 #[tauri::command]

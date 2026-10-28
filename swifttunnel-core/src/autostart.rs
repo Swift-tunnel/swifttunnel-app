@@ -89,6 +89,24 @@ pub fn sync_run_on_startup(_value_name: &str, _enabled: bool) -> Result<(), Stri
     Ok(())
 }
 
+/// Read one startup command without allowing its stored size to control memory.
+#[cfg(windows)]
+pub fn registered_command(value_name: &str) -> Result<Option<String>, String> {
+    use std::io::ErrorKind;
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE};
+
+    let run_key = match RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(RUN_KEY_PATH, KEY_QUERY_VALUE)
+    {
+        Ok(key) => key,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("Failed to open startup registry key: {error}")),
+    };
+    crate::registry_value::read(&run_key, value_name)
+        .map_err(|error| format!("Failed to read startup registry value: {error}"))
+}
+
 /// Whether Windows started this process at sign-in.
 pub fn launched_from_startup_flag() -> bool {
     std::env::args_os().skip(1).any(|arg| arg == STARTUP_FLAG)
