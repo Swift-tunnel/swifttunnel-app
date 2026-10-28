@@ -261,6 +261,12 @@ function isCurrentConnectAttempt(attempt: number): boolean {
   return attempt === connectAttemptSeq;
 }
 
+/** Bind callers' preparation work to the current Connect/Disconnect intent. */
+export function captureConnectionIntent(): () => boolean {
+  const attempt = connectAttemptSeq;
+  return () => isCurrentConnectAttempt(attempt);
+}
+
 function isRelayStoppedReturningTrafficMessage(message: string | null): boolean {
   const haystack = (message ?? "").toLowerCase();
   return (

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prepareGameConnection } from "./gameConnection";
 import { executeGameLaunch } from "./gameLaunchFlow";
-import { useVpnStore } from "../stores/vpnStore";
+import { cancelPendingConnectForRepair, useVpnStore } from "../stores/vpnStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useServerStore } from "../stores/serverStore";
 import type { GameLaunchPlan } from "./types";
@@ -109,6 +109,71 @@ describe("preferred game relay", () => {
   it("keeps the current relay when Roblox is explicitly allowed to choose any location", async () => {
     await prepareGameConnection(null, () => {});
     expect(useVpnStore.getState().disconnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().connect).not.toHaveBeenCalled();
+  });
+
+  it("does not reconnect or launch when disconnecting the previous relay fails", async () => {
+    useVpnStore.setState({ disconnect: vi.fn(async () => {
+      useVpnStore.setState({ state: "error", splitTunnelActive: true, error: "Disconnect was not confirmed. Retry Disconnect." });
+    }) });
+    const launch = vi.fn();
+    await expect(executeGameLaunch(mumbai, {
+      connect: requested => prepareGameConnection(requested, () => {}), launch,
+    })).rejects.toThrow("Disconnect was not confirmed");
+    expect(useVpnStore.getState().connect).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("does not resurrect Play's connection after a newer Disconnect during its state check", async () => {
+    let ready!: () => void;
+    const stateChecked = new Promise<void>(resolve => { ready = resolve; });
+    useVpnStore.setState({ fetchState: vi.fn(() => stateChecked) });
+    const launch = vi.fn();
+    const pending = executeGameLaunch(mumbai, {
+      connect: requested => prepareGameConnection(requested, () => {}), launch,
+    }).then(() => null, String);
+    // This uses the same intent invalidation as repair/manual Disconnect,
+    // without invoking native driver, tunnel or adapter operations.
+    cancelPendingConnectForRepair();
+    useVpnStore.setState({ state: "disconnected", region: null });
+    ready();
+    expect(await pending).toContain("connection changed");
+    expect(useVpnStore.getState().connect).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("does not reconnect after another connection action supersedes its disconnect", async () => {
+    useVpnStore.setState({ disconnect: vi.fn(async () => {
+      cancelPendingConnectForRepair();
+      // Yield after the action's own intent starts, then a different user
+      // action supersedes it. State alone could look ready to reconnect.
+      await Promise.resolve();
+      cancelPendingConnectForRepair();
+      useVpnStore.setState({ state: "disconnected", region: null });
+    }) });
+    await expect(prepareGameConnection("mumbai", () => {})).rejects.toThrow("connection changed");
+    expect(useVpnStore.getState().connect).not.toHaveBeenCalled();
+  });
+
+  it("does not launch after another connection action supersedes its connect", async () => {
+    useVpnStore.setState({ state: "disconnected", region: null, connect: vi.fn(async () => {
+      cancelPendingConnectForRepair();
+      await Promise.resolve();
+      cancelPendingConnectForRepair();
+      useVpnStore.setState({ state: "connected", region: "mumbai-01" });
+    }) });
+    const launch = vi.fn();
+    await expect(executeGameLaunch(mumbai, {
+      connect: requested => prepareGameConnection(requested, () => {}), launch,
+    })).rejects.toThrow("connection changed");
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("does not trust disconnected state alone while split-tunnel cleanup is still active", async () => {
+    useVpnStore.setState({ disconnect: vi.fn(async () => {
+      useVpnStore.setState({ state: "disconnected", splitTunnelActive: true, error: null });
+    }) });
+    await expect(prepareGameConnection("mumbai", () => {})).rejects.toThrow("previous tunnel disconnected");
     expect(useVpnStore.getState().connect).not.toHaveBeenCalled();
   });
 });
