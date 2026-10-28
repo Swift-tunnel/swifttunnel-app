@@ -3644,6 +3644,12 @@ pub struct CopyLogFileResponse {
 /// to support staff.
 #[tauri::command]
 pub async fn system_copy_log_to_clipboard() -> Result<CopyLogFileResponse, String> {
+    // Multiple windows/IPC callers must not start parallel clipboard helpers.
+    // The worker owns the permit even if the caller stops waiting.
+    static COPY_LOG: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _permit = COPY_LOG.try_acquire().map_err(|_| {
+        "A log copy is already running. Wait for it to finish, then retry.".to_string()
+    })?;
     let path = crate::logging::log_file_path();
     let path_str = path.to_string_lossy().to_string();
 
@@ -3689,6 +3695,7 @@ for ($i = 0; $i -lt 5; $i++) {{
 
         let script_for_thread = script.clone();
         let outcome = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = _permit;
             swifttunnel_core::run_hidden_command_with_timeout(
                 "powershell",
                 &[
