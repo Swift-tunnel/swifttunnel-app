@@ -46,6 +46,9 @@ struct BundleContext {
 
 #[tauri::command]
 pub async fn settings_load(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    if let Some(error) = swifttunnel_core::settings::settings_load_error() {
+        return Err(error.into());
+    }
     let settings = state.settings.clone();
     tauri::async_runtime::spawn_blocking(move || Ok(settings.lock().clone()))
         .await

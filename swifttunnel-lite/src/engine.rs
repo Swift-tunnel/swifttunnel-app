@@ -337,10 +337,10 @@ impl Engine {
     pub fn fill(&self, state: &mut State) {
         state.startup_busy = self.shared.startup_edits.is_busy();
         state.adapter_busy = self.shared.adapter_scan.is_busy();
-        state.settings_warning = self
-            .shared
-            .settings_save_signal
-            .warning()
+        let load_error = settings::settings_load_error();
+        state.settings_reload_required = load_error.is_some();
+        state.settings_warning = load_error
+            .or_else(|| self.shared.settings_save_signal.warning())
             .map(str::to_owned);
         if let Ok(snapshot) = self.shared.snapshot.read() {
             if state.settings_warning.is_none() {

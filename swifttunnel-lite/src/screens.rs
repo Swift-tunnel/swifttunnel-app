@@ -33,19 +33,17 @@ pub fn build(state: &State) -> Vec<Item> {
         },
     };
     if let Some(warning) = &state.settings_warning {
-        items.splice(
-            0..0,
-            [
-                Item::Note(warning.clone()),
-                Item::Group(vec![
-                    Row::new("Retry settings")
-                        .right(Right::Chevron)
-                        .action(Action::RetrySettingsSave)
-                        .disabled(state.startup_busy),
-                ]),
-                Item::Gap(12),
-            ],
-        );
+        let mut notice = vec![Item::Note(warning.clone())];
+        if !state.settings_reload_required {
+            notice.push(Item::Group(vec![
+                Row::new("Retry settings")
+                    .right(Right::Chevron)
+                    .action(Action::RetrySettingsSave)
+                    .disabled(state.startup_busy),
+            ]));
+        }
+        notice.push(Item::Gap(12));
+        items.splice(0..0, notice);
     }
     items
 }
@@ -925,6 +923,24 @@ mod quota_retry_tests {
                 if rows.iter().any(|row| row.action == Some(Action::RetrySettingsSave))))
             );
         }
+    }
+
+    #[test]
+    fn unreadable_startup_settings_show_restart_guidance_without_a_save_retry() {
+        let state = State {
+            settings_warning: Some(
+                "Restart SwiftTunnel to reload your saved settings before saving changes.".into(),
+            ),
+            settings_reload_required: true,
+            ..Default::default()
+        };
+        let items = build(&state);
+        assert!(
+            items.iter().any(
+                |item| matches!(item, Item::Note(text) if text.contains("Restart SwiftTunnel"))
+            )
+        );
+        assert!(!items.iter().any(|item| matches!(item, Item::Group(rows) if rows.iter().any(|row| row.action == Some(Action::RetrySettingsSave)))));
     }
 
     #[test]

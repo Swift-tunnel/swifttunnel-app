@@ -875,7 +875,9 @@ pub fn run() {
             // session timer after the relay reported "dead").
             commands::vpn::spawn_vpn_state_bridge(app.handle().clone(), vpn_state_rx);
 
-            if let Err(e) = autostart::sync_run_on_startup(app.handle(), run_on_startup_enabled) {
+            if swifttunnel_core::settings::settings_load_error().is_some() {
+                log::warn!("Startup registration was left unchanged because saved preferences could not be loaded");
+            } else if let Err(e) = autostart::sync_run_on_startup(app.handle(), run_on_startup_enabled) {
                 log::warn!("Failed to sync startup registration: {}", e);
             }
 

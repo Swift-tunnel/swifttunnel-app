@@ -28,6 +28,7 @@ interface SettingsStore {
   settings: AppSettings;
   activeTab: TabId;
   isLoaded: boolean;
+  loadError: string | null;
   saveError: string | null;
   saveWarning: string | null;
 
@@ -47,6 +48,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   settings: DEFAULT_SETTINGS,
   activeTab: "connect",
   isLoaded: false,
+  loadError: null,
   saveError: null,
   saveWarning: null,
 
@@ -65,10 +67,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         // one settings store.
         activeTab: sanitiseTab(persistedTab),
         isLoaded: true,
+        loadError: null,
       });
     } catch (error) {
       reportError("Failed to load settings", error);
-      set({ isLoaded: true });
+      set({ isLoaded: true, loadError: formatErrorMessage(error) });
     }
   },
 

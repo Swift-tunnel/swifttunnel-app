@@ -11,10 +11,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SETTINGS_FILE: &str = "settings.json";
 
 const APP_NAME: &str = "SwiftTunnel";
+static SETTINGS_LOAD_BLOCKED: AtomicBool = AtomicBool::new(false);
+const LOAD_RECOVERY_MESSAGE: &str =
+    "Restart SwiftTunnel to reload your saved settings before saving changes.";
+
+pub fn settings_load_error() -> Option<&'static str> {
+    SETTINGS_LOAD_BLOCKED
+        .load(Ordering::Acquire)
+        .then_some(LOAD_RECOVERY_MESSAGE)
+}
 pub const MIN_WINDOW_WIDTH: f32 = 800.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 600.0;
 
@@ -441,35 +451,46 @@ pub fn load_settings() -> AppSettings {
         Some(p) => p,
         None => {
             debug!("Could not determine settings path, using defaults");
+            SETTINGS_LOAD_BLOCKED.store(true, Ordering::Release);
             return sanitize_settings(AppSettings::default());
         }
     };
 
-    if !path.exists() {
-        debug!("Settings file does not exist, using defaults");
-        return sanitize_settings(AppSettings::default());
-    }
+    load_settings_from(&path, &SETTINGS_LOAD_BLOCKED)
+}
 
-    match crate::utils::read_text_file_bounded(&path, MAX_SETTINGS_BYTES, "SwiftTunnel settings") {
+fn load_settings_from(path: &std::path::Path, blocked: &AtomicBool) -> AppSettings {
+    // Defaults are safe to persist only for a confirmed missing file, a valid
+    // read, or corruption whose original bytes were successfully preserved.
+    blocked.store(true, Ordering::Release);
+    match crate::utils::read_text_file_bounded(path, MAX_SETTINGS_BYTES, "SwiftTunnel settings") {
         Ok(content) => match serde_json::from_str(&content) {
             Ok(settings) => {
                 info!("Loaded settings from {:?}", path);
+                blocked.store(false, Ordering::Release);
                 sanitize_settings(settings)
             }
             Err(e) => {
                 error!("Failed to parse settings file: {}", e);
-                if let Some(backup) = backup_corrupt_settings(&path) {
+                if let Some(backup) = backup_corrupt_settings(path) {
                     error!("Backed up corrupt settings to {:?}", backup);
+                    blocked.store(false, Ordering::Release);
                 }
                 sanitize_settings(AppSettings::default())
             }
         },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            debug!("Settings file does not exist, using defaults");
+            blocked.store(false, Ordering::Release);
+            sanitize_settings(AppSettings::default())
+        }
         Err(e) => {
             error!("Failed to read settings file: {}", e);
             if e.kind() == std::io::ErrorKind::InvalidData
-                && let Some(backup) = backup_corrupt_settings(&path)
+                && let Some(backup) = backup_corrupt_settings(path)
             {
                 error!("Kept unreadable or oversized settings at {:?}", backup);
+                blocked.store(false, Ordering::Release);
             }
             sanitize_settings(AppSettings::default())
         }
@@ -500,14 +521,27 @@ pub fn save_settings(settings: &AppSettings) -> Result<(), String> {
         None => return Err("Could not determine settings directory".to_string()),
     };
 
+    save_settings_to(&dir.join(SETTINGS_FILE), settings, &SETTINGS_LOAD_BLOCKED)
+}
+
+fn save_settings_to(
+    path: &std::path::Path,
+    settings: &AppSettings,
+    blocked: &AtomicBool,
+) -> Result<(), String> {
+    if blocked.load(Ordering::Acquire) {
+        return Err(LOAD_RECOVERY_MESSAGE.into());
+    }
+    let dir = path
+        .parent()
+        .ok_or("Could not determine settings directory")?;
+
     // Create directory if it doesn't exist
     if !dir.exists()
         && let Err(e) = fs::create_dir_all(&dir)
     {
         return Err(format!("Failed to create settings directory: {}", e));
     }
-
-    let path = dir.join(SETTINGS_FILE);
 
     let mut settings_to_save = settings.clone();
     settings_to_save.sanitize_in_place();
@@ -540,6 +574,98 @@ fn replace_settings_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct LoadFixture(PathBuf);
+    impl LoadFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "swifttunnel-settings-load-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+        fn path(&self) -> PathBuf {
+            self.0.join("settings.json")
+        }
+    }
+    impl Drop for LoadFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unreadable_settings_file_cannot_be_replaced_with_startup_defaults() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fixture = LoadFixture::new();
+        let path = fixture.path();
+        let original = serde_json::to_string(&AppSettings {
+            selected_region: "mumbai".into(),
+            minimize_to_tray: false,
+            ..AppSettings::default()
+        })
+        .unwrap();
+        fs::write(&path, &original).unwrap();
+        let blocked = AtomicBool::new(false);
+        // Deny reads but allow renames, like a transient scanner/backup lock.
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(4)
+            .open(&path)
+            .unwrap();
+        let fallback = load_settings_from(&path, &blocked);
+        drop(lock);
+        assert!(
+            save_settings_to(&path, &fallback, &blocked).is_err(),
+            "a later autosave must not replace the settings we failed to read"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        let recovered = load_settings_from(&path, &blocked);
+        assert_eq!(recovered.selected_region, "mumbai");
+        assert!(!recovered.minimize_to_tray);
+        save_settings_to(&path, &recovered, &blocked).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_corrupt_settings_backup_blocks_default_saves_even_after_the_lock_clears() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fixture = LoadFixture::new();
+        let path = fixture.path();
+        fs::write(&path, "{broken").unwrap();
+        let blocked = AtomicBool::new(false);
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        let fallback = load_settings_from(&path, &blocked);
+        drop(lock);
+        assert!(save_settings_to(&path, &fallback, &blocked).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{broken");
+    }
+
+    #[test]
+    fn new_files_and_successfully_preserved_corruption_allow_saving() {
+        let fixture = LoadFixture::new();
+        let path = fixture.path();
+        let blocked = AtomicBool::new(false);
+        let new = load_settings_from(&path, &blocked);
+        save_settings_to(&path, &new, &blocked).unwrap();
+        fs::write(&path, "{broken").unwrap();
+        let recovered = load_settings_from(&path, &blocked);
+        save_settings_to(&path, &recovered, &blocked).unwrap();
+        let backup = fs::read_dir(&fixture.0)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p != &path)
+            .unwrap();
+        assert_eq!(fs::read_to_string(backup).unwrap(), "{broken");
+        assert!(serde_json::from_str::<AppSettings>(&fs::read_to_string(path).unwrap()).is_ok());
+    }
 
     #[cfg(windows)]
     #[test]

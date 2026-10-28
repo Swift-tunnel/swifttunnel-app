@@ -5,10 +5,12 @@ import { ErrorBanner } from "./ErrorBanner";
 
 /** A failed save must remain recoverable after a toast or tab disappears. */
 export function SettingsSaveNotice() {
+  const loadError = useSettingsStore((state) => state.loadError);
   const error = useSettingsStore((state) => state.saveError);
   const warning = useSettingsStore((state) => state.saveWarning);
   const save = useSettingsStore((state) => state.save);
   const [saving, setSaving] = useState(false);
+  if (loadError) return <ErrorBanner tone="error">Your saved settings could not be loaded. {loadError}</ErrorBanner>;
   if (!error && !warning) return null;
 
   async function retry() {

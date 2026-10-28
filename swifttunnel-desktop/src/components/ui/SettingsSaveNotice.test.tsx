@@ -2,6 +2,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const h = vi.hoisted(() => ({
+  loadError: null as string | null,
   saveError: null as string | null,
   saveWarning: null as string | null,
   save: vi.fn(),
@@ -11,7 +12,17 @@ vi.mock("../../stores/settingsStore", () => ({
 }));
 import { SettingsSaveNotice } from "./SettingsSaveNotice";
 
-beforeEach(() => { h.saveError = null; h.saveWarning = null; });
+beforeEach(() => { h.loadError = null; h.saveError = null; h.saveWarning = null; });
+
+it("explains a load failure without offering to save startup defaults over it", () => {
+  h.loadError = "Restart SwiftTunnel to reload your saved settings before saving changes.";
+  h.saveError = "Previous save failure";
+  const html = renderToStaticMarkup(<SettingsSaveNotice />);
+  expect(html).toContain("Your saved settings could not be loaded.");
+  expect(html).toContain(h.loadError);
+  expect(html).not.toContain("Retry saving");
+  expect(html).not.toContain("Previous save failure");
+});
 
 it("offers a startup retry without calling a saved preference a failed save", () => {
   h.saveWarning = "Your settings were saved, but Windows startup could not be updated.";

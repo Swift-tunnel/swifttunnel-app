@@ -28,6 +28,15 @@ async function loadStore() {
 }
 
 describe("stores/settingsStore", () => {
+  it("retains a load failure for the persistent notice and clears it after a successful load", async () => {
+    settingsLoad.mockRejectedValueOnce(new Error("Restart SwiftTunnel to reload your saved settings."));
+    const store = await loadStore();
+    await store.getState().load();
+    expect(store.getState().loadError).toBe("Restart SwiftTunnel to reload your saved settings.");
+    settingsLoad.mockResolvedValueOnce(structuredClone(DEFAULT_SETTINGS));
+    await store.getState().load();
+    expect(store.getState().loadError).toBeNull();
+  });
   it("keeps a startup warning visible after preferences save and clears it after retry", async () => {
     const warning = "Your settings were saved, but Windows startup could not be updated. Retry startup setup.";
     settingsSave.mockResolvedValueOnce({ warning }).mockResolvedValueOnce({ warning: null });
