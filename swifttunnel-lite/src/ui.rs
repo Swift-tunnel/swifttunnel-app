@@ -96,6 +96,7 @@ pub struct App {
     quit_pending: bool,
     clipboard: crate::clipboard::Reader,
     pending_paste: Option<(FieldId, crate::state::TextField)>,
+    pending_character: Option<(FieldId, u16)>,
 }
 
 impl App {
@@ -836,6 +837,7 @@ fn new_app(engine: Option<Engine>, dpi: i32) -> Box<App> {
         quit_pending: false,
         clipboard: crate::clipboard::Reader::default(),
         pending_paste: None,
+        pending_character: None,
         content_area: RECT::default(),
         hot_rect: None,
         focus_rect: None,
@@ -1021,6 +1023,25 @@ fn login_field(app: &mut App, email: bool) -> &mut crate::state::TextField {
     }
 }
 
+fn login_character(
+    pending: &mut Option<(FieldId, u16)>,
+    target: FieldId,
+    value: u32,
+) -> Option<char> {
+    let previous = pending.take();
+    match value {
+        0xd800..=0xdbff => {
+            *pending = Some((target, value as u16));
+            None
+        }
+        0xdc00..=0xdfff => {
+            let (_, high) = previous.filter(|(field, _)| *field == target)?;
+            char::from_u32(0x10000 + ((u32::from(high) - 0xd800) << 10) + (value - 0xdc00))
+        }
+        _ => char::from_u32(value),
+    }
+}
+
 fn apply_clipboard_reply(app: &mut App, text: Option<String>) -> bool {
     let Some((target, original)) = app.pending_paste.take() else {
         return false;
@@ -1051,6 +1072,45 @@ fn apply_clipboard_reply(app: &mut App, text: Option<String>) -> bool {
 #[cfg(test)]
 mod preview_tests {
     use super::*;
+
+    #[test]
+    fn login_character_combines_windows_utf16_messages_for_supplementary_characters() {
+        let mut pending = None;
+        let input: String = [0x70, 0xe4, 0xd83d, 0xde42, 0x73, 0x73]
+            .into_iter()
+            .filter_map(|unit| login_character(&mut pending, FieldId::Password, unit))
+            .collect();
+        assert_eq!(input, "p\u{e4}\u{1f642}ss");
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn login_character_drops_incomplete_or_cross_field_pairs_without_inventing_password_characters()
+    {
+        let mut pending = None;
+        assert_eq!(
+            login_character(&mut pending, FieldId::Password, 0xde42),
+            None
+        );
+        assert_eq!(
+            login_character(&mut pending, FieldId::Password, 0xd83d),
+            None
+        );
+        assert_eq!(login_character(&mut pending, FieldId::Email, 0xde42), None);
+        assert_eq!(
+            login_character(&mut pending, FieldId::Password, 0xd83d),
+            None
+        );
+        assert_eq!(
+            login_character(&mut pending, FieldId::Password, u32::from('a')),
+            Some('a')
+        );
+        assert_eq!(
+            login_character(&mut pending, FieldId::Password, 0xde42),
+            None
+        );
+        assert!(pending.is_none());
+    }
 
     fn clipboard_fixture(target: FieldId) -> Box<App> {
         let mut app = new_app(None, 96);
@@ -1447,6 +1507,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     let shift = shift_held();
                     let key = wparam.0 as u32;
                     if key == 0x56 && ctrl {
+                        app.pending_character = None;
                         let original = login_field(app, email).clone();
                         let owner = hwnd.0 as usize;
                         match app.clipboard.start(
@@ -1517,6 +1578,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     if changed {
                         app.pending_paste = None;
+                        app.pending_character = None;
                         app.state.login.error = None;
                         app.rebuild(client_of(hwnd));
                         repaint_from_focus(hwnd, app);
@@ -1531,6 +1593,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_LBUTTONDBLCLK => {
                 if let Some(app) = app_of(hwnd) {
                     app.pending_paste = None;
+                    app.pending_character = None;
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     if let Some(Action::Focus(id)) = app.action_at(x, y)
@@ -1557,6 +1620,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 {
                     let email = app.state.focus == Some(FieldId::Email);
                     let ctrl = ctrl_held();
+                    if wparam.0 < 32 {
+                        app.pending_character = None;
+                    } else {
+                        // The first half is already a new typing intent, even
+                        // though it cannot be drawn until the low half arrives.
+                        app.pending_paste = None;
+                    }
                     let mut changed = true;
                     match wparam.0 as u32 {
                         // Tab moves on, Enter submits, Escape gives up focus.
@@ -1584,7 +1654,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         // those are dealt with in WM_KEYDOWN where the key is
                         // still distinguishable.
                         c if c < 32 => changed = false,
-                        c => match char::from_u32(c) {
+                        c => match login_character(
+                            &mut app.pending_character,
+                            if email {
+                                FieldId::Email
+                            } else {
+                                FieldId::Password
+                            },
+                            c,
+                        ) {
                             Some(ch) => login_field(app, email).insert(&ch.to_string(), 128),
                             None => changed = false,
                         },
@@ -1634,6 +1712,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_LBUTTONDOWN => {
                 if let Some(app) = app_of(hwnd) {
                     app.pending_paste = None;
+                    app.pending_character = None;
                     let x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
                     let action = app.action_at(x, y);
@@ -1755,6 +1834,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_KILLFOCUS => {
                 if let Some(app) = app_of(hwnd) {
                     app.pending_paste = None;
+                    app.pending_character = None;
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
