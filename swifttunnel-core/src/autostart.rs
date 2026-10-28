@@ -39,21 +39,37 @@ fn startup_command_for_exe(exe_path: &Path) -> String {
 pub fn sync_run_on_startup(value_name: &str, enabled: bool) -> Result<(), String> {
     use std::io::ErrorKind;
     use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE};
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (run_key, _) = hkcu
-        .create_subkey(RUN_KEY_PATH)
-        .map_err(|e| format!("Failed to open startup registry key: {}", e))?;
 
     if enabled {
         let exe_path =
             std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {}", e))?;
         let command = startup_command_for_exe(&exe_path);
+        let (run_key, _) = hkcu
+            .create_subkey_with_flags(RUN_KEY_PATH, KEY_QUERY_VALUE | KEY_SET_VALUE)
+            .map_err(|e| format!("Failed to open startup registry key: {}", e))?;
+        // Theme and window-position saves also visit this path. An existing
+        // matching value needs no registry write. Unreadable/different values
+        // still take the ordinary write-and-report-error path.
+        if crate::registry_value::read::<String>(&run_key, value_name)
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(command.as_str())
+        {
+            return Ok(());
+        }
         run_key
             .set_value(value_name, &command)
             .map_err(|e| format!("Failed to set startup registry value: {}", e))?;
     } else {
+        let run_key = match hkcu.open_subkey_with_flags(RUN_KEY_PATH, KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("Failed to open startup registry key: {error}")),
+        };
         // Desktop and Lite share the preference. Leaving the other entry
         // enabled would still launch SwiftTunnel while the switch says Off.
         for value in [RUN_VALUE_APP, RUN_VALUE_LITE] {
