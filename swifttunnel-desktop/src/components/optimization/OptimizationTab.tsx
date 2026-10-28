@@ -1,5 +1,5 @@
 import { bulkEnableTargets, type BulkItem } from "./bulkSelection";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as motion from "framer-motion/m";
 import { SectionHeader, Toggle, Tooltip, InfoIcon, Spinner, Chip, Icon, Watermark } from "../ui";
 import { MemoryCleaner } from "../boost/MemoryCleaner";
@@ -281,6 +281,7 @@ function OptimizationCard({ def }: { def: OptimizationDef }) {
  *  immediately through the boost backend rather than the optimization
  *  apply/revert commands. Shown as the first card of the Intermediate tier. */
 function PowerPlanCard() {
+  const changing = useRef(false);
   const config = useSettingsStore((s) => s.settings.config);
   const saveSettings = useSettingsStore((s) => s.save);
   const updateConfig = useBoostStore((s) => s.updateConfig);
@@ -290,26 +291,29 @@ function PowerPlanCard() {
   const enabled = config.system_optimization.power_plan === "SwiftTunnel";
 
   async function toggle(next: boolean) {
-    const current = config.system_optimization.power_plan;
-    const remembered = previousNonSwiftTunnelPowerPlan(
-      next && current !== "SwiftTunnel"
-        ? current
-        : rememberedPowerPlanForSwiftTunnel(
-            current,
-            config.system_optimization.previous_power_plan,
-          ),
-    );
-    const nextConfig: Config = {
-      ...config,
-      system_optimization: {
-        ...config.system_optimization,
-        power_plan: nextPowerPlanForSwiftTunnelToggle(next, remembered),
-        previous_power_plan: remembered,
-      },
-    };
-
+    if (changing.current) return;
+    changing.current = true;
     setBusy(true);
     try {
+      const currentConfig = useSettingsStore.getState().settings.config;
+      const current = currentConfig.system_optimization.power_plan;
+      const remembered = previousNonSwiftTunnelPowerPlan(
+        next && current !== "SwiftTunnel"
+          ? current
+          : rememberedPowerPlanForSwiftTunnel(
+              current,
+              currentConfig.system_optimization.previous_power_plan,
+            ),
+      );
+      const nextConfig: Config = {
+        ...currentConfig,
+        system_optimization: {
+          ...currentConfig.system_optimization,
+          power_plan: nextPowerPlanForSwiftTunnelToggle(next, remembered),
+          previous_power_plan: remembered,
+        },
+      };
+
       await updateConfig(JSON.stringify(nextConfig));
       await saveSettings(true);
       addToast({
@@ -321,6 +325,7 @@ function PowerPlanCard() {
     } catch (error) {
       addToast({ type: "error", message: `Could not finish saving the power plan: ${formatErrorMessage(error)}. Windows may already be using the changed plan. Review it and retry.` });
     } finally {
+      changing.current = false;
       setBusy(false);
     }
   }
