@@ -134,13 +134,26 @@ export const gamesLaunch = async (placeId: string, client: RobloxClient, jobId: 
 export const gamesFlags = (action: "preview" | "clean" | "undo") => invoke<FlagCleanupReport>("games_flags", { action });
 export const gamesSaveFlags = (enabled: boolean, json: string, expected: { custom_fflags_json: string; custom_fflags_enabled: boolean; ultraboost: boolean }) => invoke<BoostUpdateResult>("games_save_flags", { enabled, json, expectedJson: expected.custom_fflags_json, expectedEnabled: expected.custom_fflags_enabled, expectedUltraboost: expected.ultraboost });
 let pendingNvidiaProfile: Promise<NvidiaDriverProfile> | null = null;
+let pendingNvidiaWrite: Promise<NvidiaDriverProfile> | null = null;
 export const gamesNvidiaProfile = (): Promise<NvidiaDriverProfile> => {
+  if (pendingNvidiaWrite) {
+    // Reopening during Apply must not adopt a pre-write driver snapshot.
+    // Even a failed write is followed by a fresh read for review/retry.
+    return pendingNvidiaWrite.then(gamesNvidiaProfile, gamesNvidiaProfile);
+  }
   // Tab remounts share native work that is already running, without caching its result.
   pendingNvidiaProfile ??= invoke<NvidiaDriverProfile>("games_nvidia_profile")
     .finally(() => { pendingNvidiaProfile = null; });
   return pendingNvidiaProfile;
 };
-export const gamesSaveNvidia = (changes: { id: number; value: number | null }[], expected: NvidiaDriverSetting[]) => invoke<NvidiaDriverProfile>("games_save_nvidia", { changes, expected });
+export const gamesSaveNvidia = (changes: { id: number; value: number | null }[], expected: NvidiaDriverSetting[]): Promise<NvidiaDriverProfile> => {
+  if (pendingNvidiaWrite) return Promise.reject(new Error("NVIDIA settings are still being applied. Wait a moment, then retry Apply."));
+  const writing = Promise.resolve(pendingNvidiaProfile).catch(() => {}).then(() =>
+    invoke<NvidiaDriverProfile>("games_save_nvidia", { changes, expected }))
+    .finally(() => { if (pendingNvidiaWrite === writing) pendingNvidiaWrite = null; });
+  pendingNvidiaWrite = writing;
+  return writing;
+};
 export const gamesRefreshMetadata = () => invoke<void>("games_refresh_metadata");
 export const vpnConnectGame = (region: string, gamePresets: string[]) => invoke<void>("vpn_connect", { region, gamePresets, gameRegion: true });
 

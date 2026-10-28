@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button, Dialog, ErrorBanner, Icon, Panel, Row, Segmented, Select, SliderInput, Spinner, CONTROL_WIDTH } from "../ui";
 import { gamesNvidiaProfile, gamesSaveNvidia } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
@@ -12,6 +12,7 @@ const controls = [
 ] as const;
 const FPS=0x10835002;
 export function NvidiaPanel() {
+  const working = useRef(false);
   const [profile,setProfile]=useState<NvidiaDriverProfile|null>(null);
   const [draft,setDraft]=useState<Record<number,string>>({});
   const [busy,setBusy]=useState(false);
@@ -25,8 +26,8 @@ export function NvidiaPanel() {
   const locked=busy||!profile?.writable;
   const fps=draft[FPS];
   const invalidFps=fps!==undefined&&fps!=="default"&&(!/^\d+$/.test(fps)||Number(fps)>1023);
-  async function refresh(){setBusy(true);setError(null);setNotice(null);try{adopt(await gamesNvidiaProfile());}catch(e){setError(formatErrorMessage(e));}finally{setBusy(false);}}
-  async function save(){if(!profile||invalidFps)return;setBusy(true);setError(null);try{const result=await gamesSaveNvidia(changed.map(s=>({id:s.id,value:draft[s.id]==="default"?null:Number(draft[s.id])})),profile.settings);adopt(result);setNotice("Saved. Restart Roblox to use them.");setReview(false);}catch(e){setError(formatErrorMessage(e));}finally{setBusy(false);}}
+  async function refresh(){if(working.current)return;working.current=true;setBusy(true);setError(null);setNotice(null);try{adopt(await gamesNvidiaProfile());}catch(e){setError(formatErrorMessage(e));}finally{working.current=false;setBusy(false);}}
+  async function save(){if(!profile||invalidFps||working.current)return;working.current=true;setBusy(true);setError(null);try{const result=await gamesSaveNvidia(changed.map(s=>({id:s.id,value:draft[s.id]==="default"?null:Number(draft[s.id])})),profile.settings);adopt(result);setNotice("Saved. Restart Roblox to use them.");setReview(false);}catch(e){setError(formatErrorMessage(e));}finally{working.current=false;setBusy(false);}}
   function current(id:number){const setting=profile?.settings.find(s=>s.id===id);if(!setting||setting.current===null)return"Driver default";const choice=controls.find(c=>c.id===id)?.options.find(([v])=>v===setting.current);return choice?.[1]??String(setting.current);}
   return <div className="flex flex-col gap-4"><Panel anchorId="nvidia_profile" eyebrow="NVIDIA driver" title="Roblox Player profile" desc="NVIDIA driver settings for Roblox only. Other games are not affected." watermark={{icon:"gpu",at:"right",size:150,rotate:-12,fade:true,opacity:.05}} actions={<Button variant="secondary" size="sm" disabled={busy||loading} onClick={()=>void refresh()} leadingIcon={<Icon name="refresh" size={13}/>}>Refresh</Button>}>
     {loading?<p className="flex items-center gap-2.5 text-[12px] text-text-muted"><Spinner size={12}/>Reading the installed NVIDIA driver...</p>:!profile?.available?<p className="rounded-[10px] bg-bg-base px-3.5 py-3 text-[12px] leading-relaxed text-text-muted">{profile?.reason??error??"NVIDIA driver controls are unavailable."}</p>:<p className="font-mono text-[10.5px] text-text-muted">RobloxPlayerBeta.exe{profile.writable?"":" · Read-only"}</p>}
