@@ -563,27 +563,29 @@ pub async fn settings_generate_network_diagnostics_bundle(
     let permit = EXPORT.try_acquire().map_err(|_| {
         "A diagnostics report is already being created. Wait for it to finish.".to_string()
     })?;
-    let settings = state.settings.lock().clone();
-
-    let (vpn_state, split_tunnel_diag) = {
-        let vpn = state.vpn_connection.lock().await;
-        let snapshot = vpn.state().await;
-        let diagnostics = vpn.get_split_tunnel_diagnostics();
-        (snapshot, diagnostics)
-    };
-
-    let bundle_context = BundleContext {
-        generated_at: current_timestamp_utc(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
-        platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-        settings,
-        vpn_state,
-        split_tunnel_diag,
-    };
+    let settings = state.settings.clone();
+    // Reports are most useful while Connect is stuck. Read the published
+    // state without queuing behind that operation; a busy driver is optional.
+    let vpn_state = state.vpn_state_handle.borrow().clone();
+    let driver = state.split_tunnel_handle.read().clone();
+    let split_tunnel_diag = driver.and_then(|handle| {
+        handle
+            .try_lock()
+            .ok()
+            .and_then(|driver| driver.get_diagnostics())
+    });
 
     let output_dir = resolve_output_dir(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
+        let bundle_context = BundleContext {
+            generated_at: current_timestamp_utc(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            settings: settings.lock().clone(),
+            vpn_state,
+            split_tunnel_diag,
+        };
         let command_sections = run_windows_diagnostics_sections();
         let bundle_text = compose_bundle_text(&bundle_context, &command_sections);
         std::fs::create_dir_all(&output_dir)
