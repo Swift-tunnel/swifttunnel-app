@@ -88,8 +88,7 @@ export const gamesCreateShortcut = (placeId: string, name: string) => invoke<str
 export const gamesStartupTarget = () => invoke<string | null>("games_startup_target");
 export const gamesDismissRecovery = () => invoke<void>("games_dismiss_recovery");
 export const gamesSuggestServer = async () => {
-  await waitForLauncherSave();
-  await waitForGamePreferencesSave();
+  await Promise.all([waitForLauncherSave(), waitForGamePreferencesSave()]);
   return invoke<GameLaunchPlan | null>("games_suggest_server");
 };
 export const gamesSetFavourite = (placeId: string, client: RobloxClient, favourite: boolean) =>
@@ -112,8 +111,9 @@ export const gamesSetPreferences = (placeId: string, client: RobloxClient, prefe
   return saving;
 };
 export const gamesLaunchPlan = async (placeId: string, client: RobloxClient, jobId: string | null = null, datacenterId: number | null = null, usePreferredRegion = true) => {
-  await waitForLauncherSave();
-  await waitForGamePreferencesSave();
+  // Observe both writes immediately. Awaiting one first could lose a failure
+  // from the other if it finishes while this request is still waiting.
+  await Promise.all([waitForLauncherSave(), waitForGamePreferencesSave()]);
   return invoke<GameLaunchPlan>("games_launch_plan", { placeId, client, jobId, datacenterId, usePreferredRegion });
 };
 export const gamesLaunch = async (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, safeLaunch = false) => {

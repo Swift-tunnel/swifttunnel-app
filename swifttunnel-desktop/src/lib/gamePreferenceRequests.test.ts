@@ -2,7 +2,8 @@ import { beforeEach, expect, it, vi } from "vitest";
 import type { GamePreferences } from "./types";
 const h = vi.hoisted(() => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
-import { gamesForget, gamesGetLibrary, gamesLaunchPlan, gamesSetPreferences } from "./commands";
+import { gamesForget, gamesGetLibrary, gamesLaunchPlan, gamesSaveLauncherConfig, gamesSetPreferences } from "./commands";
+import type { LauncherConfig } from "./types";
 
 const preferences: GamePreferences = { datacenter_id: 7, fps_cap: 400, graphics_quality: null, use_tunnel: true };
 function deferred() {
@@ -62,4 +63,18 @@ it("forgets a game only after its pending save finishes, so it cannot reappear",
   pending.resolve(); await Promise.all([saving, forgetting]);
   expect(beforeSave).toEqual(["games_set_preferences"]);
   expect(h.invoke.mock.calls[1][0]).toBe("games_forget");
+});
+
+it("observes a failed game save even while a Matchmaker save is also pending", async () => {
+  const matchmaker = deferred(), game = deferred();
+  h.invoke.mockImplementation((command: string) => command === "games_save_launcher_config" ? matchmaker.promise
+    : command === "games_set_preferences" ? game.promise : Promise.resolve(undefined));
+  const globalSave = gamesSaveLauncherConfig({} as LauncherConfig);
+  const gameSave = gamesSetPreferences("1818", "standard", preferences).catch(String);
+  const planning = gamesLaunchPlan("1818", "standard").then(() => null, String);
+  game.reject(new Error("Could not save game settings. Retry Save."));
+  await gameSave;
+  matchmaker.resolve(); await globalSave;
+  expect(await planning).toContain("Retry Save");
+  expect(h.invoke.mock.calls.some(call => call[0] === "games_launch_plan")).toBe(false);
 });
