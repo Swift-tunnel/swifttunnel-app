@@ -311,7 +311,15 @@ export function OverlayStatsBar() {
         await setInteractive(interacting);
         await syncVisibility();
       } catch {
-        /* ignore */
+        // Cursor access may disappear on another input desktop. Release the
+        // grab without moving or persisting a made-up position, and require a
+        // fresh press when cursor reads recover.
+        dragRef.current = null;
+        prevDownRef.current = true;
+        interactingRef.current = false;
+        if (!disposed) setActive(false);
+        await setInteractive(false);
+        await syncVisibility();
       }
       if (!disposed) {
         const delay = dragRef.current

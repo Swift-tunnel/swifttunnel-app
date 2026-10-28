@@ -88,13 +88,15 @@ pub struct CursorPosResponse {
 /// in-game overlay's grab-to-move. Cheap `GetCursorPos` + `GetAsyncKeyState`;
 /// safe to poll a few dozen times a second while dragging.
 #[tauri::command]
-pub fn boost_cursor_pos() -> CursorPosResponse {
-    let (x, y) = swifttunnel_core::performance_monitor::cursor_position();
-    CursorPosResponse {
+pub fn boost_cursor_pos() -> Result<CursorPosResponse, String> {
+    let (x, y) = swifttunnel_core::performance_monitor::cursor_position().ok_or(
+        "Overlay movement is unavailable on this desktop. Return to Roblox and try again.",
+    )?;
+    Ok(CursorPosResponse {
         x,
         y,
         left_down: swifttunnel_core::performance_monitor::left_mouse_down(),
-    }
+    })
 }
 
 #[derive(Clone, Serialize)]
