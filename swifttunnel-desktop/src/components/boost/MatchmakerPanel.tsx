@@ -1,5 +1,5 @@
 import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Button,
   ErrorBanner,
@@ -33,6 +33,7 @@ export function MatchmakerPanel() {
   const [query, setQuery] = useState("");
   const [skipInput, setSkipInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const saving = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const games = useGameLibraryStore((s) => s.library?.entries);
@@ -60,6 +61,8 @@ export function MatchmakerPanel() {
     };
   }, []);
   async function save(next: LauncherConfig, message = "Matchmaker saved.") {
+    if (saving.current) return false;
+    saving.current = true;
     setBusy(true);
     setError(null);
     setNotice(null);
@@ -73,6 +76,7 @@ export function MatchmakerPanel() {
       setError(formatErrorMessage(e));
       return false;
     } finally {
+      saving.current = false;
       setBusy(false);
     }
   }

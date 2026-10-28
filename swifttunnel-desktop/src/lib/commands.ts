@@ -48,13 +48,32 @@ import type {
 } from "./types";
 
 export const gamesGetLibrary = () => invoke<RobloxLibrarySnapshot>("games_get_library");
-export const gamesLauncherConfig = () => invoke<LauncherConfig>("games_launcher_config");
-export const gamesSaveLauncherConfig = (config: LauncherConfig) => invoke<void>("games_save_launcher_config", { config });
+let pendingLauncherSave: Promise<void> | null = null;
+async function waitForLauncherSave() {
+  while (pendingLauncherSave) await pendingLauncherSave;
+}
+export const gamesLauncherConfig = async () => {
+  // Reopening Matchmaker must read after its previous page's save, including
+  // when that save failed and the old on-disk preferences are still valid.
+  await waitForLauncherSave().catch(() => {});
+  return invoke<LauncherConfig>("games_launcher_config");
+};
+export const gamesSaveLauncherConfig = (config: LauncherConfig): Promise<void> => {
+  if (pendingLauncherSave) return Promise.reject(new Error("Matchmaker settings are still being saved. Wait a moment, then retry Save."));
+  const saving = invoke<void>("games_save_launcher_config", { config }).finally(() => {
+    if (pendingLauncherSave === saving) pendingLauncherSave = null;
+  });
+  pendingLauncherSave = saving;
+  return saving;
+};
 export const gamesDisplays = () => invoke<GameDisplay[]>("games_displays");
 export const gamesCreateShortcut = (placeId: string, name: string) => invoke<string>("games_create_shortcut", { placeId, name });
 export const gamesStartupTarget = () => invoke<string | null>("games_startup_target");
 export const gamesDismissRecovery = () => invoke<void>("games_dismiss_recovery");
-export const gamesSuggestServer = () => invoke<GameLaunchPlan | null>("games_suggest_server");
+export const gamesSuggestServer = async () => {
+  await waitForLauncherSave();
+  return invoke<GameLaunchPlan | null>("games_suggest_server");
+};
 export const gamesSetFavourite = (placeId: string, client: RobloxClient, favourite: boolean) =>
   invoke<void>("games_set_favourite", { placeId, client, favourite });
 export const gamesAddFavourite = (placeId: string, client: RobloxClient = "standard") => invoke<void>("games_add_favourite", { placeId, client });
@@ -64,7 +83,10 @@ export const gamesScanImports = () => invoke<RobloxImportPreview>("games_scan_im
 export const gamesDatacenters = () => invoke<RobloxDatacenter[]>("games_datacenters");
 export const gamesSearchServers = (placeId: string, datacenterId: number, cursor: number | null = null) => invoke<RobloxServerPage>("games_search_servers", { placeId, datacenterId, cursor });
 export const gamesSetPreferences = (placeId: string, client: RobloxClient, preferences: GamePreferences) => invoke<void>("games_set_preferences", { placeId, client, preferences });
-export const gamesLaunchPlan = (placeId: string, client: RobloxClient, jobId: string | null = null, datacenterId: number | null = null, usePreferredRegion = true) => invoke<GameLaunchPlan>("games_launch_plan", { placeId, client, jobId, datacenterId, usePreferredRegion });
+export const gamesLaunchPlan = async (placeId: string, client: RobloxClient, jobId: string | null = null, datacenterId: number | null = null, usePreferredRegion = true) => {
+  await waitForLauncherSave();
+  return invoke<GameLaunchPlan>("games_launch_plan", { placeId, client, jobId, datacenterId, usePreferredRegion });
+};
 export const gamesLaunch = (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, safeLaunch = false) => invoke<void>("games_launch", { placeId, client, jobId, datacenterId, allowUnverified, safeLaunch });
 export const gamesFlags = (action: "preview" | "clean" | "undo") => invoke<FlagCleanupReport>("games_flags", { action });
 export const gamesSaveFlags = (enabled: boolean, json: string, expected: { custom_fflags_json: string; custom_fflags_enabled: boolean; ultraboost: boolean }) => invoke<BoostUpdateResult>("games_save_flags", { enabled, json, expectedJson: expected.custom_fflags_json, expectedEnabled: expected.custom_fflags_enabled, expectedUltraboost: expected.ultraboost });
