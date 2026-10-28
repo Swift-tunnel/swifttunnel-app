@@ -4,6 +4,7 @@ mod events;
 mod game_shortcut;
 mod harness;
 mod logging;
+mod runtime_assets;
 mod session_metadata;
 mod single_client;
 mod startup_config;
@@ -24,47 +25,6 @@ const APP_ICON: tauri::image::Image<'static> = tauri::include_image!("./icons/ic
 
 #[cfg(windows)]
 fn sync_runtime_assets(app: &tauri::AppHandle) {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
-    fn first_existing(candidates: Vec<PathBuf>) -> Option<PathBuf> {
-        candidates.into_iter().find(|p| p.exists())
-    }
-
-    fn sync_file(source: &Path, destination: &Path) -> Result<bool, String> {
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                format!(
-                    "Failed to create asset directory {}: {}",
-                    parent.display(),
-                    e
-                )
-            })?;
-        }
-
-        let should_copy = match (fs::metadata(source), fs::metadata(destination)) {
-            (Ok(src), Ok(dst)) => src.len() != dst.len(),
-            (Ok(_), Err(_)) => true,
-            (Err(e), _) => {
-                return Err(format!("Failed to inspect {}: {}", source.display(), e));
-            }
-        };
-
-        if !should_copy {
-            return Ok(false);
-        }
-
-        fs::copy(source, destination).map_err(|e| {
-            format!(
-                "Failed to stage runtime asset {} -> {}: {}",
-                source.display(),
-                destination.display(),
-                e
-            )
-        })?;
-        Ok(true)
-    }
-
     let resource_dir = match app.path().resource_dir() {
         Ok(path) => path,
         Err(e) => {
@@ -84,42 +44,29 @@ fn sync_runtime_assets(app: &tauri::AppHandle) {
         }
     };
 
-    let targets: Vec<(&str, Option<PathBuf>, PathBuf)> = vec![{
-        let msi_name = swifttunnel_core::vpn::winpkfilter::native_msi_package().msi_name;
-        (
-            msi_name,
-            first_existing(vec![
-                resource_dir.join("drivers").join(msi_name),
-                resource_dir.join(msi_name),
-            ]),
-            exe_dir.join("drivers").join(msi_name),
-        )
-    }];
-
-    for (name, source, destination) in targets {
-        let Some(source) = source else {
-            if name.starts_with("WinpkFilter-") {
-                log::warn!(
-                    "Bundled runtime asset not found: {} (runtime fallback download will be used)",
-                    name
-                );
-            } else {
-                log::debug!("Bundled runtime asset not found: {}", name);
-            }
-            continue;
-        };
-
-        match sync_file(&source, &destination) {
-            Ok(true) => info!(
-                "Staged runtime asset {} -> {}",
-                source.display(),
-                destination.display()
-            ),
-            Ok(_) => {}
-            Err(e) => {
-                log::warn!("{}", e);
-            }
-        }
+    let package = swifttunnel_core::vpn::winpkfilter::native_msi_package();
+    let source = [
+        resource_dir.join("drivers").join(package.msi_name),
+        resource_dir.join(package.msi_name),
+    ]
+    .into_iter()
+    .find(|path| path.is_file());
+    let Some(source) = source else {
+        log::warn!(
+            "Bundled driver {} not found; runtime fallback download will be used",
+            package.msi_name
+        );
+        return;
+    };
+    let destination = exe_dir.join("drivers").join(package.msi_name);
+    match runtime_assets::stage_driver(&source, &destination, package) {
+        Ok(true) => info!(
+            "Staged runtime asset {} -> {}",
+            source.display(),
+            destination.display()
+        ),
+        Ok(false) => {}
+        Err(error) => log::warn!("Could not stage bundled driver: {error}"),
     }
 }
 
@@ -158,7 +105,7 @@ fn recover_stale_network_state() {
             || ipv6_recovery::read_ipv6_marker().is_some()
             || tso_recovery::read_tso_marker().is_some();
         let driver_broken =
-            SplitTunnelDriver::driver_install_evidence() && !SplitTunnelDriver::is_available();
+            !SplitTunnelDriver::is_available() && SplitTunnelDriver::driver_install_evidence();
 
         // Always remove an enabled WinpkFilter adapter binding while SwiftTunnel
         // is disconnected. Most PCs tolerate the binding sitting enabled, but on
@@ -185,7 +132,7 @@ fn recover_stale_network_state() {
             // automatically here; BSOD reports mean this path must fail closed and
             // let the UI ask for a clean Windows restart instead.
             let still_broken =
-                SplitTunnelDriver::driver_install_evidence() && !SplitTunnelDriver::is_available();
+                !SplitTunnelDriver::is_available() && SplitTunnelDriver::driver_install_evidence();
             if still_broken {
                 warn!(
                     "Startup recovery: driver still wedged after unbind; automatic NDISRD service restart skipped"
