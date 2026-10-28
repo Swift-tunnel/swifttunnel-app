@@ -330,8 +330,17 @@ export const presetSaveToDownloads = (fileName: string, contents: string) =>
 
 // ── Updater ──
 
-export const updaterCheckChannel = (channel: UpdateChannel) =>
-  invoke<UpdaterCheckResponse>("updater_check_channel", { channel });
+const pendingUpdateChecks = new Map<UpdateChannel, Promise<UpdaterCheckResponse>>();
+export const updaterCheckChannel = (channel: UpdateChannel): Promise<UpdaterCheckResponse> => {
+  const pending = pendingUpdateChecks.get(channel);
+  if (pending) return pending;
+  // A settings remount or second caller can share a check still in progress.
+  // Never cache completed offers: a later explicit check must remain fresh.
+  const request = invoke<UpdaterCheckResponse>("updater_check_channel", { channel })
+    .finally(() => { pendingUpdateChecks.delete(channel); });
+  pendingUpdateChecks.set(channel, request);
+  return request;
+};
 
 export const updaterInstallChannel = (
   channel: UpdateChannel,
