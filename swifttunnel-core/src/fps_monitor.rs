@@ -167,7 +167,14 @@ pub struct FpsMonitor {
     runtime: std::sync::Mutex<Option<FpsRuntime>>,
     requested_enabled: AtomicBool,
     target_pid: AtomicU32,
+    latest_observation: AtomicU64,
     session_name: &'static str,
+}
+
+#[derive(Clone, Copy)]
+pub struct FpsObservation {
+    generation: u64,
+    pid: Option<u32>,
 }
 
 impl FpsMonitor {
@@ -183,6 +190,7 @@ impl FpsMonitor {
             runtime: std::sync::Mutex::new(None),
             requested_enabled: AtomicBool::new(false),
             target_pid: AtomicU32::new(0),
+            latest_observation: AtomicU64::new(0),
             session_name,
         }
     }
@@ -255,15 +263,20 @@ impl FpsMonitor {
 
     /// Point the monitor at a game process (0 to clear). Switching targets
     /// resets the window so a new game never inherits the old one's count.
-    pub fn set_target_pid(&self, pid: u32) {
+    #[cfg(test)]
+    fn set_target_pid(&self, pid: u32) {
         let Ok(mut runtime) = self.runtime.lock() else {
             return;
         };
+        self.set_target_pid_locked(&mut runtime, pid);
+    }
+
+    fn set_target_pid_locked(&self, runtime: &mut Option<FpsRuntime>, pid: u32) {
         self.target_pid.store(pid, Ordering::Release);
         // The saved preference owns permission to trace; a poll supplies only
         // presence. No trace runs while Roblox is closed, and a late poll
         // cannot override a disabled preference.
-        self.reconcile_runtime(&mut runtime);
+        self.reconcile_runtime(runtime);
         let Some(active) = runtime.as_ref() else {
             return;
         };
@@ -290,14 +303,42 @@ impl FpsMonitor {
             .unwrap_or(0)
     }
 
+    /// Record order while the caller still owns its process-discovery lock.
+    /// This never starts/stops a trace or acquires the trace lifecycle lock.
+    pub fn observe_process(&self, pid: Option<u32>) -> FpsObservation {
+        FpsObservation {
+            generation: self
+                .latest_observation
+                .fetch_add(1, Ordering::AcqRel)
+                .wrapping_add(1),
+            pid,
+        }
+    }
+
     /// A poll supplies target presence, never permission to enable tracing.
-    pub fn sample_for_process(&self, pid: Option<u32>, requested: bool) -> u32 {
-        self.set_target_pid(pid.unwrap_or(0));
-        if requested && pid.is_some() {
-            self.current_fps()
+    pub fn sample_for_process(&self, observation: FpsObservation, requested: bool) -> u32 {
+        let Ok(mut runtime) = self.runtime.lock() else {
+            return 0;
+        };
+        // Check after acquiring the lifecycle lock. Another metrics query can
+        // observe a new player while this call waits for trace shutdown.
+        if observation.generation != self.latest_observation.load(Ordering::Acquire) {
+            return 0;
+        }
+        self.set_target_pid_locked(&mut runtime, observation.pid.unwrap_or(0));
+        if requested && observation.pid.is_some() {
+            runtime
+                .as_ref()
+                .map(|active| active.shared.current_fps.load(Ordering::Acquire))
+                .unwrap_or(0)
         } else {
             0
         }
+    }
+
+    #[cfg(test)]
+    fn test_sample_for_process(&self, pid: Option<u32>, requested: bool) -> u32 {
+        self.sample_for_process(self.observe_process(pid), requested)
     }
 }
 
@@ -599,6 +640,7 @@ impl FpsMonitor {
             })),
             requested_enabled: AtomicBool::new(true),
             target_pid: AtomicU32::new(0),
+            latest_observation: AtomicU64::new(0),
             session_name: OVERLAY_SESSION_NAME,
         }
     }
@@ -617,6 +659,47 @@ impl FpsMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_observations_cannot_clear_or_retarget_a_newer_players_trace() {
+        for old_pid in [None, Some(1000)] {
+            let monitor = FpsMonitor::inert_active();
+            let old = monitor.observe_process(old_pid);
+            let fresh = monitor.observe_process(Some(2000));
+            assert_eq!(monitor.sample_for_process(fresh, true), 0);
+            let shared = monitor.test_shared();
+            shared.current_fps.store(240, Ordering::Release);
+            assert_eq!(monitor.sample_for_process(old, false), 0);
+            assert_eq!(monitor.target_pid.load(Ordering::Acquire), 2000);
+            assert!(monitor.runtime.lock().unwrap().is_some());
+            assert_eq!(monitor.current_fps(), 240);
+        }
+    }
+
+    #[test]
+    fn late_observations_are_checked_after_waiting_for_the_trace_lock() {
+        let monitor = Arc::new(FpsMonitor::inert_active());
+        monitor.set_target_pid(1000);
+        let old = monitor.observe_process(None);
+        let held = monitor.runtime.lock().unwrap();
+        let waiting = monitor.clone();
+        let worker = std::thread::spawn(move || waiting.sample_for_process(old, false));
+        // Recording presence must not wait behind trace setup/shutdown.
+        let observing = monitor.clone();
+        let (observed, observed_rx) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            let _ = observed.send(observing.observe_process(Some(2000)));
+        });
+        let fresh = observed_rx.recv_timeout(Duration::from_secs(2));
+        drop(held);
+        observer.join().unwrap();
+        assert_eq!(worker.join().unwrap(), 0);
+        let fresh = fresh.expect("recording presence must not take the lifecycle lock");
+        assert_eq!(monitor.target_pid.load(Ordering::Acquire), 1000);
+        assert!(monitor.runtime.lock().unwrap().is_some());
+        assert_eq!(monitor.sample_for_process(fresh, true), 0);
+        assert_eq!(monitor.target_pid.load(Ordering::Acquire), 2000);
+    }
 
     #[test]
     fn a_sample_clocked_before_a_reset_cannot_consume_the_new_frames() {
@@ -742,7 +825,7 @@ mod tests {
     fn late_metrics_poll_cannot_restart_a_disabled_trace() {
         let monitor = FpsMonitor::inert_active();
         monitor.set_enabled(false);
-        assert_eq!(monitor.sample_for_process(Some(1234), true), 0);
+        assert_eq!(monitor.test_sample_for_process(Some(1234), true), 0);
         assert!(monitor.runtime.lock().unwrap().is_none());
     }
 
@@ -751,7 +834,7 @@ mod tests {
         let monitor = FpsMonitor::new();
         monitor.set_enabled(true);
         for _ in 0..10 {
-            assert_eq!(monitor.sample_for_process(None, true), 0);
+            assert_eq!(monitor.test_sample_for_process(None, true), 0);
         }
         assert!(monitor.requested_enabled.load(Ordering::Acquire));
         assert!(monitor.runtime.lock().unwrap().is_none());
@@ -762,11 +845,11 @@ mod tests {
         let monitor = FpsMonitor::inert_active();
         monitor.set_target_pid(1234);
         assert!(monitor.runtime.lock().unwrap().is_some());
-        monitor.sample_for_process(None, true);
+        monitor.test_sample_for_process(None, true);
         assert!(monitor.runtime.lock().unwrap().is_none());
         assert!(monitor.requested_enabled.load(Ordering::Acquire));
         monitor.set_enabled(false);
-        assert_eq!(monitor.sample_for_process(Some(1234), true), 0);
+        assert_eq!(monitor.test_sample_for_process(Some(1234), true), 0);
         assert!(monitor.runtime.lock().unwrap().is_none());
     }
 
@@ -778,9 +861,9 @@ mod tests {
             .test_shared()
             .current_fps
             .store(120, Ordering::Release);
-        assert_eq!(monitor.sample_for_process(Some(1234), false), 0);
+        assert_eq!(monitor.test_sample_for_process(Some(1234), false), 0);
         assert!(monitor.runtime.lock().unwrap().is_some());
-        assert_eq!(monitor.sample_for_process(Some(1234), true), 120);
+        assert_eq!(monitor.test_sample_for_process(Some(1234), true), 120);
     }
 
     #[test]

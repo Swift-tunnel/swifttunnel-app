@@ -44,20 +44,20 @@ pub async fn boost_get_metrics(
     let performance_monitor = state.performance_monitor.clone();
     let fps_monitor = state.fps_monitor.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let metrics = {
+        let (metrics, observation) = {
             let mut monitor = performance_monitor.lock();
             let mut metrics = swifttunnel_core::structs::PerformanceMetrics::default();
             monitor.update_metrics(&mut metrics);
-            metrics
+            let observation =
+                fps_monitor.observe_process(metrics.process_id.filter(|_| metrics.roblox_running));
+            (metrics, observation)
         };
 
         // Settings own permission to trace; polls supply game presence. A
         // slow poll after disable cannot grant permission to restart tracing.
         // ETW startup/shutdown must not hold the process-discovery lock.
-        let fps = fps_monitor.sample_for_process(
-            metrics.process_id.filter(|_| metrics.roblox_running),
-            overlay_wants_fps.unwrap_or(true),
-        ) as f32;
+        let fps =
+            fps_monitor.sample_for_process(observation, overlay_wants_fps.unwrap_or(true)) as f32;
 
         PerformanceMetricsResponse {
             fps,
