@@ -16,6 +16,7 @@ use tauri::{Emitter, State};
 
 mod matchmaking;
 mod selection;
+mod window_placement;
 
 #[derive(Serialize)]
 pub struct LaunchPlan {
@@ -1060,7 +1061,7 @@ pub async fn games_launch(
                 // Process queries and another process's window messages can
                 // block. Keep them off runtime workers and bind this attempt
                 // to its launch and the first player process it observes.
-                let placed = tauri::async_runtime::spawn_blocking(move || {
+                let placed = window_placement::run(move |current| {
                     let generation = worker_games.lock().window_placement_generation;
                     if generation != placement_generation {
                         return (expected_pid, Ok(true));
@@ -1089,6 +1090,11 @@ pub async fn games_launch(
                                 pid,
                                 worker_preferences.borderless,
                                 worker_preferences.monitor.as_deref(),
+                                || {
+                                    current.load(std::sync::atomic::Ordering::Acquire)
+                                        && worker_games.lock().window_placement_generation
+                                            == placement_generation
+                                },
                             ),
                         ),
                     }
@@ -1115,6 +1121,12 @@ pub async fn games_launch(
                     }
                     Err(error) => {
                         log::warn!("Roblox window placement task failed: {error}");
+                        let mut games = games.lock();
+                        if games.window_placement_generation == placement_generation {
+                            games.warning = Some(error);
+                            drop(games);
+                            let _ = window_app.emit(games::LIBRARY_CHANGED, ());
+                        }
                         break;
                     }
                 }

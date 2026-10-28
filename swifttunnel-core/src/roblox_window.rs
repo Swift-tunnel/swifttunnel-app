@@ -122,8 +122,13 @@ unsafe extern "system" fn window_callback(window: HWND, data: LPARAM) -> BOOL {
         true.into()
     }
 }
-pub fn place(pid: u32, borderless: bool, monitor: Option<&str>) -> Result<bool, String> {
-    if !borderless && monitor.is_none() {
+pub fn place(
+    pid: u32,
+    borderless: bool,
+    monitor: Option<&str>,
+    is_current: impl Fn() -> bool,
+) -> Result<bool, String> {
+    if !is_current() || !borderless && monitor.is_none() {
         return Ok(true);
     }
     let available = displays();
@@ -160,6 +165,9 @@ pub fn place(pid: u32, borderless: bool, monitor: Option<&str>) -> Result<bool, 
             })
             .or_else(|| available.iter().find(|d| d.primary))
             .ok_or("No display is available.")?;
+        if !is_current() {
+            return Ok(true);
+        }
         if borderless {
             let style = GetWindowLongPtrW(window, GWL_STYLE);
             SetWindowLongPtrW(
@@ -176,6 +184,11 @@ pub fn place(pid: u32, borderless: bool, monitor: Option<&str>) -> Result<bool, 
                 (current.bottom - current.top).min(selected.height),
             )
         };
+        // A style change sends synchronous messages to the player's window.
+        // It may return after this launch was cancelled, superseded or timed out.
+        if !is_current() {
+            return Ok(true);
+        }
         position_window(window, selected.left, selected.top, width, height)?;
     }
     Ok(true)
@@ -211,6 +224,11 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
     use windows::core::w;
+
+    #[test]
+    fn retired_placement_returns_before_querying_or_changing_windows() {
+        assert!(place(0, true, Some("no-such-monitor"), || false).unwrap());
+    }
 
     #[test]
     fn positioning_does_not_wait_for_the_players_window_thread() {
