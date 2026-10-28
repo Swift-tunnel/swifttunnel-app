@@ -8,6 +8,8 @@ const h = vi.hoisted(() => ({
   ignore: vi.fn(),
   move: vi.fn(),
   save: vi.fn(),
+  report: vi.fn(),
+  listenError: null as Error | null,
   payload: null as OverlayRenderPayload | null,
 }));
 vi.mock("react", () => ({
@@ -27,12 +29,14 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("@tauri-apps/api/event", () => ({
   listen: async (_name: string, callback: typeof h.render) => {
+    if (h.listenError) throw h.listenError;
     h.render = callback;
     return () => {};
   },
   emitTo: h.save,
 }));
 vi.mock("../../lib/commands", () => ({ boostCursorPos: h.cursor }));
+vi.mock("../../lib/errors", () => ({ reportError: h.report }));
 import { OverlayStatsBar } from "./OverlayStatsBar";
 
 let cleanup: (() => void)[] = [];
@@ -60,7 +64,7 @@ async function mountAndDrag() {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.clearAllMocks();
-  h.effects = []; h.render = null; cleanup = [];
+  h.effects = []; h.render = null; cleanup = []; h.listenError = null;
   h.ignore.mockResolvedValue(undefined);
   h.move.mockResolvedValue(undefined);
   h.save.mockResolvedValue(undefined);
@@ -109,5 +113,36 @@ describe("overlay cursor availability", () => {
     await vi.advanceTimersByTimeAsync(16);
     expect(h.move).toHaveBeenLastCalledWith(expect.objectContaining({ x: 0, y: 0 }));
     expect(h.save).toHaveBeenLastCalledWith("main", "overlay-position", { x: 0, y: 0 });
+  });
+
+  it("contains a failed position delivery and allows another drag to save", async () => {
+    await mountAndDrag();
+    const failure = new Error("main window is busy");
+    h.save.mockRejectedValueOnce(failure);
+    h.cursor.mockResolvedValue({ x: 150, y: 140, left_down: false });
+    await vi.advanceTimersByTimeAsync(16);
+    expect(h.report).toHaveBeenCalledWith(
+      expect.stringContaining("Drag the bar again to retry"), failure,
+      { dedupeKey: "overlay-position" },
+    );
+    await vi.advanceTimersByTimeAsync(350);
+    h.cursor.mockResolvedValue({ x: 150, y: 140, left_down: true });
+    await vi.advanceTimersByTimeAsync(350);
+    h.cursor.mockResolvedValue({ x: 180, y: 160, left_down: false });
+    await vi.advanceTimersByTimeAsync(16);
+    expect(h.save).toHaveBeenCalledTimes(2);
+  });
+
+  it("contains failed event registration and reports a next step", async () => {
+    const failure = new Error("event bridge unavailable");
+    h.listenError = failure;
+    const tree = OverlayStatsBar();
+    attachBounds(tree);
+    cleanup = h.effects.map(effect => effect()).filter((stop): stop is () => void => typeof stop === "function");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.report).toHaveBeenCalledWith(
+      expect.stringContaining("Restart SwiftTunnel to retry"), failure,
+      { dedupeKey: "overlay-render-listener" },
+    );
   });
 });

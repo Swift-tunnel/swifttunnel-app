@@ -11,6 +11,7 @@ import {
   type OverlayRenderPayload,
 } from "./overlayBus";
 import { boostCursorPos } from "../../lib/commands";
+import { reportError } from "../../lib/errors";
 import {
   clampOverlayPosition,
   overlayAnchor,
@@ -275,7 +276,11 @@ export function OverlayStatsBar() {
               void emitOverlayPosition(
                 Math.round(next.x - m.x),
                 Math.round(next.y - m.y),
-              );
+              ).catch((error) => reportError(
+                "Overlay position could not be saved. Drag the bar again to retry.",
+                error,
+                { dedupeKey: "overlay-position" },
+              ));
             }
           } else {
             const bar = barRef.current;
@@ -367,6 +372,12 @@ export function OverlayStatsBar() {
     }).then((u) => {
       if (disposed) u();
       else unlisten = u;
+    }).catch((error) => {
+      if (!disposed) reportError(
+        "Overlay updates could not start. Restart SwiftTunnel to retry.",
+        error,
+        { dedupeKey: "overlay-render-listener" },
+      );
     });
     return () => {
       disposed = true;
