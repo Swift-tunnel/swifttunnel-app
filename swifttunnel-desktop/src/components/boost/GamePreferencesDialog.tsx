@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Dialog, ErrorBanner, Segmented, Select, SliderInput, Toggle } from "../ui";
 import { gamesDatacenters, gamesSetPreferences, gamesDisplays } from "../../lib/commands";
 import { defaultGamePreferences } from "../../lib/gameLaunchFlow";
@@ -27,6 +27,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
   const [preferences, setPreferences] = useState<GamePreferences>({ datacenter_id: null, fps_cap: null, graphics_quality: null, use_tunnel: false });
   const [centers, setCenters] = useState<RobloxDatacenter[]>([]);
   const [busy, setBusy] = useState(false);
+  const saving = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState(false);
   const [displays,setDisplays]=useState<GameDisplay[]>([]);
@@ -40,11 +41,12 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
     return () => { disposed = true; };
   }, [entry]);
   async function save() {
-    if (!entry) return;
+    if (!entry || saving.current) return;
+    saving.current = true;
     setBusy(true); setError(null);
     try { await gamesSetPreferences(entry.place_id, entry.client, preferences); onSaved(); onClose(); }
     catch (error) { setError(formatErrorMessage(error)); }
-    finally { setBusy(false); }
+    finally { saving.current = false; setBusy(false); }
   }
   const patch = (value: Partial<GamePreferences>) => setPreferences(prev => ({ ...prev, ...value }));
 

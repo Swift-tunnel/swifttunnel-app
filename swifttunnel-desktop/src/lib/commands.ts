@@ -47,7 +47,16 @@ import type {
   GameDisplay,
 } from "./types";
 
-export const gamesGetLibrary = () => invoke<RobloxLibrarySnapshot>("games_get_library");
+let pendingGamePreferencesSave: Promise<void> | null = null;
+async function waitForGamePreferencesSave() {
+  while (pendingGamePreferencesSave) await pendingGamePreferencesSave;
+}
+export const gamesGetLibrary = async () => {
+  // A save can outlive the Games page. Reads may recover from its failure,
+  // but must not publish the old preferences while a save is still pending.
+  await waitForGamePreferencesSave().catch(() => {});
+  return invoke<RobloxLibrarySnapshot>("games_get_library");
+};
 let pendingOverlayWindow: Promise<void> | null = null;
 export const ensureOverlayWindow = (): Promise<void> => {
   // A settings change can restart the driver while native creation is still
@@ -80,22 +89,37 @@ export const gamesStartupTarget = () => invoke<string | null>("games_startup_tar
 export const gamesDismissRecovery = () => invoke<void>("games_dismiss_recovery");
 export const gamesSuggestServer = async () => {
   await waitForLauncherSave();
+  await waitForGamePreferencesSave();
   return invoke<GameLaunchPlan | null>("games_suggest_server");
 };
 export const gamesSetFavourite = (placeId: string, client: RobloxClient, favourite: boolean) =>
   invoke<void>("games_set_favourite", { placeId, client, favourite });
 export const gamesAddFavourite = (placeId: string, client: RobloxClient = "standard") => invoke<void>("games_add_favourite", { placeId, client });
-export const gamesForget = (placeId: string, client: RobloxClient) => invoke<void>("games_forget", { placeId, client });
+export const gamesForget = async (placeId: string, client: RobloxClient) => {
+  await waitForGamePreferencesSave().catch(() => {});
+  return invoke<void>("games_forget", { placeId, client });
+};
 export const gamesSetNotifications = (enabled: boolean) => invoke<void>("games_set_notifications", { enabled });
 export const gamesScanImports = () => invoke<RobloxImportPreview>("games_scan_imports");
 export const gamesDatacenters = () => invoke<RobloxDatacenter[]>("games_datacenters");
 export const gamesSearchServers = (placeId: string, datacenterId: number, cursor: number | null = null) => invoke<RobloxServerPage>("games_search_servers", { placeId, datacenterId, cursor });
-export const gamesSetPreferences = (placeId: string, client: RobloxClient, preferences: GamePreferences) => invoke<void>("games_set_preferences", { placeId, client, preferences });
+export const gamesSetPreferences = (placeId: string, client: RobloxClient, preferences: GamePreferences): Promise<void> => {
+  if (pendingGamePreferencesSave) return Promise.reject(new Error("Game settings are still being saved. Wait a moment, then retry Save."));
+  const saving = invoke<void>("games_set_preferences", { placeId, client, preferences }).finally(() => {
+    if (pendingGamePreferencesSave === saving) pendingGamePreferencesSave = null;
+  });
+  pendingGamePreferencesSave = saving;
+  return saving;
+};
 export const gamesLaunchPlan = async (placeId: string, client: RobloxClient, jobId: string | null = null, datacenterId: number | null = null, usePreferredRegion = true) => {
   await waitForLauncherSave();
+  await waitForGamePreferencesSave();
   return invoke<GameLaunchPlan>("games_launch_plan", { placeId, client, jobId, datacenterId, usePreferredRegion });
 };
-export const gamesLaunch = (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, safeLaunch = false) => invoke<void>("games_launch", { placeId, client, jobId, datacenterId, allowUnverified, safeLaunch });
+export const gamesLaunch = async (placeId: string, client: RobloxClient, jobId: string | null, datacenterId: number | null, allowUnverified: boolean, safeLaunch = false) => {
+  await waitForGamePreferencesSave();
+  return invoke<void>("games_launch", { placeId, client, jobId, datacenterId, allowUnverified, safeLaunch });
+};
 export const gamesFlags = (action: "preview" | "clean" | "undo") => invoke<FlagCleanupReport>("games_flags", { action });
 export const gamesSaveFlags = (enabled: boolean, json: string, expected: { custom_fflags_json: string; custom_fflags_enabled: boolean; ultraboost: boolean }) => invoke<BoostUpdateResult>("games_save_flags", { enabled, json, expectedJson: expected.custom_fflags_json, expectedEnabled: expected.custom_fflags_enabled, expectedUltraboost: expected.ultraboost });
 let pendingNvidiaProfile: Promise<NvidiaDriverProfile> | null = null;
