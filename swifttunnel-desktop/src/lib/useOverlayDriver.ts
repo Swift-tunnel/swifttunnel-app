@@ -266,8 +266,11 @@ export function useOverlayDriver() {
               )
             : {},
       })
-        .then(() => useOverlayRuntimeStore.setState({ error: null }))
+        .then(() => {
+          if (!disposed) useOverlayRuntimeStore.setState({ error: null });
+        })
         .catch(() => {
+          if (disposed) return;
           useOverlayRuntimeStore.setState({
             error:
               "The overlay stopped receiving stats. Turn it off and on to retry.",

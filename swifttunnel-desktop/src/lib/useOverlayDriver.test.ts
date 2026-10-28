@@ -45,11 +45,13 @@ vi.mock("../stores/vpnStore", () => ({
 }));
 
 import { useOverlayDriver } from "./useOverlayDriver";
+import { useOverlayRuntimeStore } from "../stores/overlayRuntimeStore";
 
 function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((r) => { resolve = r; });
-  return { promise, resolve };
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((r, fail) => { resolve = r; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function start() {
@@ -64,6 +66,7 @@ describe("overlay polling under slow native calls", () => {
     vi.stubGlobal("window", globalThis);
     vi.stubGlobal("location", { search: "" });
     h.effects.length = 0;
+    useOverlayRuntimeStore.setState({ error: null });
     h.overlay.enabled = true;
     h.overlay.metrics=["ping","upload"];
     h.vpnState={state:"connected",region:"mumbai",connectedAt:1,bytesUp:100,bytesDown:200,ping:30,pingReadings:0,gameRoute:null};
@@ -246,6 +249,22 @@ describe("overlay polling under slow native calls", () => {
     stop();
     expect(calls).toBe(1);
     expect(h.push).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["success", "failure"] as const)("ignores a replaced driver's late render %s when reporting overlay errors", async result => {
+    const pending = deferred();
+    h.push.mockReturnValueOnce(pending.promise);
+    const stop = start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.push).toHaveBeenCalledTimes(1);
+    stop();
+    // A newer driver already owns this diagnostic. The old delivery has no
+    // authority to clear or replace it after its effect has been cleaned up.
+    useOverlayRuntimeStore.setState({ error: "The current overlay attempt failed. Retry." });
+    if (result === "success") pending.resolve();
+    else pending.reject(new Error("old delivery failed"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useOverlayRuntimeStore.getState().error).toBe("The current overlay attempt failed. Retry.");
   });
 
   it("resumes after a failed metrics sample", async () => {
