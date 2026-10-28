@@ -3,6 +3,8 @@ use serde::Serialize;
 use swifttunnel_core::roblox_library::{GameEntry, GameLibrary, RobloxClient, library_path};
 use tauri::{Emitter, State};
 
+mod metadata;
+
 pub const LIBRARY_CHANGED: &str = "roblox-library-changed";
 
 /// Library writes hold the state lock through the atomic save. Both acquiring
@@ -137,9 +139,7 @@ pub async fn games_refresh_metadata(
             .library()?
             .entries
             .iter()
-            .filter(|e| {
-                e.icon_url.is_none() || e.universe_id.is_none() || e.root_place_id.is_none()
-            })
+            .filter(|entry| metadata::needed(entry))
             .map(|e| (e.place_id.clone(), e.client))
             .collect())
     })
@@ -539,76 +539,46 @@ pub async fn refresh_name(
         return Ok(false);
     };
     let lookup_place = place_id.to_owned();
-    let needs_name = library_task(state.games.clone(), move |games| {
-        Ok(games.library()?.entries.iter().any(|e| {
-            e.place_id == lookup_place
-                && e.client == client
-                && (e.name == format!("Place {lookup_place}")
-                    || e.icon_url.is_none()
-                    || e.universe_id.is_none()
-                    || e.root_place_id.is_none())
-        }))
+    let entry = library_task(state.games.clone(), move |games| {
+        Ok(games
+            .library()?
+            .entries
+            .iter()
+            .find(|entry| {
+                entry.place_id == lookup_place && entry.client == client && metadata::needed(entry)
+            })
+            .cloned())
     })
     .await?;
-    if !needs_name {
+    let Some(entry) = entry else {
         return Ok(false);
-    }
+    };
     let http = metadata_http_client()?;
-    let response = http
-        .get(format!(
-            "https://apis.roblox.com/universes/v1/places/{place_id}/universe"
-        ))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    let bytes = swifttunnel_core::http_body::read_bounded(response, 64 * 1024, "game name").await?;
-    let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let universe = data
-        .get("universeId")
-        .and_then(|id| id.as_u64())
-        .ok_or("Game name is unavailable.")?;
-    let response = http
-        .get(format!(
-            "https://games.roblox.com/v1/games?universeIds={universe}"
-        ))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    let bytes = swifttunnel_core::http_body::read_bounded(response, 64 * 1024, "game name").await?;
-    let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    let root_place = data
-        .get("data")
-        .and_then(|data| data.get(0))
-        .and_then(|data| data.get("rootPlaceId"))
-        .and_then(|id| id.as_u64())
-        .map(|id| id.to_string());
-    let name = data
-        .get("data")
-        .and_then(|d| d.get(0))
-        .and_then(|d| d.get("name"))
-        .and_then(|n| n.as_str())
-        .ok_or("Game name is unavailable.")?;
-    let icon = async {
-        let response = http.get(format!("https://thumbnails.roblox.com/v1/games/icons?universeIds={universe}&size=256x256&format=Png&isCircular=false"))
-            .send().await.ok()?.error_for_status().ok()?;
-        let bytes = swifttunnel_core::http_body::read_bounded(response, 32 * 1024, "game icon").await.ok()?;
-        let data: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        data.get("data")?.get(0)?.get("imageUrl")?.as_str().map(str::to_string)
-    }.await;
+    let Some(details) = metadata::resolve(&entry, |url, limit| async move {
+        let response = http
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .error_for_status()
+            .map_err(|e| e.to_string())?;
+        let bytes =
+            swifttunnel_core::http_body::read_bounded(response, limit, "game details").await?;
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+    })
+    .await?
+    else {
+        return Ok(false);
+    };
     let place_id = place_id.to_owned();
-    let name = name.to_owned();
     library_task(state.games.clone(), move |games| {
         games.mutate(|lib| {
-            lib.set_universe(&place_id, client, &universe.to_string());
-            if let Some(root) = root_place {
+            lib.set_universe(&place_id, client, &details.universe);
+            if let Some(root) = details.root_place {
                 lib.set_root_place(&place_id, client, &root);
             }
-            lib.set_name(&place_id, client, &name);
-            if let Some(icon) = icon {
+            lib.set_name(&place_id, client, &details.name);
+            if let Some(icon) = details.icon {
                 lib.set_icon(&place_id, client, &icon);
             }
             Ok(())
