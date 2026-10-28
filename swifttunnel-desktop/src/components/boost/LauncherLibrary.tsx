@@ -64,6 +64,7 @@ export function GameLibraryPanel() {
   const [input, setInput] = useState("");
   const [addClient, setAddClient] = useState<RobloxClient>("standard");
   const [adding, setAdding] = useState(false);
+  const actionRunning = useRef(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -88,10 +89,14 @@ export function GameLibraryPanel() {
   },[pendingAction,library,busy]);
 
   async function run(action: () => Promise<unknown>, after?: string) {
+    // React's disabled state is committed after the handler returns. Admit
+    // synchronously too, and keep one owner through planning, launch and refresh.
+    if (actionRunning.current) return;
+    actionRunning.current = true;
     setBusy(true); setError(null); setNotice(null);
     try { await action(); await refresh(); if (after) setNotice(after); }
     catch (error) { setError(formatErrorMessage(error)); }
-    finally { setBusy(false); setProgress(null); }
+    finally { actionRunning.current = false; setBusy(false); setProgress(null); }
   }
   async function addFavourite() {
     const place = parsePlaceInput(input);
@@ -105,37 +110,42 @@ export function GameLibraryPanel() {
       ?? { place_id: previous.place_id, client: previous.client, name: `Place ${previous.place_id}`, job_id: previous.job_id, favourite: false, last_played: null };
     await run(async () => {
       await gamesDismissRecovery();
-      await prepare(entry, previous.job_id, null, false);
+      await prepareLaunch(entry, previous.job_id, null, false);
     });
   }
   async function launch(entry: RobloxGameEntry, plan: GameLaunchPlan, close: boolean, safe=false) {
-    setReview(null);
     await run(async () => {
-      if (close) {
-        setProgress("Closing the current Roblox client...");
-        await boostCloseRoblox();
-        if ((await boostGetMetrics()).roblox_running) throw new Error("Roblox is still closing. Wait a moment, then try Play again.");
-      }
-      await executeGameLaunch(plan, {
-        connect: requested => prepareGameConnection(requested, () => setProgress(plan.datacenter ? `Connecting SwiftTunnel to ${plan.datacenter.city}...` : "Preparing your SwiftTunnel connection...")),
-        launch: async allowUnverified => {
-          setProgress(plan.datacenter ? `Opening Roblox in ${plan.datacenter.city}...` : "Opening Roblox...");
-          await gamesLaunch(plan.place_id ?? entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, allowUnverified, safe);
-        },
-      });
+      setReview(null);
+      await launchGame(entry, plan, close, safe);
+    });
+  }
+  async function launchGame(entry: RobloxGameEntry, plan: GameLaunchPlan, close: boolean, safe: boolean) {
+    if (close) {
+      setProgress("Closing the current Roblox client...");
+      await boostCloseRoblox();
+      if ((await boostGetMetrics()).roblox_running) throw new Error("Roblox is still closing. Wait a moment, then try Play again.");
+    }
+    await executeGameLaunch(plan, {
+      connect: requested => prepareGameConnection(requested, () => setProgress(plan.datacenter ? `Connecting SwiftTunnel to ${plan.datacenter.city}...` : "Preparing your SwiftTunnel connection...")),
+      launch: async allowUnverified => {
+        setProgress(plan.datacenter ? `Opening Roblox in ${plan.datacenter.city}...` : "Opening Roblox...");
+        await gamesLaunch(plan.place_id ?? entry.place_id, entry.client, plan.job_id, plan.datacenter?.id ?? null, allowUnverified, safe);
+      },
     });
   }
   async function prepare(entry: RobloxGameEntry, job: string | null = null, center: number | null = null, preferred = true, safe=false) {
+    await run(() => prepareLaunch(entry, job, center, preferred, safe));
+  }
+  async function prepareLaunch(entry: RobloxGameEntry, job: string | null, center: number | null, preferred: boolean, safe=false) {
     setFailedEntry(null);
-    setBusy(true); setError(null); setNotice(null); setProgress("Checking the game and server...");
+    setProgress("Checking the game and server...");
     try {
       const [plan, metrics] = await Promise.all([gamesLaunchPlan(entry.place_id, entry.client, job, center, preferred), boostGetMetrics()]);
       verifyGameLaunchLocation(plan, job, center, preferred);
       const blocked = plan.availability === "full" || plan.availability === "unavailable";
       if (blocked || plan.job_id && plan.availability === "unknown" || metrics.roblox_running) setReview({ entry, plan, running: metrics.roblox_running, blocked, safe });
-      else await launch(entry, plan, false, safe);
-    } catch (error) { setError(formatErrorMessage(error)); setFailedEntry(entry); }
-    finally { setBusy(false); setProgress(null); }
+      else await launchGame(entry, plan, false, safe);
+    } catch (error) { setFailedEntry(entry); throw error; }
   }
   const entries = library?.entries ?? [];
   const current = library?.current;
