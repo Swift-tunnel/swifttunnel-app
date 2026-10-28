@@ -39,6 +39,7 @@ import {
   normalizeWindowState,
 } from "./lib/windowState";
 import type { TabId } from "./lib/types";
+import { createWindowStateSaver } from "./lib/windowStateSaver";
 
 // Connect is the startup screen. Optional pages are loaded on first use so
 // Games, FastFlags and driver editors do not all parse during every launch.
@@ -355,19 +356,15 @@ function App() {
       unlisteners.push(unlisten);
     };
 
-    const persistWindowState = async () => {
-      if (disposed) return;
-
-      try {
+    const windowStateSaver = createWindowStateSaver({
+      read: async () => {
         const [pos, size, maximized, minimized] = await Promise.all([
           appWindow.outerPosition(),
           appWindow.outerSize(),
           appWindow.isMaximized(),
           appWindow.isMinimized(),
         ]);
-        if (disposed) return;
-        if (minimized) return;
-        if (!isPersistableWindowSize(size.width, size.height)) return;
+        if (minimized || !isPersistableWindowSize(size.width, size.height)) return null;
 
         const nextWindowState = normalizeWindowState({
           x: pos.x,
@@ -377,25 +374,28 @@ function App() {
           maximized,
         });
 
-        updateSettings({
-          window_state: nextWindowState,
-        });
+        return nextWindowState;
+      },
+      persist: async (windowState) => {
+        updateSettings({ window_state: windowState });
         await saveSettings();
-      } catch (error) {
+      },
+      onError: (error) => {
         reportError("Failed to persist window state", error, {
           dedupeKey: "app-window-persist",
         });
-      }
-    };
+      },
+    });
 
     const schedulePersist = () => {
       if (disposed) return;
+      windowStateSaver.invalidate();
 
       if (saveTimer !== null) {
         window.clearTimeout(saveTimer);
       }
       saveTimer = window.setTimeout(() => {
-        void persistWindowState();
+        void windowStateSaver.save();
       }, 300);
     };
 
@@ -467,7 +467,7 @@ function App() {
       addUnlistener(
         await appWindow.onCloseRequested(
           createCloseToTrayHandler({
-            persistWindowState,
+            persistWindowState: windowStateSaver.save,
             hide: () => appWindow.hide(),
             close: () => appWindow.close(),
             shouldMinimizeToTray: () =>
@@ -482,6 +482,7 @@ function App() {
 
     return () => {
       disposed = true;
+      windowStateSaver.dispose();
       if (saveTimer !== null) {
         window.clearTimeout(saveTimer);
       }
