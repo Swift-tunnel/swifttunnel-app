@@ -48,6 +48,14 @@ import type {
 } from "./types";
 
 export const gamesGetLibrary = () => invoke<RobloxLibrarySnapshot>("games_get_library");
+let pendingOverlayWindow: Promise<void> | null = null;
+export const ensureOverlayWindow = (): Promise<void> => {
+  // A settings change can restart the driver while native creation is still
+  // running. Share that work without permanently caching the window's existence.
+  pendingOverlayWindow ??= invoke<void>("ensure_overlay_window", { label: "overlay-stats" })
+    .finally(() => { pendingOverlayWindow = null; });
+  return pendingOverlayWindow;
+};
 let pendingLauncherSave: Promise<void> | null = null;
 async function waitForLauncherSave() {
   while (pendingLauncherSave) await pendingLauncherSave;

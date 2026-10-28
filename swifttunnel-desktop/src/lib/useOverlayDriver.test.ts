@@ -62,6 +62,7 @@ describe("overlay polling under slow native calls", () => {
   beforeEach(() => {
     vi.useFakeTimers({toFake:["setTimeout","clearTimeout","setInterval","clearInterval","Date","performance"]});
     vi.stubGlobal("window", globalThis);
+    vi.stubGlobal("location", { search: "" });
     h.effects.length = 0;
     h.overlay.enabled = true;
     h.overlay.metrics=["ping","upload"];
@@ -89,6 +90,21 @@ describe("overlay polling under slow native calls", () => {
     const calls = h.push.mock.calls.length;
     stop();
     expect(calls).toBe(1);
+  });
+
+  it("shares window creation when the render effect restarts before it finishes", async () => {
+    const pending = deferred();
+    h.invoke.mockImplementation(command => command === "ensure_overlay_window" ? pending.promise : Promise.resolve());
+    start()();
+    const index = h.effects.length;
+    useOverlayDriver();
+    const stop = h.effects[index]() as () => void;
+    const creations = h.invoke.mock.calls.filter(call => call[0] === "ensure_overlay_window").length;
+    pending.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+    expect(creations).toBe(1);
+    expect(h.push).toHaveBeenCalledTimes(1);
   });
 
   it("forces a hovered or dragged overlay to hide when the player closes", async () => {

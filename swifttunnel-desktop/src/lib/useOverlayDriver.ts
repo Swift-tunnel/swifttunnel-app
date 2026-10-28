@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { ensureOverlayWindow } from "./commands";
 import { useBoostStore } from "../stores/boostStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useVpnStore } from "../stores/vpnStore";
@@ -85,9 +86,7 @@ export function useOverlayDriver() {
     // not during startup. It costs its own WebView2 renderer process (~60MB
     // measured) and the feature is off by default. Creation failures surface
     // in the Overlay tab instead of silently polling a missing window.
-    const overlayWindowReady = invoke("ensure_overlay_window", {
-      label: "overlay-stats",
-    })
+    const overlayWindowReady = ensureOverlayWindow()
       .then(() => true)
       .catch(() => {
         if (disposed) return false;

@@ -30,10 +30,23 @@ import {
   vpnListNetworkAdapters,
   gamesLaunch,
   gamesNvidiaProfile,
+  ensureOverlayWindow,
 } from "./commands";
 import { DEFAULT_SETTINGS } from "./settings";
 
 describe("lib/commands", () => {
+  it("shares overlay creation but retries a failed or completed native request", async () => {
+    let reject!: (error: Error) => void;
+    invoke.mockReturnValueOnce(new Promise<void>((_, fail) => { reject = fail; }));
+    const first = ensureOverlayWindow(), second = ensureOverlayWindow();
+    expect(first).toBe(second);
+    reject(new Error("WebView creation failed"));
+    await expect(first).rejects.toThrow("WebView creation failed");
+    invoke.mockResolvedValue(undefined);
+    await ensureOverlayWindow();
+    await ensureOverlayWindow();
+    expect(invoke.mock.calls.filter(call => call[0] === "ensure_overlay_window")).toHaveLength(3);
+  });
   it("passes Safe launch as a one-time native request instead of saving it to the game profile", async () => {
     invoke.mockResolvedValue(undefined);
     await gamesLaunch("1818","standard",null,null,false,true);
