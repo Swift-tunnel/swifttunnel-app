@@ -35,6 +35,7 @@ const GOODBYEDPI_MODE_STARTUP_WAIT: Duration = Duration::from_secs(2);
 /// relay is the primary bypass path, so a slow optional download must not
 /// consume the connection's deadline before relay fallback can proceed.
 const GOODBYEDPI_TOTAL_BUDGET: Duration = Duration::from_secs(8);
+const COMPONENT_RETRY_DELAY: Duration = Duration::from_secs(60);
 const ROBLOX_REACHABILITY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,16 +296,49 @@ async fn ensure_goodbyedpi_component(arch: GoodbyeDpiNativeArch) -> Result<(), S
     };
 
     let component = goodbyedpi_component(component_arch);
-    log::info!(
-        "Fetching the GoodbyeDPI helper ({} {}) for Bypass country bans",
-        component.id,
-        component.version
-    );
+    static RETRY: parking_lot::Mutex<Option<Instant>> = parking_lot::Mutex::new(None);
+    component_download_with_backoff(&RETRY, Instant::now(), async {
+        log::info!(
+            "Fetching the GoodbyeDPI helper ({} {}) for Bypass country bans",
+            component.id,
+            component.version
+        );
+        ensure_installed(&component)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })
+    .await
+}
 
-    ensure_installed(&component)
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+async fn component_download_with_backoff<T>(
+    retry: &parking_lot::Mutex<Option<Instant>>,
+    now: Instant,
+    download: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let next = now + COMPONENT_RETRY_DELAY;
+    {
+        let mut retry = retry.lock();
+        if let Some(previous) = *retry
+            && previous > now
+        {
+            let seconds = (previous - now).as_secs().max(1);
+            return Err(format!(
+                "Optional bypass helper download paused for {seconds}s after its last attempt"
+            ));
+        }
+        // Reserve before awaiting: the outer connect budget can cancel a slow
+        // download. Retain this delay on cancellation as well as failure.
+        *retry = Some(next);
+    }
+    let result = download.await;
+    if result.is_ok() {
+        let mut retry = retry.lock();
+        if *retry == Some(next) {
+            *retry = None;
+        }
+    }
+    result
 }
 
 /// Developer override for the helper path. Debug builds only.
@@ -609,6 +643,74 @@ fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unavailable_components_do_not_restart_downloads_on_every_connection() {
+        let retry = parking_lot::Mutex::new(None);
+        let now = Instant::now();
+        let calls = std::cell::Cell::new(0);
+        let request = || async {
+            calls.set(calls.get() + 1);
+            Err::<(), _>("fixture HTTP 404".to_string())
+        };
+        assert_eq!(
+            component_download_with_backoff(&retry, now, request()).await,
+            Err("fixture HTTP 404".into())
+        );
+        let next =
+            component_download_with_backoff(&retry, now + Duration::from_secs(2), request()).await;
+        assert!(next.unwrap_err().contains("paused"));
+        assert_eq!(
+            calls.get(),
+            1,
+            "a failed optional helper must not delay each connection"
+        );
+        assert!(
+            component_download_with_backoff(&retry, now + COMPONENT_RETRY_DELAY, async { Ok(()) })
+                .await
+                .is_ok()
+        );
+        // Success clears the cooldown, so a later missing helper can be repaired.
+        assert!(
+            component_download_with_backoff(&retry, now + COMPONENT_RETRY_DELAY, async { Ok(()) })
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_component_downloads_keep_their_retry_delay_and_do_not_poll_retries() {
+        use std::future::Future;
+        let retry = parking_lot::Mutex::new(None);
+        let now = Instant::now();
+        let calls = std::cell::Cell::new(0);
+        let mut first = Box::pin(component_download_with_backoff(&retry, now, async {
+            calls.set(calls.get() + 1);
+            std::future::pending::<Result<(), String>>().await
+        }));
+        std::future::poll_fn(|context| {
+            assert!(first.as_mut().poll(context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(first); // Models the outer startup deadline cancelling the download.
+        let result = component_download_with_backoff(&retry, now + Duration::from_secs(8), async {
+            calls.set(calls.get() + 1);
+            Ok(())
+        })
+        .await;
+        assert!(result.unwrap_err().contains("paused"));
+        assert_eq!(
+            calls.get(),
+            1,
+            "cooldown must refuse the future before network work starts"
+        );
+        assert!(
+            component_download_with_backoff(&retry, now + COMPONENT_RETRY_DELAY, async { Ok(()) })
+                .await
+                .is_ok()
+        );
+    }
 
     struct HostlistFixture(PathBuf);
     impl Drop for HostlistFixture {
