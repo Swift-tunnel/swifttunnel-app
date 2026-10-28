@@ -6,6 +6,8 @@ interface DialogProps {
   open: boolean;
   onClose: () => void;
   title: string;
+  /** Context such as a game name, kept verbatim by UI translation. */
+  titleSuffix?: string;
   description?: string;
   children: ReactNode;
   maxWidth?: number;
@@ -17,6 +19,7 @@ export function Dialog({
   open,
   onClose,
   title,
+  titleSuffix,
   description,
   children,
   maxWidth = 480,
@@ -63,7 +66,7 @@ export function Dialog({
         ref={dialog}
         tabIndex={-1}
         aria-modal
-        aria-label={title}
+        aria-label={titleSuffix ? `${title} · ${titleSuffix}` : title}
         onClick={(e) => e.stopPropagation()}
         className="max-h-[calc(100vh-3rem)] w-full overflow-y-auto rounded-[var(--radius-card)]"
         style={{
@@ -78,7 +81,7 @@ export function Dialog({
         >
           <div>
             <h2 className="text-[14px] font-semibold text-text-primary">
-              {title}
+              {title}{titleSuffix && <> · <span data-no-translate>{titleSuffix}</span></>}
             </h2>
             {description && (
               <p className="mt-0.5 text-[12px] text-text-muted">{description}</p>

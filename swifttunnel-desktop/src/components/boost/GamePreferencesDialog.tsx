@@ -62,7 +62,7 @@ export function GamePreferencesDialog({ entry, onClose, onSaved }: { entry: Robl
     ...(preferences.monitor && !displays.some(d => d.id === preferences.monitor) ? [{ id: preferences.monitor, label: "Saved display", detail: "Unavailable, uses primary" }] : []),
   ];
 
-  return <Dialog flush maxWidth={520} open={!!entry} onClose={() => { if (!busy) onClose(); }} title={`Settings for ${entry?.name ?? "this game"}`} description="Only for this game. FPS, graphics and FastFlags go back to normal when Roblox closes.">
+  return <Dialog flush maxWidth={520} open={!!entry} onClose={() => { if (!busy) onClose(); }} title="Game settings" titleSuffix={entry?.name} description="Only for this game. FPS, graphics and FastFlags go back to normal when Roblox closes.">
     <div className="flex max-h-[calc(100vh-13rem)] flex-col gap-4 overflow-y-auto px-5 py-4">
       {error && <ErrorBanner tone="error">{error}</ErrorBanner>}
       {catalogError && <p className="text-[11.5px] leading-relaxed text-text-muted">Locations could not load. Everything else can still be changed.</p>}

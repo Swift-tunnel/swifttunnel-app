@@ -48,6 +48,29 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+it("keeps messages containing account addresses and local file paths out of translation requests", async () => {
+  const sensitive = [
+    String.raw`Game shortcut saved: C:\Users\PrivatePlayer\Desktop\DOORS.lnk`,
+    String.raw`Couldn't open \\private-server\PlayerShare\settings.json. Try again.`,
+    "Signed in as private-player@example.com",
+  ];
+  nodes.push(...sensitive.map(value => text(value)), text("Save settings"));
+  const i18n = await import("./i18n");
+  await i18n.applyLanguage("fr");
+  const requested = invoke.mock.calls.map(([, args]) => args.text).join("\n");
+  expect(requested).not.toContain("PrivatePlayer");
+  expect(requested).not.toContain("private-server");
+  expect(requested).not.toContain("private-player@example.com");
+  expect(nodes.slice(0, 3).map(node => node.nodeValue)).toEqual(sensitive);
+  expect(nodes[3].nodeValue).toBe("FR:Save settings");
+  // React may reuse a text node that the translator already knows.
+  invoke.mockClear();
+  nodes[3].nodeValue = sensitive[0];
+  await i18n.applyLanguage("fr");
+  expect(invoke).not.toHaveBeenCalled();
+  expect(nodes[3].nodeValue).toBe(sensitive[0]);
+});
+
 it("splits long labels by encoded bytes instead of poisoning a whole oversized batch", async () => {
   for (let i = 0; i < 40; i++) nodes.push(text(`Setting ${i}: ` + "x".repeat(1200)));
   invoke.mockImplementation(async (_command, args) => {

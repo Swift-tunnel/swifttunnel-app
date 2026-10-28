@@ -131,6 +131,9 @@ function persistCache(lang: string) {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VERSION_RE = /^v?\d+(\.\d+)+$/i;
 const URL_RE = /^(https?:\/\/|www\.)\S+$/i;
+// Status/error messages may include the player's account or Windows username.
+// These are local data, even when embedded in otherwise translatable copy.
+const LOCAL_PATH_RE = /(?:\b[a-z]:[\\/]|\\\\[^\\\s]+\\)/i;
 // Live counters are data, not sentences. Translating each new throughput,
 // ping or quota value creates continuous requests and grows the persisted
 // cache during a connection. Keep the units as rendered by the formatter.
@@ -148,6 +151,7 @@ function translatable(value: string): boolean {
   if (value.length > MAX_TRANSLATION_SOURCE) return false;
   const t = value.trim();
   if (t.length < 2) return false;
+  if (t.includes("@") || LOCAL_PATH_RE.test(t)) return false;
   if (MEASUREMENT_RE.test(t)) return false;
   if (!(/\p{L}/u.test(t) && /[a-zA-Z]/.test(t))) return false;
   return !isProtectedIdentifier(t);
