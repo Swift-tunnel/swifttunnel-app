@@ -671,8 +671,6 @@ pub fn run() {
                 restore_main_window(&window);
             }
         }))
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::games::games_get_library,
             commands::games::games_dismiss_recovery,

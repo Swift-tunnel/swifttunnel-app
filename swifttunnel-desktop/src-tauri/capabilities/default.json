@@ -23,8 +23,6 @@
     "core:window:allow-outer-size",
     "core:event:allow-emit",
     "core:event:allow-emit-to",
-    "core:event:allow-listen",
-    "shell:allow-open",
-    "updater:default"
+    "core:event:allow-listen"
   ]
 }
