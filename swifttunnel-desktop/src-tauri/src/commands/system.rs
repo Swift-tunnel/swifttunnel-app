@@ -686,19 +686,11 @@ fn build_msiexec_install_args(
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
-const STARTUP_REPAIR_RELAUNCHED_ENV: &str = "SWIFTTUNNEL_STARTUP_REPAIR_RELAUNCHED";
-#[cfg(windows)]
 const WAIT_RELAUNCH_ARG: &str = "--wait-relaunch";
-#[cfg(windows)]
-const STARTUP_REPAIR_RELAUNCHED_ARG: &str = "--startup-repair-relaunched";
 
 #[cfg(windows)]
-fn restart_as_admin_args(current_pid: u32, mark_startup_repair_relaunch: bool) -> String {
-    let mut args = vec![WAIT_RELAUNCH_ARG.to_string(), current_pid.to_string()];
-    if mark_startup_repair_relaunch {
-        args.push(STARTUP_REPAIR_RELAUNCHED_ARG.to_string());
-    }
+fn restart_as_admin_args(current_pid: u32) -> String {
+    let args = [WAIT_RELAUNCH_ARG.to_string(), current_pid.to_string()];
     args.iter()
         .map(|arg| swifttunnel_core::utils::quote_windows_arg(arg))
         .collect::<Vec<_>>()
@@ -706,7 +698,7 @@ fn restart_as_admin_args(current_pid: u32, mark_startup_repair_relaunch: bool) -
 }
 
 #[cfg(windows)]
-fn launch_elevated_swifttunnel(exe_path: &str, args: &str) -> Result<(), String> {
+fn launch_elevated_swifttunnel(exe_path: &Path, args: &str) -> Result<(), String> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::UI::Shell::ShellExecuteW;
@@ -714,7 +706,7 @@ fn launch_elevated_swifttunnel(exe_path: &str, args: &str) -> Result<(), String>
     use windows::core::PCWSTR;
 
     let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
-    let file: Vec<u16> = OsStr::new(exe_path).encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = exe_path.as_os_str().encode_wide().chain(Some(0)).collect();
     let params: Vec<u16> = OsStr::new(args).encode_wide().chain(Some(0)).collect();
 
     let result = unsafe {
@@ -2837,18 +2829,10 @@ mod tests {
 
     #[test]
     fn restart_as_admin_args_waits_for_current_pid_without_powershell() {
-        let args = restart_as_admin_args(4242, false);
+        let args = restart_as_admin_args(4242);
         assert!(args.contains("--wait-relaunch"));
         assert!(args.contains("4242"));
         assert!(!args.to_ascii_lowercase().contains("powershell"));
-    }
-
-    #[test]
-    fn restart_as_admin_args_can_mark_startup_repair_relaunch() {
-        let args = restart_as_admin_args(4242, true);
-        assert!(args.contains("--wait-relaunch"));
-        assert!(args.contains("4242"));
-        assert!(args.contains("--startup-repair-relaunched"));
     }
 }
 
@@ -3546,23 +3530,10 @@ pub async fn system_open_url(url: String) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-#[allow(dead_code)]
-fn startup_repair_relaunch_already_attempted() -> bool {
-    std::env::var_os(STARTUP_REPAIR_RELAUNCHED_ENV).is_some()
-        || std::env::args_os()
-            .skip(1)
-            .any(|arg| arg == STARTUP_REPAIR_RELAUNCHED_ARG)
-}
-
-#[cfg(windows)]
-async fn launch_restart_helper(
-    app: &tauri::AppHandle,
-    child_env: Option<(&'static str, &'static str)>,
-) -> Result<(), String> {
-    let exe_path =
+async fn launch_restart_helper(app: &tauri::AppHandle) -> Result<(), String> {
+    let exe =
         std::env::current_exe().map_err(|e| format!("Failed to resolve executable: {}", e))?;
-    let exe = exe_path.to_string_lossy().to_string();
-    let args = restart_as_admin_args(std::process::id(), child_env.is_some());
+    let args = restart_as_admin_args(std::process::id());
 
     tauri::async_runtime::spawn_blocking(move || launch_elevated_swifttunnel(&exe, &args))
         .await
@@ -3572,36 +3543,13 @@ async fn launch_restart_helper(
     Ok(())
 }
 
-#[allow(dead_code)]
-pub(crate) async fn system_relaunch_after_startup_repair(
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        if startup_repair_relaunch_already_attempted() {
-            log::info!(
-                "Startup repair relaunch skipped because this process already came from the relaunch helper"
-            );
-            return Ok(());
-        }
-
-        launch_restart_helper(&app, Some((STARTUP_REPAIR_RELAUNCHED_ENV, "1"))).await
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = app;
-        Ok(())
-    }
-}
-
 #[tauri::command]
 pub async fn system_restart_as_admin(app: tauri::AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     {
         // Repair callers need a new process even when this one is elevated.
         // Returning success without relaunching leaves their restart UI waiting.
-        launch_restart_helper(&app, None).await
+        launch_restart_helper(&app).await
     }
 
     #[cfg(not(windows))]
