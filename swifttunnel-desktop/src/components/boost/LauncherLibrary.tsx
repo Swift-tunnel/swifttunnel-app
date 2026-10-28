@@ -64,8 +64,8 @@ export function GameLibraryPanel() {
   const [input, setInput] = useState("");
   const [addClient, setAddClient] = useState<RobloxClient>("standard");
   const [adding, setAdding] = useState(false);
-  const actionRunning = useRef(false);
-  const [busy, setBusy] = useState(false);
+  const busy = useGameLibraryStore(s => s.actionBusy);
+  const actionError = useGameLibraryStore(s => s.actionError);
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -89,14 +89,14 @@ export function GameLibraryPanel() {
   },[pendingAction,library,busy]);
 
   async function run(action: () => Promise<unknown>, after?: string) {
-    // React's disabled state is committed after the handler returns. Admit
-    // synchronously too, and keep one owner through planning, launch and refresh.
-    if (actionRunning.current) return;
-    actionRunning.current = true;
-    setBusy(true); setError(null); setNotice(null);
+    // Admission outlives this page. Tab changes cannot start a competing
+    // action while the old handler is still planning, connecting or refreshing.
+    if (useGameLibraryStore.getState().actionBusy) return;
+    useGameLibraryStore.setState({ actionBusy: true, actionError: null });
+    setError(null); setNotice(null);
     try { await action(); await refresh(); if (after) setNotice(after); }
-    catch (error) { setError(formatErrorMessage(error)); }
-    finally { actionRunning.current = false; setBusy(false); setProgress(null); }
+    catch (error) { useGameLibraryStore.setState({ actionError: formatErrorMessage(error) }); }
+    finally { useGameLibraryStore.setState({ actionBusy: false }); setProgress(null); }
   }
   async function addFavourite() {
     const place = parsePlaceInput(input);
@@ -154,9 +154,10 @@ export function GameLibraryPanel() {
   const locked = busy || !!library?.launch_pending;
 
   return <div className="flex flex-col gap-4">
-    {(error || loadError || library?.warning) && <ErrorBanner tone="error">{error || loadError || library?.warning}</ErrorBanner>}
+    {(error || actionError || loadError || library?.warning) && <ErrorBanner tone="error">{error || actionError || loadError || library?.warning}</ErrorBanner>}
     {failedEntry && <Button size="sm" variant="secondary" className="self-start" title="Ignores this game's preferred location." disabled={busy} onClick={() => void prepare(failedEntry, null, null, false)}>Play in any location</Button>}
     {(notice || progress) && <Notice busy={!!progress}>{progress ?? notice}</Notice>}
+    {busy && !progress && !notice && <Notice busy>Finishing the previous game action...</Notice>}
     {library?.status && <Notice>{library.status}</Notice>}
     {current && <section className="instrument relative isolate flex items-center gap-3.5 px-4 py-3.5"><Watermark icon="games" at="right" size={124} rotate={-14} opacity={.05} />
       {active && <Artwork entry={active} />}

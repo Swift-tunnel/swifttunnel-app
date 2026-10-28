@@ -16,6 +16,8 @@ interface FavouriteWrite {
 }
 const favourites = new Map<string, FavouriteWrite>();
 interface GameLibraryStore {
+  actionBusy: boolean;
+  actionError: string | null;
   pendingAction: string | null;
   requestAction: (action: string | null) => void;
   library: RobloxLibrarySnapshot | null;
@@ -25,6 +27,8 @@ interface GameLibraryStore {
   setFavourite: (placeId: string, client: RobloxClient, favourite: boolean) => Promise<void>;
 }
 export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
+  actionBusy: false,
+  actionError: null,
   pendingAction:null,requestAction:pendingAction=>set({pendingAction}),
   library: null, error: null, loading: false,
   refresh: () => {

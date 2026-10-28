@@ -8,11 +8,11 @@ vi.mock("../../stores/gameLibraryStore", async () => {
   const actual = await vi.importActual<typeof import("../../stores/gameLibraryStore")>("../../stores/gameLibraryStore");
   // Static rendering uses Zustand's initial server snapshot. Read the test's
   // current fixture instead so this exercises the loaded and failed UI states.
-  return { useGameLibraryStore: Object.assign(() => actual.useGameLibraryStore.getState(), actual.useGameLibraryStore) };
+  return { useGameLibraryStore: Object.assign((select?: (state: ReturnType<typeof actual.useGameLibraryStore.getState>) => unknown) => select ? select(actual.useGameLibraryStore.getState()) : actual.useGameLibraryStore.getState(), actual.useGameLibraryStore) };
 });
 
 vi.mock("../../lib/commands", () => ({ gamesGetLibrary: vi.fn(), gamesAddFavourite: vi.fn(), gamesForget: vi.fn(), gamesSetFavourite: vi.fn(), gamesSetNotifications: vi.fn() }));
-afterEach(() => { useGameLibraryStore.setState({ library: null, error: null, loading: false }); useVpnStore.setState({ gameRoute: null }); });
+afterEach(() => { useGameLibraryStore.setState({ library: null, error: null, loading: false, actionBusy: false, actionError: null }); useVpnStore.setState({ gameRoute: null }); });
 describe("game library panel", () => {
   it("offers rejoin and copy-link actions for both installed Roblox clients", () => {
     useGameLibraryStore.setState({ library: { current: null, warning: null, notify_joins: false, entries: [

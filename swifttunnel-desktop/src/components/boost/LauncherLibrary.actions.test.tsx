@@ -6,6 +6,8 @@ import type { GameLaunchPlan, RobloxLibrarySnapshot } from "../../lib/types";
 const h = vi.hoisted(() => ({
   hooks: [] as unknown[], cursor: 0,
   library: null as RobloxLibrarySnapshot | null,
+  actionBusy: false,
+  actionError: null as string | null,
   refresh: vi.fn(), plan: vi.fn(), metrics: vi.fn(), launch: vi.fn(), dismiss: vi.fn(),
 }));
 vi.mock("react", async () => ({
@@ -13,8 +15,9 @@ vi.mock("react", async () => ({
   useEffect: () => {},
   useState: (initial: unknown) => {
     const index = h.cursor++;
-    if (!(index in h.hooks)) h.hooks[index] = initial;
-    return [h.hooks[index], (next: unknown) => { h.hooks[index] = next; }];
+    const storage = h.hooks;
+    if (!(index in storage)) storage[index] = initial;
+    return [storage[index], (next: unknown) => { storage[index] = next; }];
   },
   useRef: (current: unknown) => {
     const index = h.cursor++;
@@ -24,9 +27,9 @@ vi.mock("react", async () => ({
 }));
 vi.mock("../../stores/gameLibraryStore", () => ({
   useGameLibraryStore: Object.assign((select?: (state: unknown) => unknown) => {
-    const state = { library: h.library, error: null, loading: false, refresh: h.refresh, pendingAction: null };
+    const state = { library: h.library, error: null, loading: false, refresh: h.refresh, pendingAction: null, actionBusy: h.actionBusy, actionError: h.actionError };
     return select ? select(state) : state;
-  }, { getState: () => ({ requestAction: vi.fn() }) }),
+  }, { getState: () => ({ requestAction: vi.fn(), actionBusy: h.actionBusy }), setState: (state: { actionBusy?: boolean; actionError?: string | null }) => { Object.assign(h, state); } }),
 }));
 vi.mock("../../stores/vpnStore", () => ({ useVpnStore: (select: (state: unknown) => unknown) => select({ gameRoute: null, state: "disconnected" }) }));
 vi.mock("../../lib/commands", () => ({
@@ -58,7 +61,7 @@ function deferred() {
 async function settle() { for (let i = 0; i < 20; i++) await Promise.resolve(); }
 
 beforeEach(() => {
-  h.hooks = []; h.cursor = 0;
+  h.hooks = []; h.cursor = 0; h.actionBusy = false; h.actionError = null;
   h.library = { current: null, warning: null, notify_joins: false, entries: [
     { place_id: "1818", name: "Crossroads", job_id: "old-job", client: "standard", last_played: 1, favourite: true },
   ] };
@@ -104,4 +107,19 @@ it("releases the action after failure and permits a later retry", async () => {
   expect(button(render(), "Play").disabled).toBe(false);
   button(render(), "Play").onClick(); await settle();
   expect(h.launch).toHaveBeenCalledTimes(1);
+});
+
+it("retains the admitted Play action when Games unmounts and mounts again", async () => {
+  const pending = deferred();
+  h.plan.mockImplementation(() => pending.promise.then(() => { throw new Error("Server lookup timed out. Try Play again."); }));
+  button(render(), "Play").onClick();
+  // Fresh component hook state, with the same app-wide library store.
+  h.hooks = [];
+  const returnedPlay = button(render(), "Play");
+  expect(returnedPlay.disabled).toBe(true);
+  returnedPlay.onClick();
+  expect(h.plan).toHaveBeenCalledTimes(1);
+  pending.resolve(); await settle();
+  expect(button(render(), "Play").disabled).toBe(false);
+  expect(nodes(render()).some(node => node.props.children === "Server lookup timed out. Try Play again.")).toBe(true);
 });
