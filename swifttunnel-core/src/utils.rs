@@ -1,9 +1,38 @@
 //! Utility functions for SwiftTunnel
 
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+/// Compare lexical path components without resolving links or parent traversal.
+/// Windows uses ordinal UTF-16 case comparison; other platforms stay exact.
+pub(crate) fn paths_match(left: &Path, right: &Path) -> bool {
+    let mut right = right.components();
+    left.components().all(|left| {
+        right
+            .next()
+            .is_some_and(|right| same_path_part(left.as_os_str(), right.as_os_str()))
+    }) && right.next().is_none()
+}
+
+pub(crate) fn same_path_part(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+        let left = left.encode_wide().collect::<Vec<_>>();
+        let right = right.encode_wide().collect::<Vec<_>>();
+        unsafe { CompareStringOrdinal(&left, &right, true) == CSTR_EQUAL }
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
 
 /// Keep synchronous OS/file work owned by its caller while allowing other
 /// tasks on a multithreaded runtime to continue. This does not cancel or put

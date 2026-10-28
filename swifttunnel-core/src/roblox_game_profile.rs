@@ -116,7 +116,10 @@ fn apply_flag(flag: &FlagOverride, restore: bool, allowed: &[PathBuf]) -> Result
     if restore && !flag.path.exists() {
         return Ok(());
     }
-    if !allowed.contains(&flag.path) {
+    if !allowed
+        .iter()
+        .any(|path| crate::utils::paths_match(path, &flag.path))
+    {
         log::warn!(
             "Game profile recovery flag path no longer matches an installed flag file: {}",
             flag.path.display()
@@ -462,7 +465,11 @@ fn restore_flags(
     // launch. Restore a copy only when it was created during this profile and
     // its entire contents still match our temporary file exactly.
     for path in &allowed {
-        if journal.flags.iter().any(|f| &f.path == path) {
+        if journal
+            .flags
+            .iter()
+            .any(|f| crate::utils::paths_match(&f.path, path))
+        {
             continue;
         }
         let created = fs::metadata(&path)
@@ -547,6 +554,35 @@ fn valid_flag_value(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_profile_recovery_accepts_the_same_file_with_different_casing() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "swift-profile-case-{:032x}",
+            rand::random::<u128>()
+        )));
+        fs::create_dir(&dir.0).unwrap();
+        let file = dir.0.join("ClientAppSettings.json");
+        fs::write(&file, format!(r#"{{"{QUALITY_FLAG}":5}}"#)).unwrap();
+        let flag = FlagOverride {
+            path: file.clone(),
+            before: serde_json::Value::from(10),
+            applied: Some(serde_json::Value::from(5)),
+            applied_hash: String::new(),
+        };
+        let allowed = [file.with_file_name("clientappsettings.JSON")];
+        apply_flag(&flag, true, &allowed).unwrap();
+        let restored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(restored[QUALITY_FLAG], 10);
+    }
 
     #[test]
     fn xml_only_profile_recovery_never_inspects_other_launchers_flags() {

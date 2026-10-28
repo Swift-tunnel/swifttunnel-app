@@ -1,4 +1,5 @@
 //! Temporary native-player flags. Other launchers' files are never changed.
+use crate::utils::{paths_match, same_path_part};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -126,20 +127,6 @@ fn allowed_in(base: &Path, path: &Path) -> bool {
     })
 }
 
-fn same_path_part(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::ffi::OsStrExt;
-        use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
-        let left = left.encode_wide().collect::<Vec<_>>();
-        let right = right.encode_wide().collect::<Vec<_>>();
-        unsafe { CompareStringOrdinal(&left, &right, true) == CSTR_EQUAL }
-    }
-    #[cfg(not(windows))]
-    {
-        left == right
-    }
-}
 pub fn prepare(player: &Path, flags: HashMap<String, String>) -> Result<(), String> {
     if !crate::roblox_game_profile::player_stopped() {
         return Err("Close Roblox before preparing launch flags.".into());
@@ -246,10 +233,12 @@ pub fn diagnostic() -> Result<Option<String>, String> {
     };
     if !journal.flags.is_empty()
         && let Ok(player) = crate::roblox_native_launch::official_player_for(client)
-        && journal
-            .entries
-            .iter()
-            .all(|entry| player.parent() != entry.path.parent().and_then(Path::parent))
+        && journal.entries.iter().all(|entry| {
+            match (player.parent(), entry.path.parent().and_then(Path::parent)) {
+                (Some(player), Some(saved)) => !paths_match(player, saved),
+                _ => true,
+            }
+        })
     {
         return Ok(Some(
             "Roblox updated during this launch. Press Play again to load your FastFlags.".into(),

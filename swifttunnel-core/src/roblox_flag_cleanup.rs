@@ -250,7 +250,11 @@ fn undo_in(paths: &[PathBuf], backups: &Path) -> Result<FlagCleanupReport, Strin
     let mut report = FlagCleanupReport::default();
     let mut remaining = Vec::new();
     for backup in manifest {
-        if !paths.contains(&backup.path) || !safe(&backup.path) {
+        if !paths
+            .iter()
+            .any(|path| crate::utils::paths_match(path, &backup.path))
+            || !safe(&backup.path)
+        {
             report.skipped.push(
                 "A flag file is no longer installed at its original location; its backup was kept."
                     .into(),
@@ -301,6 +305,37 @@ pub fn undo() -> Result<FlagCleanupReport, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn undo_accepts_file_casing_changes_but_not_a_different_file() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(
+            std::env::temp_dir().join(format!("swift-undo-case-{:032x}", rand::random::<u128>())),
+        );
+        fs::create_dir(&dir.0).unwrap();
+        let file = dir.0.join("ClientAppSettings.json");
+        let backups = dir.0.join("backups");
+        let original = br#"{"FFlagDebugSkyGray":true,"FFlagRetired":true}"#;
+        fs::write(&file, original).unwrap();
+        assert_eq!(
+            clean_in(&[file.clone()], &backups).unwrap().files_changed,
+            1
+        );
+        let unrelated = undo_in(&[file.with_file_name("OtherSettings.json")], &backups).unwrap();
+        assert_eq!(unrelated.files_changed, 0);
+        assert!(unrelated.can_undo);
+        let recovered =
+            undo_in(&[file.with_file_name("clientappsettings.JSON")], &backups).unwrap();
+        assert_eq!(recovered.files_changed, 1);
+        assert_eq!(fs::read(&file).unwrap(), original);
+        assert!(!backups.join("index.json").exists());
+    }
 
     #[test]
     fn cleanup_requires_confirmed_process_absence_and_keeps_scan_errors_in_the_log() {
