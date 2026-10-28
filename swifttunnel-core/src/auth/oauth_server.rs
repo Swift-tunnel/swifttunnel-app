@@ -85,7 +85,7 @@ impl OAuthServer {
         Self::start_with_listener(server, port, expected_state.to_string())
     }
 
-    fn start_with_listener(
+    pub(super) fn start_with_listener(
         server: TcpListener,
         port: u16,
         expected_state: String,

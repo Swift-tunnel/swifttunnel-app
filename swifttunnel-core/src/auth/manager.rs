@@ -736,6 +736,14 @@ impl AuthManager {
     ///
     /// Returns the OAuth state string for verification.
     pub fn start_google_sign_in(&self) -> Result<String, AuthError> {
+        self.start_google_sign_in_with(OAuthServer::start, crate::utils::try_open_url)
+    }
+
+    fn start_google_sign_in_with(
+        &self,
+        start_listener: impl FnOnce(&str) -> Result<OAuthServer, String>,
+        open_browser: impl FnOnce(&str) -> Result<(), String>,
+    ) -> Result<String, AuthError> {
         info!("Starting Google OAuth sign-in flow with localhost server");
 
         // Stop any existing OAuth server
@@ -744,6 +752,14 @@ impl AuthManager {
             if let Some(mut server) = server_guard.take() {
                 info!("Stopping previous OAuth server");
                 server.stop();
+            }
+        }
+        // The old attempt no longer has a listener. A failure to bind or open
+        // the browser must not leave its pending state visible to the UI.
+        {
+            let mut current = self.state.lock();
+            if matches!(*current, AuthState::AwaitingOAuthCallback(_)) {
+                *current = AuthState::LoggedOut;
             }
         }
 
@@ -755,7 +771,7 @@ impl AuthManager {
             .collect();
 
         // Start the localhost OAuth server
-        let oauth_server = match OAuthServer::start(&state) {
+        let oauth_server = match start_listener(&state) {
             Ok(server) => server,
             Err(e) => {
                 error!("Failed to start OAuth server: {}", e);
@@ -793,7 +809,7 @@ impl AuthManager {
         );
 
         // Open the browser
-        crate::utils::try_open_url(&oauth_url).map_err(AuthError::ApiError)?;
+        open_browser(&oauth_url).map_err(AuthError::ApiError)?;
 
         // Store the OAuth server
         {
@@ -1051,6 +1067,68 @@ mod tests {
     use super::AuthManager;
     use crate::auth::types::{SupabaseAuthResponse, SupabaseUser};
     use url::form_urlencoded;
+
+    #[test]
+    fn failed_browser_sign_in_restart_does_not_leave_a_dead_pending_attempt() {
+        use super::*;
+        let storage_path = std::env::temp_dir().join(format!(
+            "swifttunnel-oauth-restart-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let manager = AuthManager {
+            state: Arc::new(Mutex::new(AuthState::AwaitingOAuthCallback(
+                OAuthPendingState {
+                    state: "previous-fixture".into(),
+                    started_at: Utc::now(),
+                },
+            ))),
+            storage: SecureStorage::with_test_directory(storage_path.clone()),
+            client: AuthClient::unavailable_for_test(),
+            oauth_server: Arc::new(Mutex::new(None)),
+            refresh_backoff: Arc::new(Mutex::new(RefreshBackoff::default())),
+        };
+        let result = manager.start_google_sign_in_with(
+            |_| Err("fixture listener unavailable".into()),
+            |_| panic!("do not open a browser without a listener"),
+        );
+        assert!(result.is_err());
+        assert_eq!(manager.get_state(), AuthState::LoggedOut);
+        assert!(manager.get_oauth_port().is_none());
+
+        let new_port = std::cell::Cell::new(0);
+        let listener = |state: &str| {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            new_port.set(port);
+            OAuthServer::start_with_listener(listener, port, state.to_string())
+        };
+        *manager.state.lock() = AuthState::AwaitingOAuthCallback(OAuthPendingState {
+            state: "another-previous-fixture".into(),
+            started_at: Utc::now(),
+        });
+        let result = manager
+            .start_google_sign_in_with(listener, |_| Err("fixture browser unavailable".into()));
+        assert!(result.is_err());
+        assert_eq!(manager.get_state(), AuthState::LoggedOut);
+        assert!(manager.get_oauth_port().is_none());
+        // The failed attempt owns and closes its listener rather than keeping
+        // an unreachable server alive. Use only this fixture's ephemeral port.
+        drop(std::net::TcpListener::bind(("127.0.0.1", new_port.get())).unwrap());
+
+        let state = manager
+            .start_google_sign_in_with(listener, |_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            manager.get_pending_oauth_state().as_deref(),
+            Some(state.as_str())
+        );
+        assert_eq!(manager.get_oauth_port(), Some(new_port.get()));
+        manager.cancel_oauth();
+        assert_eq!(manager.get_state(), AuthState::LoggedOut);
+        assert!(manager.get_oauth_port().is_none());
+        assert!(!storage_path.exists());
+    }
 
     #[tokio::test]
     async fn a_failed_ban_recheck_reaches_transport_without_unlocking_account_access() {
