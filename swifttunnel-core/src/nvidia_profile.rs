@@ -245,7 +245,7 @@ mod platform {
             -137 => Err("Windows denied this driver profile change. Open SwiftTunnel as administrator, then retry.".into()),
             -6 => Err("No NVIDIA GPU was found.".into()),
             -9 => Err("The NVIDIA driver uses an unsupported profile format. Update its driver or use NVIDIA Control Panel.".into()),
-            _ => Err(format!("NVIDIA could not save the profile (code {code}). Nothing was changed.")),
+            _ => Err(format!("NVIDIA returned an error (code {code}). Refresh the profile and try again.")),
         }
     }
     fn buffer(bytes: usize) -> Vec<u32> {
