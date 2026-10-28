@@ -2960,10 +2960,8 @@ impl VpnConnection {
                                     });
 
                                     // STEP 3: Remove WFP block filters - packets now flow through VPN relay
-                                    for path in blocked_paths {
-                                        if let Err(e) = super::wfp_block::unblock_process_by_path(&path) {
-                                            log::warn!("V3: WFP unblock failed for {}: {}", path, e);
-                                        }
+                                    if let Err(e) = super::wfp_block::release_process_holds(&blocked_paths) {
+                                        log::warn!("V3: WFP batch release failed: {} (using speculative tunneling)", e);
                                     }
                                 }
                             }

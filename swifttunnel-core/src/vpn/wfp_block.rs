@@ -493,28 +493,59 @@ fn unblock_process_by_path_inner(image_path: &str) -> Result<(), String> {
         .lock()
         .map_err(|e| format!("Lock failed: {}", e))?;
     let state = state_guard.as_mut().ok_or("WFP not initialized")?;
+    remove_owned_filter(&mut state.active_filters, image_path, |filter_id| unsafe {
+        FwpmFilterDeleteById0(state.engine_handle, filter_id)
+    })
+}
 
+fn remove_owned_filter(
+    filters: &mut HashMap<String, u64>,
+    image_path: &str,
+    mut delete: impl FnMut(u64) -> u32,
+) -> Result<(), String> {
     let key = image_path.to_lowercase();
 
-    if let Some(filter_id) = state.active_filters.remove(&key) {
-        unsafe {
-            let result = FwpmFilterDeleteById0(state.engine_handle, filter_id);
-            if result != 0 {
-                log::warn!(
-                    "Failed to remove block filter for '{}': 0x{:08x}",
-                    image_path,
-                    result
-                );
-            } else {
-                log::info!(
-                    "WFP block filter removed for {} (filter_id={})",
-                    image_path,
-                    filter_id
-                );
-            }
+    if let Some(filter_id) = filters.get(&key).copied() {
+        let result = delete(filter_id);
+        if result == 0 || result == FWP_E_FILTER_NOT_FOUND_CODE {
+            filters.remove(&key);
+            log::info!(
+                "WFP block filter removed for {} (filter_id={})",
+                image_path,
+                filter_id
+            );
+        } else {
+            return Err(format!(
+                "Failed to remove block filter for '{image_path}': 0x{result:08x}"
+            ));
         }
     }
 
+    Ok(())
+}
+
+/// Release the current process batch. If an individual removal fails, retire
+/// our dynamic session instead of leaving an untracked hold on the game.
+/// Later events can use the driver's existing speculative tunneling fallback.
+pub fn release_process_holds(paths: &[String]) -> Result<(), String> {
+    crate::utils::blocking_step(|| {
+        release_holds_with(paths, unblock_process_by_path_inner, cleanup_inner)
+    })
+}
+
+fn release_holds_with(
+    paths: &[String],
+    mut release: impl FnMut(&str) -> Result<(), String>,
+    cleanup: impl FnOnce(),
+) -> Result<(), String> {
+    for path in paths {
+        if let Err(error) = release(path) {
+            cleanup();
+            return Err(format!(
+                "{error}; requested cleanup of temporary process holds"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -524,37 +555,57 @@ pub fn cleanup() {
 }
 
 fn cleanup_inner() {
-    if let Ok(mut state_guard) = WFP_STATE.lock()
-        && let Some(state) = state_guard.take()
-    {
-        unsafe {
-            // Remove all active filters
-            for (path, filter_id) in state.active_filters {
-                let result = FwpmFilterDeleteById0(state.engine_handle, filter_id);
-                if result == 0 || result == FWP_E_FILTER_NOT_FOUND_CODE {
-                    log::debug!("Cleanup: removed block filter for '{}'", path);
-                } else {
-                    log::warn!(
-                        "Cleanup: failed to remove block filter for '{}': 0x{:08x}",
-                        path,
-                        result
-                    );
-                }
-            }
+    if let Ok(mut state_guard) = WFP_STATE.lock() {
+        cleanup_state_with(
+            &mut state_guard,
+            |handle, id| unsafe { FwpmFilterDeleteById0(handle, id) },
+            |handle| unsafe { FwpmSubLayerDeleteByKey0(handle, &SWIFTTUNNEL_SUBLAYER_GUID) },
+            |handle| unsafe { FwpmEngineClose0(handle) },
+        );
+    }
+}
 
-            // Remove our sublayer
-            let sublayer_result =
-                FwpmSubLayerDeleteByKey0(state.engine_handle, &SWIFTTUNNEL_SUBLAYER_GUID);
-            if sublayer_result != 0 && sublayer_result != FWP_E_SUBLAYER_NOT_FOUND_CODE {
+fn cleanup_state_with(
+    state_slot: &mut Option<WfpBlockState>,
+    mut delete: impl FnMut(HANDLE, u64) -> u32,
+    delete_sublayer: impl FnOnce(HANDLE) -> u32,
+    close: impl FnOnce(HANDLE) -> u32,
+) {
+    if let Some(state) = state_slot.as_mut() {
+        // Remove all active filters
+        let handle = state.engine_handle;
+        state.active_filters.retain(|path, filter_id| {
+            let result = delete(handle, *filter_id);
+            if result == 0 || result == FWP_E_FILTER_NOT_FOUND_CODE {
+                log::debug!("Cleanup: removed block filter for '{}'", path);
+                false
+            } else {
                 log::warn!(
-                    "Cleanup: failed to remove WFP sublayer: 0x{:08x}",
-                    sublayer_result
+                    "Cleanup: failed to remove block filter for '{}': 0x{:08x}",
+                    path,
+                    result
                 );
+                true
             }
+        });
 
-            // Close engine
-            let _ = FwpmEngineClose0(state.engine_handle);
+        // Remove our sublayer
+        let sublayer_result = delete_sublayer(state.engine_handle);
+        if sublayer_result != 0 && sublayer_result != FWP_E_SUBLAYER_NOT_FOUND_CODE {
+            log::warn!(
+                "Cleanup: failed to remove WFP sublayer: 0x{:08x}",
+                sublayer_result
+            );
+        }
+
+        // Close engine
+        let result = close(handle);
+        if result == 0 {
+            // The dynamic session also removes any remaining owned filters.
+            *state_slot = None;
             log::info!("WFP block filter engine closed");
+        } else {
+            log::warn!("WFP engine close failed: 0x{result:08x}; keeping it for cleanup retry");
         }
     }
 }
@@ -567,6 +618,108 @@ pub fn is_initialized() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_release_uses_session_cleanup_only_after_a_failed_removal() {
+        let paths = vec!["first".into(), "second".into(), "third".into()];
+        let mut released = Vec::new();
+        let mut cleaned = 0;
+        assert!(
+            release_holds_with(
+                &paths,
+                |path| {
+                    released.push(path.to_owned());
+                    Ok(())
+                },
+                || cleaned += 1
+            )
+            .is_ok()
+        );
+        assert_eq!(released, paths);
+        assert_eq!(cleaned, 0);
+        released.clear();
+        assert!(
+            release_holds_with(
+                &paths,
+                |path| {
+                    released.push(path.to_owned());
+                    if path == "second" {
+                        Err("injected removal failure".into())
+                    } else {
+                        Ok(())
+                    }
+                },
+                || cleaned += 1
+            )
+            .is_err()
+        );
+        assert_eq!(released, ["first", "second"]);
+        assert_eq!(cleaned, 1);
+    }
+
+    #[test]
+    fn failed_filter_deletion_keeps_ownership_and_reports_failure_for_retry() {
+        let mut filters = HashMap::from([("player.exe".into(), 123), ("other.exe".into(), 456)]);
+        let before = filters.clone();
+        assert!(
+            remove_owned_filter(&mut filters, "PLAYER.exe", |id| {
+                assert_eq!(id, 123);
+                5
+            })
+            .is_err()
+        );
+        assert_eq!(filters, before);
+        assert!(remove_owned_filter(&mut filters, "PLAYER.exe", |_| 0).is_ok());
+        assert_eq!(filters, HashMap::from([("other.exe".into(), 456)]));
+        assert!(
+            remove_owned_filter(&mut filters, "other.exe", |_| FWP_E_FILTER_NOT_FOUND_CODE).is_ok()
+        );
+        assert!(filters.is_empty());
+        assert!(remove_owned_filter(&mut filters, "missing.exe", |_| panic!("not owned")).is_ok());
+    }
+
+    #[test]
+    fn failed_engine_close_preserves_remaining_owned_filters_for_later_cleanup() {
+        let mut state = Some(WfpBlockState {
+            engine_handle: HANDLE::default(),
+            active_filters: HashMap::from([("player.exe".into(), 123), ("other.exe".into(), 456)]),
+            filter_counter: 2,
+        });
+        cleanup_state_with(
+            &mut state,
+            |_, id| if id == 123 { 5 } else { 0 },
+            |_| 5,
+            |_| 5,
+        );
+        assert!(state.is_some(), "a failed close must retain its handle");
+        assert_eq!(
+            state.as_ref().unwrap().active_filters,
+            HashMap::from([("player.exe".into(), 123)])
+        );
+        let mut removed = Vec::new();
+        cleanup_state_with(
+            &mut state,
+            |_, id| {
+                removed.push(id);
+                0
+            },
+            |_| 0,
+            |_| 0,
+        );
+        assert_eq!(removed, [123]);
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn successful_dynamic_session_close_completes_cleanup_even_if_individual_delete_failed() {
+        let mut state = Some(WfpBlockState {
+            engine_handle: HANDLE::default(),
+            active_filters: HashMap::from([("player.exe".into(), 123)]),
+            filter_counter: 1,
+        });
+        cleanup_state_with(&mut state, |_, _| 5, |_| 5, |_| 0);
+        assert!(state.is_none());
+    }
 
     #[test]
     fn drive_mapping_requires_the_complete_device_name() {
