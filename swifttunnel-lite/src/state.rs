@@ -164,11 +164,20 @@ impl TextField {
         self.anchor = self.caret;
     }
 
-    pub fn paste_login(&mut self, value: &str, email: bool) {
+    #[must_use]
+    pub fn paste_login(&mut self, value: &str, email: bool) -> bool {
         let line = value.lines().next().unwrap_or("");
         // Spaces are part of a password, just as when they are typed. Only
         // email addresses get whitespace cleanup when pasted from a message.
-        self.insert(if email { line.trim() } else { line }, 128);
+        let value = if email { line.trim() } else { line };
+        let length = self.len();
+        let (start, end) = self.selection();
+        let retained = length - (end.min(length) - start.min(length));
+        if value.chars().count() > 128usize.saturating_sub(retained) {
+            return false;
+        }
+        self.insert(value, 128);
+        true
     }
 
     pub fn backspace(&mut self, word: bool) {
@@ -638,7 +647,7 @@ mod login_edit_tests {
         let mut typed = TextField::default();
         typed.insert(password, 128);
         let mut pasted = TextField::default();
-        pasted.paste_login(password, false);
+        assert!(pasted.paste_login(password, false));
         assert_eq!(pasted, typed);
         assert_eq!(pasted.text, password);
     }
@@ -646,7 +655,7 @@ mod login_edit_tests {
     #[test]
     fn email_paste_still_trims_message_whitespace_and_uses_one_line() {
         let mut field = TextField::default();
-        field.paste_login("  user@example.test  \r\nmessage footer", true);
+        assert!(field.paste_login("  user@example.test  \r\nmessage footer", true));
         assert_eq!(field.text, "user@example.test");
     }
 
@@ -655,11 +664,28 @@ mod login_edit_tests {
         let mut field = TextField::default();
         field.insert("old password", 128);
         field.select_all();
-        field.paste_login(" new password \r\nother line", false);
+        assert!(field.paste_login(" new password \r\nother line", false));
         assert_eq!(field.text, " new password ");
         field.select_all();
-        field.paste_login(&"\u{1f642}".repeat(200), false);
+        let original = field.clone();
+        assert!(!field.paste_login(&"\u{1f642}".repeat(200), false));
+        assert_eq!(field, original);
+        assert!(field.paste_login(&"\u{1f642}".repeat(128), false));
         assert_eq!(field.len(), 128);
         assert_eq!(field.caret, 128);
+    }
+
+    #[test]
+    fn a_paste_that_does_not_fit_preserves_the_original_text_and_selection() {
+        let mut field = TextField::default();
+        field.insert("existing password", 128);
+        field.select_all();
+        let original = field.clone();
+        assert!(!field.paste_login(&"x".repeat(129), false));
+        assert_eq!(field, original);
+        field.move_to(field.len(), false);
+        let original = field.clone();
+        assert!(!field.paste_login(&"x".repeat(120), false));
+        assert_eq!(field, original);
     }
 }

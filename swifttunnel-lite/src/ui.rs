@@ -1034,8 +1034,13 @@ fn apply_clipboard_reply(app: &mut App, text: Option<String>) -> bool {
         return false;
     }
     if let Some(text) = text {
-        login_field(app, target == FieldId::Email).paste_login(&text, target == FieldId::Email);
-        app.state.login.error = None;
+        app.state.login.error = if login_field(app, target == FieldId::Email)
+            .paste_login(&text, target == FieldId::Email)
+        {
+            None
+        } else {
+            Some("That text is too long here. Select text to replace it, or sign in with the full app.".into())
+        };
     } else {
         app.state.login.error =
             Some("Could not read clipboard text. Copy it again or type it here.".into());
@@ -1102,6 +1107,22 @@ mod preview_tests {
                 .as_deref()
                 .unwrap()
                 .contains("Copy it again")
+        );
+    }
+
+    #[test]
+    fn pending_clipboard_overlong_text_is_reported_without_truncating_credentials() {
+        let mut app = clipboard_fixture(FieldId::Password);
+        let original = app.state.login.password.clone();
+        assert!(apply_clipboard_reply(&mut app, Some("x".repeat(129))));
+        assert_eq!(app.state.login.password, original);
+        assert!(
+            app.state
+                .login
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("too long")
         );
     }
 
