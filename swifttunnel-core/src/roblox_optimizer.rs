@@ -1995,8 +1995,18 @@ impl RobloxOptimizer {
             ))
             .ok()?;
         let location: String = crate::registry_value::read(&key, "InstallLocation").ok()??;
+        Self::recorded_launcher_directory(&location)
+    }
+
+    #[cfg(any(windows, test))]
+    fn recorded_launcher_directory(location: &str) -> Option<PathBuf> {
         let path = PathBuf::from(location.trim());
-        path.is_dir().then_some(path)
+        (path.is_absolute()
+            && !path
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+            && path.is_dir())
+        .then_some(path)
     }
 
     #[cfg(not(windows))]
@@ -2728,6 +2738,44 @@ impl RobloxOptimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_launcher_directory_cannot_follow_the_apps_working_directory() {
+        assert!(RobloxOptimizer::recorded_launcher_directory(".").is_none());
+        assert!(RobloxOptimizer::recorded_launcher_directory("..").is_none());
+    }
+
+    #[test]
+    fn recorded_launcher_directory_accepts_existing_absolute_folders_only() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = Fixture(std::env::temp_dir().join(format!(
+            "swift-launcher-root-{:032x}",
+            rand::random::<u128>()
+        )));
+        fs::create_dir(&root.0).unwrap();
+        assert_eq!(
+            RobloxOptimizer::recorded_launcher_directory(&format!(" {} ", root.0.display())),
+            Some(root.0.clone())
+        );
+        let child = root.0.join("child");
+        fs::create_dir(&child).unwrap();
+        assert!(
+            RobloxOptimizer::recorded_launcher_directory(child.join("..").to_str().unwrap())
+                .is_none()
+        );
+        let file = root.0.join("settings.json");
+        fs::write(&file, b"{}").unwrap();
+        assert!(RobloxOptimizer::recorded_launcher_directory(file.to_str().unwrap()).is_none());
+        assert!(
+            RobloxOptimizer::recorded_launcher_directory(root.0.join("missing").to_str().unwrap())
+                .is_none()
+        );
+    }
     #[test]
     fn launcher_import_keeps_supported_flags_and_explains_every_skipped_value() {
         let report = RobloxOptimizer::preview_flag_import(
