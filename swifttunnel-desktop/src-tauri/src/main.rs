@@ -103,7 +103,7 @@ fn wait_for_relaunch_parent_if_requested() {
     const WAIT_RELAUNCH_ARG: &str = "--wait-relaunch";
     const RELAUNCH_WAIT_MS: u32 = 10_000;
 
-    let mut args = std::env::args();
+    let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         if arg != WAIT_RELAUNCH_ARG {
             continue;
@@ -112,7 +112,7 @@ fn wait_for_relaunch_parent_if_requested() {
         let Some(pid_arg) = args.next() else {
             return;
         };
-        let Ok(pid) = pid_arg.parse::<u32>() else {
+        let Some(pid) = pid_arg.to_str().and_then(|value| value.parse::<u32>().ok()) else {
             return;
         };
 
@@ -131,8 +131,8 @@ fn main() {
     // Windows application manifest embedded in build.rs declares
     // `requireAdministrator`, so UAC elevation is handled by Windows before
     // main() runs — no runtime self-elevation needed.
-    let is_cleanup = std::env::args().any(|a| a == "--cleanup");
-    let is_install_driver = std::env::args().any(|a| a == "--install-driver");
+    let is_cleanup = std::env::args_os().skip(1).any(|a| a == "--cleanup");
+    let is_install_driver = std::env::args_os().skip(1).any(|a| a == "--install-driver");
 
     // --cleanup: stateless removal of all SwiftTunnel system modifications.
     // Used by the MSI/NSIS uninstaller to clean up before removing files.

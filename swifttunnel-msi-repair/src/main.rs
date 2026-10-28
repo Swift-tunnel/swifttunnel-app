@@ -8,7 +8,7 @@
 use swifttunnel_msi_repair::{clear_registration, find_orphans, preserve_installer_sources};
 
 fn main() {
-    let dry_run = std::env::args().any(|a| a == "--dry-run");
+    let dry_run = std::env::args_os().skip(1).any(|a| a == "--dry-run");
 
     println!("SwiftTunnel MSI repair");
     println!("======================");

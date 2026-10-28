@@ -3572,7 +3572,9 @@ pub async fn system_open_url(url: String) -> Result<(), String> {
 #[allow(dead_code)]
 fn startup_repair_relaunch_already_attempted() -> bool {
     std::env::var_os(STARTUP_REPAIR_RELAUNCHED_ENV).is_some()
-        || std::env::args().any(|arg| arg == STARTUP_REPAIR_RELAUNCHED_ARG)
+        || std::env::args_os()
+            .skip(1)
+            .any(|arg| arg == STARTUP_REPAIR_RELAUNCHED_ARG)
 }
 
 #[cfg(windows)]

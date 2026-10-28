@@ -53,7 +53,7 @@ use state::Push;
 use view::Screen;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let previewing = args.iter().any(|a| a == "--preview");
     if !previewing {
         init_logging();
@@ -74,7 +74,7 @@ fn main() {
     // core own uninstall routine, the same one the full app runs, so the
     // routes, the firewall rules, the hosts entries and both clients Run
     // entries go with it rather than being left on the machine.
-    if std::env::args().any(|a| a == "--cleanup") {
+    if args.iter().any(|a| a == "--cleanup") {
         installer_cli::finish(
             "cleanup",
             swifttunnel_core::network_booster::cleanup_all_system_state()
@@ -90,7 +90,7 @@ fn main() {
     // no new driver logic. It comes before the single-client lock because it
     // is not a client: it installs and exits, and refusing to do that because
     // somebody has the app open would leave the machine without a driver.
-    if std::env::args().any(|a| a == "--install-driver") {
+    if args.iter().any(|a| a == "--install-driver") {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -116,7 +116,7 @@ fn main() {
         // broken, and only the uninstall-first path clears it.
         let force = health.recommended_action
             == swifttunnel_core::vpn::DriverRecommendedAction::Reinstall
-            || std::env::args().any(|a| a == "--force");
+            || args.iter().any(|a| a == "--force");
         log::info!("driver helper: force={force}");
 
         let result = swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
@@ -149,14 +149,18 @@ fn main() {
     if let Some(i) = args.iter().position(|a| a == "--preview") {
         let path = args
             .get(i + 1)
-            .cloned()
-            .unwrap_or_else(|| "preview.bmp".to_string());
+            .map(std::ffi::OsString::as_os_str)
+            .unwrap_or_else(|| std::ffi::OsStr::new("preview.bmp"));
+        let Some(path) = path.to_str() else {
+            eprintln!("Preview path contains unsupported text. Choose another path.");
+            return;
+        };
         let connected = args.iter().any(|a| a == "--connected");
         let named = |flag: &str| {
             args.iter()
                 .position(|a| a == flag)
                 .and_then(|i| args.get(i + 1))
-                .map(String::as_str)
+                .and_then(|value| value.to_str())
         };
         let screen = match named("--screen") {
             Some("roblox") => Screen::Roblox,

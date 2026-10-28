@@ -75,7 +75,7 @@ pub fn sync_run_on_startup(_value_name: &str, _enabled: bool) -> Result<(), Stri
 
 /// Whether Windows started this process at sign-in.
 pub fn launched_from_startup_flag() -> bool {
-    std::env::args().any(|arg| arg == STARTUP_FLAG)
+    std::env::args_os().skip(1).any(|arg| arg == STARTUP_FLAG)
 }
 
 #[cfg(test)]

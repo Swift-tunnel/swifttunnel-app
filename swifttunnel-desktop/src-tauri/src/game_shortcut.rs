@@ -14,7 +14,7 @@ pub fn take_request() -> Option<String> {
     if INITIAL_TAKEN.swap(true, Ordering::AcqRel) {
         None
     } else {
-        startup_target(&std::env::args().collect::<Vec<_>>())
+        startup_target(&std::env::args_os().collect::<Vec<_>>())
     }
 }
 use windows::{
@@ -27,12 +27,16 @@ use windows::{
     },
     core::{Interface, PCWSTR},
 };
-pub fn startup_target(args: &[String]) -> Option<String> {
+pub fn startup_target(args: &[impl AsRef<std::ffi::OsStr>]) -> Option<String> {
     args.windows(2)
         .find(|pair| {
-            pair[0] == "--open-game" && swifttunnel_core::roblox_library::valid_place_id(&pair[1])
+            pair[0].as_ref() == "--open-game"
+                && pair[1]
+                    .as_ref()
+                    .to_str()
+                    .is_some_and(swifttunnel_core::roblox_library::valid_place_id)
         })
-        .map(|p| p[1].clone())
+        .and_then(|pair| pair[1].as_ref().to_str().map(str::to_string))
 }
 pub fn create(place: &str, name: &str) -> Result<String, String> {
     if !swifttunnel_core::roblox_library::valid_place_id(place) {
@@ -94,11 +98,24 @@ mod tests {
     #[test]
     fn shortcut_cannot_pass_auth_tokens_or_commands() {
         assert_eq!(
-            startup_target(&["app".into(), "--open-game".into(), "1818".into()]),
+            startup_target(&["app", "--open-game", "1818"]),
+            Some("1818".into())
+        );
+        assert_eq!(startup_target(&["--open-game", "1&ticket=secret"]), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn non_unicode_arguments_are_not_join_ids_or_removed_from_the_argument_order() {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        let unusual = OsString::from_wide(&[0xd800]);
+        assert_eq!(
+            startup_target(&[unusual.clone(), "--open-game".into(), "1818".into(),]),
             Some("1818".into())
         );
         assert_eq!(
-            startup_target(&["--open-game".into(), "1&ticket=secret".into()]),
+            startup_target(&["--open-game".into(), unusual, "1818".into()]),
             None
         );
     }
