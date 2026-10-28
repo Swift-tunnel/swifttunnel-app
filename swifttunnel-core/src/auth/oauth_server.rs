@@ -8,18 +8,23 @@
 //! - Industry standard (used by Discord, Slack, VS Code, Spotify)
 
 use log::{debug, error, info, warn};
+use std::io::{self, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
-use tiny_http::{Method, Response, Server, StatusCode};
+use std::time::{Duration, Instant};
 use url::Url;
 
 /// Default port for OAuth callback server
 pub const DEFAULT_OAUTH_PORT: u16 = 17435;
+const MAX_CALLBACK_HEADERS: usize = 16 * 1024;
+const CALLBACK_READ_BUDGET: Duration = Duration::from_secs(2);
+const CALLBACK_WRITE_BUDGET: Duration = Duration::from_millis(500);
+const CALLBACK_POLL: Duration = Duration::from_millis(100);
 
 /// Callback data received from OAuth redirect
 #[derive(Debug, Clone)]
@@ -49,7 +54,7 @@ impl OAuthServer {
             return Err("Could not prepare browser sign-in. Please try again.".to_string());
         }
         // Try default port first
-        let (server, port) = match Server::http(format!("127.0.0.1:{}", DEFAULT_OAUTH_PORT)) {
+        let (server, port) = match TcpListener::bind(("127.0.0.1", DEFAULT_OAUTH_PORT)) {
             Ok(s) => {
                 info!("OAuth server started on port {}", DEFAULT_OAUTH_PORT);
                 (s, DEFAULT_OAUTH_PORT)
@@ -60,9 +65,9 @@ impl OAuthServer {
                     DEFAULT_OAUTH_PORT, e
                 );
                 // Try port 0 to get a random available port
-                match Server::http("127.0.0.1:0") {
+                match TcpListener::bind(("127.0.0.1", 0)) {
                     Ok(s) => {
-                        let port = s.server_addr().to_ip().map(|a| a.port()).unwrap_or(0);
+                        let port = s.local_addr().map(|address| address.port()).unwrap_or(0);
                         if port == 0 {
                             return Err("Failed to get assigned port".to_string());
                         }
@@ -81,15 +86,16 @@ impl OAuthServer {
     }
 
     fn start_with_listener(
-        server: Server,
+        server: TcpListener,
         port: u16,
         expected_state: String,
     ) -> Result<Self, String> {
+        server
+            .set_nonblocking(true)
+            .map_err(|error| format!("Could not prepare browser sign-in: {error}"))?;
         let (tx, rx) = mpsc::channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = Arc::clone(&stop_flag);
-
-        // Note: recv_timeout is used in run_server to check stop flag periodically
 
         let thread_handle = thread::Builder::new()
             .name("oauth-callback".into())
@@ -109,106 +115,202 @@ impl OAuthServer {
         self.port
     }
 
-    /// Run the HTTP server and handle requests
+    /// One bounded connection at a time. A slow local peer cannot grow a
+    /// connection-thread pool or make headers consume unbounded memory.
     fn run_server(
-        server: Server,
+        server: TcpListener,
         tx: Sender<OAuthCallbackData>,
         stop_flag: Arc<AtomicBool>,
         expected_state: String,
     ) {
         info!("OAuth server thread started");
         let mut invalid_requests = 0u64;
-
-        loop {
+        while !stop_flag.load(Ordering::Relaxed) {
+            let mut peer = match server.accept() {
+                Ok((peer, _)) => peer,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::park_timeout(CALLBACK_POLL);
+                    continue;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    warn!("OAuth listener could not accept a connection: {error}");
+                    break;
+                }
+            };
+            let target = Self::read_target(&mut peer, &stop_flag);
             if stop_flag.load(Ordering::Relaxed) {
-                info!("OAuth server received stop signal");
                 break;
             }
-
-            // Try to receive a request with timeout
-            match server.recv_timeout(Duration::from_millis(100)) {
-                Ok(Some(request)) => {
-                    let url_str = request.url();
-                    // Path only. The query on this callback carries the
-                    // exchange token, which is redeemable for a session, and
-                    // the state that binds it. Logging the whole URL put a live
-                    // credential in a file users routinely attach to support
-                    // tickets.
-                    // A previous browser tab may reach the reused port after a
-                    // new attempt starts. Ignore it without consuming the new
-                    // attempt's one callback. The manager also verifies state
-                    // before exchanging the token.
-                    let callback = (request.method() == &Method::Get)
-                        .then(|| Self::parse_callback(url_str))
-                        .flatten()
-                        .filter(|callback| callback.state == expected_state);
-                    match callback {
-                        Some(callback) => {
-                            info!(
-                                "OAuth callback received: {} (query omitted)",
-                                Self::log_safe_path(url_str)
-                            );
-
-                            // Deliver independently of whether the browser is
-                            // still connected or can accept the response.
-                            if let Err(e) = tx.send(callback) {
-                                error!("Failed to send callback data: {}", e);
-                            }
-
-                            // Send success response to browser
-                            let html = Self::success_html();
-                            let response = Response::from_string(html)
-                                .with_status_code(StatusCode(200))
-                                .with_header(
-                                    tiny_http::Header::from_bytes(
-                                        &b"Content-Type"[..],
-                                        &b"text/html; charset=utf-8"[..],
-                                    )
-                                    .unwrap(),
-                                );
-
-                            if let Err(e) = request.respond(response) {
-                                warn!("Failed to send success response: {}", e);
-                            }
-
-                            // We're done after receiving the callback
-                            break;
-                        }
-                        None => {
-                            // Invalid request - send error response
-                            invalid_requests = invalid_requests.saturating_add(1);
-                            if invalid_requests <= 4 || invalid_requests.is_power_of_two() {
-                                warn!(
-                                    "Invalid OAuth callback request #{}: {} (query omitted)",
-                                    invalid_requests,
-                                    Self::log_safe_path(url_str)
-                                );
-                            }
-                            let html = Self::error_html("Invalid callback parameters");
-                            let response = Response::from_string(html)
-                                .with_status_code(StatusCode(400))
-                                .with_header(
-                                    tiny_http::Header::from_bytes(
-                                        &b"Content-Type"[..],
-                                        &b"text/html; charset=utf-8"[..],
-                                    )
-                                    .unwrap(),
-                                );
-                            let _ = request.respond(response);
-                        }
-                    }
+            let callback = target
+                .as_deref()
+                .ok()
+                .and_then(Self::parse_callback)
+                .filter(|callback| callback.state == expected_state);
+            if let Some(callback) = callback {
+                info!(
+                    "OAuth callback received: {} (query omitted)",
+                    Self::log_safe_path(target.as_deref().unwrap_or("/invalid-request"))
+                );
+                // Deliver before replying: a closed browser must not lose a
+                // valid callback. Only this worker can publish a callback.
+                if let Err(error) = tx.send(callback) {
+                    error!("Failed to send callback data: {error}");
                 }
-                Ok(None) => {
-                    // Timeout, no request received - continue loop
+                if let Err(error) =
+                    Self::respond(&mut peer, true, &Self::success_html(), &stop_flag)
+                {
+                    debug!("Could not reply to OAuth browser: {error}");
                 }
-                Err(e) => {
-                    // Connection error or timeout, continue
-                    debug!("OAuth server recv error (likely timeout): {}", e);
+                break;
+            }
+            invalid_requests = invalid_requests.saturating_add(1);
+            if invalid_requests <= 4 || invalid_requests.is_power_of_two() {
+                warn!(
+                    "Invalid OAuth callback request #{invalid_requests}: {} (query omitted)",
+                    Self::log_safe_path(target.as_deref().unwrap_or("/invalid-request"))
+                );
+            }
+            let _ = Self::respond(
+                &mut peer,
+                false,
+                &Self::error_html("Invalid callback parameters"),
+                &stop_flag,
+            );
+        }
+        info!("OAuth server thread exiting");
+    }
+
+    fn read_target(peer: &mut TcpStream, stop: &AtomicBool) -> io::Result<String> {
+        peer.set_nonblocking(false)?;
+        let deadline = Instant::now() + CALLBACK_READ_BUDGET;
+        let mut bytes = [0u8; MAX_CALLBACK_HEADERS];
+        let mut length = 0usize;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "callback cancelled",
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "callback headers timed out",
+                ));
+            }
+            if length == bytes.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "callback headers too large",
+                ));
+            }
+            peer.set_read_timeout(Some(remaining.min(CALLBACK_POLL)))?;
+            let count = match peer.read(&mut bytes[length..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "callback closed",
+                    ));
                 }
+                Ok(count) => count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let scan_from = length.saturating_sub(3);
+            length += count;
+            // Scan only new bytes plus the delimiter overlap. Slow drip input
+            // must not cause the whole accumulated header to be reparsed.
+            if !bytes[scan_from..length]
+                .windows(4)
+                .any(|part| part == b"\r\n\r\n")
+            {
+                continue;
+            }
+            let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid callback request");
+            let mut headers = [httparse::EMPTY_HEADER; 64];
+            let mut request = httparse::Request::new(&mut headers);
+            if !request
+                .parse(&bytes[..length])
+                .map_err(|_| invalid())?
+                .is_complete()
+                || request.method != Some("GET")
+                || !matches!(request.version, Some(0 | 1))
+                || request.headers.iter().any(|header| {
+                    header.name.eq_ignore_ascii_case("transfer-encoding")
+                        || (header.name.eq_ignore_ascii_case("content-length")
+                            && std::str::from_utf8(header.value)
+                                .ok()
+                                .and_then(|value| value.trim().parse::<u64>().ok())
+                                != Some(0))
+                })
+            {
+                return Err(invalid());
+            }
+            return request.path.map(str::to_owned).ok_or_else(invalid);
+        }
+    }
+
+    fn respond(
+        peer: &mut TcpStream,
+        success: bool,
+        html: &str,
+        stop: &AtomicBool,
+    ) -> io::Result<()> {
+        let status = if success { "200 OK" } else { "400 Bad Request" };
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{html}",
+            html.len()
+        );
+        let deadline = Instant::now() + CALLBACK_WRITE_BUDGET;
+        let mut remaining = response.as_bytes();
+        while !remaining.is_empty() {
+            if stop.load(Ordering::Relaxed) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "callback cancelled",
+                ));
+            }
+            let budget = deadline.saturating_duration_since(Instant::now());
+            if budget.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "callback reply timed out",
+                ));
+            }
+            peer.set_write_timeout(Some(budget.min(CALLBACK_POLL)))?;
+            match peer.write(remaining) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "callback reply closed",
+                    ));
+                }
+                Ok(written) => remaining = &remaining[written..],
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::TimedOut
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
             }
         }
-
-        info!("OAuth server thread exiting");
+        Ok(())
     }
 
     /// The path of a request URL, with the query discarded.
@@ -440,6 +542,7 @@ impl OAuthServer {
 
         // A stalled browser response must not hang cancellation or app exit.
         if let Some(handle) = self.thread_handle.take() {
+            handle.thread().unpark();
             let deadline = std::time::Instant::now() + Duration::from_millis(500);
             while !handle.is_finished() && std::time::Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(10));
@@ -463,6 +566,123 @@ impl Drop for OAuthServer {
 mod tests {
     use super::*;
 
+    fn fixture_server() -> OAuthServer {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        OAuthServer::start_with_listener(listener, port, "fixture".into()).unwrap()
+    }
+
+    fn fixture_peer(port: u16) -> TcpStream {
+        let peer = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(4))).unwrap();
+        peer.set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        peer
+    }
+
+    #[test]
+    fn incomplete_request_expires_and_a_later_valid_callback_still_works() {
+        let server = fixture_server();
+        let mut slow_peer = fixture_peer(server.port());
+        slow_peer
+            .write_all(b"GET /callback?token=x&state=fixture HTTP/1.1\r\nHost: local")
+            .unwrap();
+        let mut response = [0u8; 64];
+        let read = slow_peer.read(&mut response).unwrap();
+        assert!(response[..read].starts_with(b"HTTP/1.1 400"));
+        assert!(server.try_recv_callback().is_none());
+
+        let mut valid_peer = fixture_peer(server.port());
+        valid_peer
+            .write_all(
+                b"GET /callback?token=valid&state=fixture HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            .unwrap();
+        let read = valid_peer.read(&mut response).unwrap();
+        assert!(response[..read].starts_with(b"HTTP/1.1 200"));
+        assert_eq!(server.try_recv_callback().unwrap().token, "valid");
+        assert!(server.try_recv_callback().is_none());
+    }
+
+    #[test]
+    fn request_bodies_and_malformed_headers_do_not_consume_a_callback() {
+        let server = fixture_server();
+        for header in [
+            "Content-Length: 1\r\n",
+            "Content-Length: not-a-number\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Bad Header: value\r\n",
+            &"X-Fixture: x\r\n".repeat(65),
+        ] {
+            let mut peer = fixture_peer(server.port());
+            let request = format!(
+                "GET /callback?token=x&state=fixture HTTP/1.1\r\nHost: localhost\r\n{header}\r\n"
+            );
+            // No advertised body is sent: reject framing before waiting for it.
+            peer.write_all(request.as_bytes()).unwrap();
+            let mut response = [0u8; 64];
+            let read = peer.read(&mut response).unwrap();
+            assert!(response[..read].starts_with(b"HTTP/1.1 400"));
+            assert!(server.try_recv_callback().is_none());
+        }
+    }
+
+    #[test]
+    fn stopping_an_active_partial_header_reader_releases_its_socket() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let (accepted, ready) = mpsc::sync_channel(1);
+        let (completed, done) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().unwrap();
+            accepted.send(()).unwrap();
+            let result = OAuthServer::read_target(&mut peer, &worker_stop);
+            drop(peer);
+            completed
+                .send(result.map_err(|error| error.kind()))
+                .unwrap();
+        });
+        let mut peer = fixture_peer(port);
+        peer.write_all(b"GET /callback?").unwrap();
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let outcome = done.recv_timeout(Duration::from_secs(1));
+        // Always join our owned worker, even if cancellation regresses.
+        drop(peer);
+        worker.join().unwrap();
+        assert_eq!(outcome.unwrap(), Err(io::ErrorKind::Interrupted));
+    }
+
+    #[test]
+    fn oversized_unfinished_headers_are_rejected_without_waiting_for_the_peer() {
+        use std::io::{Read, Write};
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut server =
+            OAuthServer::start_with_listener(listener, port, "fixture".into()).unwrap();
+        let mut peer = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        peer.set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request =
+            b"GET /callback?token=x&state=fixture HTTP/1.1\r\nHost: localhost\r\nX-Fill: ".to_vec();
+        request.extend(std::iter::repeat_n(b'x', 20 * 1024));
+        peer.write_all(&request).unwrap();
+        let mut response = [0u8; 64];
+        let result = peer.read(&mut response);
+        drop(peer);
+        server.stop();
+        assert!(
+            result
+                .as_ref()
+                .is_ok_and(|count| *count > 0 && response[..*count].starts_with(b"HTTP/1.1 400")),
+            "unfinished header was not rejected: {result:?}"
+        );
+        assert!(server.try_recv_callback().is_none());
+    }
+
     #[test]
     fn callback_log_paths_bound_untrusted_text_and_cannot_inject_log_lines() {
         let input = format!(
@@ -479,8 +699,8 @@ mod tests {
     #[tokio::test]
     async fn stale_or_invalid_requests_do_not_consume_the_pending_sign_in() {
         // An owned ephemeral port avoids the real app's callback listener.
-        let listener = Server::http("127.0.0.1:0").unwrap();
-        let port = listener.server_addr().to_ip().unwrap().port();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
         let server = OAuthServer::start_with_listener(listener, port, "current".into()).unwrap();
         let client = reqwest::Client::builder()
             .no_proxy()

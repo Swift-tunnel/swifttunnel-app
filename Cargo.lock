@@ -4511,6 +4511,7 @@ dependencies = [
  "discord-rich-presence",
  "env_logger",
  "futures-util",
+ "httparse",
  "keyring",
  "log",
  "ndisapi",

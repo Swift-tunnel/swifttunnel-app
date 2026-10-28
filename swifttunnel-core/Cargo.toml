@@ -113,8 +113,8 @@ url = "2"
 # Date/time handling
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 
-# Lightweight HTTP server for OAuth callback
-tiny_http = "0.12"
+# Bounded loopback OAuth parsing, already used by reqwest.
+httparse = "1.10"
 
 # Fast mutex
 parking_lot = "0.12"
@@ -141,3 +141,7 @@ winreg = "0.52"
 # Maintained fork of winrt-notification; the original 0.5 pulls in windows 0.24,
 # which ships no aarch64 import libraries and fails ARM64 linking (LNK1181).
 tauri-winrt-notification = "0.7"
+
+[dev-dependencies]
+# Owned loopback HTTP fixtures only.
+tiny_http = "0.12"
