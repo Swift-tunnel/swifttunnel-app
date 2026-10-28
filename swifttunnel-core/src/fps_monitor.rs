@@ -113,9 +113,20 @@ struct FpsShared {
     present_count: AtomicU64,
     /// Most recent presents-per-second sample.
     current_fps: AtomicU32,
+    window: parking_lot::Mutex<FpsWindow>,
     stop_flag: AtomicBool,
     /// ETW session this monitor owns.
     session_name: &'static str,
+}
+
+struct FpsWindow {
+    count: u64,
+    at: Instant,
+}
+impl FpsWindow {
+    fn new(at: Instant) -> Self {
+        Self { count: 0, at }
+    }
 }
 
 /// The live ETW session + sampler threads for one enabled stretch.
@@ -207,6 +218,7 @@ impl FpsMonitor {
             target_pid: AtomicU32::new(self.target_pid.load(Ordering::Acquire)),
             present_count: AtomicU64::new(0),
             current_fps: AtomicU32::new(0),
+            window: parking_lot::Mutex::new(FpsWindow::new(Instant::now())),
             stop_flag: AtomicBool::new(false),
             session_name: self.session_name,
         });
@@ -255,10 +267,14 @@ impl FpsMonitor {
         let Some(active) = runtime.as_ref() else {
             return;
         };
+        // Serialize the once-per-second sample with target changes, without
+        // adding a lock to the high-frequency ETW event callback.
+        let mut window = active.shared.window.lock();
         let prev = active.shared.target_pid.swap(pid, Ordering::Release);
         if prev != pid {
             active.shared.present_count.store(0, Ordering::Release);
             active.shared.current_fps.store(0, Ordering::Release);
+            *window = FpsWindow::new(Instant::now());
         }
     }
 
@@ -301,9 +317,6 @@ impl Drop for FpsMonitor {
 /// 2-sample average smooths the jitter from ETW's ~1s buffer flushing at low
 /// present rates (at real gaming framerates buffers fill sub-second anyway).
 fn run_sampler(shared: Arc<FpsShared>) {
-    let mut last_count = shared.present_count.load(Ordering::Acquire);
-    let mut last_at = Instant::now();
-
     loop {
         // Interruptible ~1s sleep so shutdown is prompt.
         for _ in 0..10 {
@@ -313,31 +326,40 @@ fn run_sampler(shared: Arc<FpsShared>) {
             std::thread::sleep(Duration::from_millis(100));
         }
 
-        let count = shared.present_count.load(Ordering::Acquire);
-        let now = Instant::now();
-        let elapsed = now.duration_since(last_at).as_secs_f64();
-        last_at = now;
-
-        if shared.target_pid.load(Ordering::Acquire) == 0 {
-            shared.current_fps.store(0, Ordering::Release);
-            last_count = count;
-            continue;
-        }
-
-        let delta = count.saturating_sub(last_count);
-        last_count = count;
-
-        let raw = if elapsed > 0.0 {
-            (delta as f64 / elapsed).round() as u32
-        } else {
-            0
-        }
-        .min(MAX_REPORTABLE_FPS);
-
-        let prev = shared.current_fps.load(Ordering::Acquire);
-        let smoothed = if prev == 0 { raw } else { (raw + prev) / 2 };
-        shared.current_fps.store(smoothed, Ordering::Release);
+        sample_window(&shared, Instant::now());
     }
+}
+
+fn sample_window(shared: &FpsShared, now: Instant) {
+    let mut window = shared.window.lock();
+    // A target reset can win the lock after the sampler captured its clock.
+    // Do not consume new frames using a timestamp from before that reset.
+    if now <= window.at {
+        return;
+    }
+    let count = shared.present_count.load(Ordering::Acquire);
+    let elapsed = now.saturating_duration_since(window.at).as_secs_f64();
+    window.at = now;
+
+    if shared.target_pid.load(Ordering::Acquire) == 0 {
+        shared.current_fps.store(0, Ordering::Release);
+        window.count = count;
+        return;
+    }
+
+    let delta = count.saturating_sub(window.count);
+    window.count = count;
+
+    let raw = if elapsed > 0.0 {
+        (delta as f64 / elapsed).round() as u32
+    } else {
+        0
+    }
+    .min(MAX_REPORTABLE_FPS);
+
+    let prev = shared.current_fps.load(Ordering::Acquire);
+    let smoothed = if prev == 0 { raw } else { (raw + prev) / 2 };
+    shared.current_fps.store(smoothed, Ordering::Release);
 }
 
 /// Supervisor: (re)start the ETW session with capped exponential backoff so a
@@ -568,6 +590,7 @@ impl FpsMonitor {
                     target_pid: AtomicU32::new(0),
                     present_count: AtomicU64::new(0),
                     current_fps: AtomicU32::new(0),
+                    window: parking_lot::Mutex::new(FpsWindow::new(Instant::now())),
                     stop_flag: AtomicBool::new(true),
                     session_name: OVERLAY_SESSION_NAME,
                 }),
@@ -594,6 +617,65 @@ impl FpsMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sample_clocked_before_a_reset_cannot_consume_the_new_frames() {
+        let monitor = FpsMonitor::inert_active();
+        monitor.set_target_pid(1000);
+        let shared = monitor.test_shared();
+        let at = shared.window.lock().at;
+        shared.present_count.store(120, Ordering::Release);
+        sample_window(&shared, at - Duration::from_nanos(1));
+        assert_eq!(monitor.current_fps(), 0);
+        sample_window(&shared, at + Duration::from_secs(1));
+        assert_eq!(monitor.current_fps(), 120);
+    }
+
+    #[test]
+    fn a_new_player_does_not_inherit_the_previous_counter_baseline() {
+        let monitor = FpsMonitor::inert_active();
+        let shared = monitor.test_shared();
+        monitor.set_target_pid(1000);
+        let at = shared.window.lock().at;
+        shared.present_count.store(120, Ordering::Release);
+        sample_window(&shared, at + Duration::from_secs(1));
+        assert_eq!(monitor.current_fps(), 120);
+        monitor.set_target_pid(2000);
+        let at = shared.window.lock().at;
+        shared.present_count.store(240, Ordering::Release);
+        sample_window(&shared, at + Duration::from_secs(1));
+        assert_eq!(monitor.current_fps(), 240);
+    }
+
+    #[test]
+    fn an_older_sample_must_publish_before_the_new_target_is_reset() {
+        let monitor = Arc::new(FpsMonitor::inert_active());
+        monitor.set_target_pid(1000);
+        let shared = monitor.test_shared();
+        let held_sample = shared.window.lock();
+        let changing = monitor.clone();
+        let worker = std::thread::spawn(move || changing.set_target_pid(2000));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while monitor.target_pid.load(Ordering::Acquire) != 2000 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let entered = monitor.target_pid.load(Ordering::Acquire);
+        let sample_target = shared.target_pid.load(Ordering::Acquire);
+        // The old sampler finishes while it owns the shared sampling window.
+        shared.current_fps.store(180, Ordering::Release);
+        drop(held_sample);
+        worker.join().unwrap();
+        assert_eq!(entered, 2000);
+        assert_eq!(
+            sample_target, 1000,
+            "the target must wait for an active sample"
+        );
+        assert_eq!(
+            monitor.current_fps(),
+            0,
+            "a previous player's sample survived the reset"
+        );
+    }
 
     #[test]
     fn native_filter_preserves_the_counted_present_events_and_excludes_noise() {
