@@ -161,34 +161,27 @@ pub fn restore() -> Result<bool, String> {
     if !pending() || !crate::roblox_game_profile::player_stopped() {
         return Ok(false);
     }
-    let Some(raw) = read(&journal_path()?)? else {
+    restore_from(&journal_path()?, allowed)
+}
+fn restore_from(path: &Path, path_allowed: impl Fn(&Path) -> bool) -> Result<bool, String> {
+    let Some(raw) = read(path)? else {
         return Ok(false);
     };
     let journal: Journal = serde_json::from_str(&raw).map_err(|error| {
         log::warn!("Native FastFlags recovery record could not be decoded; retained for inspection: {error}");
         RESTORE_ERROR
     })?;
-    if journal.entries.len() > 4
-        || journal
-            .entries
-            .iter()
-            .any(|e| !allowed(&e.path) || e.applied.len() != 64)
-    {
-        log::warn!(
-            "Native FastFlags recovery record failed path or hash validation; retained for inspection"
-        );
-        return Err(RESTORE_ERROR.into());
-    }
+    validate_journal(&journal, path_allowed)?;
     for e in journal.entries {
         restore_entry(e)?;
     }
-    fs::remove_file(journal_path()?).map_err(|e| e.to_string())?;
+    fs::remove_file(path).map_err(|e| e.to_string())?;
     Ok(true)
 }
 fn restore_entry(e: Entry) -> Result<(), String> {
     if read(&e.path)?
         .as_deref()
-        .is_some_and(|raw| hash(raw) == e.applied)
+        .is_some_and(|raw| hash(raw).eq_ignore_ascii_case(&e.applied))
     {
         match e.before {
             Some(before) => write(&e.path, before.as_bytes())?,
@@ -196,6 +189,40 @@ fn restore_entry(e: Entry) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_journal(journal: &Journal, path_allowed: impl Fn(&Path) -> bool) -> Result<(), String> {
+    if journal.entries.is_empty()
+        || journal.entries.len() > 4
+        || journal.entries.iter().enumerate().any(|(index, entry)| {
+            !path_allowed(&entry.path)
+                || entry.applied.len() != 64
+                || !entry.applied.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || journal.entries[..index]
+                    .iter()
+                    .any(|previous| paths_match(&previous.path, &entry.path))
+        })
+    {
+        log::warn!(
+            "Native FastFlags recovery record failed entry/path/hash validation; retained for inspection"
+        );
+        return Err(RESTORE_ERROR.into());
+    }
+    Ok(())
+}
+
+fn journal_client(base: &Path, journal: &Journal) -> crate::roblox_library::RobloxClient {
+    use crate::roblox_library::RobloxClient;
+    let vng = crate::roblox_native_launch::installation_root(base, RobloxClient::Vng);
+    if journal
+        .entries
+        .first()
+        .is_some_and(|entry| entry.path.ancestors().any(|path| paths_match(path, &vng)))
+    {
+        RobloxClient::Vng
+    } else {
+        RobloxClient::Standard
+    }
 }
 pub fn diagnostic() -> Result<Option<String>, String> {
     let Some(raw) = read(&journal_path()?)? else {
@@ -205,32 +232,18 @@ pub fn diagnostic() -> Result<Option<String>, String> {
         log::warn!("Native FastFlags recovery diagnostic could not decode record: {error}");
         RESTORE_ERROR
     })?;
-    if journal.entries.len() > 4 || journal.entries.iter().any(|e| !allowed(&e.path)) {
-        log::warn!("Native FastFlags recovery diagnostic rejected record paths");
-        return Err(RESTORE_ERROR.into());
-    }
+    validate_journal(&journal, allowed)?;
     for entry in &journal.entries {
         if read(&entry.path)?
             .as_deref()
-            .is_none_or(|raw| hash(raw) != entry.applied)
+            .is_none_or(|raw| !hash(raw).eq_ignore_ascii_case(&entry.applied))
         {
             return Ok(Some("Something else changed Roblox's flags during this launch. Check whether another launcher is running.".into()));
         }
     }
-    let client = if std::env::var_os("LOCALAPPDATA").is_some_and(|base| {
-        journal.entries.first().is_some_and(|entry| {
-            entry
-                .path
-                .starts_with(crate::roblox_native_launch::installation_root(
-                    &PathBuf::from(base),
-                    crate::roblox_library::RobloxClient::Vng,
-                ))
-        })
-    }) {
-        crate::roblox_library::RobloxClient::Vng
-    } else {
-        crate::roblox_library::RobloxClient::Standard
-    };
+    let client = std::env::var_os("LOCALAPPDATA")
+        .map(|base| journal_client(Path::new(&base), &journal))
+        .unwrap_or_default();
     if !journal.flags.is_empty()
         && let Ok(player) = crate::roblox_native_launch::official_player_for(client)
         && journal.entries.iter().all(|entry| {
@@ -249,6 +262,97 @@ pub fn diagnostic() -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_flag_backups_restore_original_bytes_and_allow_uppercase_hex_hashes() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(
+            std::env::temp_dir().join(format!("swift-flags-valid-{:032x}", rand::random::<u128>())),
+        );
+        fs::create_dir(&dir.0).unwrap();
+        let file = dir.0.join("ClientAppSettings.json");
+        let backup = dir.0.join("native-launch-flags.json");
+        fs::write(&file, b"{}").unwrap();
+        let original = "{\"original\":true}\n";
+        let journal = Journal {
+            entries: vec![Entry {
+                path: file.clone(),
+                before: Some(original.into()),
+                applied: hash("{}").to_ascii_uppercase(),
+            }],
+            flags: HashMap::new(),
+        };
+        write_journal(&backup, &journal).unwrap();
+        assert_eq!(restore_from(&backup, |path| path == file), Ok(true));
+        assert_eq!(fs::read_to_string(&file).unwrap(), original);
+        assert!(!backup.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vng_backup_classification_uses_the_same_windows_path_rules() {
+        let base = Path::new(r"E:\Users\Élodie\AppData\Local");
+        let journal = Journal {
+            entries: vec![Entry {
+                path: PathBuf::from(
+                    r"e:\users\éLODIE\AppData\local\ROBLOXPCVNG\Versions\version-test\ClientSettings\ClientAppSettings.json",
+                ),
+                before: None,
+                applied: hash("{}"),
+            }],
+            flags: HashMap::new(),
+        };
+        assert!(matches!(
+            journal_client(base, &journal),
+            crate::roblox_library::RobloxClient::Vng
+        ));
+    }
+
+    #[test]
+    fn damaged_native_flag_backups_are_kept_instead_of_deleted_as_external_edits() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "swift-flags-damaged-{:032x}",
+            rand::random::<u128>()
+        )));
+        fs::create_dir(&dir.0).unwrap();
+        let file = dir.0.join("ClientAppSettings.json");
+        let backup = dir.0.join("native-launch-flags.json");
+        for applied in [Some("z".repeat(64)), Some("a".repeat(63)), None] {
+            fs::write(&file, b"{}").unwrap();
+            let journal = Journal {
+                entries: applied
+                    .map(|applied| {
+                        vec![Entry {
+                            path: file.clone(),
+                            before: Some("original flag contents".into()),
+                            applied,
+                        }]
+                    })
+                    .unwrap_or_default(),
+                flags: HashMap::new(),
+            };
+            write_journal(&backup, &journal).unwrap();
+            let before = fs::read(&backup).unwrap();
+            let result = restore_from(&backup, |path| path == file);
+            assert!(
+                result.is_err(),
+                "invalid recovery metadata must not consume the only backup"
+            );
+            assert_eq!(fs::read(&backup).unwrap(), before);
+            assert_eq!(fs::read(&file).unwrap(), b"{}");
+        }
+    }
 
     #[cfg(windows)]
     #[test]
