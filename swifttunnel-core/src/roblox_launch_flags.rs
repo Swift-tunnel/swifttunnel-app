@@ -86,6 +86,9 @@ fn allowed(path: &Path) -> bool {
     allowed_in(&PathBuf::from(base), path)
 }
 fn allowed_in(base: &Path, path: &Path) -> bool {
+    if !base.is_absolute() || !path.is_absolute() {
+        return false;
+    }
     [
         crate::roblox_library::RobloxClient::Standard,
         crate::roblox_library::RobloxClient::Vng,
@@ -94,18 +97,48 @@ fn allowed_in(base: &Path, path: &Path) -> bool {
     .any(|client| {
         let versions =
             crate::roblox_native_launch::installation_root(base, client).join("Versions");
-        let Ok(relative) = path.strip_prefix(versions) else {
+        let mut components = path.components();
+        // Rust's lexical strip_prefix is case-sensitive even on Windows.
+        // Compare complete components so casing cannot reject a valid backup
+        // and a similarly named sibling cannot enter the allowed directory.
+        if !versions.components().all(|expected| {
+            components
+                .next()
+                .is_some_and(|actual| same_path_part(expected.as_os_str(), actual.as_os_str()))
+        }) {
             return false;
-        };
-        let parts = relative.components().collect::<Vec<_>>();
+        }
+        let parts = components.collect::<Vec<_>>();
         parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
             && parts[0]
                 .as_os_str()
-                .to_string_lossy()
-                .starts_with("version-")
-            && parts[1].as_os_str() == "ClientSettings"
-            && parts[2].as_os_str() == "ClientAppSettings.json"
+                .to_str()
+                .and_then(|name| name.get(..8))
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("version-"))
+            && same_path_part(parts[1].as_os_str(), std::ffi::OsStr::new("ClientSettings"))
+            && same_path_part(
+                parts[2].as_os_str(),
+                std::ffi::OsStr::new("ClientAppSettings.json"),
+            )
     })
+}
+
+fn same_path_part(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Globalization::{CSTR_EQUAL, CompareStringOrdinal};
+        let left = left.encode_wide().collect::<Vec<_>>();
+        let right = right.encode_wide().collect::<Vec<_>>();
+        unsafe { CompareStringOrdinal(&left, &right, true) == CSTR_EQUAL }
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 pub fn prepare(player: &Path, flags: HashMap<String, String>) -> Result<(), String> {
     if !crate::roblox_game_profile::player_stopped() {
@@ -227,6 +260,35 @@ pub fn diagnostic() -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_accepts_windows_casing_without_widening_the_install_boundary() {
+        let base = Path::new(r"E:\Users\Élodie\AppData\Local");
+        for path in [
+            r"e:\users\éLODIE\appdata\LOCAL\roblox\versions\VERSION-test\clientsettings\clientappsettings.JSON",
+            "E:/Users/Élodie/AppData/Local/ROBLOXPCVNG/Versions/version-test/ClientSettings/ClientAppSettings.json",
+        ] {
+            assert!(
+                allowed_in(base, Path::new(path)),
+                "same Windows install rejected: {path}"
+            );
+        }
+        for path in [
+            r"E:\Users\Élodie2\AppData\Local\Roblox\Versions\version-test\ClientSettings\ClientAppSettings.json",
+            r"E:\Users\Élodie\AppData\Local\Roblox-old\Versions\version-test\ClientSettings\ClientAppSettings.json",
+            r"E:\Users\Élodie\AppData\Local\Roblox\Versions\version-test\..\ClientSettings\ClientAppSettings.json",
+            r"E:\Users\Élodie\AppData\Local\Roblox\Versions\version-test\ClientSettings\..\ClientSettings\ClientAppSettings.json",
+            r"E:\Users\Élodie\AppData\Local\Roblox\Versions\version-test\ClientSettings\ClientAppSettings.json\other",
+            r"E:\Users\Élodie\AppData\Local\Voidstrap\Versions\version-test\ClientSettings\ClientAppSettings.json",
+            r"F:\Users\Élodie\AppData\Local\Roblox\Versions\version-test\ClientSettings\ClientAppSettings.json",
+        ] {
+            assert!(
+                !allowed_in(base, Path::new(path)),
+                "outside install accepted: {path}"
+            );
+        }
+    }
     #[test]
     fn escaped_backup_cannot_replace_a_record_with_one_recovery_cannot_read() {
         let root = std::env::temp_dir().join(format!(

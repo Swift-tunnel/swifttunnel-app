@@ -11,6 +11,8 @@ swifttunnel-msi-repair = { path = "../swifttunnel-msi-repair" }
 # Windows API - version 0.62 to match ndisapi dependency
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    # Ordinal Windows path comparison, including non-ASCII user folders.
+    "Win32_Globalization",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",
