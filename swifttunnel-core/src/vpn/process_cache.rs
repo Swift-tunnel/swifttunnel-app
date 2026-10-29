@@ -1,17 +1,10 @@
-//! Lock-Free Process Cache - RCU-style read-copy-update pattern
+//! Snapshot-based process ownership cache.
 //!
-//! Achieves <0.1ms lookup latency by eliminating locks entirely:
-//! - Single writer thread creates new snapshots atomically
-//! - Multiple reader threads access snapshots without any locks
-//! - Uses arc-swap for safe atomic Arc operations (NO use-after-free!)
+//! Serialized writers publish immutable snapshots through arc-swap. Packet
+//! workers retain owned snapshot references without taking the writer's mutex.
 //!
-//! BSOD FIX (v0.7.2): Replaced unsafe AtomicPtr with arc-swap crate.
-//! The old implementation had a race condition where the writer could
-//! free memory while readers were still accessing it, causing
-//! IRQL_NOT_LESS_OR_EQUAL kernel crashes.
-//!
-//! V2 ROUTING (v0.7.3): Added ExitLag-style hybrid routing that checks
-//! both process ownership AND destination IP ranges.
+//! Static destination classification supplements process ownership. Snapshot
+//! lifetime safety is separate from the kernel packet driver's safety.
 
 use super::process_tracker::{ConnectionKey, Protocol, TrackerStats};
 use crate::process_names::process_name_matches_any_tunnel_app;
@@ -550,6 +543,13 @@ impl LockFreeProcessCache {
         let now = Instant::now();
         let mut immediate = self.immediate_pid_names.lock();
         immediate.retain(|&pid, entry| {
+            // A fresh identity supersedes a launch hint. Forget a contradicted
+            // hint so a later missing owner-table row cannot resurrect it.
+            if pid_names.get(&pid).is_some_and(|name| {
+                !name.eq_ignore_ascii_case(&entry.name) && name.to_lowercase() != entry.name
+            }) {
+                return false;
+            }
             let retain = now.duration_since(entry.registered_at) <= IMMEDIATE_PROCESS_RETENTION;
             if retain {
                 pid_names.entry(pid).or_insert_with(|| entry.name.clone());
@@ -565,7 +565,7 @@ impl LockFreeProcessCache {
     ///
     /// SAFETY: arc-swap's load_full() safely clones the Arc, incrementing the
     /// refcount atomically. The old snapshot won't be freed until all Arcs are
-    /// dropped, eliminating the use-after-free bug that caused BSOD.
+    /// dropped, so publishing a new view cannot invalidate a retained one.
     #[inline(always)]
     pub fn get_snapshot(&self) -> Arc<ProcessSnapshot> {
         self.current.load_full()
@@ -580,7 +580,7 @@ impl LockFreeProcessCache {
     /// eliminating string allocation from the hot path (is_tunnel_pid).
     ///
     /// SAFETY: arc-swap's store() handles the atomic swap correctly.
-    /// The old Arc is returned and dropped, decrementing its refcount.
+    /// Replaced snapshots remain alive while readers retain their Arcs.
     /// Memory is only freed when refcount reaches zero (all readers done).
     pub fn update(
         &self,
@@ -1183,6 +1183,42 @@ mod tests {
             snap.tunnel_pids.contains(&pid),
             "recent ETW registration must survive an empty owner-table refresh"
         );
+    }
+
+    #[test]
+    fn test_fresh_owner_retires_immediate_process_hint_until_a_new_registration() {
+        let cache = LockFreeProcessCache::new(vec!["roblox".into()]);
+        let pid = 2235;
+        cache.register_process_immediate(pid, "RobloxPlayerBeta.exe".into());
+        cache.update(
+            HashMap::new(),
+            [(pid, "other-program.exe".into())].into_iter().collect(),
+        );
+        assert!(!cache.get_snapshot().tunnel_pids.contains(&pid));
+        // A later missing endpoint/name must not resurrect the former owner.
+        cache.update(HashMap::new(), HashMap::new());
+        assert!(
+            !cache.get_snapshot().tunnel_pids.contains(&pid),
+            "a contradicted process hint was resurrected"
+        );
+        cache.register_process_immediate(pid, "RobloxPlayerBeta.exe".into());
+        cache.update(
+            HashMap::new(),
+            [(pid, "ROBLOXPLAYERBETA.EXE".into())].into_iter().collect(),
+        );
+        cache.update(HashMap::new(), HashMap::new());
+        assert!(
+            cache.get_snapshot().tunnel_pids.contains(&pid),
+            "matching case variants must preserve a fresh registration"
+        );
+        let unicode = LockFreeProcessCache::new(vec!["игра".into()]);
+        unicode.register_process_immediate(pid, "игра.exe".into());
+        unicode.update(
+            HashMap::new(),
+            [(pid, "ИГРА.EXE".into())].into_iter().collect(),
+        );
+        unicode.update(HashMap::new(), HashMap::new());
+        assert!(unicode.get_snapshot().tunnel_pids.contains(&pid));
     }
 
     #[test]
