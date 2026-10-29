@@ -209,7 +209,7 @@ function RobloxCard() {
             <Meter fraction={ramTotalMb > 0 ? ramMb / ramTotalMb : 0} />
           </div>
           <div>
-            <Stat label="FPS" value={fps > 0 ? fps : "Overlay off"} />
+            <Stat label="FPS" value={fps > 0 ? fps : "Unavailable"} />
             <Meter fraction={fps > 0 ? Math.min(1, fps / 240) : 0} />
           </div>
         </div>
@@ -220,9 +220,9 @@ function RobloxCard() {
       )}
 
       <div className="mt-auto flex flex-wrap items-center gap-2">
-        <Chip label="FPS cap" value={roblox.unlock_fps ? String(roblox.target_fps) : "60"} />
-        <Chip label="Profile" value={profile} />
-        <Chip label="Graphics" value={String(roblox.graphics_quality)} />
+        <Chip label="Default FPS cap" value={roblox.unlock_fps ? String(roblox.target_fps) : "60"} />
+        <Chip label="Global profile" value={profile} />
+        <Chip label="Default graphics" value={String(roblox.graphics_quality)} />
       </div>
     </div>
   );
