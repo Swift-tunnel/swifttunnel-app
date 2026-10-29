@@ -195,6 +195,62 @@ impl State {
         !self.busy && !self.reboot_required && !self.worker_closed
     }
 
+    /// Polling an idle worker must not request a full-window repaint. The
+    /// chooser's animation is driven separately by SLIDE_TIMER.
+    fn poll_worker_events(&mut self) -> bool {
+        let mut changed = false;
+        loop {
+            let event = match self.events.try_recv() {
+                Ok(event) => event,
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if !self.worker_closed {
+                        self.shift(|s| {
+                            s.worker_stopped();
+                        });
+                        changed = true;
+                    }
+                    break;
+                }
+            };
+            match event {
+                Event::Progress(status) => {
+                    if self.heading != status {
+                        self.heading = status;
+                        changed = true;
+                    }
+                }
+                Event::Ready(package, installed) => {
+                    self.shift(|s| s.ready(package, installed));
+                    changed = true;
+                }
+                Event::Finished(action, code, installed) => {
+                    self.installed = installed;
+                    self.busy = false;
+                    self.installing = false;
+                    self.exit_code = code;
+                    self.reboot_required = matches!(code, 3010 | 1641);
+                    let (ok, message) = result_message(action, code);
+                    self.heading = if ok { "All done" } else { "Could not complete" }.into();
+                    self.detail = message;
+                    changed = true;
+                }
+                Event::Failed(error) => {
+                    self.shift(|s| {
+                        s.exit_code = 1;
+                        s.busy = false;
+                        s.installing = false;
+                        s.switching_to_lite = None;
+                    });
+                    self.heading = "Setup needs attention".into();
+                    self.detail = error;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     fn worker_stopped(&mut self) -> bool {
         if self.worker_closed {
             return false;
@@ -1501,45 +1557,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             LRESULT(0)
         }
         WM_TIMER => {
-            loop {
-                let event = match state.events.try_recv() {
-                    Ok(event) => event,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        state.shift(|s| {
-                            s.worker_stopped();
-                        });
-                        break;
-                    }
-                };
-                match event {
-                    Event::Progress(status) => {
-                        state.heading = status;
-                    }
-                    Event::Ready(package, installed) => {
-                        state.shift(|s| s.ready(package, installed));
-                    }
-                    Event::Finished(action, code, installed) => {
-                        state.installed = installed;
-                        state.busy = false;
-                        state.installing = false;
-                        state.exit_code = code;
-                        state.reboot_required = matches!(code, 3010 | 1641);
-                        let (ok, message) = result_message(action, code);
-                        state.heading = if ok { "All done" } else { "Could not complete" }.into();
-                        state.detail = message;
-                    }
-                    Event::Failed(error) => {
-                        state.shift(|s| {
-                            s.exit_code = 1;
-                            s.busy = false;
-                            s.installing = false;
-                            s.switching_to_lite = None;
-                        });
-                        state.heading = "Setup needs attention".into();
-                        state.detail = error;
-                    }
-                }
+            if wp.0 != EVENT_TIMER || !state.poll_worker_events() {
+                return LRESULT(0);
             }
             LRESULT(0)
         }
@@ -1710,6 +1729,62 @@ pub fn run(state: Box<State>) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_events_refresh_only_when_the_display_changes() {
+        let (commands, _actions) = std::sync::mpsc::channel();
+        let (events, updates) = std::sync::mpsc::channel();
+        let mut state = State::new(commands, updates);
+        assert!(!state.poll_worker_events());
+        events
+            .send(Event::Progress("Checking the package".into()))
+            .unwrap();
+        assert!(state.poll_worker_events());
+        assert_eq!(state.heading, "Checking the package");
+        events
+            .send(Event::Progress("Checking the package".into()))
+            .unwrap();
+        assert!(!state.poll_worker_events());
+        events
+            .send(Event::Ready(
+                Package {
+                    name: "SwiftTunnel".into(),
+                    version: "3.9.5".into(),
+                    product_code: "owned-fixture".into(),
+                    upgrade_code: crate::model::DESKTOP_FAMILY.into(),
+                },
+                vec![],
+            ))
+            .unwrap();
+        assert!(state.poll_worker_events());
+        assert!(!state.busy);
+        assert!(!state.poll_worker_events());
+        events
+            .send(Event::Finished(Action::Install, 3010, vec![]))
+            .unwrap();
+        assert!(state.poll_worker_events());
+        assert!(state.reboot_required && !state.installing);
+        assert_eq!(state.exit_code, 3010);
+        assert!(!state.poll_worker_events());
+    }
+
+    #[test]
+    fn worker_events_keep_failure_details_and_retire_a_closed_channel_once() {
+        let (commands, _actions) = std::sync::mpsc::channel();
+        let (events, updates) = std::sync::mpsc::channel();
+        let mut state = State::new(commands, updates);
+        events
+            .send(Event::Failed("Owned fixture error".into()))
+            .unwrap();
+        assert!(state.poll_worker_events());
+        assert_eq!(state.exit_code, 1);
+        assert_eq!(state.detail, "Owned fixture error");
+        drop(events);
+        assert!(state.poll_worker_events());
+        assert!(state.worker_closed && state.package.is_none());
+        assert_eq!(state.detail, "Owned fixture error");
+        assert!(!state.poll_worker_events());
+    }
 
     unsafe fn render_png(state: &State, dpi: u32, focus: Option<usize>, path: &std::path::Path) {
         let (w, h) = (scaled(WIDTH, dpi), scaled(HEIGHT, dpi));
