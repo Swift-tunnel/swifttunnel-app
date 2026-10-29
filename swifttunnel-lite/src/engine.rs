@@ -2331,10 +2331,9 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                     })
                     .unwrap_or(false);
 
-                // Only when something is actually different. The window's own
-                // one-second heartbeat keeps the session timer moving while
-                // connected; this is for everything else, and asking for a
-                // repaint that changes no pixels is pure waste.
+                // Elapsed session time and remaining allowance are part of
+                // this comparison too. Notify for changed snapshots, without
+                // a second timer rereading and repainting the same values.
                 if changed || settings_changed {
                     shared.notify();
                 }

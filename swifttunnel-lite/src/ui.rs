@@ -2,9 +2,8 @@
 //!
 //! Everything is drawn in one `WM_PAINT`: shapes are composited by
 //! [`crate::canvas`] into an offscreen buffer, blitted once, and the text is
-//! drawn by GDI on top. Nothing animates and nothing is repainted on a timer
-//! unless something actually changed, so an idle Lite costs no CPU and no GPU
-//! at all. That is the whole reason this client is not a webview.
+//! drawn by GDI on top. Engine notifications carry changed snapshots; the
+//! window does not run a second repaint timer for those same values.
 //!
 //! The window is frameless because the app is: a 28px bar carrying the
 //! wordmark, the free-tier budget and two buttons, then the tabs, then the
@@ -42,19 +41,12 @@ use crate::view::{
     self, Action, Face, FieldId, Fonts, Frame, Item, Metrics, Screen, Shape, TextRun, contains,
 };
 
-/// Repaint cadence while something is moving.
-///
-/// Only armed when the tunnel is up or mid-connect: a session timer that does
-/// not tick looks broken, but a window sitting on Settings has nothing to
-/// redraw and should cost nothing.
 /// Not exported by the windows crate, so it is named here rather than left
 /// as a bare identifier in the match below. An unresolved name there is a
 /// binding pattern that matches every value, which silently swallowed every
 /// message after it: no clicks, no repaints, no close.
 const MOUSE_LEAVE: u32 = 0x02A3;
 
-const TICK_TIMER: usize = 1;
-const TICK_MS: u32 = 1000;
 const WM_CLIPBOARD_READY: u32 = WM_APP + 4;
 
 pub struct App {
@@ -70,7 +62,6 @@ pub struct App {
     max_scroll: i32,
     hot: Option<Action>,
     dpi: i32,
-    ticking: bool,
     /// Where the list ended up, which the footer moves.
     content_area: RECT,
     /// Where the lit row is, so a hover change can repaint just the rows that
@@ -226,14 +217,6 @@ impl App {
                 })
             })
         });
-    }
-
-    /// Whether the window needs a heartbeat right now.
-    fn wants_tick(&self) -> bool {
-        matches!(
-            self.state.tunnel.status,
-            Status::Connected | Status::Working
-        )
     }
 
     fn action_at(&self, x: i32, y: i32) -> Option<Action> {
@@ -829,7 +812,6 @@ fn new_app(engine: Option<Engine>, dpi: i32) -> Box<App> {
         max_scroll: 0,
         hot: None,
         dpi,
-        ticking: false,
         canvas: Canvas::new(m.s(theme::WINDOW_W), m.s(theme::WINDOW_H), theme::BG),
         buffer: crate::surface::Buffer::new(),
         tray: None,
@@ -1244,29 +1226,6 @@ fn on_screen(hwnd: HWND) -> bool {
     unsafe { IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool() }
 }
 
-/// `visible` is passed rather than queried because WM_SHOWWINDOW and WM_SIZE
-/// arrive while the change is still happening, so the window would report its
-/// old state.
-fn sync_timer(hwnd: HWND, app: &mut App, visible: bool) {
-    // The heartbeat exists to move a session timer on screen. With a game
-    // fullscreen and Lite in the tray there is no screen to move it on, and
-    // ticking anyway costs a rebuild every second for nothing. The tunnel runs
-    // on the engine's own threads and does not go through here.
-    let wanted = app.wants_tick() && visible;
-    if wanted == app.ticking {
-        return;
-    }
-    // SAFETY: setting and killing a timer on a live window.
-    unsafe {
-        if wanted {
-            SetTimer(Some(hwnd), TICK_TIMER, TICK_MS, None);
-        } else {
-            let _ = KillTimer(Some(hwnd), TICK_TIMER);
-        }
-    }
-    app.ticking = wanted;
-}
-
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if crate::tray::taskbar_recreated(msg) {
@@ -1291,7 +1250,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     app.m = Metrics::new(app.dpi);
                     app.fonts = Fonts::new(&app.m);
                     app.rebuild(client_of(hwnd));
-                    sync_timer(hwnd, app, on_screen(hwnd));
                     app.tray = Some(Tray::new(hwnd));
                 }
                 LRESULT(0)
@@ -1729,19 +1687,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
 
-            WM_TIMER => {
-                if wparam.0 == TICK_TIMER
-                    && let Some(app) = app_of(hwnd)
-                    && !app.quit_pending
-                {
-                    app.refresh_from_engine();
-                    app.rebuild(client_of(hwnd));
-                    sync_timer(hwnd, app, on_screen(hwnd));
-                    repaint(hwnd);
-                }
-                LRESULT(0)
-            }
-
             // Posted by the engine when a background job lands, so a finished
             // connect or a fresh ping shows up without waiting for a tick.
             crate::engine::WM_ENGINE_UPDATE => {
@@ -1760,7 +1705,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     // WM_SHOWWINDOW/restore reads a fresh snapshot before
                     // drawing. A hidden window needs no cloned fleet, layout
                     // rebuild or invalidation for background traffic updates.
-                    sync_timer(hwnd, app, visible);
                 }
                 LRESULT(0)
             }
@@ -1799,7 +1743,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         app.refresh_from_engine();
                     }
                     app.rebuild(client_of(hwnd));
-                    sync_timer(hwnd, app, visible);
                 }
                 LRESULT(0)
             }
@@ -1812,7 +1755,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         app.refresh_from_engine();
                         app.rebuild(client_of(hwnd));
                     }
-                    sync_timer(hwnd, app, visible);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -1923,6 +1865,5 @@ fn dispatch(hwnd: HWND, app: &mut App, action: Action) {
     app.refresh_from_engine();
     app.hot = None;
     app.rebuild(client_of(hwnd));
-    sync_timer(hwnd, app, on_screen(hwnd));
     repaint(hwnd);
 }
