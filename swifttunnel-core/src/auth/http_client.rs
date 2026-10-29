@@ -1200,7 +1200,7 @@ mod client_initialization_tests {
             tokio::time::timeout(Duration::from_secs(3), async {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = [0; 2048];
-                stream.read(&mut request).await.unwrap();
+                assert!(stream.read(&mut request).await.unwrap() > 0);
                 stream.write_all(wire.as_bytes()).await.unwrap();
             })
             .await

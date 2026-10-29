@@ -779,7 +779,7 @@ mod tests {
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
                 let mut request = [0; 4096];
-                socket.read(&mut request).unwrap();
+                assert!(socket.read(&mut request).unwrap() > 0);
                 // The error body is intentionally truncated, so classification
                 // must use headers rather than waiting for/parsing its content.
                 write!(socket, "HTTP/1.1 {status} Fixture\r\nRetry-After: 67\r\nContent-Length: 100000\r\nConnection: close\r\n\r\n").unwrap();

@@ -137,12 +137,17 @@ mod tests {
         let buffered = Capture::default();
         let original = WriteLogger::new(LevelFilter::Info, file_config(), direct.clone());
         let logger = file_logger(LevelFilter::Info, buffered.clone());
-        let record = log::Record::builder()
-            .level(log::Level::Info)
-            .args(format_args!("Relay {} connected in {} ms", "Mumbai 05", 21))
-            .build();
-        original.log(&record);
-        logger.log(&record);
+        // Keep formatted arguments alive through both logger calls, including
+        // analysis builds that do not fold literal arguments into one string.
+        let publish = |args: std::fmt::Arguments<'_>| {
+            let record = log::Record::builder()
+                .level(log::Level::Info)
+                .args(args)
+                .build();
+            original.log(&record);
+            logger.log(&record);
+        };
+        publish(format_args!("Relay {} connected in {} ms", "Mumbai 05", 21));
         // No explicit flush or drop: the newline must already be visible,
         // preserving the last complete line if the process then crashes.
         let original = direct.0.lock().unwrap();
