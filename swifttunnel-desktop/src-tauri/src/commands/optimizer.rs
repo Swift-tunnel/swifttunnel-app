@@ -447,7 +447,12 @@ fn persist_roblox_reset(
     persist: impl FnOnce(&swifttunnel_core::settings::AppSettings) -> Result<(), String>,
 ) -> Result<swifttunnel_core::structs::RobloxSettingsConfig, String> {
     let mut updated = settings.clone();
-    updated.config.roblox_settings = swifttunnel_core::structs::RobloxSettingsConfig::default();
+    // Fresh installs enable an FPS override. Reset must clear that override,
+    // or the next launch applies it again and every Repair sees more to reset.
+    updated.config.roblox_settings = swifttunnel_core::structs::RobloxSettingsConfig {
+        unlock_fps: false,
+        ..Default::default()
+    };
     persist(&updated)?;
     *settings = updated;
     Ok(settings.config.roblox_settings.clone())
@@ -867,6 +872,7 @@ mod tests {
 
         let restored = persist_roblox_reset(&mut settings, |_| Ok(())).unwrap();
         assert!(!restored.ultraboost);
+        assert!(!restored.unlock_fps);
         assert_eq!(settings.config.roblox_settings, restored);
     }
 
@@ -901,7 +907,10 @@ mod tests {
         settings.run_on_startup = true;
         settings.config.roblox_settings.ultraboost = true;
         let mut expected = settings.clone();
-        expected.config.roblox_settings = Default::default();
+        expected.config.roblox_settings = swifttunnel_core::structs::RobloxSettingsConfig {
+            unlock_fps: false,
+            ..Default::default()
+        };
         let expected = serde_json::to_value(expected).unwrap();
         let result = persist_roblox_reset(&mut settings, |candidate| {
             assert_eq!(serde_json::to_value(candidate).unwrap(), expected);
