@@ -8,6 +8,12 @@ let refreshTask: Promise<void> | null = null;
 let refreshRequested = false;
 let favouriteRevision = 0;
 const favouriteRevisions = new Map<string, number>();
+function noteFavouriteRevision(key: string) {
+  const revision = ++favouriteRevision;
+  // Only an older in-flight snapshot needs protection. Completed game keys
+  // must not accumulate for the rest of a long-running app session.
+  if (refreshTask) favouriteRevisions.set(key, revision);
+}
 interface FavouriteWrite {
   desired: boolean;
   confirmed: boolean;
@@ -67,6 +73,7 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
           observedFavourites = favouriteRevision;
         } while (refreshRequested);
       } finally {
+        favouriteRevisions.clear();
         refreshTask = null;
       }
     });
@@ -87,7 +94,7 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
     }));
     // Merge just the star into old reads. New session/close metadata must still
     // arrive, even when a favourite save overlaps the event-driven refresh.
-    favouriteRevisions.set(key, ++favouriteRevision);
+    noteFavouriteRevision(key);
     const existing = favourites.get(key);
     if (existing) {
       existing.desired = favourite;
@@ -114,7 +121,7 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
         if (write.revision === revision) break;
       }
     })().finally(() => {
-      favouriteRevisions.set(key, ++favouriteRevision);
+      noteFavouriteRevision(key);
       favourites.delete(key);
       set({ loading: false });
     });
