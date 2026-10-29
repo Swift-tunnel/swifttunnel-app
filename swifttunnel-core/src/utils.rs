@@ -177,6 +177,10 @@ fn is_system32_program(program: &str) -> bool {
             | "w32tm.exe"
             | "rstrui"
             | "rstrui.exe"
+            | "reg"
+            | "reg.exe"
+            | "schtasks"
+            | "schtasks.exe"
     )
 }
 
@@ -1272,6 +1276,10 @@ mod tests {
             ("cmd", "cmd.exe"),
             ("ping", "ping.exe"),
             ("rstrui.exe", "rstrui.exe"),
+            ("reg", "reg.exe"),
+            ("REG.EXE", "reg.exe"),
+            ("schtasks", "schtasks.exe"),
+            ("SCHTASKS.EXE", "schtasks.exe"),
         ] {
             // No actual E: directory or executable needs to exist. Missing
             // OS files must fail at that path, not select an adjacent helper.
@@ -1300,6 +1308,10 @@ mod tests {
             "cmd",
             "ping",
             "rstrui.exe",
+            "reg",
+            "REG.EXE",
+            "schtasks",
+            "SCHTASKS.EXE",
         ] {
             assert!(
                 resolve_windows_command_path_with_root(name, None)
