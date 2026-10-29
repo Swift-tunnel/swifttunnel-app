@@ -588,46 +588,6 @@ where
     Err(last_error.expect("at least one attempt should have been made"))
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  LOG ROTATION
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Maximum log file size before rotation (1MB)
-const MAX_LOG_SIZE: u64 = 1024 * 1024;
-
-/// Rotate log file if it exceeds the maximum size
-///
-/// Renames the current log to .old (deleting previous .old) if it's too large.
-/// Returns Ok(true) if rotation occurred, Ok(false) if not needed.
-pub fn rotate_log_if_needed(log_path: &std::path::Path) -> std::io::Result<bool> {
-    if !log_path.exists() {
-        return Ok(false);
-    }
-
-    let metadata = std::fs::metadata(log_path)?;
-    if metadata.len() <= MAX_LOG_SIZE {
-        return Ok(false);
-    }
-
-    // Create .old path
-    let old_path = log_path.with_extension("log.old");
-
-    // Delete previous .old file if it exists
-    if old_path.exists() {
-        let _ = std::fs::remove_file(&old_path);
-    }
-
-    // Rename current log to .old
-    std::fs::rename(log_path, &old_path)?;
-
-    log::info!(
-        "Rotated log file: {} -> {}",
-        log_path.display(),
-        old_path.display()
-    );
-    Ok(true)
-}
-
 /// Outcome of a bounded external command run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundedCommandOutput {

@@ -60,6 +60,5 @@ pub mod vpn;
 // Re-export commonly used items
 pub use utils::is_administrator;
 pub use utils::quote_windows_arg;
-pub use utils::rotate_log_if_needed;
 pub use utils::with_retry;
 pub use utils::{BoundedCommandOutput, hidden_command, run_hidden_command_with_timeout};

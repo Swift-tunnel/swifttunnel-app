@@ -10,9 +10,8 @@
 //!
 //! ## Architecture
 //!
-//! - routes.rs: Internet interface IP detection
 //! - process_tracker.rs: Connection-tracking key/stat types shared by process_cache
-//! - process_cache.rs: Lock-free RCU-style process cache for <0.1ms lookups
+//! - process_cache.rs: Immutable snapshots of process and endpoint ownership
 //! - parallel_interceptor.rs: Per-CPU parallel packet processing
 //! - split_tunnel.rs: Per-process routing coordination
 //! - connection.rs: Connection state machine and lifecycle management
@@ -36,7 +35,6 @@ mod quota_notice;
 mod relay_support;
 pub(crate) mod route_measurements;
 pub mod route_preview;
-pub mod routes;
 pub mod servers;
 pub mod split_tunnel;
 pub mod tso_recovery;
