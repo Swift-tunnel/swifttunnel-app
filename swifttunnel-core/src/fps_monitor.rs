@@ -403,6 +403,16 @@ fn sample_window(shared: &FpsShared, now: Instant) {
     shared.current_fps.store(smoothed, Ordering::Release);
 }
 
+fn reset_failed_session_sample(shared: &FpsShared, now: impl FnOnce() -> Instant) {
+    let mut window = shared.window.lock();
+    // Retire old samples before clearing the failed trace's frames and history.
+    // Clock the reset under this lock so a waiting old sample remains stale.
+    let now = now();
+    shared.present_count.store(0, Ordering::Release);
+    shared.current_fps.store(0, Ordering::Release);
+    *window = FpsWindow::new(now);
+}
+
 /// Supervisor: (re)start the ETW session with capped exponential backoff so a
 /// transient failure (or starting before elevation) doesn't permanently kill
 /// FPS. Mirrors the process watcher's supervisor.
@@ -420,6 +430,7 @@ fn supervise_etw_session(shared: Arc<FpsShared>) {
                 break;
             }
             Err(e) => {
+                reset_failed_session_sample(&shared, Instant::now);
                 if started.elapsed() >= Duration::from_secs(LONG_RUN_RESET_SECS) {
                     backoff_ms = INITIAL_BACKOFF_MS;
                 }
@@ -712,6 +723,57 @@ mod tests {
         assert_eq!(monitor.current_fps(), 0);
         sample_window(&shared, at + Duration::from_secs(1));
         assert_eq!(monitor.current_fps(), 120);
+    }
+
+    #[test]
+    fn private_trace_outage_clears_the_previous_sample_and_pending_frames() {
+        let monitor = FpsMonitor::inert_active();
+        let observation = monitor.observe_process(Some(1000));
+        monitor.sample_for_process(observation, true);
+        let shared = monitor.test_shared();
+        let at = shared.window.lock().at;
+        shared.present_count.store(240, Ordering::Release);
+        sample_window(&shared, at + Duration::from_secs(1));
+        assert_eq!(monitor.current_fps(), 240);
+        // These previous-session frames were not sampled before the failure.
+        shared.present_count.store(300, Ordering::Release);
+        let failed_at = at + Duration::from_secs(2);
+        reset_failed_session_sample(&shared, || failed_at);
+        assert_eq!(monitor.current_fps(), 0);
+        assert_eq!(shared.present_count.load(Ordering::Acquire), 0);
+        assert_eq!(shared.window.lock().count, 0);
+        assert_eq!(shared.window.lock().at, failed_at);
+        assert_eq!(shared.target_pid.load(Ordering::Acquire), 1000);
+        assert_eq!(monitor.target_pid.load(Ordering::Acquire), 1000);
+        assert_eq!(
+            monitor.latest_observation.load(Ordering::Acquire),
+            observation.generation
+        );
+        assert_eq!(monitor.sample_for_process(observation, true), 0);
+        sample_window(&shared, failed_at + Duration::from_secs(1));
+        assert_eq!(monitor.current_fps(), 0);
+        // A recovered trace starts a fresh sample, without the old smoothing.
+        shared.present_count.store(120, Ordering::Release);
+        sample_window(&shared, failed_at + Duration::from_secs(2));
+        assert_eq!(monitor.current_fps(), 120);
+    }
+
+    #[test]
+    fn private_trace_outage_rejects_a_sample_clocked_before_the_reset() {
+        let monitor = FpsMonitor::inert_active();
+        monitor.set_target_pid(1000);
+        let shared = monitor.test_shared();
+        let at = shared.window.lock().at;
+        shared.present_count.store(240, Ordering::Release);
+        sample_window(&shared, at + Duration::from_secs(1));
+        let failed_at = at + Duration::from_secs(2);
+        reset_failed_session_sample(&shared, || failed_at);
+        shared.present_count.store(180, Ordering::Release);
+        sample_window(&shared, failed_at - Duration::from_nanos(1));
+        assert_eq!(monitor.current_fps(), 0);
+        assert_eq!(shared.present_count.load(Ordering::Acquire), 180);
+        sample_window(&shared, failed_at + Duration::from_secs(1));
+        assert_eq!(monitor.current_fps(), 180);
     }
 
     #[test]
