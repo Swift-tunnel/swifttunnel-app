@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Button,
   Dialog,
@@ -19,6 +19,7 @@ import type {
 import { Notice } from "../boost/Notice";
 
 export function LauncherImportPanel() {
+  const operation = useRef(false);
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<RobloxImportPreview | null>(null);
@@ -41,6 +42,7 @@ export function LauncherImportPanel() {
     });
 
   async function review(next: boolean) {
+    if (operation.current) return;
     setEnabled(next);
     setError(null);
     setNotice(null);
@@ -49,16 +51,22 @@ export function LauncherImportPanel() {
     setFps(true);
     setGraphics(true);
     if (!next) return;
+    operation.current = true;
     setBusy(true);
     try {
       setPreview(await gamesScanImports());
     } catch (error) {
       setError(formatErrorMessage(error));
     } finally {
+      operation.current = false;
       setBusy(false);
     }
   }
   async function apply() {
+    // A second callback can arrive before React disables the controls. It
+    // must not capture the first import as its rollback baseline.
+    if (operation.current || !Object.keys(patch).length) return;
+    operation.current = true;
     setBusy(true);
     setError(null);
     const store = useSettingsStore.getState();
@@ -79,6 +87,7 @@ export function LauncherImportPanel() {
         store.update({ config: before });
       setError(formatErrorMessage(error));
     } finally {
+      operation.current = false;
       setBusy(false);
     }
   }
