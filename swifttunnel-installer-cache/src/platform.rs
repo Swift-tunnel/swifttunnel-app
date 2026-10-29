@@ -1,4 +1,4 @@
-use super::{package_name, CacheNote};
+use super::{append_note_bytes, package_name, CacheNote, MAX_NOTE_BYTES};
 use std::os::windows::{
     ffi::{OsStrExt, OsStringExt},
     fs::OpenOptionsExt,
@@ -425,7 +425,7 @@ impl InstallerCache {
     }
 
     pub fn write_note(&self, note: CacheNote, bytes: &[u8]) -> io::Result<()> {
-        if bytes.len() > 16 * 1024 {
+        if bytes.len() > MAX_NOTE_BYTES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Cache note too large",
@@ -435,15 +435,26 @@ impl InstallerCache {
     }
     pub fn read_note(&self, note: CacheNote) -> io::Result<String> {
         let file = open_package(&self.inner.path.join(note.name()))?;
-        if file.metadata()?.len() > 16 * 1024 {
+        if file.metadata()?.len() > MAX_NOTE_BYTES as u64 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Cache note too large",
             ));
         }
         let mut content = String::new();
-        file.take(16 * 1024).read_to_string(&mut content)?;
+        file.take(MAX_NOTE_BYTES as u64)
+            .read_to_string(&mut content)?;
         Ok(content)
+    }
+
+    /// Best-effort diagnostic history, not a transactional multi-writer log.
+    pub fn append_note(&self, note: CacheNote, message: &str) -> io::Result<()> {
+        let previous = match self.read_note(note) {
+            Ok(previous) => previous,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(error),
+        };
+        self.write_note(note, &append_note_bytes(&previous, message))
     }
 }
 fn recoverable_policy_error(error: &io::Error) -> bool {

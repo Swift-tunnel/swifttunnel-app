@@ -2,22 +2,13 @@
 
 #[cfg(windows)]
 fn append_driver_install_log(message: &str) {
-    use std::io::Write;
-
-    let program_data =
-        std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-    let log_dir = std::path::PathBuf::from(program_data)
-        .join("SwiftTunnel")
-        .join("logs");
-    let _ = std::fs::create_dir_all(&log_dir);
-    let log_path = log_dir.join("driver-install.log");
-
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
+    use swifttunnel_installer_cache::{CacheNote, InstallerCache};
+    // This helper may run as SYSTEM. Reuse the verified cache directory and
+    // guarded publication instead of following a pre-created log path.
+    if let Err(error) = InstallerCache::open()
+        .and_then(|cache| cache.append_note(CacheNote::DriverInstall, message))
     {
-        let _ = writeln!(file, "{}", message);
+        eprintln!("Could not save driver installer diagnostics: {error}");
     }
 }
 

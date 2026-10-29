@@ -33,14 +33,41 @@ fn package_name(suggested: &str, bytes: &[u8]) -> io::Result<String> {
 pub enum CacheNote {
     LiteAttempt,
     SetupError,
+    DriverInstall,
 }
 impl CacheNote {
     fn name(self) -> &'static str {
         match self {
             Self::LiteAttempt => "lite-last-attempt.txt",
             Self::SetupError => "setup-error.txt",
+            Self::DriverInstall => "driver-install.log",
         }
     }
+}
+
+const MAX_NOTE_BYTES: usize = 16 * 1024;
+
+fn append_note_bytes(previous: &str, message: &str) -> Vec<u8> {
+    fn tail(value: &str, budget: usize) -> &str {
+        let mut start = value.len().saturating_sub(budget);
+        while !value.is_char_boundary(start) {
+            start += 1;
+        }
+        &value[start..]
+    }
+    // Allocate only the retained tail, even for an unexpectedly long error.
+    let message = tail(message, MAX_NOTE_BYTES - 1);
+    let previous = tail(previous, MAX_NOTE_BYTES.saturating_sub(message.len() + 2));
+    let mut bytes = Vec::with_capacity(previous.len() + message.len() + 2);
+    if !previous.is_empty() {
+        bytes.extend_from_slice(previous.as_bytes());
+        if !previous.ends_with('\n') {
+            bytes.push(b'\n');
+        }
+    }
+    bytes.extend_from_slice(message.as_bytes());
+    bytes.push(b'\n');
+    bytes
 }
 
 #[cfg(windows)]
@@ -53,6 +80,24 @@ pub use platform::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_note_append_keeps_readable_history_and_the_latest_unicode_message() {
+        assert_eq!(append_note_bytes("start\n", "ready"), b"start\nready\n");
+        assert_eq!(append_note_bytes("start", "ready"), b"start\nready\n");
+        let previous = "旧".repeat(MAX_NOTE_BYTES);
+        let bytes = append_note_bytes(&previous, "latest 🎮");
+        assert!(bytes.len() <= MAX_NOTE_BYTES);
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap()
+            .ends_with("latest 🎮\n"));
+        let message = format!("{}latest 🎮", "界".repeat(MAX_NOTE_BYTES));
+        let bytes = append_note_bytes("old history", &message);
+        assert!(bytes.len() <= MAX_NOTE_BYTES);
+        let text = std::str::from_utf8(&bytes).unwrap();
+        assert!(text.ends_with("latest 🎮\n"));
+        assert!(!text.contains("old history"));
+    }
     #[test]
     fn package_names_bind_contents_and_reject_paths() {
         assert_eq!(
