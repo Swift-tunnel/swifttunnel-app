@@ -13,12 +13,6 @@ struct Product {
     location: String,
 }
 
-fn normalized_directory(path: &str) -> String {
-    path.replace('/', "\\")
-        .trim_end_matches('\\')
-        .to_ascii_lowercase()
-}
-
 fn select_product(products: &[Product], install_dir: &str) -> Result<Option<String>, String> {
     select_product_with_policy(products, install_dir, true)
 }
@@ -28,11 +22,11 @@ fn select_product_with_policy(
     install_dir: &str,
     allow_missing_location: bool,
 ) -> Result<Option<String>, String> {
-    let directory = normalized_directory(install_dir);
     let matches: Vec<_> = products
         .iter()
         .filter(|product| {
-            !product.location.is_empty() && normalized_directory(&product.location) == directory
+            !product.location.is_empty()
+                && crate::utils::paths_match(Path::new(&product.location), Path::new(install_dir))
         })
         .collect();
     if matches.len() == 1 {
@@ -121,6 +115,35 @@ mod tests {
         Product {
             code: code.into(),
             location: location.into(),
+        }
+    }
+
+    #[test]
+    fn unicode_install_locations_keep_windows_case_matching_and_ambiguity() {
+        for allow_missing in [true, false] {
+            let products = [product("current", "D:\\Üsers\\SwiftTunnel")];
+            assert_eq!(
+                select_product_with_policy(&products, "d:/üsers/swifttunnel/", allow_missing)
+                    .unwrap()
+                    .as_deref(),
+                Some("current")
+            );
+            let duplicates = [
+                product("first", "D:\\Üsers\\SwiftTunnel"),
+                product("second", "d:\\üsers\\swifttunnel"),
+            ];
+            assert!(
+                select_product_with_policy(&duplicates, "d:/üsers/swifttunnel", allow_missing)
+                    .is_err()
+            );
+            assert!(
+                select_product_with_policy(
+                    &[product("different", "D:\\Straße\\SwiftTunnel")],
+                    "D:\\Strasse\\SwiftTunnel",
+                    allow_missing,
+                )
+                .is_err()
+            );
         }
     }
 
