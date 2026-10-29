@@ -4,8 +4,6 @@
 //! Similar to Bloxstrap's server location notifications.
 
 #[cfg(windows)]
-use std::path::Path;
-#[cfg(windows)]
 use tauri_winrt_notification::{Duration, IconCrop, Sound, Toast};
 #[cfg(windows)]
 #[path = "notification_queue.rs"]
@@ -95,20 +93,8 @@ fn get_icon_path(icon: NotificationIcon) -> Option<std::path::PathBuf> {
         NotificationIcon::Swifty => "swifty.png",
     };
 
-    // Try installed locations first.
-    let installed_path = Path::new(r"C:\Program Files\SwiftTunnel").join(filename);
-    if installed_path.exists() {
-        return Some(installed_path);
-    }
-
-    let installed_resource_path = Path::new(r"C:\Program Files\SwiftTunnel")
-        .join("resources")
-        .join(filename);
-    if installed_resource_path.exists() {
-        return Some(installed_resource_path);
-    }
-
-    // Try relative to executable (for development)
+    // Prefer this copy, including custom install locations and development.
+    // Another installed version must not replace its notification artwork.
     if let Ok(exe_path) = std::env::current_exe()
         && let Some(exe_dir) = exe_path.parent()
     {
@@ -126,6 +112,18 @@ fn get_icon_path(icon: NotificationIcon) -> Option<std::path::PathBuf> {
         let assets_path = exe_dir.join("assets").join(filename);
         if assets_path.exists() {
             return Some(assets_path);
+        }
+    }
+
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        let installed = std::path::PathBuf::from(program_files).join("SwiftTunnel");
+        for candidate in [
+            installed.join(filename),
+            installed.join("resources").join(filename),
+        ] {
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
     }
 
