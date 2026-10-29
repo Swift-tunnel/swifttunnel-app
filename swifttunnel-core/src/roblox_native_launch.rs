@@ -94,6 +94,13 @@ fn find_player(versions: &Path) -> Result<PathBuf, String> {
         .ok_or_else(|| "Install Roblox from roblox.com first.".into())
 }
 pub fn safe_path(path: &Path) -> Result<(), String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return Err("This file location is invalid. Reopen SwiftTunnel and try again.".into());
+    }
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(meta) => {
@@ -198,6 +205,28 @@ pub fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_locations_reject_relative_and_parent_traversal_paths() {
+        for path in [
+            "",
+            "RobloxPlayerBeta.exe",
+            r"version-test\RobloxPlayerBeta.exe",
+            r"C:RobloxPlayerBeta.exe",
+            r"C:\Roblox\..\Other\RobloxPlayerBeta.exe",
+        ] {
+            assert!(
+                safe_path(Path::new(path)).is_err(),
+                "accepted ambiguous location: {path}"
+            );
+        }
+        // A checked destination can be created later; absence is not a link.
+        let uncreated = std::env::temp_dir().join(format!(
+            "swift-safe-location-{:032x}",
+            rand::random::<u128>()
+        ));
+        assert!(safe_path(&uncreated).is_ok());
+    }
     #[cfg(windows)]
     #[test]
     fn client_detection_accepts_unicode_casing_but_requires_a_bounded_absolute_path() {
