@@ -27,6 +27,7 @@ import type {
   NetworkAdapterInfo,
   VpnStateResponse,
   WindowsFirewallRepairResponse,
+  StartupRegistrationRepairResponse,
 } from "./types";
 import type {
   NetworkRepairResponse,
@@ -60,7 +61,7 @@ export interface RepairCenterDeps {
   systemRepairNetwork: () => Promise<NetworkRepairResponse>;
   systemRepairStartupRegistration: (
     enabled: boolean,
-  ) => Promise<StartupRegistrationSnapshot>;
+  ) => Promise<StartupRegistrationRepairResponse>;
   systemRestoreStartupRegistration: (
     snapshot: StartupRegistrationSnapshot,
   ) => Promise<StartupRegistrationSnapshot>;
@@ -927,7 +928,19 @@ async function repairStartupRegistration(
 
   let after: StartupRegistrationSnapshot;
   try {
-    after = await deps.systemRepairStartupRegistration(settings.run_on_startup);
+    const result = await deps.systemRepairStartupRegistration(settings.run_on_startup);
+    if (result.outcome === "preference_changed") {
+      return {
+        status: "not_checked",
+        summary: "Startup preference changed while Repair was running.",
+        nextStep: "Run Startup login again to check the current startup preference.",
+        changed: false,
+        reversible: false,
+        ranAt: deps.now(),
+        entries: [{ label: "Repair", value: result.message, tone: "warn" }],
+      };
+    }
+    after = result.snapshot;
   } catch (error) {
     return {
       status: "failed",

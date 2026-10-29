@@ -58,13 +58,11 @@ pub async fn settings_load(state: State<'_, AppState>) -> Result<AppSettings, St
 #[tauri::command]
 pub async fn settings_save(
     state: State<'_, AppState>,
-    app: AppHandle,
     settings: AppSettings,
 ) -> Result<SettingsSaveResult, String> {
     let settings_arc = state.settings.clone();
     let discord_manager = state.discord_manager.clone();
     let fps_monitor = state.fps_monitor.clone();
-    let app_handle = app.clone();
 
     let result: Result<(bool, Option<String>), String> = tauri::async_runtime::spawn_blocking(move || {
         let mut new_settings = settings;
@@ -72,11 +70,22 @@ pub async fn settings_save(
         let discord_enabled = new_settings.enable_discord_rpc;
         let wants_fps = overlay_wants_fps(&new_settings);
         let run_on_startup = new_settings.run_on_startup;
+        // Repair must compare its requested preference against the same save
+        // ordering that publishes the Windows registration.
+        let publication = crate::autostart::begin_startup_publication();
         let routing_changed = persist_preferences(
             &settings_arc,
             new_settings,
             swifttunnel_core::settings::save_settings,
         )?;
+
+        let warning = if let Err(e) = publication.sync(run_on_startup) {
+            log::warn!("Failed to sync startup registration after settings save: {}", e);
+            Some("Your settings were saved, but Windows startup could not be updated. Retry startup setup or use Startup login in Repair.".to_string())
+        } else {
+            None
+        };
+        drop(publication);
 
         {
             let mut discord = discord_manager.lock();
@@ -87,16 +96,6 @@ pub async fn settings_save(
         // showing FPS. Other metrics stay lighter and avoid the real-time DXGI
         // present trace entirely.
         fps_monitor.set_enabled(wants_fps);
-
-        let warning = if let Err(e) = crate::autostart::sync_run_on_startup(&app_handle, run_on_startup) {
-            log::warn!(
-                "Failed to sync startup registration after settings save: {}",
-                e
-            );
-            Some("Your settings were saved, but Windows startup could not be updated. Retry startup setup or use Startup login in Repair.".to_string())
-        } else {
-            None
-        };
 
         Ok((routing_changed, warning))
     })

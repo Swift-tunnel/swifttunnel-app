@@ -1,6 +1,6 @@
 // Mock @tauri-apps/api/core for browser preview
 
-import type { AppSettings } from "../lib/types";
+import type { AppSettings, StartupRegistrationRepairResponse } from "../lib/types";
 import { OPTIMIZATIONS, SPEEDUP_OPTIMIZATIONS } from "../components/optimization/optimizationCatalog";
 import { DEFAULT_SETTINGS } from "../lib/settings";
 
@@ -548,17 +548,20 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
     exists: true,
     value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",
   }),
-  system_repair_startup_registration: (args: unknown) => {
+  system_repair_startup_registration: (args: unknown): StartupRegistrationRepairResponse => {
     const enabled =
       typeof args === "object" &&
       args !== null &&
       "enabled" in args &&
       Boolean((args as { enabled?: boolean }).enabled);
     return {
-      exists: enabled,
-      value: enabled
-        ? "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup"
-        : null,
+      outcome: "completed",
+      snapshot: {
+        exists: enabled,
+        value: enabled
+          ? "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup"
+          : null,
+      },
     };
   },
   system_restore_startup_registration: (args: unknown) => {

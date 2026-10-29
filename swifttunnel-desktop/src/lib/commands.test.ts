@@ -199,8 +199,9 @@ describe("lib/commands", () => {
     await expect(systemGetStartupRegistration()).resolves.toEqual(snapshot);
     expect(invoke).toHaveBeenLastCalledWith("system_get_startup_registration");
 
-    invoke.mockResolvedValueOnce(snapshot);
-    await expect(systemRepairStartupRegistration(true)).resolves.toEqual(snapshot);
+    const repaired = { outcome: "completed", snapshot };
+    invoke.mockResolvedValueOnce(repaired);
+    await expect(systemRepairStartupRegistration(true)).resolves.toEqual(repaired);
     expect(invoke).toHaveBeenLastCalledWith(
       "system_repair_startup_registration",
       { enabled: true },

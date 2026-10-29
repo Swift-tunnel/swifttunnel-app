@@ -498,6 +498,15 @@ export interface AdminCheckResponse {
   is_admin: boolean;
 }
 
+export interface StartupRegistrationSnapshot {
+  exists: boolean;
+  value: string | null;
+}
+
+export type StartupRegistrationRepairResponse =
+  | { outcome: "completed"; snapshot: StartupRegistrationSnapshot }
+  | { outcome: "preference_changed"; message: string };
+
 export interface DriverCheckResponse {
   installed: boolean;
   version: string | null;

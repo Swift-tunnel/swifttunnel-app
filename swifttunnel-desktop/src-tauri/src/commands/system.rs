@@ -3417,6 +3417,33 @@ pub struct StartupRegistrationSnapshot {
     pub value: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum StartupRegistrationRepairResponse {
+    Completed {
+        snapshot: StartupRegistrationSnapshot,
+    },
+    PreferenceChanged {
+        message: String,
+    },
+}
+
+// The caller holds the startup publication lock through this check and the
+// registration write. The settings lock itself is released before OS calls.
+fn repair_current_startup_preference(
+    requested: bool,
+    current: bool,
+    repair: impl FnOnce() -> Result<StartupRegistrationSnapshot, String>,
+) -> Result<StartupRegistrationRepairResponse, String> {
+    if requested != current {
+        return Ok(StartupRegistrationRepairResponse::PreferenceChanged {
+            message: "Your startup setting changed during Repair. Run Startup login again."
+                .to_string(),
+        });
+    }
+    repair().map(|snapshot| StartupRegistrationRepairResponse::Completed { snapshot })
+}
+
 #[cfg(windows)]
 fn read_startup_registration() -> Result<StartupRegistrationSnapshot, String> {
     let value = swifttunnel_core::autostart::registered_command(crate::autostart::RUN_VALUE_NAME)?;
@@ -3446,14 +3473,19 @@ pub async fn system_get_startup_registration() -> Result<StartupRegistrationSnap
 
 #[tauri::command]
 pub async fn system_repair_startup_registration(
-    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
     enabled: bool,
-) -> Result<StartupRegistrationSnapshot, String> {
+) -> Result<StartupRegistrationRepairResponse, String> {
+    let settings = state.settings.clone();
     #[cfg(windows)]
     {
         tauri::async_runtime::spawn_blocking(move || {
-            crate::autostart::sync_run_on_startup(&app, enabled)?;
-            read_startup_registration()
+            let publication = crate::autostart::begin_startup_publication();
+            let current = settings.lock().run_on_startup;
+            repair_current_startup_preference(enabled, current, || {
+                publication.sync(enabled)?;
+                read_startup_registration()
+            })
         })
         .await
         .map_err(|e| format!("Startup repair task failed: {e}"))?
@@ -3461,11 +3493,13 @@ pub async fn system_repair_startup_registration(
 
     #[cfg(not(windows))]
     {
-        let _ = app;
-        let _ = enabled;
-        Ok(StartupRegistrationSnapshot {
-            exists: false,
-            value: None,
+        let _publication = crate::autostart::begin_startup_publication();
+        let current = settings.lock().run_on_startup;
+        repair_current_startup_preference(enabled, current, || {
+            Ok(StartupRegistrationSnapshot {
+                exists: false,
+                value: None,
+            })
         })
     }
 }
@@ -3482,6 +3516,7 @@ pub async fn system_restore_startup_registration(
             use winreg::RegKey;
             use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 
+            let _publication = crate::autostart::begin_startup_publication();
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
             if snapshot.exists {
@@ -3515,6 +3550,46 @@ pub async fn system_restore_startup_registration(
     #[cfg(not(windows))]
     {
         Ok(snapshot)
+    }
+}
+
+#[cfg(test)]
+mod startup_preference_tests {
+    use super::*;
+
+    #[test]
+    fn stale_startup_repair_never_writes_or_snapshots_registration() {
+        for (requested, current) in [(true, false), (false, true)] {
+            let result = repair_current_startup_preference(requested, current, || {
+                panic!("stale Repair must not touch registration")
+            })
+            .unwrap();
+            assert!(matches!(
+                result,
+                StartupRegistrationRepairResponse::PreferenceChanged { .. }
+            ));
+            let json = serde_json::to_value(result).unwrap();
+            assert_eq!(json["outcome"], "preference_changed");
+        }
+    }
+
+    #[test]
+    fn current_startup_repair_preserves_snapshot_and_native_errors() {
+        let result = repair_current_startup_preference(true, true, || {
+            Ok(StartupRegistrationSnapshot {
+                exists: true,
+                value: Some("owned fixture".into()),
+            })
+        })
+        .unwrap();
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["outcome"], "completed");
+        assert_eq!(json["snapshot"]["value"], "owned fixture");
+        assert_eq!(
+            repair_current_startup_preference(false, false, || Err("injected failure".into()))
+                .unwrap_err(),
+            "injected failure"
+        );
     }
 }
 

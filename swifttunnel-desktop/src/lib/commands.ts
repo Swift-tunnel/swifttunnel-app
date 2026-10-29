@@ -26,6 +26,8 @@ import type {
   SpeedResultResponse,
   BufferbloatResultResponse,
   AdminCheckResponse,
+  StartupRegistrationSnapshot,
+  StartupRegistrationRepairResponse,
   DriverCheckResponse,
   WindowsFirewallRepairResponse,
   BoostUpdateResult,
@@ -424,16 +426,13 @@ export const systemRepairNetwork = () =>
  */
 export const systemResetDriver = () => invoke<void>("system_reset_driver");
 
-export interface StartupRegistrationSnapshot {
-  exists: boolean;
-  value: string | null;
-}
+export type { StartupRegistrationSnapshot } from "./types";
 
 export const systemGetStartupRegistration = () =>
   invoke<StartupRegistrationSnapshot>("system_get_startup_registration");
 
 export const systemRepairStartupRegistration = (enabled: boolean) =>
-  invoke<StartupRegistrationSnapshot>("system_repair_startup_registration", {
+  invoke<StartupRegistrationRepairResponse>("system_repair_startup_registration", {
     enabled,
   });
 

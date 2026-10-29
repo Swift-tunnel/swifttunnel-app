@@ -148,8 +148,11 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
     systemRepairNetwork: vi.fn().mockResolvedValue(healthyNetworkRepair),
     systemRepairWindowsFirewall: vi.fn().mockResolvedValue(healthyFirewall),
     systemRepairStartupRegistration: vi.fn().mockResolvedValue({
-      exists: true,
-      value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",
+      outcome: "completed",
+      snapshot: {
+        exists: true,
+        value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",
+      },
     }),
     systemRestoreStartupRegistration: vi.fn().mockResolvedValue({
       exists: false,
@@ -622,6 +625,49 @@ describe("repair center logic", () => {
       exists: false,
       value: null,
     });
+  });
+
+  it("does not offer rollback when a later startup preference skips repair", async () => {
+    const message = "The startup preference changed. Run Startup login again.";
+    const deps = makeDeps({
+      systemRepairStartupRegistration: vi.fn().mockResolvedValue({
+        outcome: "preference_changed",
+        message,
+      }),
+    });
+
+    const report = await runRepairIssue("startup", deps, {
+      settings: { ...DEFAULT_SETTINGS, run_on_startup: true },
+    });
+
+    expect(report).toMatchObject({
+      status: "not_checked",
+      changed: false,
+      reversible: false,
+      entries: [{ label: "Repair", value: message, tone: "warn" }],
+    });
+    expect(report.nextStep).toContain("Run Startup login again");
+    expect(report).not.toHaveProperty("rollback");
+    expect(deps.systemRestoreStartupRegistration).not.toHaveBeenCalled();
+  });
+
+  it("retains startup rollback when a native failure may have changed the entry", async () => {
+    const deps = makeDeps({
+      systemRepairStartupRegistration: vi.fn().mockRejectedValue(new Error("Read-back failed")),
+    });
+
+    const report = await runRepairIssue("startup", deps, { settings: DEFAULT_SETTINGS });
+
+    expect(report).toMatchObject({
+      status: "failed",
+      changed: true,
+      reversible: true,
+      rollback: {
+        kind: "startup_registration",
+        snapshot: { exists: false, value: null },
+      },
+    });
+    expect(report.entries).toContainEqual({ label: "Repair", value: "Read-back failed", tone: "bad" });
   });
 
   it("reports partial when startup rollback read-back differs from the snapshot", async () => {
