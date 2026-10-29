@@ -44,6 +44,12 @@ const CLASSES_PRODUCTS: &str = r"SOFTWARE\Classes\Installer\Products";
 const CLASSES_FEATURES: &str = r"SOFTWARE\Classes\Installer\Features";
 const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
 
+fn is_client_name(name: &str) -> bool {
+    ["SwiftTunnel", "SwiftTunnel Lite"]
+        .iter()
+        .any(|expected| name.trim().eq_ignore_ascii_case(expected))
+}
+
 #[derive(Debug, Clone)]
 pub struct Orphan {
     /// Which account's product list this was found under.
@@ -80,17 +86,23 @@ fn all_registrations() -> windows_registry::Result<Vec<(Orphan, bool)>> {
             };
 
             let display_name = props.get_string("DisplayName").unwrap_or_default();
-            if !display_name.to_lowercase().contains("swifttunnel") {
+            let product_code = unpack_guid(&packed);
+            if !is_client_name(&display_name) || product_code.is_empty() {
                 continue;
             }
 
-            let local_package = props.get_string("LocalPackage").unwrap_or_default();
+            // An unreadable or missing value does not establish that the file
+            // is missing. In particular, never turn a query failure into an
+            // empty path that authorizes removing a registration.
+            let Ok(local_package) = props.get_string("LocalPackage") else {
+                continue;
+            };
             let usable = package_is_usable(&local_package);
 
             out.push((
                 Orphan {
                     sid: sid.clone(),
-                    product_code: unpack_guid(&packed),
+                    product_code,
                     packed,
                     display_name,
                     display_version: props.get_string("DisplayVersion").unwrap_or_default(),
@@ -187,8 +199,10 @@ fn files_have_same_contents(left: &Path, right: &Path) -> bool {
 /// file is the *right* package is `files_have_same_contents`, and
 /// `preserve_installer_sources` needs both for that reason.
 fn package_is_usable(path: &str) -> bool {
-    if path.is_empty() {
-        return false;
+    if !local_source_path(Path::new(path)) {
+        // Unknown location, not proof that a local cached package is missing.
+        // Do not contact a network share from elevated startup maintenance.
+        return true;
     }
 
     // Absent is the one thing worth acting on. Anything else that stops us
@@ -221,33 +235,161 @@ fn package_header_is_usable(mut file: impl std::io::Read) -> bool {
 
 /// Remove every key that makes Windows believe the product is installed.
 pub fn clear_registration(orphan: &Orphan) -> Result<(), String> {
-    // Each delete is independent and a missing key is not worth aborting on:
-    // a half-cleaned machine should still end up fully cleaned.
-    let _ = LOCAL_MACHINE.remove_tree(format!(
-        r"{USERDATA}\{}\Products\{}",
-        orphan.sid, orphan.packed
-    ));
-    let _ = LOCAL_MACHINE.remove_tree(format!(r"{CLASSES_PRODUCTS}\{}", orphan.packed));
-    let _ = LOCAL_MACHINE.remove_tree(format!(r"{CLASSES_FEATURES}\{}", orphan.packed));
-    if !orphan.product_code.is_empty() {
-        let _ = LOCAL_MACHINE.remove_tree(format!(r"{UNINSTALL}\{}", orphan.product_code));
-        // A per-user install lists itself under the user's own hive, and
-        // leaving that behind keeps a dead entry in Add/Remove Programs.
-        let _ = CURRENT_USER.remove_tree(format!(r"{UNINSTALL}\{}", orphan.product_code));
-    }
-
-    // Verify the one that actually gates upgrades is gone. The rest is
-    // bookkeeping; this is the key `RemoveExistingProducts` consults, so
-    // reporting success while it survives would send the user round the same
-    // loop again.
-    if LOCAL_MACHINE
+    validate_orphan(orphan)?;
+    // Discovery can precede a long source-preservation pass. Recheck the
+    // registration before any deletion; a recovered package is no orphan.
+    let props = LOCAL_MACHINE
         .open(format!(
-            r"{USERDATA}\{}\Products\{}",
+            r"{USERDATA}\{}\Products\{}\InstallProperties",
             orphan.sid, orphan.packed
         ))
-        .is_ok()
+        .map_err(|error| {
+            format!(
+                "Could not recheck the installer registration: {error}. Reopen the repair tool."
+            )
+        })?;
+    let name = props
+        .get_string("DisplayName")
+        .map_err(|error| format!("Could not recheck the product name: {error}"))?;
+    let package = props
+        .get_string("LocalPackage")
+        .map_err(|error| format!("Could not recheck the installer source: {error}"))?;
+    if !name.trim().eq_ignore_ascii_case(orphan.display_name.trim())
+        || package != orphan.local_package
     {
-        return Err("the registration key could not be removed".to_string());
+        return Err("The installation changed while it was being checked. Reopen the repair tool before trying again.".into());
+    }
+    if package_is_usable(&package) {
+        return Err("Windows no longer confirms that this installer source is missing. No registration was removed. Reopen Setup to continue.".into());
+    }
+    drop(props);
+    // Classes/Installer keys are shared by product code. Do not remove them
+    // while another account still has a registration for that same product.
+    let users = LOCAL_MACHINE
+        .open(USERDATA)
+        .map_err(|error| format!("Could not check other Windows installations: {error}"))?;
+    for (index, sid) in users.keys().map_err(|error| error.to_string())?.enumerate() {
+        if index >= 256 {
+            return Err(
+                "Too many Windows account records to confirm a safe repair. Contact support."
+                    .into(),
+            );
+        }
+        if sid == orphan.sid {
+            continue;
+        }
+        match users.open(format!(r"{sid}\Products\{}", orphan.packed)) {
+            Ok(_) => return Err("Another Windows account still has this SwiftTunnel version registered. Its shared installer information was left intact. Use Windows Settings > Apps to repair the affected copy.".into()),
+            Err(error) if registry_not_found(error.code().0 as u32) => {}
+            Err(error) => return Err(format!("Could not check another Windows account's installer registration: {error}. Nothing was removed.")),
+        }
+    }
+    clear_registration_with(
+        orphan,
+        |hive, path| {
+            hive.key()
+                .remove_tree(path)
+                .map_err(|error| error.code().0 as u32)
+        },
+        |hive, path| match hive.key().open(path) {
+            Ok(_) => Ok(false),
+            Err(error) if registry_not_found(error.code().0 as u32) => Ok(true),
+            Err(error) => Err(error.code().0 as u32),
+        },
+    )
+}
+
+fn validate_orphan(orphan: &Orphan) -> Result<(), String> {
+    let valid_sid = orphan.sid.starts_with("S-1-")
+        && orphan.sid.len() <= 184
+        && orphan.sid.split('-').skip(2).count() >= 2
+        && orphan
+            .sid
+            .split('-')
+            .skip(2)
+            .all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit()));
+    let code = unpack_guid(&orphan.packed);
+    if !valid_sid
+        || !is_client_name(&orphan.display_name)
+        || code.is_empty()
+        || !code.eq_ignore_ascii_case(&orphan.product_code)
+    {
+        return Err(
+            "The repair record does not identify a SwiftTunnel installation. Nothing was removed."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum RegistrationHive {
+    Machine,
+    User,
+}
+impl RegistrationHive {
+    fn key(self) -> &'static windows_registry::Key {
+        match self {
+            Self::Machine => LOCAL_MACHINE,
+            Self::User => CURRENT_USER,
+        }
+    }
+}
+
+fn registry_not_found(code: u32) -> bool {
+    matches!(code, 0x80070002 | 0x80070003)
+}
+
+fn clear_registration_with(
+    orphan: &Orphan,
+    mut remove: impl FnMut(RegistrationHive, &str) -> Result<(), u32>,
+    mut absent: impl FnMut(RegistrationHive, &str) -> Result<bool, u32>,
+) -> Result<(), String> {
+    validate_orphan(orphan)?;
+    // Keep the discovery record until the other deletions succeed. An access
+    // failure must remain diagnosable and retryable, not look like success.
+    let paths = [
+        (
+            RegistrationHive::Machine,
+            format!(r"{CLASSES_PRODUCTS}\{}", orphan.packed),
+        ),
+        (
+            RegistrationHive::Machine,
+            format!(r"{CLASSES_FEATURES}\{}", orphan.packed),
+        ),
+        (
+            RegistrationHive::Machine,
+            format!(r"{UNINSTALL}\{}", orphan.product_code),
+        ),
+        (
+            RegistrationHive::User,
+            format!(r"{UNINSTALL}\{}", orphan.product_code),
+        ),
+        (
+            RegistrationHive::Machine,
+            format!(r"{USERDATA}\{}\Products\{}", orphan.sid, orphan.packed),
+        ),
+    ];
+    for (index, (hive, path)) in paths.iter().enumerate() {
+        if index == paths.len() - 1 {
+            // Confirm secondary records before discarding our retry anchor.
+            for (hive, path) in &paths[..index] {
+                if !matches!(absent(*hive, path), Ok(true)) {
+                    return Err("Could not confirm the partial installer repair. The installation record was kept so you can retry as administrator.".into());
+                }
+            }
+        }
+        if let Err(error) = remove(*hive, path) {
+            if !registry_not_found(error) {
+                return Err(format!("Installer registration repair is incomplete (Windows error 0x{error:08X}). Reopen the repair tool as administrator to retry."));
+            }
+        }
+    }
+    for (hive, path) in &paths {
+        match absent(*hive, path) {
+            Ok(true) => {}
+            _ => return Err("Could not confirm that the installer registration was removed. Reopen the repair tool as administrator to retry.".into()),
+        }
     }
     Ok(())
 }
@@ -298,6 +440,99 @@ pub fn unpack_guid(packed: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn orphan() -> super::Orphan {
+        super::Orphan {
+            sid: "S-1-5-18".into(),
+            packed: "D128028F38FA27944BA0B4B4D4359AE2".into(),
+            product_code: "{F820821D-AF83-4972-B40A-4B4B4D53A92E}".into(),
+            display_name: "SwiftTunnel".into(),
+            display_version: "3.0.4".into(),
+            local_package: "C:\\owned-fixture\\missing.msi".into(),
+        }
+    }
+
+    #[test]
+    fn incomplete_cleanup_keeps_discovery_until_secondary_removals_succeed() {
+        let mut removed = vec![];
+        let result = super::clear_registration_with(
+            &orphan(),
+            |_, path| {
+                removed.push(path.to_string());
+                if removed.len() == 2 {
+                    Err(0x80070005)
+                } else {
+                    Ok(())
+                }
+            },
+            |_, _| panic!("a failed deletion cannot be reported as verified"),
+        );
+        assert!(result.unwrap_err().contains("incomplete"));
+        assert_eq!(removed.len(), 2);
+        assert!(!removed.iter().any(|path| path.contains("UserData")));
+
+        removed.clear();
+        super::clear_registration_with(
+            &orphan(),
+            |_, path| {
+                removed.push(path.to_string());
+                Err(0x80070002) // An already removed key is retryable.
+            },
+            |_, _| Ok(true),
+        )
+        .unwrap();
+        assert_eq!(removed.len(), 5);
+        assert!(removed.last().unwrap().contains("UserData"));
+    }
+
+    #[test]
+    fn cleanup_verification_never_treats_access_errors_or_remaining_keys_as_absence() {
+        for verified in [Ok(false), Err(0x80070005)] {
+            let mut removed = vec![];
+            let result = super::clear_registration_with(
+                &orphan(),
+                |_, path| {
+                    removed.push(path.to_string());
+                    Ok(())
+                },
+                |_, _| verified,
+            );
+            assert!(result.unwrap_err().contains("Could not confirm"));
+            assert!(!removed.iter().any(|path| path.contains("UserData")));
+        }
+    }
+
+    #[test]
+    fn cleanup_admits_only_exact_client_names_and_consistent_leaf_identifiers() {
+        for name in ["SwiftTunnel", "swifttunnel lite", " SwiftTunnel "] {
+            let mut record = orphan();
+            record.display_name = name.into();
+            assert!(super::validate_orphan(&record).is_ok());
+        }
+        for (field, value) in [
+            ("name", "NotSwiftTunnel"),
+            ("name", "SwiftTunnel Tools"),
+            ("packed", "not-a-guid"),
+            ("packed", "..\\other"),
+            ("sid", "S-1-5-18\\other"),
+            ("sid", "S-1--18"),
+            ("product", "{5EC81BE0-A95C-40A1-A761-C4846CED3900}"),
+        ] {
+            let mut record = orphan();
+            match field {
+                "name" => record.display_name = value.into(),
+                "packed" => record.packed = value.into(),
+                "sid" => record.sid = value.into(),
+                _ => record.product_code = value.into(),
+            }
+            assert!(super::clear_registration_with(
+                &record,
+                |_, _| panic!("invalid identifiers must not reach registry removal"),
+                |_, _| panic!("invalid identifiers must not reach registry reads"),
+            )
+            .is_err());
+        }
+    }
+
     use super::{
         files_have_same_contents, package_header_is_usable, package_is_usable, unpack_guid,
     };
@@ -533,9 +768,43 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_unnamed_package_is_not() {
-        assert!(!package_is_usable(""));
+    fn a_missing_local_package_is_distinct_from_an_unknown_location() {
+        assert!(package_is_usable(""));
         assert!(!package_is_usable("C:/definitely/not/here/nope.msi"));
+    }
+
+    #[test]
+    fn unknown_installer_paths_are_kept_and_rejected_before_source_reads() {
+        use std::path::Path;
+        for path in [
+            "",
+            "relative.msi",
+            "C:relative.msi",
+            r"\\unreachable.invalid\share\source.msi",
+            r"\\?\UNC\unreachable.invalid\share\source.msi",
+            r"\\.\pipe\source",
+            r"C:\source.msi:stream",
+            r"C:\folder\..\source.msi",
+        ] {
+            assert!(!super::local_source_path(Path::new(path)), "{path}");
+            assert!(
+                package_is_usable(path),
+                "unknown is not a missing package: {path}"
+            );
+            assert_eq!(
+                super::read_source_file_bounded(Path::new(path), 32)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+        for path in [
+            r"E:\Windows\Installer\source.msi",
+            r"\\?\E:\Windows\Installer\source.msi",
+            "C:/Windows/Installer/source.msi",
+        ] {
+            assert!(super::local_source_path(Path::new(path)), "{path}");
+        }
     }
 }
 
@@ -615,6 +884,12 @@ pub fn preserve_installer_sources() -> Result<Vec<String>, String> {
 fn read_source_file_bounded(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
     use std::io::{Error, ErrorKind, Read};
 
+    if !local_source_path(path) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "Installer source is not a local absolute path",
+        ));
+    }
     let mut file = std::fs::File::open(path)?;
     if file.metadata()?.len() > limit as u64 {
         return Err(Error::new(
@@ -644,6 +919,18 @@ fn read_source_file_bounded(path: &Path, limit: usize) -> std::io::Result<Vec<u8
         bytes.try_reserve(count).map_err(Error::other)?;
         bytes.extend_from_slice(&buffer[..count]);
     }
+}
+
+fn local_source_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    path.is_absolute()
+        && matches!(path.components().next(), Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+        && path.components().all(|component| match component {
+            Component::ParentDir | Component::CurDir => false,
+            Component::Normal(value) => !value.to_string_lossy().contains(':'),
+            _ => true,
+        })
 }
 
 /// Record `dir\file_name` as where this product was installed from.

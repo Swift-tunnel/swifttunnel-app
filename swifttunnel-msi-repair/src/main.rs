@@ -80,8 +80,8 @@ fn main() {
 
     if orphans.is_empty() {
         println!();
-        println!("Nothing to repair. Either SwiftTunnel is not installed, or its");
-        println!("installer package is still present and upgrades will work normally.");
+        println!("No confirmed orphaned SwiftTunnel registration was found.");
+        println!("If Setup still fails, send support its error message and code.");
         return;
     }
 
