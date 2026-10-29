@@ -127,11 +127,16 @@ impl State {
         self.exit_code = 0;
         self.heading = match installed.as_slice() {
             [] => format!("{} is ready to install", package.name),
+            [current] if current.advertised => format!("{} is ready to install", package.name),
             [_] => format!("{} is installed", package.name),
             _ => "Multiple installations found".into(),
         };
         self.detail = match installed.as_slice() {
             [] => "Install SwiftTunnel on this PC. Close SwiftTunnel before continuing.".into(),
+            [current] if current.advertised && action_allowed(&package, &installed, Action::Install) =>
+                format!("Windows has a pending installation record for version {}. Install SwiftTunnel to complete the setup.", current.version),
+            [current] if current.advertised =>
+                format!("Windows has a pending installation record for version {}. Download Setup for that version or a newer release.", current.version),
             [current] if current.product_code.eq_ignore_ascii_case(&package.product_code) =>
                 format!("Version {}. Repair fixes missing files. Reinstall replaces app files and keeps your preferences.", current.version),
             [current] if current.version == package.version && action_allowed(&package, &installed, Action::Install) =>
@@ -736,6 +741,10 @@ unsafe fn paint(dc: HDC, bounds: RECT, dpi: u32, state: &State) {
         format!("{} is not on this PC yet", product_name(state))
     } else {
         match state.installed.as_slice() {
+            [installed] if installed.advertised => format!(
+                "Version {} is registered but not installed",
+                installed.version
+            ),
             [installed] => format!("Version {} on this PC", installed.version),
             _ => "Choose an action".into(),
         }
@@ -877,7 +886,7 @@ fn control_rect(id: usize, dpi: u32, state: &State) -> RECT {
 fn item_label(id: usize, state: &State) -> &'static str {
     match id {
         DETAILS_ID => "Details",
-        100 if !state.installed.is_empty() => "Update",
+        100 if state.installed.iter().any(|p| !p.advertised) => "Update",
         _ => LABELS.get(id.wrapping_sub(100)).copied().unwrap_or(""),
     }
 }
@@ -1122,6 +1131,7 @@ pub unsafe fn paint_preview(dc: HDC, bounds: RECT, dpi: u32, existing: bool) {
         vec![Installed {
             product_code: package.product_code.clone(),
             version: package.version.clone(),
+            advertised: false,
         }]
     } else {
         vec![]
@@ -1728,6 +1738,34 @@ pub fn run(state: Box<State>) -> Result<i32, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn advertised_registration_offers_install_without_claiming_the_app_is_installed() {
+        let (commands, _) = std::sync::mpsc::channel();
+        let (_, events) = std::sync::mpsc::channel();
+        let mut state = super::State::new(commands, events);
+        let package = crate::model::Package {
+            name: "SwiftTunnel".into(),
+            version: "3.9.4".into(),
+            product_code: "same-product".into(),
+            upgrade_code: crate::model::DESKTOP_FAMILY.into(),
+        };
+        state.ready(
+            package,
+            vec![crate::model::Installed {
+                product_code: "same-product".into(),
+                version: "3.9.4".into(),
+                advertised: true,
+            }],
+        );
+        assert_eq!(state.heading, "SwiftTunnel is ready to install");
+        assert!(state.detail.contains("pending installation record"));
+        assert_eq!(super::item_label(100, &state), "Install");
+        let actions = super::visible_actions(&state);
+        assert!(actions.contains(&0));
+        assert!(!actions.contains(&1));
+        assert!(!actions.contains(&2));
+    }
+
     use super::*;
 
     #[test]
@@ -2133,6 +2171,7 @@ mod tests {
             vec![Installed {
                 product_code: code.into(),
                 version: version.into(),
+                advertised: false,
             }]
         };
         let screens: Vec<(&str, Option<usize>, Box<dyn Fn(&mut State)>)> = vec![
@@ -2437,6 +2476,7 @@ mod tests {
                     vec![Installed {
                         product_code: "test".into(),
                         version: "3.1.6".into(),
+                        advertised: false,
                     }],
                 ))
                 .unwrap();

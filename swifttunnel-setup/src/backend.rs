@@ -1,6 +1,6 @@
 use crate::model::{
-    action_allowed, product_version_available, registration_matches, result_message, Action,
-    Command, Installed, Package, DESKTOP_FAMILY, LITE_FAMILY,
+    action_allowed, registration_matches, registration_version, result_message, Action, Command,
+    Installed, Package, DESKTOP_FAMILY, LITE_FAMILY,
 };
 use std::path::Path;
 use std::sync::mpsc::{Receiver, Sender};
@@ -37,6 +37,7 @@ extern "system" {
         value: *mut u16,
         size: *mut u32,
     ) -> u32;
+    fn MsiQueryProductStateW(code: *const u16) -> i32;
 }
 
 struct MsiHandle(u32);
@@ -140,30 +141,39 @@ fn installed_products(package: &Package) -> Result<Vec<Installed>, String> {
             return Ok(products);
         }
         check(status, "identify installed copies")?;
-        let mut version = [0u16; 256];
-        let mut length = version.len() as u32;
-        let version_status = unsafe {
-            MsiGetProductInfoW(
-                code.as_ptr(),
-                wide("VersionString").as_ptr(),
-                version.as_mut_ptr(),
-                &mut length,
-            )
-        };
-        match product_version_available(version_status) {
-            Ok(false) => continue,
-            Ok(true) => {}
-            Err(status) => {
-                return Err(format!("Could not check an existing SwiftTunnel installation (Windows Installer {status}). Close other installers and reopen Setup. If it persists, contact support with this code."));
-            }
-        }
         let product_code = String::from_utf16_lossy(&code[..38]);
         if !guid(&product_code) {
             return Err("Invalid Windows Installer registration. Contact support.".into());
         }
+        let Some(info) = registration_version(
+            |property| {
+                let mut value = [0u16; 256];
+                let mut length = value.len() as u32;
+                let status = unsafe {
+                    MsiGetProductInfoW(
+                        code.as_ptr(),
+                        wide(property).as_ptr(),
+                        value.as_mut_ptr(),
+                        &mut length,
+                    )
+                };
+                if status != 0 {
+                    return Err(status);
+                }
+                value
+                    .get(..length as usize)
+                    .and_then(|value| String::from_utf16(value).ok())
+                    .ok_or(13) // ERROR_INVALID_DATA
+            },
+            || unsafe { MsiQueryProductStateW(code.as_ptr()) },
+        )?
+        else {
+            continue;
+        };
         products.push(Installed {
             product_code,
-            version: String::from_utf16_lossy(&version[..length as usize]),
+            version: info.version,
+            advertised: info.advertised,
         });
     }
     Err("Too many SwiftTunnel installation records. Open Windows Settings > Apps to select the installation.".into())
