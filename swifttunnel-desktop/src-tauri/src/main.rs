@@ -25,8 +25,6 @@ fn append_driver_install_log(message: &str) {
 fn install_driver_for_installer() -> Result<(), String> {
     append_driver_install_log("SwiftTunnel driver install helper starting.");
 
-    cleanup_stale_network_state_for_installer();
-
     let initial = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
     append_driver_install_log(&format!(
         "Initial health: status={}, ready={}, message={}",
@@ -38,6 +36,11 @@ fn install_driver_for_installer() -> Result<(), String> {
         append_driver_install_log("Driver already ready; helper exiting.");
         return Ok(());
     }
+
+    // A healthy driver needs no installer remediation. Startup owns stale
+    // session recovery; an install must not reset a working client's network
+    // state merely to discover that the shared driver is already ready.
+    cleanup_stale_network_state_for_installer();
 
     let exe_dir = std::env::current_exe()
         .ok()
