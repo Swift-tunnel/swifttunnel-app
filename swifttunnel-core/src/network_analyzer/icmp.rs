@@ -67,8 +67,6 @@ fn ping_blocking(addr: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
         ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
     };
 
-    // IP_STATUS success code (IP_SUCCESS) for ICMP_ECHO_REPLY.Status.
-    const IP_SUCCESS: u32 = 0;
     const PAYLOAD: &[u8] = b"SwiftTunnelPing.";
 
     let handle = unsafe { IcmpCreateFile() }.ok()?;
@@ -92,16 +90,7 @@ fn ping_blocking(addr: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
         )
     };
 
-    let result = if replies > 0 {
-        let reply = unsafe { &*(reply_buf.as_ptr() as *const ICMP_ECHO_REPLY) };
-        if reply.Status == IP_SUCCESS {
-            Some(reply.RoundTripTime.max(1))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let result = echo_reply_rtt(replies, &reply_buf).map(|rtt| rtt.max(1));
 
     unsafe {
         let _ = IcmpCloseHandle(handle);
@@ -109,9 +98,55 @@ fn ping_blocking(addr: Ipv4Addr, timeout_ms: u32) -> Option<u32> {
     result
 }
 
+/// Decode scalar fields without making an aligned native reference into a byte
+/// allocation. Keep zero-ms replies intact; diagnostic callers round separately.
+pub(crate) fn echo_reply_rtt(replies: u32, bytes: &[u8]) -> Option<u32> {
+    use std::mem::{offset_of, size_of};
+    use windows::Win32::NetworkManagement::IpHelper::ICMP_ECHO_REPLY;
+
+    if replies == 0 || bytes.len() < size_of::<ICMP_ECHO_REPLY>() {
+        return None;
+    }
+    let field = |offset| -> Option<u32> {
+        Some(u32::from_ne_bytes(
+            bytes
+                .get(offset..offset + size_of::<u32>())?
+                .try_into()
+                .ok()?,
+        ))
+    };
+    // IP_SUCCESS is zero. Non-success responses have no usable round trip.
+    if field(offset_of!(ICMP_ECHO_REPLY, Status)) != Some(0) {
+        return None;
+    }
+    field(offset_of!(ICMP_ECHO_REPLY, RoundTripTime))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_reply_decoding_accepts_unaligned_storage_and_rejects_missing_or_failed_replies() {
+        use std::mem::{align_of, offset_of, size_of};
+        use windows::Win32::NetworkManagement::IpHelper::ICMP_ECHO_REPLY;
+
+        let mut buffer = vec![0u8; size_of::<ICMP_ECHO_REPLY>() + align_of::<ICMP_ECHO_REPLY>()];
+        let shift = (0..align_of::<ICMP_ECHO_REPLY>())
+            .find(|offset| (buffer.as_ptr() as usize + offset) % align_of::<ICMP_ECHO_REPLY>() != 0)
+            .unwrap();
+        let reply = &mut buffer[shift..shift + size_of::<ICMP_ECHO_REPLY>()];
+        let status = offset_of!(ICMP_ECHO_REPLY, Status);
+        let rtt = offset_of!(ICMP_ECHO_REPLY, RoundTripTime);
+        reply[rtt..rtt + 4].copy_from_slice(&21u32.to_ne_bytes());
+        assert_eq!(echo_reply_rtt(1, reply), Some(21));
+        assert_eq!(echo_reply_rtt(0, reply), None);
+        assert_eq!(echo_reply_rtt(1, &reply[..reply.len() - 1]), None);
+        reply[rtt..rtt + 4].copy_from_slice(&0u32.to_ne_bytes());
+        assert_eq!(echo_reply_rtt(1, reply), Some(0));
+        reply[status..status + 4].copy_from_slice(&11010u32.to_ne_bytes());
+        assert_eq!(echo_reply_rtt(1, reply), None);
+    }
 
     #[tokio::test]
     async fn cancelled_native_probe_keeps_its_slot_until_work_finishes() {

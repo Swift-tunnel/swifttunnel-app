@@ -74,9 +74,6 @@ pub fn measure_latency_icmp(ip: &str) -> Option<u32> {
         ICMP_ECHO_REPLY, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho,
     };
 
-    /// IP_SUCCESS from ipexport.h.
-    const IP_STATUS_SUCCESS: u32 = 0;
-
     const ICMP_TIMEOUT_MS: u32 = 2000;
     const PAYLOAD_LEN: usize = 32;
 
@@ -105,18 +102,7 @@ pub fn measure_latency_icmp(ip: &str) -> Option<u32> {
         )
     };
 
-    let latency = if reply_count > 0 {
-        // SAFETY: reply_count > 0 guarantees the buffer starts with a valid
-        // ICMP_ECHO_REPLY written by IcmpSendEcho.
-        let reply = unsafe { &*(reply_buf.as_ptr() as *const ICMP_ECHO_REPLY) };
-        if reply.Status == IP_STATUS_SUCCESS {
-            Some(reply.RoundTripTime)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let latency = crate::network_analyzer::icmp::echo_reply_rtt(reply_count, &reply_buf);
 
     unsafe {
         let _ = IcmpCloseHandle(handle);
