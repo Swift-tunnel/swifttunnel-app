@@ -502,6 +502,16 @@ pub struct ServerLookup {
     place: String,
     roster: Option<Result<(HashMap<String, PublicServer>, bool), String>>,
 }
+
+async fn required_with_optional<T, U>(
+    required: impl std::future::Future<Output = Result<T, String>>,
+    optional: impl std::future::Future<Output = Result<U, String>>,
+) -> Result<(T, Result<U, String>), String> {
+    // Availability can fail without losing the regional list. A failed
+    // regional list has no use for availability, so drop that work promptly.
+    tokio::try_join!(biased; required, async { Ok::<_, String>(optional.await) })
+}
+
 impl ServerLookup {
     pub fn new(place: &str) -> Result<Self, String> {
         if !valid_place_id(place) {
@@ -539,13 +549,14 @@ impl ServerLookup {
                 .append_pair("cursor", &cursor.to_string());
         }
         let directory = if self.roster.is_none() {
-            let (directory, roster) = tokio::join!(json(url), public_roster(place, None));
+            let (directory, roster) =
+                required_with_optional(json(url), public_roster(place, None)).await?;
             self.roster = Some(roster);
             directory
         } else {
-            json(url).await
+            json(url).await?
         };
-        let mut page = parse_servers(directory?, place, &center)?;
+        let mut page = parse_servers(directory, place, &center)?;
         match self.roster.as_ref() {
         Some(Ok((roster, complete))) => apply_availability(&mut page.servers, roster, *complete),
         _ => page.warning = Some("Roblox could not verify current server availability. A listed server may be full or closed.".into()),
@@ -613,6 +624,86 @@ mod tests {
         sync::Arc,
         time::{Duration, Instant},
     };
+
+    struct FetchDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for FetchDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    fn pending_fetch(
+        started: Arc<tokio::sync::Notify>,
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    ) -> impl std::future::Future<Output = Result<u32, String>> {
+        let guard = FetchDrop(dropped);
+        async move {
+            let _guard = guard;
+            started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_required_directory_drops_a_pending_optional_roster() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let roster_started = Arc::new(tokio::sync::Notify::new());
+        let roster_dropped = Arc::new(AtomicBool::new(false));
+        let (fail, failure) = tokio::sync::oneshot::channel::<()>();
+        let mut request = Box::pin(required_with_optional(
+            async {
+                failure.await.unwrap();
+                Err::<u32, _>("directory unavailable".into())
+            },
+            pending_fetch(roster_started.clone(), roster_dropped.clone()),
+        ));
+        tokio::select! {
+            result = &mut request => panic!("request completed before directory failure: {result:?}"),
+            () = roster_started.notified() => {}
+        }
+        fail.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), &mut request)
+            .await
+            .expect("a known directory error must not wait for availability");
+        assert_eq!(result, Err("directory unavailable".into()));
+        assert!(roster_dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn failed_optional_roster_preserves_a_successful_required_directory() {
+        let result = required_with_optional(
+            async {
+                tokio::task::yield_now().await;
+                Ok(7_u32)
+            },
+            async { Err::<u32, _>("availability unavailable".into()) },
+        )
+        .await;
+        assert_eq!(result, Ok((7, Err("availability unavailable".into()))));
+    }
+
+    #[tokio::test]
+    async fn cancelled_directory_request_drops_both_owned_fetches() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let directory_started = Arc::new(tokio::sync::Notify::new());
+        let roster_started = Arc::new(tokio::sync::Notify::new());
+        let directory_dropped = Arc::new(AtomicBool::new(false));
+        let roster_dropped = Arc::new(AtomicBool::new(false));
+        let mut request = Box::pin(required_with_optional(
+            pending_fetch(directory_started.clone(), directory_dropped.clone()),
+            pending_fetch(roster_started.clone(), roster_dropped.clone()),
+        ));
+        tokio::select! {
+            result = &mut request => panic!("pending fetches completed unexpectedly: {result:?}"),
+            _ = async {
+                tokio::join!(directory_started.notified(), roster_started.notified());
+            } => {}
+        }
+        drop(request);
+        assert!(directory_dropped.load(Ordering::Acquire));
+        assert!(roster_dropped.load(Ordering::Acquire));
+    }
 
     #[test]
     fn directory_cooldowns_expire_without_blocking_the_other_service() {
