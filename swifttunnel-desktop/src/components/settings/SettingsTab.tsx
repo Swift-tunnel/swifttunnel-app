@@ -200,9 +200,9 @@ export function SettingsTab() {
             <span
               className="pill-base self-start"
               style={{
-                backgroundColor: `${updateColor}1a`,
+                backgroundColor: `color-mix(in srgb, ${updateColor} 10%, transparent)`,
                 color: updateColor,
-                border: `1px solid ${updateColor}30`,
+                border: `1px solid color-mix(in srgb, ${updateColor} 19%, transparent)`,
               }}
             >
               {updateLabel}

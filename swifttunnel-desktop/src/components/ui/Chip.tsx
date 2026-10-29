@@ -14,9 +14,9 @@ interface ChipProps {
 function toneStyle(tone: Tone, color?: string): React.CSSProperties {
   if (tone === "custom" && color) {
     return {
-      backgroundColor: `${color}1a`,
+      backgroundColor: `color-mix(in srgb, ${color} 10%, transparent)`,
       color,
-      border: `1px solid ${color}30`,
+      border: `1px solid color-mix(in srgb, ${color} 19%, transparent)`,
     };
   }
   switch (tone) {
