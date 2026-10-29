@@ -738,11 +738,8 @@ pub struct WorkerStats {
     pub bytes_bypassed: AtomicU64,
     /// This worker's total CPU time, kernel plus user, in 100ns units.
     ///
-    /// Here to answer one question from a user's log: how much of a core each
-    /// worker is actually taking. Workers are pinned one per core, so on a
-    /// small machine they can occupy every core the game also wants, and
-    /// reports of a large frame rate drop on connect have no other evidence
-    /// to weigh. Sampled on a timer, not per packet.
+    /// Sampled on a timer, not per packet. Affinity does not reserve a CPU;
+    /// measured CPU time records the work actually competing with the game.
     pub cpu_time_100ns: AtomicU64,
 }
 
@@ -1144,34 +1141,20 @@ pub struct ParallelInterceptor {
 impl ParallelInterceptor {
     /// Create new parallel interceptor
     pub fn new(tunnel_apps: Vec<String>) -> Self {
-        // Use physical cores only (hyperthreading doesn't help packet processing)
-        // Cap at 4 workers - more threads = more overhead with diminishing returns
-        // ExitLag-style efficiency: fewer threads, smarter scheduling
+        // Size the worker pool from the physical core count, capped at four.
+        // The affinity mask used on startup addresses logical processors.
         let physical_cores = num_cpus::get_physical();
         let num_workers = physical_cores.clamp(1, 4);
 
-        // Spell out the machine, because the workers are pinned one per core
-        // and what that costs depends entirely on how many cores exist. On a
-        // four core machine every core gets a worker and the game shares none
-        // of them; on sixteen it is a quarter of the box. A frame rate report
-        // is unreadable without this line.
+        // Record topology and the requested policy. Each worker reports the
+        // actual affinity outcome separately; no CPU is reserved for it.
         log::info!(
             "Creating parallel interceptor with {} workers ({} physical cores, {} logical), \
-             each pinned to one core: the game shares {} of {} physical cores",
+             requesting logical-processor affinity per worker",
             num_workers,
             physical_cores,
             num_cpus::get(),
-            physical_cores.saturating_sub(num_workers),
-            physical_cores,
         );
-        if physical_cores <= num_workers {
-            log::warn!(
-                "Every physical core has a pinned packet worker on it ({} cores, {} workers); \
-                 a game on this machine has no uncontended core",
-                physical_cores,
-                num_workers,
-            );
-        }
 
         let worker_stats: Vec<Arc<WorkerStats>> = (0..num_workers)
             .map(|_| Arc::new(WorkerStats::default()))
@@ -5284,11 +5267,10 @@ impl Drop for ParallelInterceptor {
     }
 }
 
-/// Set thread affinity to specific CPU core
+/// Request thread affinity to a logical processor in its current group.
 ///
 /// Logs the outcome. The return value is the *previous* mask, and zero means
-/// the call failed, so a worker that silently stayed unpinned is otherwise
-/// indistinguishable in a log from one that took a core to itself.
+/// the call failed. A failed request retains the thread's prior affinity.
 fn set_thread_affinity(core_id: usize) {
     #[cfg(target_os = "windows")]
     unsafe {
@@ -5296,9 +5278,13 @@ fn set_thread_affinity(core_id: usize) {
         let previous =
             SetThreadAffinityMask(windows::Win32::System::Threading::GetCurrentThread(), mask);
         if previous == 0 {
-            log::warn!("Worker {core_id}: could not pin to core {core_id}, left unpinned");
+            log::warn!(
+                "Worker {core_id}: could not set logical-processor affinity, prior affinity retained"
+            );
         } else {
-            log::info!("Worker {core_id}: pinned to core {core_id} (was mask {previous:#x})");
+            log::info!(
+                "Worker {core_id}: affinity set to logical processor {core_id} (was mask {previous:#x})"
+            );
         }
     }
 }
