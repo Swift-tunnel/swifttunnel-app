@@ -142,9 +142,7 @@ impl DiscordManager {
         let mut client = DiscordIpcClient::new(DISCORD_APP_ID)
             .map_err(|e| format!("Failed to create Discord client: {}", e))?;
 
-        client
-            .connect()
-            .map_err(|e| format!("Failed to connect to Discord: {}", e))?;
+        super::handshake::connect(&mut client)?;
 
         Ok(client)
     }
