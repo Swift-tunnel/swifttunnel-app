@@ -276,10 +276,17 @@ impl Engine {
             was_connected: AtomicBool::new(false),
         });
 
-        spawn_regions(shared.clone());
-        spawn_game_logs(shared.clone());
-        spawn_poller(shared.clone());
-        spawn_auto_update(shared.clone());
+        // Own shutdown before launching workers. A later startup failure must
+        // signal already-started workers instead of abandoning their owners.
+        let engine = Engine {
+            shared: shared.clone(),
+        };
+        spawn_regions(shared.clone())?;
+        spawn_game_logs(shared.clone())?;
+        spawn_poller(shared.clone())?;
+        if let Err(error) = spawn_auto_update(shared.clone()) {
+            log::warn!("Automatic update checks could not start: {error}");
+        }
         spawn_installation_lookup(shared.clone());
 
         // The profile is re-fetched once at startup, because a ban applied
@@ -320,7 +327,6 @@ impl Engine {
             }
         }
 
-        let engine = Engine { shared };
         engine.refresh_adapters();
         Ok(engine)
     }
@@ -1691,14 +1697,14 @@ async fn download_while_idle<T>(
 }
 
 /// Check for automatic updates in the background and hand off only while idle.
-fn spawn_auto_update(shared: Arc<Shared>) {
+fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
     // Long enough that a launch is not competing with a download, short enough
     // that somebody who opens Lite, updates, and plays is covered.
     const FIRST_CHECK_AFTER: Duration = Duration::from_secs(45);
     // A session left open for days should not stay on an old build.
     const THEN_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
-    std::thread::spawn(move || {
+    std::thread::Builder::new().name("lite-auto-update".into()).spawn(move || {
         let mut wait = FIRST_CHECK_AFTER;
 
         loop {
@@ -1842,7 +1848,7 @@ fn spawn_auto_update(shared: Arc<Shared>) {
                 }
             }
         }
-    });
+    }).map(|_| ()).map_err(|error| format!("Could not start the Lite update worker: {error}"))
 }
 
 fn region_rows(list: &DynamicServerList) -> Vec<RegionRow> {
@@ -1891,7 +1897,7 @@ async fn refresh_fleet(shared: &Arc<Shared>) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_game_logs(shared: Arc<Shared>) {
+fn spawn_game_logs(shared: Arc<Shared>) -> Result<(), String> {
     std::thread::Builder::new()
         .name("lite-game-logs".into())
         .spawn(move || {
@@ -1990,10 +1996,11 @@ fn spawn_game_logs(shared: Arc<Shared>) {
                 game_destination::clear();
             });
         })
-        .expect("Lite game log watcher");
+        .map(|_| ())
+        .map_err(|error| format!("Could not start the Lite game log worker: {error}"))
 }
 
-fn spawn_regions(shared: Arc<Shared>) {
+fn spawn_regions(shared: Arc<Shared>) -> Result<(), String> {
     std::thread::Builder::new()
         .name("lite-regions".into())
         .spawn(move || {
@@ -2100,7 +2107,8 @@ fn spawn_regions(shared: Arc<Shared>) {
                 shared.notify();
             }
         })
-        .expect("region watcher thread");
+        .map(|_| ())
+        .map_err(|error| format!("Could not start the Lite region worker: {error}"))
 }
 
 /// Keep picker-only probes off the connection during play. A game opening
@@ -2138,7 +2146,7 @@ fn wait_for_picker_round(
 /// So: the interval stretches when there is nothing moving, the process scan
 /// runs at a fraction of the poll rate, and a repaint is only asked for when
 /// the snapshot actually differs from what the window already has.
-fn spawn_poller(shared: Arc<Shared>) {
+fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
     std::thread::Builder::new()
         .name("lite-poll".into())
         .spawn(move || {
@@ -2335,7 +2343,8 @@ fn spawn_poller(shared: Arc<Shared>) {
                 maybe_reconnect(&shared);
             }
         })
-        .expect("poller thread");
+        .map(|_| ())
+        .map_err(|error| format!("Could not start the Lite state worker: {error}"))
 }
 
 // ── Reading the machine ─────────────────────────────────────────────────────

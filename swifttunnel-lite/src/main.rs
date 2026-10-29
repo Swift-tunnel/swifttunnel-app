@@ -40,6 +40,7 @@ mod runtime;
 mod screens;
 mod settings_writer;
 mod single_client;
+mod startup_failure;
 mod state;
 mod surface;
 mod theme;
@@ -190,13 +191,10 @@ fn main() {
     start_maintenance();
     let engine = match engine::Engine::new() {
         Ok(engine) => engine,
-        Err(error) => {
-            log::error!("could not start: {error}");
-            return;
-        }
+        Err(error) => startup_failure::abort(startup_failure::Stage::Engine, error),
     };
     if let Err(error) = ui::run(engine) {
-        log::error!("window failed: {error}");
+        startup_failure::abort(startup_failure::Stage::Window, error);
     }
 }
 
