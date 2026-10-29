@@ -1,7 +1,42 @@
 //! Coordination between trace setup and a concurrent stop request.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use windows::Win32::Foundation::{ERROR_SUCCESS, WIN32_ERROR};
+use windows::Win32::Foundation::{
+    ERROR_ACTIVE_CONNECTIONS, ERROR_MORE_DATA, ERROR_SUCCESS, ERROR_WMI_INSTANCE_NOT_FOUND,
+    WIN32_ERROR,
+};
+
+/// Byte capacity for a native properties header followed by UTF-16 names.
+/// A Vec<u8> does not promise the alignment required for header field access.
+pub(crate) fn trace_properties_storage(bytes: usize) -> Vec<u64> {
+    use std::mem::{align_of, size_of};
+    use windows::Win32::System::Diagnostics::Etw::EVENT_TRACE_PROPERTIES;
+    const {
+        assert!(align_of::<EVENT_TRACE_PROPERTIES>() <= align_of::<u64>());
+    }
+    vec![
+        0;
+        bytes
+            .max(size_of::<EVENT_TRACE_PROPERTIES>())
+            .div_ceil(size_of::<u64>())
+    ]
+}
+
+/// Keep failure evidence before a caller waits for its trace worker to retire.
+/// MORE_DATA still means the session stopped; ACTIVE_CONNECTIONS means stopping
+/// is already underway. Neither should be presented as a failed stop.
+pub(crate) fn report_trace_stop_result(session: &str, result: WIN32_ERROR) {
+    if !matches!(
+        result,
+        ERROR_SUCCESS | ERROR_WMI_INSTANCE_NOT_FOUND | ERROR_MORE_DATA | ERROR_ACTIVE_CONNECTIONS
+    ) {
+        log::warn!(
+            "Windows did not confirm stopping ETW session '{}' (0x{:08X})",
+            session,
+            result.0
+        );
+    }
+}
 
 /// Call only after the trace session and consumer have both been opened.
 /// The caller must still close the consumer and stop its session on return.
@@ -39,6 +74,23 @@ mod tests {
     use std::sync::{Arc, atomic::Ordering, mpsc};
     use std::time::Duration;
     use windows::Win32::Foundation::ERROR_SUCCESS;
+
+    #[test]
+    fn properties_storage_is_aligned_zeroed_and_covers_the_trailing_name() {
+        use std::mem::{align_of, size_of};
+        use windows::Win32::System::Diagnostics::Etw::EVENT_TRACE_PROPERTIES;
+        for trailing in 0..32 {
+            let requested = size_of::<EVENT_TRACE_PROPERTIES>() + trailing;
+            let storage = trace_properties_storage(requested);
+            assert_eq!(
+                storage.as_ptr() as usize % align_of::<EVENT_TRACE_PROPERTIES>(),
+                0
+            );
+            assert!(size_of_val(storage.as_slice()) >= requested);
+            assert!(size_of_val(storage.as_slice()) < requested + size_of::<u64>());
+            assert!(storage.iter().all(|unit| *unit == 0));
+        }
+    }
 
     #[test]
     fn etw_shutdown_before_session_creation_cannot_enter_blocking_trace() {

@@ -467,7 +467,7 @@ fn run_etw_session(shared: &Arc<FpsShared>) -> Result<(), String> {
             .collect();
         let properties_size =
             std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + (session_name_wide.len() * 2) + 2;
-        let mut properties_buffer = vec![0u8; properties_size];
+        let mut properties_buffer = crate::etw_lifecycle::trace_properties_storage(properties_size);
         let properties = properties_buffer.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
 
         (*properties).Wnode.BufferSize = properties_size as u32;
@@ -578,7 +578,7 @@ fn stop_existing_session(session_name: &str) {
             .collect();
         let properties_size =
             std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + (session_name_wide.len() * 2) + 2;
-        let mut properties_buffer = vec![0u8; properties_size];
+        let mut properties_buffer = crate::etw_lifecycle::trace_properties_storage(properties_size);
         let properties = properties_buffer.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
         (*properties).Wnode.BufferSize = properties_size as u32;
         (*properties).LoggerNameOffset = std::mem::size_of::<EVENT_TRACE_PROPERTIES>() as u32;
@@ -589,12 +589,13 @@ fn stop_existing_session(session_name: &str) {
             name_dest,
             session_name_wide.len(),
         );
-        let _ = ControlTraceW(
+        let result = ControlTraceW(
             CONTROLTRACE_HANDLE::default(),
             PCWSTR(session_name_wide.as_ptr()),
             properties,
             EVENT_TRACE_CONTROL_STOP,
         );
+        crate::etw_lifecycle::report_trace_stop_result(session_name, result);
     }
 }
 

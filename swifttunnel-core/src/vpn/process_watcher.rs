@@ -218,7 +218,7 @@ fn run_etw_session(
             .collect();
         let properties_size =
             std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + (session_name_wide.len() * 2) + 2;
-        let mut properties_buffer = vec![0u8; properties_size];
+        let mut properties_buffer = crate::etw_lifecycle::trace_properties_storage(properties_size);
         let properties = properties_buffer.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
 
         // Initialize properties
@@ -345,7 +345,7 @@ fn stop_existing_session() {
             .collect();
         let properties_size =
             std::mem::size_of::<EVENT_TRACE_PROPERTIES>() + (session_name_wide.len() * 2) + 2;
-        let mut properties_buffer = vec![0u8; properties_size];
+        let mut properties_buffer = crate::etw_lifecycle::trace_properties_storage(properties_size);
         let properties = properties_buffer.as_mut_ptr() as *mut EVENT_TRACE_PROPERTIES;
 
         (*properties).Wnode.BufferSize = properties_size as u32;
@@ -369,6 +369,7 @@ fn stop_existing_session() {
         if result == ERROR_SUCCESS {
             log::info!("Stopped existing ETW session");
         }
+        crate::etw_lifecycle::report_trace_stop_result(SESSION_NAME, result);
     }
 }
 
