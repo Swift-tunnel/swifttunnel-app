@@ -421,6 +421,57 @@ pub struct SplitTunnelDiagnostics {
     pub leaked_worker_threads: u64,
 }
 
+/// Native IP Helper headers contain pointers and unions with native alignment.
+/// Keep the trailing API output in the same aligned, zeroed allocation.
+fn ip_helper_storage<T>(bytes: u32) -> Vec<u64> {
+    const {
+        assert!(std::mem::align_of::<T>() <= std::mem::align_of::<u64>());
+    }
+    vec![
+        0;
+        (bytes as usize)
+            .max(std::mem::size_of::<T>())
+            .div_ceil(std::mem::size_of::<u64>())
+    ]
+}
+
+fn route_table_rows(
+    storage: &[u64],
+    returned_bytes: usize,
+) -> Option<&[windows::Win32::NetworkManagement::IpHelper::MIB_IPFORWARDROW]> {
+    use std::mem::{offset_of, size_of, size_of_val};
+    use windows::Win32::NetworkManagement::IpHelper::{MIB_IPFORWARDROW, MIB_IPFORWARDTABLE};
+
+    const {
+        assert!(std::mem::align_of::<MIB_IPFORWARDROW>() <= std::mem::align_of::<u64>());
+        assert!(
+            offset_of!(MIB_IPFORWARDTABLE, table) % std::mem::align_of::<MIB_IPFORWARDROW>() == 0
+        );
+    }
+    let bytes = returned_bytes;
+    let offset = offset_of!(MIB_IPFORWARDTABLE, table);
+    if bytes > size_of_val(storage) || bytes < offset || bytes < size_of::<u32>() {
+        return None;
+    }
+    // The header and rows contain integer fields only. The backing u64 slice
+    // supplies alignment and initialized bytes; validate the count before
+    // making a slice that may extend beyond the header's single inline row.
+    let count = unsafe { storage.as_ptr().cast::<u32>().read() } as usize;
+    if count > (bytes - offset) / size_of::<MIB_IPFORWARDROW>() {
+        return None;
+    }
+    Some(unsafe {
+        std::slice::from_raw_parts(
+            storage
+                .as_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<MIB_IPFORWARDROW>(),
+            count,
+        )
+    })
+}
+
 fn pwstr_to_string(ptr: windows::core::PWSTR) -> String {
     if ptr.0.is_null() {
         return String::new();
@@ -455,7 +506,7 @@ pub fn list_network_adapters() -> VpnResult<Vec<NetworkAdapterInfo>> {
             return Ok(Vec::new());
         }
 
-        let mut buffer = vec![0u8; size as usize];
+        let mut buffer = ip_helper_storage::<IP_ADAPTER_ADDRESSES_LH>(size);
         let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
         let rc = GetAdaptersAddresses(
             AF_UNSPEC.0 as u32,
@@ -1654,7 +1705,7 @@ impl ParallelInterceptor {
                 return None;
             }
 
-            let mut buffer = vec![0u8; size as usize];
+            let mut buffer = ip_helper_storage::<IP_ADAPTER_ADDRESSES_LH>(size);
             let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
             if GetAdaptersAddresses(
                 AF_UNSPEC.0 as u32,
@@ -1737,7 +1788,7 @@ impl ParallelInterceptor {
                 return None;
             }
 
-            let mut buffer = vec![0u8; size as usize];
+            let mut buffer = ip_helper_storage::<IP_ADAPTER_ADDRESSES_LH>(size);
             let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
             if GetAdaptersAddresses(
                 AF_UNSPEC.0 as u32,
@@ -1793,13 +1844,15 @@ impl ParallelInterceptor {
 
             // Table can grow between calls; retry a few times on buffer resize.
             for attempt in 1..=3 {
-                let mut buffer = vec![0u8; size as usize];
+                let mut buffer = ip_helper_storage::<MIB_IPFORWARDTABLE>(size);
                 let table = buffer.as_mut_ptr() as *mut MIB_IPFORWARDTABLE;
 
                 let rc = GetIpForwardTable(Some(table), &mut size, false);
                 if rc == NO_ERROR.0 {
-                    let num_entries = (*table).dwNumEntries as usize;
-                    let entries = std::slice::from_raw_parts((*table).table.as_ptr(), num_entries);
+                    let Some(entries) = route_table_rows(&buffer, size as usize) else {
+                        log::warn!("Windows returned an invalid IPv4 route table size");
+                        return None;
+                    };
 
                     let mut defaults: Vec<DefaultRouteInfo> = entries
                         .iter()
@@ -2045,7 +2098,7 @@ impl ParallelInterceptor {
                 return None;
             }
 
-            let mut buffer = vec![0u8; size as usize];
+            let mut buffer = ip_helper_storage::<IP_ADAPTER_ADDRESSES_LH>(size);
             let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
 
             if GetAdaptersAddresses(
@@ -2285,7 +2338,7 @@ impl ParallelInterceptor {
                 return None;
             }
 
-            let mut buffer = vec![0u8; size as usize];
+            let mut buffer = ip_helper_storage::<IP_ADAPTER_ADDRESSES_LH>(size);
             let adapter_addresses = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
             if GetAdaptersAddresses(
                 AF_UNSPEC.0 as u32,
@@ -8515,7 +8568,7 @@ fn get_adapter_friendly_name(internal_name: &str) -> Option<String> {
             return None;
         }
 
-        let mut buffer: Vec<u8> = vec![0; buf_len as usize];
+        let mut buffer = ip_helper_storage::<IP_ADAPTER_INFO>(buf_len);
         let adapter_info_ptr = buffer.as_mut_ptr() as *mut IP_ADAPTER_INFO;
 
         if GetAdaptersInfo(Some(adapter_info_ptr), &mut buf_len) != 0 {
@@ -8578,7 +8631,7 @@ fn get_adapter_friendly_name_v2(internal_name: &str) -> Option<String> {
             return None;
         }
 
-        let mut buffer: Vec<u8> = vec![0; buf_len as usize];
+        let mut buffer = ip_helper_storage::<IP_ADAPTER_ADDRESSES_LH>(buf_len);
         let adapter_addr_ptr = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
 
         // Second call to get actual data
@@ -8669,7 +8722,7 @@ fn check_adapter_matches_luid(internal_name: &str, target_luid: u64) -> bool {
             return false;
         }
 
-        let mut buffer: Vec<u8> = vec![0; buf_len as usize];
+        let mut buffer = ip_helper_storage::<IP_ADAPTER_ADDRESSES_LH>(buf_len);
         let adapter_addr_ptr = buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
 
         let result = GetAdaptersAddresses(
@@ -9378,6 +9431,64 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ip_helper_storage_is_aligned_and_route_rows_fit_the_returned_bytes() {
+        use std::mem::{align_of, offset_of, size_of, size_of_val};
+        use windows::Win32::NetworkManagement::IpHelper::{
+            IP_ADAPTER_ADDRESSES_LH, IP_ADAPTER_INFO, MIB_IPFORWARDROW, MIB_IPFORWARDTABLE,
+        };
+
+        for bytes in [0, 1, 17, 15_000] {
+            for storage in [
+                super::ip_helper_storage::<IP_ADAPTER_ADDRESSES_LH>(bytes),
+                super::ip_helper_storage::<IP_ADAPTER_INFO>(bytes),
+                super::ip_helper_storage::<MIB_IPFORWARDTABLE>(bytes),
+            ] {
+                assert_eq!(storage.as_ptr() as usize % align_of::<u64>(), 0);
+                assert!(size_of_val(storage.as_slice()) >= bytes as usize);
+                assert!(storage.iter().all(|word| *word == 0));
+            }
+        }
+
+        let offset = offset_of!(MIB_IPFORWARDTABLE, table);
+        let bytes = offset + 2 * size_of::<MIB_IPFORWARDROW>();
+        let mut storage = super::ip_helper_storage::<MIB_IPFORWARDTABLE>(bytes as u32);
+        let table = storage.as_mut_ptr().cast::<MIB_IPFORWARDTABLE>();
+        unsafe {
+            (*table).dwNumEntries = 2;
+            let rows = storage
+                .as_mut_ptr()
+                .cast::<u8>()
+                .add(offset)
+                .cast::<MIB_IPFORWARDROW>();
+            (*rows).dwForwardIfIndex = 7;
+            (*rows.add(1)).dwForwardIfIndex = 9;
+        }
+        let rows = super::route_table_rows(&storage, bytes).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.dwForwardIfIndex)
+                .collect::<Vec<_>>(),
+            vec![7, 9]
+        );
+        assert!(super::route_table_rows(&storage, bytes - 1).is_none());
+        assert!(super::route_table_rows(&storage, offset - 1).is_none());
+        assert!(super::route_table_rows(&storage, usize::MAX).is_none());
+        assert!(super::route_table_rows(&[], bytes).is_none());
+        unsafe {
+            (*storage.as_mut_ptr().cast::<MIB_IPFORWARDTABLE>()).dwNumEntries = u32::MAX;
+        }
+        assert!(super::route_table_rows(&storage, bytes).is_none());
+        unsafe {
+            (*storage.as_mut_ptr().cast::<MIB_IPFORWARDTABLE>()).dwNumEntries = 0;
+        }
+        assert!(
+            super::route_table_rows(&storage, offset)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn binding_command_drains_chatty_output_before_waiting_for_exit() {
         let output = super::ParallelInterceptor::run_powershell_with_timeout_capture(
