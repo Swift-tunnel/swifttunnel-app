@@ -27,10 +27,19 @@ const CALLBACK_WRITE_BUDGET: Duration = Duration::from_millis(500);
 const CALLBACK_POLL: Duration = Duration::from_millis(100);
 
 /// Callback data received from OAuth redirect
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OAuthCallbackData {
     pub token: String,
     pub state: String,
+}
+
+impl std::fmt::Debug for OAuthCallbackData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCallbackData")
+            .field("token", &"[redacted]")
+            .field("state", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Localhost HTTP server for OAuth callbacks
@@ -565,6 +574,18 @@ impl Drop for OAuthServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sensitive_debug_output_redacts_callback_credentials() {
+        let callback = OAuthCallbackData {
+            token: "fixture-private-token".into(),
+            state: "fixture-private-state".into(),
+        };
+        let output = format!("{callback:?}");
+        assert!(!output.contains("fixture-private-"));
+        assert_eq!(callback.token, "fixture-private-token");
+        assert_eq!(callback.state, "fixture-private-state");
+    }
 
     fn fixture_server() -> OAuthServer {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();

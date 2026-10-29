@@ -1065,6 +1065,7 @@ fn token_after(haystack: &str, needle: &str) -> Option<String> {
     let token: String = haystack[start..]
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric())
+        .take(64)
         .collect();
     (!token.is_empty()).then_some(token)
 }
@@ -1365,6 +1366,17 @@ mod tests {
         );
         assert!(!summary.contains('<'), "markup leaked: {summary}");
         assert!(summary.len() < 200, "summary too long: {}", summary.len());
+    }
+
+    #[test]
+    fn test_summarize_error_body_bounds_an_oversized_html_diagnostic_id() {
+        let summary = summarize_error_body(&format!("<html>Ray ID: {} </html>", "a".repeat(8000)));
+        assert!(summary.contains("HTML error page"));
+        assert!(summary.contains("Ray ID"));
+        assert!(
+            summary.len() < 300,
+            "HTML diagnostics bypassed the display budget"
+        );
     }
 
     #[test]

@@ -3,6 +3,21 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+// Debug must never become an accidental credential export. Serialization is
+// unchanged: authentication and encrypted storage still need the real values.
+macro_rules! redacted_debug {
+    ($kind:ident, [$($public:ident),*], [$($secret:ident),*]) => {
+        impl std::fmt::Debug for $kind {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let mut record = f.debug_struct(stringify!($kind));
+                $(record.field(stringify!($public), &self.$public);)*
+                $(let _ = &self.$secret; record.field(stringify!($secret), &"[redacted]");)*
+                record.finish()
+            }
+        }
+    };
+}
+
 /// Authentication state
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum AuthState {
@@ -23,22 +38,28 @@ pub enum AuthState {
 }
 
 /// State for pending OAuth authentication
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuthPendingState {
     /// Random state parameter for CSRF protection
     pub state: String,
     /// When the OAuth flow was started
     pub started_at: chrono::DateTime<chrono::Utc>,
 }
+redacted_debug!(OAuthPendingState, [started_at], [state]);
 
 /// Authenticated session with tokens
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct AuthSession {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_at: DateTime<Utc>,
     pub user: UserInfo,
 }
+redacted_debug!(
+    AuthSession,
+    [expires_at, user],
+    [access_token, refresh_token]
+);
 
 impl AuthSession {
     /// Check if the access token has expired
@@ -70,7 +91,7 @@ pub struct UserInfo {
 }
 
 /// Supabase auth response
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct SupabaseAuthResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -80,6 +101,11 @@ pub struct SupabaseAuthResponse {
     pub token_type: String,
     pub user: SupabaseUser,
 }
+redacted_debug!(
+    SupabaseAuthResponse,
+    [expires_in, expires_at, token_type, user],
+    [access_token, refresh_token]
+);
 
 // Supabase's documented maximum JWT lifetime is seven days. Invalid API
 // numbers must not reach Duration::seconds or DateTime addition, both of
@@ -120,7 +146,7 @@ pub struct SupabaseUser {
 /// VPN configuration from API
 ///
 /// Field names use serde rename to match the API's camelCase response format.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VpnConfig {
     /// Config ID (UUID from database)
@@ -149,9 +175,25 @@ pub struct VpnConfig {
     #[serde(default)]
     pub phantun_port: Option<u16>,
 }
+redacted_debug!(
+    VpnConfig,
+    [
+        id,
+        region,
+        endpoint,
+        server_public_key,
+        public_key,
+        assigned_ip,
+        allowed_ips,
+        dns,
+        phantun_enabled,
+        phantun_port
+    ],
+    [private_key]
+);
 
 /// Response from the desktop OAuth exchange API
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ExchangeTokenResponse {
     /// Type of token (always "magiclink")
     #[serde(rename = "type")]
@@ -174,6 +216,18 @@ pub struct ExchangeTokenResponse {
     #[serde(default, rename = "token_type")]
     pub session_token_type: Option<String>,
 }
+redacted_debug!(
+    ExchangeTokenResponse,
+    [
+        token_type,
+        email,
+        user_id,
+        expires_in,
+        expires_at,
+        session_token_type
+    ],
+    [token, access_token, refresh_token]
+);
 
 /// Relay connection policy delivered by relay ticket bootstrap endpoint.
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -203,7 +257,7 @@ pub struct RelayConnectionPolicy {
 }
 
 /// Response from relay ticket bootstrap endpoint
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct RelayTicketResponse {
     pub token: String,
     pub expires_at: String,
@@ -251,6 +305,22 @@ pub struct RelayTicketResponse {
     #[serde(default)]
     pub suggested_region: Option<String>,
 }
+redacted_debug!(
+    RelayTicketResponse,
+    [
+        expires_at,
+        auth_required,
+        key_id,
+        connection_policy,
+        limit_seconds,
+        remaining_seconds,
+        resets_at,
+        grace_seconds,
+        degraded,
+        suggested_region
+    ],
+    [token]
+);
 
 impl RelayTicketResponse {
     pub fn preflight_mode(&self) -> RelayPreflightMode {
@@ -316,6 +386,52 @@ pub enum AuthError {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn sensitive_debug_output_redacts_credentials_but_not_session_serialization() {
+        let session: AuthSession = serde_json::from_value(serde_json::json!({
+            "access_token": "fixture-private-access", "refresh_token": "fixture-private-refresh",
+            "expires_at": "2026-10-29T00:00:00Z", "user": { "id": "fixture-user", "email": "fixture@example.invalid" }
+        })).unwrap();
+        let stored = serde_json::to_value(&session).unwrap();
+        assert_eq!(stored["access_token"], "fixture-private-access");
+        assert_eq!(stored["refresh_token"], "fixture-private-refresh");
+        let auth: SupabaseAuthResponse = serde_json::from_value(serde_json::json!({
+            "access_token": "fixture-private-access", "refresh_token": "fixture-private-refresh",
+            "expires_in": 3600, "token_type": "bearer", "user": {"id":"fixture-user"}
+        }))
+        .unwrap();
+        let exchange: ExchangeTokenResponse = serde_json::from_value(serde_json::json!({
+            "type": "magiclink", "token": "fixture-private-magic", "email":"fixture@example.invalid", "user_id":"fixture-user",
+            "access_token": "fixture-private-access", "refresh_token": "fixture-private-refresh"
+        })).unwrap();
+        let ticket: RelayTicketResponse = serde_json::from_value(serde_json::json!({
+            "token":"fixture-private-ticket", "expires_at":"later", "auth_required":true, "key_id":"public-key-id"
+        })).unwrap();
+        let config = VpnConfig {
+            private_key: "fixture-private-vpn".into(),
+            ..Default::default()
+        };
+        let pending = AuthState::AwaitingOAuthCallback(OAuthPendingState {
+            state: "fixture-private-state".into(),
+            started_at: Utc::now(),
+        });
+        for output in [
+            format!("{:?}", AuthState::LoggedIn(session.clone())),
+            format!("{:?}", AuthState::Banned(session)),
+            format!("{auth:?}"),
+            format!("{exchange:?}"),
+            format!("{ticket:?}"),
+            format!("{config:?}"),
+            format!("{pending:?}"),
+        ] {
+            assert!(
+                !output.contains("fixture-private-"),
+                "credential exposed in debug: {output}"
+            );
+            assert!(output.contains("[redacted]"));
+        }
+    }
 
     #[test]
     fn malformed_access_token_lifetimes_are_rejected_before_session_arithmetic() {
