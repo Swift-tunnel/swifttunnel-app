@@ -35,19 +35,37 @@ export function Tooltip({
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const anchorRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     return () => {
-      if (timer.current) clearTimeout(timer.current);
+      if (timer.current !== null) clearTimeout(timer.current);
     };
   }, []);
 
+  useEffect(() => {
+    if (disabled) hide();
+  }, [disabled]);
+
+  useEffect(() => {
+    if (!open) return;
+    // Its anchor may move without a pointer event. Dismiss rather than keep
+    // a fixed popup floating over unrelated controls after scrolling.
+    window.addEventListener("scroll", hide, true);
+    window.addEventListener("resize", hide);
+    window.addEventListener("blur", hide);
+    return () => {
+      window.removeEventListener("scroll", hide, true);
+      window.removeEventListener("resize", hide);
+      window.removeEventListener("blur", hide);
+    };
+  }, [open]);
+
   function show(el: HTMLElement) {
     if (disabled) return;
-    anchorRef.current = el;
-    if (timer.current) clearTimeout(timer.current);
+    if (timer.current !== null) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
+      timer.current = null;
+      if (!el.isConnected) return;
       const r = el.getBoundingClientRect();
       let x = r.left + r.width / 2;
       let y = r.top + r.height / 2;
@@ -61,7 +79,8 @@ export function Tooltip({
   }
 
   function hide() {
-    if (timer.current) clearTimeout(timer.current);
+    if (timer.current !== null) clearTimeout(timer.current);
+    timer.current = null;
     setOpen(false);
     setPos(null);
   }
