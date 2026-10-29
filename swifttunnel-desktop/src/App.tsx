@@ -7,6 +7,7 @@ import {
 } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { AppShell } from "./components/shell/AppShell";
+import { PageErrorBoundary } from "./components/shell/PageErrorBoundary";
 import { StartupScreen } from "./components/shell/StartupScreen";
 import { LoginScreen } from "./components/auth/LoginScreen";
 import { BannedScreen } from "./components/auth/BannedScreen";
@@ -77,7 +78,6 @@ function App() {
   const fetchAuth = useAuthStore((s) => s.fetchState);
   const refreshAuthProfile = useAuthStore((s) => s.refreshProfile);
   const isSettingsLoaded = useSettingsStore((s) => s.isLoaded);
-  const setTab = useSettingsStore((s) => s.setTab);
   const updateSettings = useSettingsStore((s) => s.update);
   const saveSettings = useSettingsStore((s) => s.save);
   const loadSettings = useSettingsStore((s) => s.load);
@@ -531,42 +531,6 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) {
-        return;
-      }
-
-      const target = event.target as HTMLElement | null;
-      if (
-        target instanceof HTMLInputElement ||
-        target instanceof HTMLTextAreaElement ||
-        target?.isContentEditable
-      ) {
-        return;
-      }
-
-      const map: Record<string, TabId> = {
-        "1": "connect",
-        "2": "optimization",
-        "3": "games",
-        "4": "network",
-        "5": "repair",
-        "6": "settings",
-        "7": "ingame",
-      };
-      const tab = map[event.key];
-      if (!tab) return;
-
-      event.preventDefault();
-      setTab(tab);
-      void saveSettings();
-    };
-
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [setTab, saveSettings]);
-
   // Stay on the branded screen for the whole warm-up, both the network self-heal
   // and the initial auth/settings/server pre-fetch (kicked off on mount, so it's
   // already in flight here), so the app only reveals once it's ready, instead of
@@ -627,7 +591,7 @@ function App() {
 
   return (
     <>
-      <AppShell>{(tab) => <Suspense fallback={<div role="status" className="flex items-center justify-center gap-2 py-12 text-[12px] text-text-muted"><Spinner size={14} />Loading...</div>}>{tabComponent(tab as TabId)}</Suspense>}</AppShell>
+      <AppShell>{(tab) => <PageErrorBoundary key={tab} page={tab}><Suspense fallback={<div role="status" className="flex items-center justify-center gap-2 py-12 text-[12px] text-text-muted"><Spinner size={14} />Loading...</div>}>{tabComponent(tab as TabId)}</Suspense></PageErrorBoundary>}</AppShell>
       <WhatsNewDialog />
     </>
   );

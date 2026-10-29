@@ -6,7 +6,7 @@ import { TopBar } from "./TopBar";
 import { BindingChooserDialog } from "./BindingChooserDialog";
 import { CommandPalette } from "./CommandPalette";
 import { ToastContainer } from "../common/Toast";
-import { NAV_ITEMS } from "./nav";
+import { handleTabShortcut } from "../../lib/tabShortcuts";
 import { applyCachedTranslations, initI18n } from "../../lib/i18n";
 
 interface AppShellProps {
@@ -21,17 +21,14 @@ export function AppShell({ children }: AppShellProps) {
     scrollRef.current?.scrollTo(0, 0);
   }, [activeTab]);
 
-  // Every sidebar item renders a digit badge, but nothing ever listened for the
-  // key, the app advertised shortcuts that did nothing. Ctrl/Cmd+<digit>
-  // matches the Ctrl+K palette convention.
+  // One owner for the sidebar shortcuts, including persisted tab selection.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
-      const item = NAV_ITEMS.find((i) => i.shortcut === e.key);
-      if (!item) return;
-      e.preventDefault();
-      useSettingsStore.getState().setTab(item.id);
-    };
+    const onKey = (event: KeyboardEvent) => handleTabShortcut(event, tab => {
+      const store = useSettingsStore.getState();
+      if (store.activeTab === tab) return;
+      store.setTab(tab);
+      void store.save();
+    });
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
