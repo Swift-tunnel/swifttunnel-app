@@ -30,6 +30,8 @@
 
 use semver::Version;
 use serde::Deserialize;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::update_verify::{
     stable_manifest_signature_url, verify_bytes_sha256, verify_manifest_signature_with_public_key,
@@ -47,6 +49,7 @@ const MAX_INSTALLER_BYTES: u64 = 128 * 1024 * 1024;
 
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const INSTALLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+static DOWNLOAD_SLOT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
 #[derive(Debug, Deserialize)]
 struct SignedManifest {
@@ -199,15 +202,52 @@ pub async fn check_for_update(current_version: &str) -> Result<Option<AvailableU
 pub async fn download_verified(
     update: &AvailableUpdate,
 ) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
+    let permit = reserve_download(DOWNLOAD_SLOT.clone())?;
     let client = http_client(INSTALLER_TIMEOUT)?;
-    let bytes = fetch(
-        &client,
-        &update.url,
-        &update.file,
-        MAX_INSTALLER_BYTES as usize,
-    )
-    .await?;
+    let limit = if update.size == 0 {
+        MAX_INSTALLER_BYTES
+    } else {
+        update.size.min(MAX_INSTALLER_BYTES)
+    };
+    let bytes = fetch(&client, &update.url, &update.file, limit as usize).await?;
 
+    let update = update.clone();
+    stage_on_blocking_pool(permit, move || verify_and_stage(&update, bytes)).await
+}
+
+fn reserve_download(slots: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, String> {
+    slots.try_acquire_owned().map_err(|_| {
+        "A Lite installer is still being prepared. Wait for it to finish, then retry.".into()
+    })
+}
+
+async fn stage_on_blocking_pool<T: Send + 'static>(
+    permit: OwnedSemaphorePermit,
+    stage: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    // A cancelled future aborts queued jobs. A running filesystem operation
+    // retains its permit and bytes until it returns, without blocking the
+    // runtime or admitting more abandoned staging jobs.
+    let mut worker = tokio::task::JoinSet::new();
+    worker.spawn_blocking(move || {
+        let _permit = permit;
+        stage()
+    });
+    let failure = || "Could not finish preparing the Lite installer. Please retry.".to_string();
+    worker
+        .join_next()
+        .await
+        .ok_or_else(failure)?
+        .map_err(|error| {
+            log::warn!("Lite installer staging worker failed: {error}");
+            failure()
+        })?
+}
+
+fn verify_and_stage(
+    update: &AvailableUpdate,
+    bytes: Vec<u8>,
+) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
     // The manifest is signed, so its size is trustworthy and a mismatch means
     // this is not the file it described.
     if update.size > 0 && bytes.len() as u64 != update.size {
@@ -360,6 +400,59 @@ async fn fetch(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn cancelled_staging_keeps_its_permit_without_blocking_the_runtime() {
+        use std::time::Duration;
+        let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = super::reserve_download(slots.clone()).unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let task = tokio::spawn(super::stage_on_blocking_pool(permit, move || {
+            let _ = started.send(());
+            let _ = resume.recv_timeout(Duration::from_secs(3));
+            Ok(7)
+        }));
+        tokio::time::timeout(Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        // This current-thread runtime is still able to cancel the owner while
+        // the injected filesystem operation is deliberately waiting.
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let duplicate = super::reserve_download(slots.clone());
+        let _ = release.send(());
+        assert!(
+            duplicate.is_err(),
+            "a cancelled owner must not admit another staging job"
+        );
+        let permit = tokio::time::timeout(Duration::from_secs(2), slots.acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(super::stage_on_blocking_pool(permit, || Ok(9)).await, Ok(9));
+    }
+
+    #[test]
+    fn bad_download_size_or_hash_is_rejected_before_opening_the_installer_cache() {
+        let mut update = super::AvailableUpdate {
+            version: semver::Version::parse("3.9.5").unwrap(),
+            tag: "v3.9.5".into(),
+            file: "owned-fixture.msi".into(),
+            url: "https://example.invalid/fixture.msi".into(),
+            sha256: "00".repeat(32),
+            size: 3,
+        };
+        assert!(
+            super::verify_and_stage(&update, vec![1, 2])
+                .err()
+                .expect("size mismatch must precede cache access")
+                .contains("signed manifest")
+        );
+        update.size = 2;
+        assert!(super::verify_and_stage(&update, vec![1, 2]).is_err());
+    }
+
     use super::*;
 
     #[test]
