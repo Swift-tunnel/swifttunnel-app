@@ -57,6 +57,7 @@ struct FlagOverride {
     applied_hash: String,
 }
 const QUALITY_FLAG: &str = "DFIntDebugFRMQualityLevelOverride";
+const MAX_PROFILE_BYTES: usize = 256 * 1024;
 const RESTORE_ERROR: &str =
     "Couldn't restore your Roblox FPS and graphics settings. Contact support and include your log.";
 fn flag_plan(level: Option<i32>) -> Result<Vec<FlagOverride>, String> {
@@ -181,7 +182,10 @@ fn read(path: &Path) -> Result<String, String> {
         .is_some_and(|name| name == "game-profile.json");
     let mut bytes = Vec::new();
     fs::File::open(path)
-        .and_then(|file| file.take(256 * 1024 + 1).read_to_end(&mut bytes))
+        .and_then(|file| {
+            file.take(MAX_PROFILE_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+        })
         .map_err(|error| {
             log::warn!(
                 "Could not read game settings file {}: {error}",
@@ -194,7 +198,7 @@ fn read(path: &Path) -> Result<String, String> {
                     .to_string()
             }
         })?;
-    if bytes.len() > 256 * 1024 {
+    if bytes.len() > MAX_PROFILE_BYTES {
         log::warn!("Game settings file exceeds 256 KB: {}", path.display());
         return Err(if recovery {
             RESTORE_ERROR.into()
@@ -215,6 +219,16 @@ fn read(path: &Path) -> Result<String, String> {
     })
 }
 fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > MAX_PROFILE_BYTES {
+        log::warn!("Game settings output exceeds 256 KB: {}", path.display());
+        return Err("This Roblox settings file is too large to save safely. Contact support and include your log.".into());
+    }
+    // Reject redirected or ambiguous ancestors before creating missing folders.
+    // The checks below still run after creation and before replacement.
+    crate::roblox_native_launch::safe_path(path).map_err(|error| {
+        log::warn!("Game settings location was rejected, {}: {error}", path.display());
+        "Couldn't save your Roblox settings because the file location could not be verified. Contact support and include your log.".to_string()
+    })?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -554,6 +568,37 @@ fn valid_flag_value(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expanded_profile_output_cannot_replace_a_file_that_recovery_could_read() {
+        let root = crate::test_support::recovery_directory();
+        let path = root.join("GlobalBasicSettings.xml");
+        let prefix = "<Properties><int name=\"FramerateCap\">60</int>";
+        let suffix = "</Properties>";
+        let original = format!(
+            "{prefix}{}{suffix}",
+            " ".repeat(MAX_PROFILE_BYTES - prefix.len() - suffix.len())
+        );
+        write(&path, original.as_bytes()).unwrap();
+        assert_eq!(read(&path).unwrap(), original);
+        let expanded = set(&original, Property::Fps, Some(99999));
+        assert!(expanded.len() > MAX_PROFILE_BYTES);
+        assert!(write(&path, expanded.as_bytes()).is_err());
+        assert_eq!(read(&path).unwrap(), original);
+
+        let journal = root.join("missing/game-profile.json");
+        assert!(write(&journal, expanded.as_bytes()).is_err());
+        assert!(!journal.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn profile_write_checks_the_location_before_creating_missing_folders() {
+        let root = crate::test_support::recovery_directory();
+        let path = root.join("missing/../GlobalBasicSettings.xml");
+        assert!(write(&path, b"owned settings fixture").is_err());
+        assert!(!root.join("missing").exists());
+        assert!(!root.join("GlobalBasicSettings.xml").exists());
+    }
 
     #[cfg(windows)]
     #[test]
