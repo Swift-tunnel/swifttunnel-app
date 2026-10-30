@@ -444,6 +444,27 @@ impl RelayAuthAckStatus {
     }
 }
 
+async fn poll_recorded_auth_ack(
+    deadline: Instant,
+    mut take_ack: impl FnMut() -> Option<RelayAuthAckStatus>,
+) -> Option<RelayAuthAckStatus> {
+    let mut saw_replay = false;
+    loop {
+        match take_ack() {
+            Some(RelayAuthAckStatus::Replay) => saw_replay = true,
+            Some(status) => return Some(status),
+            None => {}
+        }
+        // Replay replies still consume the deadline and one polling interval.
+        // A stream of them must not turn renewal into an unbounded busy loop.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return saw_replay.then_some(RelayAuthAckStatus::Replay);
+        }
+        tokio::time::sleep(Duration::from_millis(25).min(remaining)).await;
+    }
+}
+
 #[derive(Clone, Copy)]
 struct OutboundJob {
     addr: SocketAddr,
@@ -1676,7 +1697,6 @@ impl UdpRelay {
             self.send_auth_hello_to(token, target)?;
 
             // Poll the ack recorded by the inbound receiver thread.
-            const POLL_INTERVAL: Duration = Duration::from_millis(25);
             let is_last_attempt = attempt + 1 == AUTH_HANDSHAKE_ATTEMPTS;
             let attempt_timeout = if is_last_attempt {
                 remaining
@@ -1684,30 +1704,26 @@ impl UdpRelay {
                 AUTH_HANDSHAKE_RETRY_DELAY.min(remaining)
             };
             let attempt_deadline = (Instant::now() + attempt_timeout).min(deadline);
-            loop {
+            let status = poll_recorded_auth_ack(attempt_deadline, || {
                 // Release the guard before handling the response. An if-let
                 // scrutinee keeps its temporary guard through the body, which
                 // deadlocked when the Replay branch tried to lock it again.
                 let ack = self.last_auth_ack.lock().take();
-                if let Some((from, status)) = ack
-                    && from == target
-                {
+                ack.filter(|(from, _)| *from == target).map(|(_, status)| {
                     log::info!(
                         "UDP Relay: Mid-session auth ack {} from {} (session {:016x})",
                         status.as_str(),
                         target,
                         self.session_id_u64()
                     );
-                    if status == RelayAuthAckStatus::Replay {
-                        saw_replay = true;
-                        continue;
-                    }
-                    return Ok(Some(status));
-                }
-                if Instant::now() >= attempt_deadline {
-                    break;
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
+                    status
+                })
+            })
+            .await;
+            match status {
+                Some(RelayAuthAckStatus::Replay) => saw_replay = true,
+                Some(status) => return Ok(Some(status)),
+                None => {}
             }
         }
 
@@ -3934,6 +3950,40 @@ mod tests {
         assert_eq!(result, Some(RelayAuthAckStatus::Replay));
         assert!(relay.last_auth_ack.lock().is_none());
         assert!((**relay.pending_auth_addr.load()).is_none());
+    }
+
+    #[tokio::test]
+    async fn repeated_recorded_auth_replays_yield_and_expire() {
+        let calls = std::cell::Cell::new(0);
+        let deadline = Instant::now() + Duration::from_millis(60);
+        let mut waiting = Box::pin(poll_recorded_auth_ack(deadline, || {
+            let count = calls.get() + 1;
+            calls.set(count);
+            assert!(count <= 5, "replay replies bypassed the polling delay");
+            Some(RelayAuthAckStatus::Replay)
+        }));
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(calls.get(), 1);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), waiting)
+                .await
+                .unwrap(),
+            Some(RelayAuthAckStatus::Replay)
+        );
+        assert!(Instant::now() >= deadline);
+    }
+
+    #[tokio::test]
+    async fn recorded_auth_replay_can_be_followed_by_a_real_acceptance() {
+        let mut replies = [RelayAuthAckStatus::Replay, RelayAuthAckStatus::Ok].into_iter();
+        assert_eq!(
+            poll_recorded_auth_ack(Instant::now() + Duration::from_secs(1), || replies.next())
+                .await,
+            Some(RelayAuthAckStatus::Ok)
+        );
+        assert_eq!(poll_recorded_auth_ack(Instant::now(), || None).await, None);
     }
 
     #[test]
