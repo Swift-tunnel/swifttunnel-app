@@ -24,7 +24,7 @@ beforeEach(() => {
   useSettingsStore.setState({ settings: { ...initialSettings.settings, selected_region: "singapore", selected_game_presets: [] } });
   useVpnStore.setState({
     state: "connected", region: "singapore-05", error: null,
-    fetchState: vi.fn().mockResolvedValue(undefined),
+    fetchState: vi.fn().mockResolvedValue(true),
     disconnect: vi.fn(async () => { useVpnStore.setState({ state: "disconnected", region: null }); }),
     connect: vi.fn(async () => { useVpnStore.setState({ state: "connected", region: "mumbai-01", error: null }); }),
   });
@@ -64,7 +64,7 @@ describe("preferred game relay", () => {
   });
 
   it("checks the native session rather than reusing a stale Mumbai UI snapshot", async () => {
-    const fetchState = vi.fn(async () => { useVpnStore.setState({ region: "singapore-05" }); });
+    const fetchState = vi.fn(async () => { useVpnStore.setState({ region: "singapore-05" }); return true; });
     useVpnStore.setState({ region: "mumbai-01", fetchState });
     await prepareGameConnection("mumbai", () => {});
     expect(fetchState).toHaveBeenCalledTimes(1);
@@ -100,8 +100,19 @@ describe("preferred game relay", () => {
   });
 
   it("does not reuse a session when its native state could not be checked", async () => {
-    useVpnStore.setState({ fetchState: vi.fn(async () => { useVpnStore.setState({ error: "Could not read connection" }); }) });
+    useVpnStore.setState({ fetchState: vi.fn(async () => { useVpnStore.setState({ error: "Could not read connection" }); return false; }) });
     await expect(prepareGameConnection("mumbai", () => {})).rejects.toThrow("Could not read connection");
+    expect(useVpnStore.getState().disconnect).not.toHaveBeenCalled();
+    expect(useVpnStore.getState().connect).not.toHaveBeenCalled();
+  });
+
+  it("does not authorize Play from an old matching relay after a superseded native state read", async () => {
+    useVpnStore.setState({ region: "mumbai-01", error: null, fetchState: vi.fn().mockResolvedValue(false) });
+    const launch = vi.fn();
+    await expect(executeGameLaunch(mumbai, {
+      connect: requested => prepareGameConnection(requested, () => {}), launch,
+    })).rejects.toThrow("Couldn't confirm your current connection");
+    expect(launch).not.toHaveBeenCalled();
     expect(useVpnStore.getState().disconnect).not.toHaveBeenCalled();
     expect(useVpnStore.getState().connect).not.toHaveBeenCalled();
   });
@@ -125,8 +136,8 @@ describe("preferred game relay", () => {
   });
 
   it("does not resurrect Play's connection after a newer Disconnect during its state check", async () => {
-    let ready!: () => void;
-    const stateChecked = new Promise<void>(resolve => { ready = resolve; });
+    let ready!: (verified: boolean) => void;
+    const stateChecked = new Promise<boolean>(resolve => { ready = resolve; });
     useVpnStore.setState({ fetchState: vi.fn(() => stateChecked) });
     const launch = vi.fn();
     const pending = executeGameLaunch(mumbai, {
@@ -136,7 +147,7 @@ describe("preferred game relay", () => {
     // without invoking native driver, tunnel or adapter operations.
     cancelPendingConnectForRepair();
     useVpnStore.setState({ state: "disconnected", region: null });
-    ready();
+    ready(true);
     expect(await pending).toContain("connection changed");
     expect(useVpnStore.getState().connect).not.toHaveBeenCalled();
     expect(launch).not.toHaveBeenCalled();

@@ -465,7 +465,8 @@ interface VpnStore {
   connectAttemptInFlight: boolean;
 
   // Actions
-  fetchState: () => Promise<void>;
+  /** False means this read failed or was superseded; it cannot authorize a launch. */
+  fetchState: () => Promise<boolean>;
   ensureDriverReady: (attempt?: number) => Promise<void>;
   repairDriver: () => Promise<void>;
   installDriver: () => Promise<void>;
@@ -517,7 +518,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
     const currentRead = () => isCurrentConnectAttempt(attempt) && read === stateReadSeq && eventRevision === stateEventRevision;
     try {
       const resp = await vpnGetState();
-      if (!currentRead()) return;
+      if (!currentRead()) return false;
+      let applied = false;
       set((current) => {
         const staleReadyPoll =
           resp.state === "disconnected" &&
@@ -529,6 +531,8 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         if (staleReadyPoll) {
           return {};
         }
+
+        applied = true;
 
         const sessionChanged = current.state !== resp.state || current.region !== resp.region || current.serverEndpoint !== resp.server_endpoint;
         if (sessionChanged) sessionRevision += 1;
@@ -564,9 +568,11 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           connectedAt,
         };
       });
+      return applied;
     } catch (e) {
-      if (!currentRead()) return;
+      if (!currentRead()) return false;
       set({ error: getErrorMessage(e), gameRoute: null });
+      return false;
     }
   },
 

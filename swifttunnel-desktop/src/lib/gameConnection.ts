@@ -10,8 +10,11 @@ export async function prepareGameConnection(requested: string | null, onPreparin
   };
   // Check the native session before reusing a relay. A stale UI snapshot must
   // not let a game launch through a different location.
-  await useVpnStore.getState().fetchState();
+  const verified = await useVpnStore.getState().fetchState();
   requireCurrent(unchanged);
+  if (!verified) {
+    throw new Error(useVpnStore.getState().error ?? "Couldn't confirm your current connection. Try Play again.");
+  }
   const vpn = useVpnStore.getState();
   if (vpn.state === "connected" && vpn.error) throw new Error(vpn.error);
   const existing = vpn.state === "connected";

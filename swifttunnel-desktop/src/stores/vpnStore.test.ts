@@ -225,7 +225,7 @@ describe("stores/vpnStore", () => {
     const reading = store.getState().fetchState();
     store.getState().handleStateEvent(disconnectedState());
     poll.resolve(connectedState("singapore"));
-    await reading;
+    expect(await reading).toBe(false);
     expect(store.getState().state).toBe("disconnected");
     expect(store.getState().connectedAt).toBeNull();
     expect(store.getState().splitTunnelActive).toBe(false);
@@ -238,9 +238,9 @@ describe("stores/vpnStore", () => {
     vpnGetState.mockReturnValueOnce(first.promise).mockResolvedValueOnce(connectedState("tokyo"));
     const store = await loadStore();
     const stale = store.getState().fetchState();
-    await store.getState().fetchState();
+    expect(await store.getState().fetchState()).toBe(true);
     first.resolve(connectedState("singapore"));
-    await stale;
+    expect(await stale).toBe(false);
     expect(store.getState().region).toBe("tokyo");
   });
 

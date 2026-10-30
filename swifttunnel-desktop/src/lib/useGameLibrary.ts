@@ -73,9 +73,9 @@ export function useGameLibrary() {
     let attempts = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const show = async () => {
-      await useVpnStore.getState().fetchState();
+      const verified = await useVpnStore.getState().fetchState();
       if (disposed) return;
-      const route = useVpnStore.getState().gameRoute;
+      const route = verified ? useVpnStore.getState().gameRoute : null;
       const latest = useGameLibraryStore.getState().library?.current;
       // The store can advance before React runs this effect's cleanup. Never
       // announce a closed game or borrow the next join's location.

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { RobloxGameSession, RobloxLibrarySnapshot } from "./types";
+import type { GameRouteStatus, RobloxGameSession, RobloxLibrarySnapshot } from "./types";
 
 const h = vi.hoisted(() => ({
   effects: [] as Array<() => (() => void) | undefined>,
@@ -7,6 +7,8 @@ const h = vi.hoisted(() => ({
   library: null as RobloxLibrarySnapshot | null,
   fetchState: vi.fn(),
   notify: vi.fn(),
+  route: null as GameRouteStatus | null,
+  describe: vi.fn(),
 }));
 vi.mock("react", () => ({
   useEffect: (effect: () => (() => void) | undefined) => h.effects.push(effect),
@@ -17,12 +19,12 @@ vi.mock("../stores/gameLibraryStore", () => ({ useGameLibraryStore: Object.assig
   (select: (state: { library: RobloxLibrarySnapshot | null }) => unknown) => select({ library: h.library }),
   { getState: () => ({ library: h.library }) },
 ) }));
-vi.mock("../stores/vpnStore", () => ({ useVpnStore: { getState: () => ({ fetchState: h.fetchState, gameRoute: null }) } }));
+vi.mock("../stores/vpnStore", () => ({ useVpnStore: { getState: () => ({ fetchState: h.fetchState, gameRoute: h.route }) } }));
 vi.mock("./notifications", () => ({ notify: h.notify }));
 vi.mock("./commands", () => ({ gamesStartupTarget: vi.fn() }));
 vi.mock("../stores/deepLinkStore", () => ({ useDeepLinkStore: { getState: vi.fn() } }));
 vi.mock("./errors", () => ({ reportError: vi.fn() }));
-vi.mock("./robloxGames", () => ({ gameSessionDescription: (session: RobloxGameSession) => session.location }));
+vi.mock("./robloxGames", () => ({ gameSessionDescription: h.describe }));
 import { useGameLibrary } from "./useGameLibrary";
 
 const join = (place = "1", observed = 100): RobloxGameSession => ({
@@ -44,6 +46,8 @@ beforeEach(() => {
   h.library = { entries: [], current: join(), warning: null, notify_joins: true };
   h.fetchState.mockReset().mockResolvedValue(true);
   h.notify.mockReset().mockResolvedValue(undefined);
+  h.route = null;
+  h.describe.mockReset().mockImplementation((session: RobloxGameSession) => session.location);
 });
 afterEach(() => {
   cleanups.splice(0).forEach(stop => stop());
@@ -56,6 +60,15 @@ it("survives effect replay before its first notification is sent", async () => {
   cleanups.push(first.effect() ?? (() => {}));
   await vi.advanceTimersByTimeAsync(2000);
   expect(h.notify).toHaveBeenCalledExactlyOnceWith("Roblox game joined", "Location 1");
+});
+
+it.each([true, false])("only uses a route reading in a join notification when its read is verified (%s)", async verified => {
+  h.route = { game_location: "Mumbai", game_server_ip: join().ip, relay: "mumbai-01", estimated_path_ms: 26, bypassed: false };
+  h.fetchState.mockResolvedValue(verified);
+  render();
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(h.describe).toHaveBeenCalledWith(h.library!.current, verified ? h.route : null);
+  expect(h.notify).toHaveBeenCalledOnce();
 });
 
 it("does not announce a game closed while the route read was pending", async () => {

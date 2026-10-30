@@ -195,7 +195,7 @@ function App() {
           loadSettings,
           fetchServers,
           fetchSystemInfo,
-          fetchVpnState,
+          fetchVpnState: async () => { await fetchVpnState(); },
           refreshAuthProfile,
           getSettings: () => useSettingsStore.getState().settings,
           getAuthState: () => useAuthStore.getState().state,
