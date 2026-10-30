@@ -124,6 +124,27 @@ const DENYLIST_NAMES_LOWER: &[&str] = &[
     "robloxstudiolauncher.exe",
 ];
 
+fn trim_name_allowed(name: &str) -> bool {
+    !DENYLIST_NAMES_LOWER.contains(&name.to_ascii_lowercase().as_str())
+}
+
+fn trim_target_still_allowed(expected: &str, image: &str, foreground: bool) -> bool {
+    let name = image.rsplit(['\\', '/']).next().unwrap_or(image);
+    !foreground && name.eq_ignore_ascii_case(expected) && trim_name_allowed(name)
+}
+
+fn require_assigned_privilege(status: u32) -> Result<()> {
+    match status {
+        0 => Ok(()),
+        1300 => Err(anyhow::anyhow!(
+            "Windows did not grant the required memory-cleanup permission. This step was skipped."
+        )),
+        other => Err(anyhow::anyhow!(
+            "Windows could not confirm the memory-cleanup permission (code {other}). This step was skipped."
+        )),
+    }
+}
+
 fn select_trim_candidates(
     processes: Vec<ProcessSample>,
     exclude_pids: &HashSet<u32>,
@@ -131,19 +152,9 @@ fn select_trim_candidates(
     let mut candidates: Vec<ProcessSample> = processes
         .into_iter()
         .filter(|p| !exclude_pids.contains(&p.pid))
-        .filter(|p| {
-            let name = p.name.to_ascii_lowercase();
-            !DENYLIST_NAMES_LOWER.contains(&name.as_str())
-        })
+        .filter(|p| trim_name_allowed(&p.name))
         .filter(|p| p.memory_bytes >= MIN_PROCESS_BYTES)
-        .filter(|p| {
-            let cpu = if p.cpu_usage.is_finite() {
-                p.cpu_usage
-            } else {
-                0.0
-            };
-            cpu <= MAX_CPU_PERCENT
-        })
+        .filter(|p| p.cpu_usage.is_finite() && (0.0..=MAX_CPU_PERCENT).contains(&p.cpu_usage))
         .collect();
 
     candidates.sort_by_key(|c| std::cmp::Reverse(c.memory_bytes));
@@ -238,8 +249,8 @@ mod windows_impl {
     use super::*;
     use std::ffi::c_void;
 
-    use sysinfo::{ProcessesToUpdate, System};
-    use windows::Win32::Foundation::CloseHandle;
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows::Win32::Security::{
         AdjustTokenPrivileges, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED,
         TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
@@ -252,6 +263,17 @@ mod windows_impl {
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     use windows::core::PCWSTR;
+
+    struct ScopedHandle(HANDLE);
+    impl Drop for ScopedHandle {
+        fn drop(&mut self) {
+            if !self.0.is_invalid() {
+                unsafe {
+                    let _ = CloseHandle(self.0);
+                }
+            }
+        }
+    }
 
     unsafe extern "system" {
         fn NtSetSystemInformation(
@@ -368,9 +390,10 @@ mod windows_impl {
 
     fn sample_processes() -> Vec<ProcessSample> {
         let mut system = System::new();
-        system.refresh_processes(ProcessesToUpdate::All, true);
+        let refresh = ProcessRefreshKind::new().with_cpu().with_memory();
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
         std::thread::sleep(Duration::from_millis(200));
-        system.refresh_processes(ProcessesToUpdate::All, true);
+        system.refresh_processes_specifics(ProcessesToUpdate::All, true, refresh);
 
         system
             .processes()
@@ -384,22 +407,33 @@ mod windows_impl {
             .collect()
     }
 
-    fn trim_working_set(pid: u32) -> Result<()> {
+    fn trim_working_set(candidate: &ProcessSample) -> Result<bool> {
         unsafe {
-            let handle = OpenProcess(
+            let handle = ScopedHandle(OpenProcess(
                 PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA,
                 false,
-                pid,
-            )?;
+                candidate.pid,
+            )?);
 
-            if handle.is_invalid() {
+            if handle.0.is_invalid() {
                 return Err(anyhow::anyhow!("Failed to open process"));
             }
 
-            let result = EmptyWorkingSet(handle);
-            let _ = CloseHandle(handle);
-
-            result.map_err(|e| anyhow::anyhow!("EmptyWorkingSet failed: {}", e))
+            // The snapshot can be stale or its PID reused. Inspect the same
+            // opened process that would be trimmed, and protect a newly focused
+            // app instead of relying on the foreground PID from before sampling.
+            let image =
+                crate::process_snapshot::image_for_handle(handle.0).map_err(anyhow::Error::msg)?;
+            if !trim_target_still_allowed(
+                &candidate.name,
+                &image,
+                foreground_pid() == Some(candidate.pid),
+            ) {
+                return Ok(false);
+            }
+            EmptyWorkingSet(handle.0)
+                .map_err(|e| anyhow::anyhow!("EmptyWorkingSet failed: {}", e))?;
+            Ok(true)
         }
     }
 
@@ -411,6 +445,7 @@ mod windows_impl {
                 TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
                 &mut token,
             )?;
+            let token = ScopedHandle(token);
 
             let wide_name: Vec<u16> = privilege_name
                 .encode_utf16()
@@ -428,9 +463,10 @@ mod windows_impl {
                 }],
             };
 
-            AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None)?;
-            let _ = CloseHandle(token);
-            Ok(())
+            AdjustTokenPrivileges(token.0, false, Some(&tp), 0, None, None)?;
+            // BOOL success does not mean the token contained this privilege.
+            // Capture the documented success status before another Win32 call.
+            require_assigned_privilege(GetLastError().0)
         }
     }
 
@@ -546,8 +582,9 @@ mod windows_impl {
         let mut trimmed_count: u32 = 0;
         for candidate in candidates {
             let current_name = candidate.name.clone();
-            match trim_working_set(candidate.pid) {
-                Ok(()) => {
+            match trim_working_set(&candidate) {
+                Ok(false) => continue,
+                Ok(true) => {
                     trimmed_count = trimmed_count.saturating_add(1);
                     let snap = snapshot_or_warn(&mut warnings);
                     on_progress("trimming", snap, trimmed_count, Some(current_name), None);
@@ -707,11 +744,60 @@ mod tests {
         let processes = vec![
             proc(10, "chrome.exe", 900, 10.0),
             proc(11, "discord.exe", 700, 4.0),
+            proc(12, "unknown.exe", 700, f32::NAN),
+            proc(13, "unavailable.exe", 700, f32::INFINITY),
+            proc(14, "invalid.exe", 700, -1.0),
         ];
         let exclude = HashSet::new();
         let selected = select_trim_candidates(processes, &exclude);
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].pid, 11);
+    }
+
+    #[test]
+    fn trim_rechecks_the_opened_image_and_current_foreground_before_touching_memory() {
+        assert!(trim_target_still_allowed(
+            "chrome.exe",
+            r"C:\Browser\CHROME.EXE",
+            false
+        ));
+        assert!(!trim_target_still_allowed(
+            "chrome.exe",
+            r"C:\Roblox\RobloxPlayerBeta.exe",
+            false
+        ));
+        assert!(!trim_target_still_allowed(
+            "chrome.exe",
+            r"C:\Browser\chrome.exe",
+            true
+        ));
+        assert!(!trim_target_still_allowed(
+            "RobloxPlayerBeta.exe",
+            r"C:\Roblox\RobloxPlayerBeta.exe",
+            false
+        ));
+        assert!(!trim_target_still_allowed(
+            "msedgewebview2.exe",
+            r"C:\UI\msedgewebview2.exe",
+            false
+        ));
+    }
+
+    #[test]
+    fn an_unassigned_privilege_is_not_reported_as_enabled() {
+        assert!(require_assigned_privilege(0).is_ok());
+        assert!(
+            require_assigned_privilege(1300)
+                .unwrap_err()
+                .to_string()
+                .contains("did not grant")
+        );
+        assert!(
+            require_assigned_privilege(5)
+                .unwrap_err()
+                .to_string()
+                .contains("could not confirm")
+        );
     }
 
     #[test]
