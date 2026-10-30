@@ -38,6 +38,12 @@ struct Response {
     generated_at_ms: u64,
     targets: Vec<ReferenceTarget>,
     routes: Vec<ReferenceSample>,
+    // Cloud-hosted datacenters. The website keeps them apart because 3.9.4 and
+    // 3.9.5 discard the whole table if `targets` holds anything else.
+    #[serde(default)]
+    cloud_targets: Vec<ReferenceTarget>,
+    #[serde(default)]
+    cloud_routes: Vec<ReferenceSample>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -46,9 +52,15 @@ struct ReferenceTarget {
     location: String,
 }
 
+/// Roblox's own network answers ping only on its .3 addresses. Its Doha servers
+/// are on Google Cloud (34.18.0.0/16, me-central1) and answer on the server itself.
+fn reference_ip_valid(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    (octets[..2] == [128, 116] && octets[3] == 3) || octets[..2] == [34, 18]
+}
+
 fn target_valid(target: &ReferenceTarget) -> bool {
-    target.ip.octets()[..2] == [128, 116]
-        && target.ip.octets()[3] == 3
+    reference_ip_valid(target.ip)
         && !target.location.is_empty()
         && target.location.len() <= 80
         && !target.location.chars().any(char::is_control)
@@ -67,6 +79,7 @@ pub fn reference_location(region: &str) -> Option<&'static str> {
         "amsterdam" => Some("Amsterdam"),
         "paris" => Some("Paris"),
         "israel" => Some("Israel"),
+        "middle-east" => Some("Doha"),
         "jakarta" => Some("Jakarta"),
         "us-east" => Some("US East"),
         "us-central" => Some("US Central"),
@@ -104,8 +117,7 @@ pub fn estimates(
                 || row.location.is_empty()
                 || row.location.len() > 80
                 || row.location.chars().any(char::is_control)
-                || row.target.octets()[..2] != [128, 116]
-                || row.target.octets()[3] != 3
+                || !reference_ip_valid(row.target)
             {
                 return None;
             }
@@ -170,6 +182,10 @@ pub async fn fetch() -> Vec<ReferenceSample> {
             crate::http_body::read_json_bounded(response, 524_288, "route preview")
                 .await
                 .ok()?;
+        let cloud_targets = std::mem::take(&mut body.cloud_targets);
+        body.targets.extend(cloud_targets);
+        let cloud_routes = std::mem::take(&mut body.cloud_routes);
+        body.routes.extend(cloud_routes);
         if body.method != "icmp_reference_matrix"
             || body.routes.len() > 2048
             || body.targets.is_empty()
@@ -222,6 +238,7 @@ mod tests {
         assert_eq!(reference_location("germany"), Some("Frankfurt"));
         assert_eq!(reference_location("jakarta"), Some("Jakarta"));
         assert_eq!(reference_location("israel"), Some("Israel"));
+        assert_eq!(reference_location("middle-east"), Some("Doha"));
         assert_eq!(reference_location("new-location"), None);
         let servers = vec![(
             "mumbai-01".into(),
@@ -309,10 +326,47 @@ mod tests {
         assert!(!target_valid(&target));
         target.ip = "128.116.47.33".parse().unwrap();
         assert!(!target_valid(&target));
+        target.ip = "34.18.186.248".parse().unwrap();
+        assert!(target_valid(&target));
+        target.ip = "34.19.186.248".parse().unwrap();
+        assert!(!target_valid(&target));
         target.ip = "128.116.47.3".parse().unwrap();
         target.location = "bad\nlabel".into();
         assert!(!target_valid(&target));
     }
+    #[test]
+    fn middle_east_relays_are_measured_against_doha() {
+        let id = "middle-east-03".to_string();
+        let address: SocketAddr = "20.46.43.171:51821".parse().unwrap();
+        let servers = vec![(id.clone(), address, Some(52))];
+        let regions = vec![super::super::servers::DynamicGamingRegion {
+            id: "middle-east".into(),
+            name: "Middle East".into(),
+            description: String::new(),
+            country_code: "QA".into(),
+            servers: vec![id.clone()],
+        }];
+        let mut doha = sample();
+        doha.relay = id;
+        doha.address = address;
+        doha.target = "34.18.186.248".parse().unwrap();
+        doha.location = "Doha".into();
+        doha.rtt_ms = 14;
+        let rows = estimates(&servers, &[doha], &regions);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].estimate.estimated_game_ms, 66);
+        assert_eq!(rows[0].location, "Doha");
+    }
+
+    #[test]
+    fn cloud_fields_are_optional_and_merge_with_the_main_table() {
+        let body: Response = serde_json::from_str(r#"{"method":"icmp_reference_matrix","generated_at_ms":1,"targets":[],"routes":[]}"#).unwrap();
+        assert!(body.cloud_targets.is_empty() && body.cloud_routes.is_empty());
+        let body: Response = serde_json::from_str(r#"{"method":"icmp_reference_matrix","generated_at_ms":1,"targets":[],"routes":[],"cloud_targets":[{"ip":"34.18.186.248","location":"Doha"}],"cloud_routes":[]}"#).unwrap();
+        assert_eq!(body.cloud_targets.len(), 1);
+        assert!(target_valid(&body.cloud_targets[0]));
+    }
+
     fn sample() -> ReferenceSample {
         ReferenceSample {
             relay: "mumbai-01".into(),

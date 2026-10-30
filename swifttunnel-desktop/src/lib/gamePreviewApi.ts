@@ -19,6 +19,7 @@ const centers: RobloxDatacenter[] = [
   { id: 1, city: "Sydney", country: "AU", relay_region: "sydney", datacenter_ids: [6] },
   { id: 3588, city: "Jakarta", country: "ID", relay_region: "jakarta", datacenter_ids: [7] },
   { id: 3594, city: "Tel Aviv", country: "IL", relay_region: "israel", datacenter_ids: [8] },
+  { id: 14377, city: "Doha", country: "QA", relay_region: "middle-east", datacenter_ids: [9] },
 ];
 let running = false;
 export async function previewInvoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {

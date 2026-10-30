@@ -156,6 +156,7 @@ pub fn is_roblox_game_server_ip(ip: Ipv4Addr) -> bool {
 pub enum RobloxRegion {
     Jakarta,
     TelAviv,
+    Doha,
     Singapore,
     Tokyo,
     Mumbai,
@@ -179,6 +180,7 @@ impl RobloxRegion {
             RobloxRegion::Singapore,
             RobloxRegion::Jakarta,
             RobloxRegion::TelAviv,
+            RobloxRegion::Doha,
             RobloxRegion::Tokyo,
             RobloxRegion::Mumbai,
             RobloxRegion::Sydney,
@@ -199,6 +201,7 @@ impl RobloxRegion {
         match self {
             RobloxRegion::Jakarta => Some("jakarta"),
             RobloxRegion::TelAviv => Some("israel"),
+            RobloxRegion::Doha => Some("middle-east"),
             RobloxRegion::Unknown => None,
             RobloxRegion::Singapore => Some("singapore"),
             RobloxRegion::Tokyo => Some("tokyo"),
@@ -220,6 +223,7 @@ impl RobloxRegion {
         match self {
             RobloxRegion::Jakarta => "Jakarta",
             RobloxRegion::TelAviv => "Tel Aviv",
+            RobloxRegion::Doha => "Doha",
             RobloxRegion::Singapore => "Singapore",
             RobloxRegion::Tokyo => "Tokyo",
             RobloxRegion::Mumbai => "Mumbai",

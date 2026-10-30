@@ -1241,6 +1241,7 @@ pub fn native_region(center: &Datacenter) -> Option<swifttunnel_core::geolocatio
         "paris" => Paris,
         "jakarta" => Jakarta,
         "israel" => TelAviv,
+        "middle-east" => Doha,
         "brazil" => Brazil,
         "us-east" => UsEast,
         "us-central" => UsCentral,

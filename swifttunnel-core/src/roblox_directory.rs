@@ -294,6 +294,7 @@ fn relay_region(city: &str, country: &str) -> Option<&'static str> {
         ("Paris", "FR") => Some("paris"),
         ("Jakarta", "ID") => Some("jakarta"),
         ("Tel Aviv", "IL") => Some("israel"),
+        ("Doha", "QA") => Some("middle-east"),
         ("São Paulo", "BR") => Some("brazil"),
         ("Ashburn" | "Atlanta" | "Miami" | "New York City", "US") => Some("us-east"),
         ("Chicago" | "Dallas", "US") => Some("us-central"),
@@ -1143,6 +1144,7 @@ mod tests {
     fn cloud_locations_map_without_pretending_other_cities_are_the_same_datacenter() {
         assert_eq!(relay_region("Jakarta", "ID"), Some("jakarta"));
         assert_eq!(relay_region("Tel Aviv", "IL"), Some("israel"));
+        assert_eq!(relay_region("Doha", "QA"), Some("middle-east"));
         assert_eq!(relay_region("Istanbul", "TR"), None);
         assert_eq!(relay_region("Osaka", "JP"), Some("tokyo"));
     }
