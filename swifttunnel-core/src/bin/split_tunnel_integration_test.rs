@@ -9,9 +9,10 @@ use swifttunnel_core::vpn::{SplitTunnelDiagnostics, VpnConnection};
 use testbench_shared::{
     DEFAULT_HTTPS_PROBE_URL, DEFAULT_TCP_PROBE_COUNT, DEFAULT_TCP_PROBE_TARGET,
     DEFAULT_UDP_ECHO_PAYLOAD_BYTES, DEFAULT_UDP_PROBE_COUNT, DEFAULT_UDP_PROBE_STARTUP_DELAY_MS,
-    DEFAULT_UDP_PROBE_TARGET, connect_vpn, get_public_ip, init_logging, parse_common_cli_options,
-    print_diagnostics, print_preflight_summary, resolve_binding_preference,
-    resolve_enable_api_tunneling, resolve_probe_process_name, resolve_region, resolve_test_exe,
+    DEFAULT_UDP_PROBE_TARGET, connect_vpn, get_public_ip_async, init_logging,
+    parse_common_cli_options, print_diagnostics, print_preflight_summary,
+    resolve_binding_preference, resolve_enable_api_tunneling, resolve_probe_process_name,
+    resolve_region, resolve_test_exe,
 };
 
 fn print_usage() {
@@ -80,7 +81,7 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let baseline_ip = match get_public_ip() {
+    let baseline_ip = match get_public_ip_async().await {
         Ok(ip) => ip,
         Err(err) => {
             eprintln!("FAIL: could not determine baseline public IP: {}", err);
@@ -120,7 +121,7 @@ async fn run_connected_checks(
 ) -> Result<(), String> {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let connected_ip = get_public_ip()?;
+    let connected_ip = get_public_ip_async().await?;
     println!("Post-connect IP (current process): {}", connected_ip);
     if connected_ip != baseline_ip {
         return Err(format!(

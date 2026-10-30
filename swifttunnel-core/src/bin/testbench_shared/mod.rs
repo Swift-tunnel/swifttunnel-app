@@ -313,6 +313,18 @@ pub fn get_public_ip() -> Result<String, String> {
     Err(last_error.unwrap_or_else(|| "No IP check service succeeded".to_string()))
 }
 
+pub async fn get_public_ip_async() -> Result<String, String> {
+    public_ip_worker(get_public_ip).await
+}
+
+async fn public_ip_worker(
+    read: impl FnOnce() -> Result<String, String> + Send + 'static,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(read)
+        .await
+        .map_err(|error| format!("Public-IP worker failed: {error}"))?
+}
+
 fn check_ip_via_http(host: &str, path: &str) -> Result<String, String> {
     let addr = format!("{}:80", host)
         .to_socket_addrs()
@@ -401,6 +413,34 @@ mod public_ip_tests {
     fn response(bytes: &[u8]) -> Result<String, String> {
         let mut bytes = std::io::Cursor::new(bytes);
         read_public_ip_response(Duration::from_secs(1), |buffer, _| bytes.read(buffer))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn public_ip_io_does_not_block_the_tunnel_runtime() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+        let work = tokio::spawn(async move {
+            let result = public_ip_worker(move || {
+                let _ = started_tx.send(());
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok("203.0.113.1".into())
+            })
+            .await;
+            let _ = done_tx.send(result);
+        });
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(matches!(
+            done_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        release_tx.send(()).unwrap();
+        assert_eq!(done_rx.await.unwrap().unwrap(), "203.0.113.1");
+        work.await.unwrap();
     }
 
     #[test]
