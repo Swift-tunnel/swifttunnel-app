@@ -619,21 +619,55 @@ fn binding_preflight_result(
         };
     }
 
-    BindingPreflightInfo {
-        status: status.to_string(),
-        reason: interceptor.binding_reason.clone(),
-        network_signature: interceptor
-            .active_network_signature
-            .clone()
-            .unwrap_or_else(|| "unresolved".to_string()),
-        route_resolution_source: interceptor.default_route_source.as_str().to_string(),
-        route_resolution_target_ip: interceptor.default_route_target_ip.map(|ip| ip.to_string()),
-        resolved_if_index: interceptor.default_route_if_index,
-        recommended_guid: interceptor.recommended_adapter_guid.clone(),
-        cached_override_used: interceptor.cached_override_used,
-        binding_stage: Some(interceptor.binding_stage.clone()),
-        candidates: interceptor.binding_candidates.clone(),
+    validated_binding_preflight(
+        BindingPreflightInfo {
+            status: status.to_string(),
+            reason: interceptor.binding_reason.clone(),
+            network_signature: interceptor
+                .active_network_signature
+                .clone()
+                .unwrap_or_else(|| "unresolved".to_string()),
+            route_resolution_source: interceptor.default_route_source.as_str().to_string(),
+            route_resolution_target_ip: interceptor
+                .default_route_target_ip
+                .map(|ip| ip.to_string()),
+            resolved_if_index: interceptor.default_route_if_index,
+            recommended_guid: interceptor.recommended_adapter_guid.clone(),
+            cached_override_used: interceptor.cached_override_used,
+            binding_stage: Some(interceptor.binding_stage.clone()),
+            candidates: interceptor.binding_candidates.clone(),
+        },
+        result,
+    )
+}
+
+fn validated_binding_preflight(
+    mut info: BindingPreflightInfo,
+    result: &VpnResult<()>,
+) -> BindingPreflightInfo {
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| ParallelInterceptor::is_binding_check_timeout(&error.to_string()))
+    {
+        // A timed-out check cannot establish an adapter conflict. Preserve a
+        // retryable failure instead of asking the player to change networks.
+        info.status = "unrecoverable".into();
+        info.binding_stage = Some("binding_check_timeout".into());
+        info.reason =
+            "The network adapter check took too long. Wait a moment, then try Connect again."
+                .into();
+        info.recommended_guid = None;
     }
+    info.recommended_guid = info.recommended_guid.filter(|guid| {
+        info.candidates.iter().any(|candidate| {
+            candidate.guid == *guid
+                && candidate.is_up
+                && candidate.kind != "tunnel"
+                && candidate.kind != "loopback"
+        })
+    });
+    info
 }
 
 /// Detect whether the current active default route is point-to-point (PPP/PPPoE/WAN).
@@ -3299,7 +3333,9 @@ impl ParallelInterceptor {
             self.recommended_adapter_guid = self
                 .binding_candidates
                 .iter()
-                .filter(|candidate| candidate.kind != "tunnel" && candidate.kind != "loopback")
+                .filter(|candidate| {
+                    candidate.is_up && candidate.kind != "tunnel" && candidate.kind != "loopback"
+                })
                 .max_by_key(|candidate| candidate.score)
                 .map(|candidate| candidate.guid.clone());
 
@@ -9417,6 +9453,57 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn binding_preflight_timeout_cannot_request_adapter_choice_or_recommend_a_down_adapter() {
+        use super::{
+            BindingCandidateInfo, BindingPreflightInfo, VpnError, validated_binding_preflight,
+        };
+        let candidate = BindingCandidateInfo {
+            guid: "owned-guid".into(),
+            friendly_name: "Wi-Fi Direct".into(),
+            description: String::new(),
+            if_index: Some(2),
+            is_up: false,
+            is_default_route: false,
+            kind: "wifi".into(),
+            stage: "smart_auto".into(),
+            reason: String::new(),
+            score: 1000,
+        };
+        let info = BindingPreflightInfo {
+            status: "ambiguous".into(),
+            reason: "previous uncertainty".into(),
+            network_signature: "owned".into(),
+            route_resolution_source: "fixture".into(),
+            route_resolution_target_ip: None,
+            resolved_if_index: Some(1),
+            recommended_guid: Some(candidate.guid.clone()),
+            cached_override_used: false,
+            binding_stage: None,
+            candidates: vec![candidate],
+        };
+        let timeout = Err(VpnError::SplitTunnel(
+            "PowerShell timed out after 15s.".into(),
+        ));
+        let checked = validated_binding_preflight(info.clone(), &timeout);
+        assert_eq!(checked.status, "unrecoverable");
+        assert!(checked.reason.contains("try Connect again"));
+        assert!(checked.recommended_guid.is_none());
+
+        let actual_ambiguity = Err(VpnError::SplitTunnel("multiple active underlays".into()));
+        let checked = validated_binding_preflight(info.clone(), &actual_ambiguity);
+        assert_eq!(checked.status, "ambiguous");
+        assert!(checked.recommended_guid.is_none());
+        let mut up = info;
+        up.candidates[0].is_up = true;
+        assert_eq!(
+            validated_binding_preflight(up, &actual_ambiguity)
+                .recommended_guid
+                .as_deref(),
+            Some("owned-guid")
+        );
+    }
+
     #[test]
     fn ip_helper_storage_is_aligned_and_route_rows_fit_the_returned_bytes() {
         use std::mem::{align_of, offset_of, size_of, size_of_val};

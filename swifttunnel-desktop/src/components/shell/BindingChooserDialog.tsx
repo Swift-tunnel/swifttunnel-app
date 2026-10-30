@@ -11,8 +11,10 @@ export function BindingChooserDialog() {
   if (!bindingPreflight) return null;
 
   const recommendedGuid = bindingPreflight.recommended_guid?.toLowerCase();
-  const isRecommended = (guid: string) =>
-    recommendedGuid !== undefined && guid.toLowerCase() === recommendedGuid;
+  const isUsable = (candidate: BindingCandidateInfo) =>
+    candidate.is_up && candidate.kind !== "tunnel" && candidate.kind !== "loopback";
+  const isRecommended = (candidate: BindingCandidateInfo) =>
+    isUsable(candidate) && recommendedGuid !== undefined && candidate.guid.toLowerCase() === recommendedGuid;
 
   return (
     <Dialog
@@ -47,8 +49,7 @@ export function BindingChooserDialog() {
             // Float the recommended physical NIC to the top so it's the first
             // thing the user sees; on Hyper-V/VM boxes the real one is often
             // virtual adapters, where the real one is otherwise buried.
-            const rank = (guid: string) => (isRecommended(guid) ? 0 : 1);
-            return rank(a.guid) - rank(b.guid);
+            return Number(isRecommended(b)) - Number(isRecommended(a));
           })
           .map((candidate) => (
             <CandidateRow
@@ -57,7 +58,8 @@ export function BindingChooserDialog() {
                 `${candidate.friendly_name}-${candidate.if_index ?? "na"}`
               }
               candidate={candidate}
-              recommended={isRecommended(candidate.guid)}
+              recommended={isRecommended(candidate)}
+              disabled={!isUsable(candidate)}
               onChoose={(guid) => void resumeConnectWithAdapter(guid)}
             />
           ))}
@@ -69,10 +71,12 @@ export function BindingChooserDialog() {
 function CandidateRow({
   candidate,
   recommended,
+  disabled,
   onChoose,
 }: {
   candidate: BindingCandidateInfo;
   recommended: boolean;
+  disabled: boolean;
   onChoose: (guid: string) => void;
 }) {
   const label =
@@ -80,8 +84,9 @@ function CandidateRow({
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={() => onChoose(candidate.guid)}
-      className="group flex items-center justify-between gap-3 rounded-[var(--radius-card)] px-3.5 py-3 text-left transition-colors"
+      className="group flex items-center justify-between gap-3 rounded-[var(--radius-card)] px-3.5 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50"
       style={{
         backgroundColor: "var(--color-bg-base)",
         border: `1px solid ${recommended ? "var(--color-accent-primary)" : "var(--color-border-subtle)"}`,
@@ -124,7 +129,7 @@ function CandidateRow({
         </div>
       </div>
       <span className="shrink-0 text-[11px] font-semibold text-accent-secondary">
-        Use →
+        {disabled ? "Unavailable" : "Use →"}
       </span>
     </button>
   );
