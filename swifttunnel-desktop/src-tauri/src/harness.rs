@@ -792,3 +792,24 @@ fn print_help() {
     println!("  --connect-wait-ms <ms>    Wait time after connect before collecting diagnostics");
     println!("  --game-preset <name>      Include a game preset for connect tests (repeatable)");
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn named_relay_arguments_keep_the_exact_node_and_derive_multi_part_region_ids() {
+        let args = ["--only-server", "middle-east-03", "--connect"].map(str::to_string);
+        let parsed = match super::parse_cli(&args) {
+            Ok(parsed) => parsed,
+            Err(_) => panic!("valid named-relay arguments were rejected"),
+        };
+        assert_eq!(parsed.only_server.as_deref(), Some("middle-east-03"));
+        assert!(parsed.connect);
+        assert_eq!(super::region_of_server("middle-east-03"), "middle-east");
+        assert_eq!(super::region_of_server("us-east-02"), "us-east");
+        assert_eq!(super::region_of_server("singapore"), "singapore");
+        assert!(matches!(
+            super::parse_cli(&["--only-server".into()]),
+            Err(super::ParseOutcome::Error(_))
+        ));
+    }
+}
