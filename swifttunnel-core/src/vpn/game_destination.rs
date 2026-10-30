@@ -1,5 +1,5 @@
-//! A single short-lived, locally observed Roblox destination. This does not
-//! widen speculative tunneling or the relay's destination policy.
+//! A single short-lived, locally observed Roblox destination. Cloud candidates
+//! require a separate process-owned first-packet gate in the interceptor.
 use parking_lot::RwLock;
 use std::{
     net::Ipv4Addr,
@@ -143,13 +143,17 @@ pub fn contains(ip: Ipv4Addr) -> bool {
     DESTINATION.contains(ip, tick())
 }
 pub fn known_or_observed(ip: Ipv4Addr) -> bool {
-    crate::geolocation::is_roblox_game_server_ip(ip) || contains(ip)
+    crate::geolocation::is_roblox_game_server_ip(ip)
+        || super::cloud_game_routes::is_cloud_game_ip(ip)
+        || contains(ip)
 }
 pub fn details(ip: Ipv4Addr) -> Option<ObservedGame> {
     DESTINATION.details(ip, tick())
 }
 pub fn routing_candidate(ip: Ipv4Addr) -> bool {
-    crate::geolocation::is_roblox_game_server_ip(ip) || DESTINATION.routing_candidate(ip, tick())
+    crate::geolocation::is_roblox_game_server_ip(ip)
+        || super::cloud_game_routes::is_cloud_game_ip(ip)
+        || DESTINATION.routing_candidate(ip, tick())
 }
 pub fn refresh() {
     DESTINATION.refresh(tick());

@@ -4742,6 +4742,8 @@ impl ParallelInterceptor {
         let reader_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
         let reader_udp_tunneling = Arc::clone(&self.udp_tunneling_enabled);
         let reader_queue_full_events = Arc::clone(&self.queue_full_events);
+        let reader_refresh_now = Arc::clone(&self.refresh_now_flag);
+        let reader_refresh_condvar = Arc::clone(&self.refresh_condvar);
         let physical_name =
             Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
                 VpnError::SplitTunnel("Physical adapter name not set".to_string())
@@ -4779,6 +4781,8 @@ impl ParallelInterceptor {
                     reader_api_tunneling,
                     reader_udp_tunneling,
                     reader_queue_full_events,
+                    reader_refresh_now,
+                    reader_refresh_condvar,
                     reader_stop,
                     num_workers,
                 )
@@ -5629,6 +5633,8 @@ fn run_packet_reader(
     api_tunneling_enabled: Arc<AtomicBool>,
     udp_tunneling_enabled: Arc<AtomicBool>,
     queue_full_events: Arc<AtomicU64>,
+    refresh_now: Arc<AtomicBool>,
+    refresh_condvar: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
     stop_flag: Arc<AtomicBool>,
     num_workers: usize,
 ) -> VpnResult<()> {
@@ -5650,6 +5656,12 @@ fn run_packet_reader(
     let mut snapshot = process_cache.get_snapshot();
     let mut snapshot_version = snapshot.version;
     let mut inline_cache: InlineCache = ahash::AHashMap::with_capacity(1024);
+    let mut cloud_routes = super::cloud_game_routes::CloudGameRoutes::new(&snapshot);
+    // A short, bounded wait for the existing background owner-table reader.
+    // No IP Helper calls or sleeps are added to the packet path.
+    const MAX_CLOUD_PENDING: usize = 64;
+    let mut cloud_pending: Vec<(Instant, IntermediateBuffer)> = Vec::new();
+    let mut last_cloud_refresh: Option<Instant> = None;
 
     // Bundle the per-run driver/adapter/event so we can rebind atomically.
     // Each acquire() opens a fresh NDISRD handle and re-enumerates adapters,
@@ -5891,7 +5903,9 @@ fn run_packet_reader(
                     prior
                 );
             }
-            continue;
+            if cloud_pending.is_empty() {
+                continue;
+            }
         }
 
         if wait_result == WAIT_FAILED {
@@ -5927,7 +5941,7 @@ fn run_packet_reader(
             }
         }
 
-        if wait_result != WAIT_OBJECT_0 {
+        if wait_result != WAIT_OBJECT_0 && wait_result != WAIT_TIMEOUT {
             log::warn!(
                 "Reader: unexpected packet event wait result: {:?}",
                 wait_result
@@ -5938,7 +5952,12 @@ fn run_packet_reader(
         // Read batch of packets
         let mut to_read = EthMRequestMut::from_iter(b.physical_handle, packets.iter_mut());
 
-        let packets_read = match b.driver.read_packets::<BATCH_SIZE>(&mut to_read) {
+        let read_result = if wait_result == WAIT_TIMEOUT {
+            Ok(0)
+        } else {
+            b.driver.read_packets::<BATCH_SIZE>(&mut to_read)
+        };
+        let packets_read = match read_result {
             Ok(n) => {
                 // A successful read_packets IOCTL is itself the signal that
                 // the handle is healthy. `Ok(0)` is also benign here: the
@@ -5996,7 +6015,7 @@ fn run_packet_reader(
             }
         };
 
-        if packets_read == 0 {
+        if packets_read == 0 && cloud_pending.is_empty() {
             unsafe {
                 let _ = ResetEvent(b.event);
             }
@@ -6019,9 +6038,27 @@ fn run_packet_reader(
         // Prepare passthrough queues
         passthrough_to_adapter = EthMRequest::new(b.physical_handle);
         passthrough_to_mstcp = EthMRequest::new(b.physical_handle);
+        let replay = std::mem::take(&mut cloud_pending);
+        let cloud_now = Instant::now();
 
         // Dispatch packets to workers using source-port hash or fragment metadata hash.
-        for packet in packets.iter().take(packets_read) {
+        for (held_since, packet) in replay
+            .iter()
+            .map(|(since, packet)| (Some(*since), packet))
+            .chain(
+                packets
+                    .iter()
+                    .take(packets_read)
+                    .map(|packet| (None, packet)),
+            )
+        {
+            // A replay can add one batch. Flush before borrowing another packet.
+            if passthrough_to_adapter.get_packet_number() as usize == BATCH_SIZE {
+                let _ = b
+                    .driver
+                    .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
+                passthrough_to_adapter = EthMRequest::new(b.physical_handle);
+            }
             let direction_flags = packet.get_device_flags();
             let is_outbound = direction_flags == DirectionFlags::PACKET_FLAG_ON_SEND;
             let Some(data) = bounded_intermediate_buffer_data(packet) else {
@@ -6035,13 +6072,47 @@ fn run_packet_reader(
                     let packet_len = data.len() as u64;
 
                     // Decide routing here to keep bypass traffic out of the workers.
-                    let should_tunnel = should_route_to_vpn_with_routing_flags(
-                        data,
-                        &snapshot,
-                        &mut inline_cache,
-                        api_tunneling,
-                        udp_tunneling,
-                    );
+                    let cloud_ip = parse_ipv4_header_offset(data).map(|offset| &data[offset..]);
+                    let cloud_action = cloud_ip.and_then(|ip| {
+                        cloud_routes.classify(ip, &snapshot, udp_tunneling, cloud_now)
+                    });
+                    if cloud_action == Some(super::cloud_game_routes::Route::Hold) {
+                        let since = held_since.unwrap_or(cloud_now);
+                        if cloud_now.saturating_duration_since(since)
+                            >= super::cloud_game_routes::OWNER_WAIT
+                        {
+                            // Orphan fragments cannot safely be attributed to a process.
+                            continue;
+                        }
+                        if cloud_pending.len() < MAX_CLOUD_PENDING {
+                            cloud_pending.push((since, *packet));
+                            if last_cloud_refresh.is_none_or(|last| {
+                                cloud_now.saturating_duration_since(last)
+                                    >= Duration::from_millis(100)
+                            }) {
+                                last_cloud_refresh = Some(cloud_now);
+                                refresh_now.store(true, Ordering::Release);
+                                let (lock, cvar) = &*refresh_condvar;
+                                if let Ok(mut signaled) = lock.lock() {
+                                    *signaled = true;
+                                    cvar.notify_one();
+                                }
+                            }
+                        }
+                        // Queue overflow drops instead of leaking a handshake direct.
+                        continue;
+                    }
+                    let should_tunnel = match cloud_action {
+                        Some(super::cloud_game_routes::Route::Relay) => true,
+                        Some(super::cloud_game_routes::Route::Direct) => false,
+                        _ => should_route_to_vpn_with_routing_flags(
+                            data,
+                            &snapshot,
+                            &mut inline_cache,
+                            api_tunneling,
+                            udp_tunneling,
+                        ),
+                    };
 
                     // Auto-routing whitelist bypass: if bypass is active, tunnel-eligible packets
                     // should be passed through to the physical adapter instead.
@@ -6049,7 +6120,11 @@ fn run_packet_reader(
                         should_tunnel && auto_router.as_ref().is_some_and(|r| r.is_bypassed());
 
                     let auto_action =
-                        auto_routing_packet_action(data, auto_router.as_ref(), should_tunnel);
+                        if cloud_action == Some(super::cloud_game_routes::Route::Direct) {
+                            AutoRoutingPacketAction::Pass
+                        } else {
+                            auto_routing_packet_action(data, auto_router.as_ref(), should_tunnel)
+                        };
 
                     if let Some((_, src_port, dst_ip, dst_port)) = voice_flow_endpoints(data) {
                         log::trace!(
@@ -6069,6 +6144,11 @@ fn run_packet_reader(
                     }
 
                     if !should_tunnel || auto_routing_bypass {
+                        if cloud_action.is_some()
+                            && let Some(ip) = cloud_ip
+                        {
+                            cloud_routes.keep_direct(ip);
+                        }
                         // Batch passthrough (much cheaper than per-packet bypass reinjection).
                         let _ = passthrough_to_adapter.push(packet);
 
@@ -6107,7 +6187,13 @@ fn run_packet_reader(
                             &throughput,
                             &detected_game_servers,
                             auto_router.as_ref(),
-                            QueueOverflowMode::from_u8(queue_overflow_mode.load(Ordering::Relaxed)),
+                            if cloud_action.is_some() {
+                                QueueOverflowMode::Drop
+                            } else {
+                                QueueOverflowMode::from_u8(
+                                    queue_overflow_mode.load(Ordering::Relaxed),
+                                )
+                            },
                         ) {
                             ReaderTunnelAction::Consumed => continue,
                             ReaderTunnelAction::BypassPhysical => {
@@ -6133,8 +6219,11 @@ fn run_packet_reader(
                     // Worker queue overflow strategy is runtime-configurable:
                     // `bypass` preserves delivery, `drop` preserves single-path consistency.
                     if senders[worker_id].try_send(work).is_err() {
-                        let mode =
-                            QueueOverflowMode::from_u8(queue_overflow_mode.load(Ordering::Relaxed));
+                        let mode = if cloud_action.is_some() {
+                            QueueOverflowMode::Drop
+                        } else {
+                            QueueOverflowMode::from_u8(queue_overflow_mode.load(Ordering::Relaxed))
+                        };
                         match queue_overflow_action(mode, data) {
                             QueueFullAction::Bypass => {
                                 if auto_routing_packet_action(data, auto_router.as_ref(), false)
@@ -6489,9 +6578,13 @@ fn run_packet_worker(
                         }
                         Ok(super::udp_relay::RelaySendOutcome::Backpressure) => {
                             relay_fail += 1;
-                            let mode = QueueOverflowMode::from_u8(
-                                queue_overflow_mode.load(Ordering::Relaxed),
-                            );
+                            let mode = if super::cloud_game_routes::is_cloud_game_ip(dst_ip) {
+                                QueueOverflowMode::Drop
+                            } else {
+                                QueueOverflowMode::from_u8(
+                                    queue_overflow_mode.load(Ordering::Relaxed),
+                                )
+                            };
                             if queue_overflow_action(mode, work.data.as_slice())
                                 == QueueFullAction::Bypass
                             {
@@ -6543,7 +6636,9 @@ fn run_packet_worker(
                     // Either no relay context, or the relay is marked Dead —
                     // forward to the physical adapter (bypass) so the game
                     // isn't silently drop-forwarded to nowhere.
-                    send_bypass_packet(&driver, &adapters, &work);
+                    if !super::cloud_game_routes::is_cloud_game_ip(dst_ip) {
+                        send_bypass_packet(&driver, &adapters, &work);
+                    }
                 }
             } else {
                 stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
@@ -7930,7 +8025,7 @@ fn should_relay_udp_for_mode(
     super::process_cache::is_likely_gameplay_udp(dst_ip, dst_port, protocol)
         || (dst_port != super::process_cache::DNS_PORT
             && dst_port != 443
-            && super::game_destination::contains(dst_ip))
+            && super::game_destination::routing_candidate(dst_ip))
 }
 
 fn should_route_to_vpn_with_routing_flags(
@@ -9184,6 +9279,7 @@ fn run_v3_inbound_receiver(
     let mut recv_buf = vec![0u8; 2048];
     let mut packets_received = 0u64;
     let mut packets_injected = 0u64;
+    let mut cloud_replies: ahash::AHashMap<Ipv4Addr, (u64, u64)> = ahash::AHashMap::new();
     let mut inject_errors = 0u64;
     let mut inject_skipped = 0u64;
 
@@ -9316,6 +9412,18 @@ fn run_v3_inbound_receiver(
                 let len = ip_packet.len();
                 packets_received += 1;
                 last_packet_time = Some(now);
+                let cloud_source = if ip_packet.len() >= 20 && ip_packet[0] >> 4 == 4 {
+                    let src =
+                        Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
+                    super::cloud_game_routes::is_cloud_game_ip(src).then_some(src)
+                } else {
+                    None
+                };
+                if let Some(src) = cloud_source
+                    && (cloud_replies.len() < 16 || cloud_replies.contains_key(&src))
+                {
+                    cloud_replies.entry(src).or_default().0 += 1;
+                }
 
                 if let Some((src_ip, src_port, _, dst_port)) = voice_flow_endpoints(ip_packet) {
                     log::trace!(
@@ -9349,6 +9457,14 @@ fn run_v3_inbound_receiver(
                 ) {
                     Some(true) => {
                         packets_injected += 1;
+                        if let Some(src) = cloud_source
+                            && let Some(counts) = cloud_replies.get_mut(&src)
+                        {
+                            counts.1 += 1;
+                            if counts.1 == 1 {
+                                log::info!("Cloud gameplay reply injected: {src} via relay");
+                            }
+                        }
                         relay.record_inject_outcome(true);
                         if packets_injected <= 10 {
                             log::info!(
@@ -9394,6 +9510,9 @@ fn run_v3_inbound_receiver(
     relay.log_support_snapshot("receiver_stopped");
     log::info!("========================================");
     log::info!("V3 INBOUND RECEIVER STOPPED");
+    for (ip, (received, injected)) in &cloud_replies {
+        log::info!("Cloud gameplay return totals: {ip} received={received} injected={injected}");
+    }
     log::info!("========================================");
     log::info!("  Uptime: {}s", total_uptime);
     log::info!("  Packets received: {}", packets_received);

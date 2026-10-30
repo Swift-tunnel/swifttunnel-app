@@ -19,6 +19,7 @@
 
 pub mod auto_routing;
 pub mod bypass_diag;
+mod cloud_game_routes;
 pub mod connect_policy;
 pub mod connection;
 pub(crate) mod diskless_passthrough;
