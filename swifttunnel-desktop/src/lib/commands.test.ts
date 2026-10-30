@@ -28,6 +28,7 @@ import {
   vpnPreflightBinding,
   vpnGetPing,
   vpnListNetworkAdapters,
+  serverGetLatencies,
   gamesLaunch,
   gamesNvidiaProfile,
   ensureOverlayWindow,
@@ -35,6 +36,11 @@ import {
 import { DEFAULT_SETTINGS } from "./settings";
 
 describe("lib/commands", () => {
+  it("requests cached picker pings without asking native code to probe", async () => {
+    invoke.mockResolvedValue([]);
+    await serverGetLatencies(true);
+    expect(invoke).toHaveBeenCalledWith("server_get_latencies", { cachedOnly: true });
+  });
   it("shares overlay creation but retries a failed or completed native request", async () => {
     let reject!: (error: Error) => void;
     invoke.mockReturnValueOnce(new Promise<void>((_, fail) => { reject = fail; }));

@@ -40,12 +40,12 @@ it("keeps city-best ping distinct from each relay's own ping", async () => {
 it("does not let an old cached list undo a completed refresh", async () => {
   let finishOld!: (value: object) => void;
   serverGetList.mockReturnValueOnce(new Promise(resolve => { finishOld = resolve; }))
-    .mockResolvedValueOnce({ regions: [{ id: "new" }], servers: [], source: "fresh" });
+    .mockResolvedValueOnce({ regions: [{ id: "new", servers: [] }], servers: [], source: "fresh" });
   serverRefresh.mockResolvedValue(undefined);
   const store = (await import("./serverStore")).useServerStore;
   const old = store.getState().fetchList();
   await store.getState().refresh();
-  finishOld({ regions: [{ id: "old" }], servers: [], source: "stale" });
+  finishOld({ regions: [{ id: "old", servers: [] }], servers: [], source: "stale" });
   await old;
   expect(store.getState().source).toBe("fresh");
 });
@@ -148,4 +148,52 @@ it("drops displayed and in-flight pings when a relay id moves to a new box", asy
   finish([{ region: "jakarta", latency_ms: 6 }]);
   await oldScan;
   expect(store.getState().getLatency("jakarta")).toBeNull();
+});
+
+it("retains paused ping readings for unchanged endpoints when another relay changes", async () => {
+  const list = (ip: string) => ({
+    regions: [{ id: "middle-east", name: "Middle East", country_code: "AE", servers: ["middle-east-03"] },
+      { id: "mumbai", name: "Mumbai", country_code: "IN", servers: ["mumbai-01"] }],
+    servers: [{ region: "middle-east-03", ip: "192.0.2.3", relay_available: true },
+      { region: "mumbai-01", ip, relay_available: true }], source: "API",
+  });
+  serverGetList.mockResolvedValueOnce(list("192.0.2.1")).mockResolvedValueOnce(list("192.0.2.2"));
+  serverGetLatencies.mockResolvedValueOnce([
+    { region: "middle-east", latency_ms: 27 },
+    { region: "middle-east-03", server_id: "middle-east-03", latency_ms: 27 },
+    { region: "mumbai-01", server_id: "mumbai-01", latency_ms: 10 },
+  ]);
+  const store = (await import("./serverStore")).useServerStore;
+  await store.getState().fetchList();
+  await store.getState().fetchLatencies();
+  await store.getState().fetchList();
+  expect(store.getState().getLatency("middle-east")).toBe(27);
+  expect(store.getState().getLatency("relay:middle-east-03")).toBe(27);
+  expect(store.getState().getLatency("relay:mumbai-01")).toBeNull();
+  expect(store.getState().regions[0]).toMatchObject({ id: "middle-east", name: "Qatar", country_code: "QA" });
+  expect(serverGetLatencies).toHaveBeenCalledOnce();
+});
+
+it("can restore display pings from the native cache without refreshing a game estimate", async () => {
+  serverGetLatencies.mockResolvedValueOnce([{ region: "middle-east-03", server_id: "middle-east-03", latency_ms: 27 }]);
+  const store = (await import("./serverStore")).useServerStore;
+  await store.getState().fetchLatencies(true);
+  expect(serverGetLatencies).toHaveBeenCalledWith(true);
+  expect(store.getState().getLatency("relay:middle-east-03")).toBe(27);
+  expect(store.getState().previews).toEqual([]);
+});
+
+it("does one fresh round if Roblox closes while a cached-only read is waiting", async () => {
+  let finish!: (entries: object[]) => void;
+  serverGetLatencies.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }))
+    .mockResolvedValueOnce([{ region: "middle-east", latency_ms: 30 }]);
+  const store = (await import("./serverStore")).useServerStore;
+  const cached = store.getState().fetchLatencies(true);
+  const fresh = store.getState().fetchLatencies();
+  expect(store.getState().fetchLatencies()).toBe(fresh);
+  expect(serverGetLatencies).toHaveBeenCalledOnce();
+  finish([{ region: "middle-east", latency_ms: 27 }]);
+  await Promise.all([cached, fresh]);
+  expect(serverGetLatencies.mock.calls).toEqual([[true], [false]]);
+  expect(store.getState().getLatency("middle-east")).toBe(30);
 });

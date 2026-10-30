@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatConnectedServerLabel } from "./connectedServer";
+import { formatConnectedServerLabel, relayDisplayLabel, regionPresentation, serverPresentation } from "./connectedServer";
 import type { ServerInfo } from "./types";
 
 const SERVERS: ServerInfo[] = [
@@ -24,6 +24,17 @@ const SERVERS: ServerInfo[] = [
 ];
 
 describe("formatConnectedServerLabel", () => {
+  it("presents a single Qatar relay consistently without changing its identity", () => {
+    const server = serverPresentation({ ...SERVERS[0], region: "middle-east-03", name: "Dubai", country_code: "AE" });
+    expect(server.region).toBe("middle-east-03");
+    expect(server.name).toBe("Qatar 03");
+    expect(server.country_code).toBe("QA");
+    expect(formatConnectedServerLabel("1.2.3.4:51821", [server], "middle-east")).toBe("Qatar 03");
+    expect(formatConnectedServerLabel(null, [], "middle-east-03")).toBe("Qatar 03");
+    expect(relayDisplayLabel("middle-east-02")).toBe("Qatar 02");
+    const region = regionPresentation({ id: "middle-east", name: "Middle East", description: "", country_code: "AE", servers: [server.region] });
+    expect(region).toMatchObject({ id: "middle-east", name: "Qatar", country_code: "QA", servers: ["middle-east-03"] });
+  });
   it("shows the actual relay number when API names only contain the city", () => {
     const label = formatConnectedServerLabel("1.2.3.4:51821", SERVERS, "mumbai");
     expect(label).toBe("Mumbai 02");

@@ -798,8 +798,8 @@ impl DynamicServerList {
         self.regions.iter().find(|r| r.id == id)
     }
 
-    /// Get a recent latency for a server. Picker and Auto selection must use
-    /// the same expiry even while game-time polling is paused.
+    /// Get a recent latency for route selection. Display-only callers use
+    /// get_display_latency while game-time polling is paused.
     pub fn get_latency(&self, region: &str) -> Option<u32> {
         self.get_recent_latency(region)
     }
@@ -808,6 +808,14 @@ impl DynamicServerList {
         self.latencies
             .get(region)
             .filter(|sample| sample.last_measured.elapsed() <= std::time::Duration::from_secs(60))
+            .and_then(|sample| sample.latency_ms)
+    }
+
+    /// Last completed reading for display while fleet probing is paused.
+    /// Route selection must continue to use get_recent_latency/get_latency.
+    pub fn get_display_latency(&self, region: &str) -> Option<u32> {
+        self.latencies
+            .get(region)
             .and_then(|sample| sample.latency_ms)
     }
 
@@ -982,7 +990,7 @@ mod tests {
     // --- DynamicServerList ---
 
     #[test]
-    fn expired_latency_cannot_win_region_selection_or_remain_visible() {
+    fn expired_latency_cannot_win_region_selection_but_remains_a_display_reading() {
         let _guard = RELAY_LOAD_TEST_LOCK.lock().unwrap();
         let mut list = DynamicServerList::new_empty();
         list.update(
@@ -1000,6 +1008,7 @@ mod tests {
 
         assert_eq!(list.get_latency("fast-old"), None);
         assert_eq!(list.get_recent_latency("fast-old"), None);
+        assert_eq!(list.get_display_latency("fast-old"), Some(1));
         assert_eq!(list.get_region_best_latency("region"), Some(30));
         assert_eq!(
             crate::vpn::connect_policy::select_best_region_by_latency(&list).as_deref(),

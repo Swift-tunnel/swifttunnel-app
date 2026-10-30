@@ -3,6 +3,18 @@ import { expect, it } from "vitest";
 import { RelayPicker } from "./RelayPicker";
 import type { ReferenceEstimate, ServerInfo } from "../../lib/types";
 
+it("keeps the last relay reading when its game estimate expires, including a one-relay Qatar region", () => {
+  const html = renderToStaticMarkup(<RelayPicker
+    region={{ id: "middle-east", name: "Qatar", description: "", country_code: "QA", servers: ["middle-east-03"] }}
+    servers={[{ region: "middle-east-03", ip: "192.0.2.3", relay_port: 51821, relay_available: true } as ServerInfo]}
+    latencies={new Map([["relay:middle-east-03", 27]])} previews={[{ relay: "middle-east-03", address: "192.0.2.3:51821", relay_ms: 27, second_leg_ms: 3, estimated_game_ms: 30, target: "34.18.186.248", location: "Doha", valid_for_ms: 1, expiresAt: 0 }]}
+    value={null} disabled={false} onChange={() => {}} />);
+  expect(html).toContain("Qatar 03");
+  expect(html).toContain("27 ms");
+  expect(html).not.toContain("Unavailable");
+  expect(html).not.toContain("middle-east-03");
+});
+
 it("renders a single ms value before connecting and keeps the target in the tooltip", () => {
   const previews: ReferenceEstimate[] = [{ relay: "mumbai-01", address: "1.2.3.4:51821",
     relay_ms: 20, second_leg_ms: 2, estimated_game_ms: 22, target: "128.116.47.3",

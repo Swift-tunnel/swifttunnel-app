@@ -50,7 +50,7 @@ pub fn region_display_name(region_id: &str) -> &'static str {
         "tokyo" => "Tokyo",
         "jakarta" => "Jakarta",
         "israel" => "Israel",
-        "middle-east" => "Middle East",
+        "middle-east" => "Qatar",
         "sydney" => "Sydney",
         "germany" | "frankfurt" => "Germany",
         "paris" => "Paris",
@@ -63,7 +63,7 @@ pub fn region_display_name(region_id: &str) -> &'static str {
         _ if region_id.starts_with("tokyo-") => "Tokyo",
         _ if region_id.starts_with("jakarta-") => "Jakarta",
         _ if region_id.starts_with("israel-") => "Israel",
-        _ if region_id.starts_with("middle-east-") => "Middle East",
+        _ if region_id.starts_with("middle-east-") => "Qatar",
         _ if region_id.starts_with("sydney-") => "Sydney",
         _ if region_id.starts_with("germany-") => "Germany",
         _ if region_id.starts_with("paris-") => "Paris",
@@ -108,6 +108,12 @@ fn format_region_token(token: &str) -> String {
 /// Resolve a Discord region label, preserving existing mappings and falling back
 /// to a readable label when the region id is meaningful but not yet mapped.
 pub fn region_display_label(region_id: &str) -> Cow<'static, str> {
+    if let Some(number) = region_id.strip_prefix("middle-east-")
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Cow::Owned(format!("Qatar {number}"));
+    }
     let known = region_display_name(region_id);
     if known != "Unknown Region" {
         return Cow::Borrowed(known);
@@ -169,6 +175,15 @@ pub fn game_display_name(game_name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qatar_relay_labels_preserve_the_node_without_changing_ids() {
+        assert_eq!(region_display_name("middle-east"), "Qatar");
+        assert_eq!(region_display_name("middle-east-03"), "Qatar");
+        assert_eq!(region_display_label("middle-east-03"), "Qatar 03");
+        assert_eq!(region_display_label("middle-east-02"), "Qatar 02");
+        assert_eq!(region_display_name("middle-eastern"), "Unknown Region");
+    }
 
     #[test]
     fn new_locations_and_unknown_regions_use_verified_artwork() {

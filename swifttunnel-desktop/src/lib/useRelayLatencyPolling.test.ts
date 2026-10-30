@@ -4,6 +4,7 @@ const h = vi.hoisted(() => ({
   effects: [] as Array<() => void | (() => void)>,
   running: false,
   loaded: true,
+  fleetLoaded: true,
   idleWhenUnfocused: true,
   scan: vi.fn(),
 }));
@@ -22,8 +23,8 @@ vi.mock("../stores/boostStore", () => {
   };
 });
 vi.mock("../stores/serverStore", () => ({
-  useServerStore: (select: (s: { fetchLatencies: typeof h.scan }) => unknown) =>
-    select({ fetchLatencies: h.scan }),
+  useServerStore: (select: (s: { fetchLatencies: typeof h.scan; hasLoaded: boolean }) => unknown) =>
+    select({ fetchLatencies: h.scan, hasLoaded: h.fleetLoaded }),
 }));
 vi.mock("../stores/settingsStore", () => ({
   useSettingsStore: (select: (s: unknown) => unknown) => select({
@@ -59,6 +60,7 @@ describe("automatic picker scans", () => {
     vi.useFakeTimers();
     h.running = false;
     h.loaded = true;
+    h.fleetLoaded = true;
     h.idleWhenUnfocused = true;
     h.scan.mockResolvedValue(undefined);
     cleanups = [];
@@ -103,8 +105,18 @@ describe("automatic picker scans", () => {
     start();
     vi.advanceTimersByTime(5 * 60_000);
     events.dispatchEvent(new Event("focus"));
-    expect(h.scan).not.toHaveBeenCalled();
+    expect(h.scan).toHaveBeenCalledExactlyOnceWith(true);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("loads cached readings after a fleet opened during Roblox finishes loading", () => {
+    h.running = true;
+    h.fleetLoaded = false;
+    start();
+    expect(h.scan).not.toHaveBeenCalled();
+    h.fleetLoaded = true;
+    start();
+    expect(h.scan).toHaveBeenCalledExactlyOnceWith(true);
   });
 
   it("guards queued timer and focus callbacks before React handles game startup", () => {
@@ -121,6 +133,8 @@ describe("automatic picker scans", () => {
   it("does one fresh round when Roblox closes, then resumes the idle cadence", () => {
     h.running = true;
     start();
+    expect(h.scan).toHaveBeenCalledExactlyOnceWith(true);
+    h.scan.mockClear();
     vi.advanceTimersByTime(30_000);
     h.running = false;
     start();

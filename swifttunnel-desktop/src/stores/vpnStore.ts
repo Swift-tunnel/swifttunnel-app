@@ -28,6 +28,7 @@ import { reportError, formatErrorMessage as getErrorMessage } from "../lib/error
 import { notify } from "../lib/notifications";
 import { useSettingsStore } from "./settingsStore";
 import { useServerStore } from "./serverStore";
+import { relayDisplayLabel } from "../lib/connectedServer";
 import { formatDriverSetupMessage as cleanDriverSetupMessage, isWindowsDriverInstallerFailureMessage } from "../lib/driverMessages";
 
 type DriverSetupState =
@@ -964,7 +965,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
           "SwiftTunnel",
           fullCountryBanEnabled
             ? "Connected. Open Roblox now so Full Country Ban uses the tunnel."
-            : `Connected to ${get().region ?? region}`,
+            : `Connected to ${relayDisplayLabel(get().region ?? region)}`,
         );
       }
       // Successful connect clears the reset-attempted one-shot so a future

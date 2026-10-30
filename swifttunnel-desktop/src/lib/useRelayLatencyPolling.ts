@@ -9,7 +9,8 @@ export function useRelayLatencyPolling() {
   const robloxRunning = useBoostStore((s) => s.robloxRunning);
   const hasLoadedMetrics = useBoostStore((s) => s.hasLoadedMetrics);
   const fetchLatencies = useServerStore((s) => s.fetchLatencies);
-  const enabled = hasLoadedMetrics && !robloxRunning;
+  const fleetLoaded = useServerStore((s) => s.hasLoaded);
+  const enabled = fleetLoaded && hasLoadedMetrics && !robloxRunning;
 
   const scan = useCallback(() => {
     // A queued focus/timer callback can run before React handles a process
@@ -22,6 +23,7 @@ export function useRelayLatencyPolling() {
   // for the existing process sampler at startup rather than assuming idle.
   useEffect(() => {
     if (enabled) scan();
-  }, [enabled, scan]);
+    else if (fleetLoaded && hasLoadedMetrics && robloxRunning) void fetchLatencies(true);
+  }, [enabled, scan, fleetLoaded, hasLoadedMetrics, robloxRunning, fetchLatencies]);
   useFocusAwareInterval(scan, 15_000, { idleMs: 60_000, enabled });
 }

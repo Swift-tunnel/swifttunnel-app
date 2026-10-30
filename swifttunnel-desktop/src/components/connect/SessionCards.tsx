@@ -13,6 +13,7 @@ import {
 import { useVpnStore } from "../../stores/vpnStore";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { Flag } from "../ui/Flag";
+import { relayDisplayLabel } from "../../lib/connectedServer";
 
 function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -127,7 +128,7 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
       <div className="text-[12.5px] text-text-muted">
         {live && relay ? (
           <>
-            Relay <b className="ml-1 text-[15px] font-bold text-text-primary">{relay}</b>
+            Relay <b className="ml-1 text-[15px] font-bold text-text-primary">{relayDisplayLabel(relay)}</b>
             {paused && <span className="ml-3 text-[11px] text-text-dimmed" title="Ping statistics pause while Roblox is closed.">Paused</span>}
           </>
         ) : stats ? (

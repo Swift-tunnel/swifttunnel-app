@@ -742,7 +742,7 @@ pub async fn games_launch_plan(
         && launcher.matchmaker.applies(&place_id)
     {
         if state.games.lock().previews.iter().all(|p| !p.is_fresh()) {
-            crate::commands::vpn::server_get_latencies(state.clone()).await?;
+            crate::commands::vpn::server_get_latencies(state.clone(), None).await?;
         }
         let choice = matchmake(
             &state,

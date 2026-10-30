@@ -1099,14 +1099,22 @@ fn apply_latency_measurements(
         .iter()
         .map(|region| LatencyEntry {
             region: region.id.clone(),
-            latency_ms: sl.get_region_best_latency(&region.id),
+            latency_ms: region
+                .servers
+                .iter()
+                .filter_map(|id| {
+                    sl.get_server(id)
+                        .filter(|server| server.relay_available)
+                        .and_then(|_| sl.get_display_latency(id))
+                })
+                .min(),
             server_id: None,
             preview: None,
         })
         .chain(sl.servers().iter().map(|server| LatencyEntry {
             region: server.region.clone(),
             latency_ms: if server.relay_available {
-                sl.get_recent_latency(&server.region)
+                sl.get_display_latency(&server.region)
             } else {
                 None
             },
@@ -1148,7 +1156,18 @@ fn select_best_server_in_region(
 }
 
 #[tauri::command]
-pub async fn server_get_latencies(state: State<'_, AppState>) -> Result<Vec<LatencyEntry>, String> {
+pub async fn server_get_latencies(
+    state: State<'_, AppState>,
+    cached_only: Option<bool>,
+) -> Result<Vec<LatencyEntry>, String> {
+    if cached_only.unwrap_or(false) {
+        // A picker opened/reloaded during a game may need its last readings,
+        // but must not start fleet probes or make old readings fresh for Auto.
+        return Ok(apply_latency_measurements(
+            &mut state.server_list.lock(),
+            &[],
+        ));
+    }
     let probes = {
         let sl = state.server_list.lock();
         build_latency_probe_targets(&sl)

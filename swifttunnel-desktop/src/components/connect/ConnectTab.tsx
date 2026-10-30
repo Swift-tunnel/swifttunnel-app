@@ -7,7 +7,7 @@ import {
   formatBytes,
   getLatencyColor,
 } from "../../lib/utils";
-import { formatConnectedServerLabel } from "../../lib/connectedServer";
+import { formatConnectedServerLabel, relayDisplayLabel, regionPresentation } from "../../lib/connectedServer";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useRelayLatencyPolling } from "../../lib/useRelayLatencyPolling";
@@ -110,10 +110,10 @@ export function ConnectTab() {
   });
 
   const selectedRegion = regions.find((r) => r.id === settings.selected_region);
-  const relayPickerRegion = selectedRegion ?? (settings.manual_relay ? {
+  const relayPickerRegion = selectedRegion ?? (settings.manual_relay ? regionPresentation({
     id: settings.manual_relay.region, name: settings.manual_relay.region,
     description: "", country_code: "", servers: [],
-  } : undefined);
+  }) : undefined);
   const cachedLatency = settings.manual_relay
     ? relayLatencies.get(`relay:${settings.manual_relay.server_id}`) ?? null
     : getLatency(settings.selected_region);
@@ -231,7 +231,7 @@ export function ConnectTab() {
       : null;
 
   const heroRegionName = isConnected
-    ? connectedRegion?.name || vpnRegion || "Unknown"
+    ? connectedRegion?.name || (vpnRegion ? relayDisplayLabel(vpnRegion) : "Unknown")
     : isTransitioning
       ? stateLabel(vpnState)
       : settings.auto_routing_enabled
@@ -1092,7 +1092,7 @@ function RegionRow({
       </button>
 
       {/* Fixed-width latency slot, always same position */}
-        <div title={estimatedLatency !== null ? "Estimated network latency to this region's Roblox datacenter" : "Ping to the relay only"} className="flex w-[110px] shrink-0 items-center justify-end gap-2">
+        <div title={estimatedLatency !== null ? "Estimated network latency to this region's Roblox datacenter" : "Last measured ping to the relay"} className="flex w-[110px] shrink-0 items-center justify-end gap-2">
           {(estimatedLatency ?? latency) !== null ? (
           <>
               <LatencyBars latency={(estimatedLatency ?? latency)!} />

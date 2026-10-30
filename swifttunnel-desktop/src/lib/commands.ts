@@ -235,8 +235,9 @@ export const vpnListNetworkAdapters = () =>
 export const serverGetList = () =>
   invoke<ServerListResponse>("server_get_list");
 
-export const serverGetLatencies = () =>
-  invoke<LatencyEntry[]>("server_get_latencies");
+export const serverGetLatencies = (cachedOnly = false) => cachedOnly
+  ? invoke<LatencyEntry[]>("server_get_latencies", { cachedOnly: true })
+  : invoke<LatencyEntry[]>("server_get_latencies");
 
 export const serverRefresh = () => invoke<string>("server_refresh");
 

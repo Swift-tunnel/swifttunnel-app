@@ -7,10 +7,12 @@ import {
   serverSmartSelect,
 } from "../lib/commands";
 import { formatErrorMessage, reportError } from "../lib/errors";
+import { regionPresentation, serverPresentation } from "../lib/connectedServer";
 
 // A scan probes every relay. Timer ticks,
 // focus changes and refresh clicks must share it instead of queuing more scans.
 let pendingLatencies: Promise<void> | null = null;
+let pendingCachedOnly = false;
 
 interface ServerStore {
   regions: ServerRegion[];
@@ -27,7 +29,7 @@ interface ServerStore {
 
   // Actions
   fetchList: () => Promise<void>;
-  fetchLatencies: () => Promise<void>;
+  fetchLatencies: (cachedOnly?: boolean) => Promise<void>;
   refresh: () => Promise<void>;
   smartSelect: (regionId: string) => Promise<string | null>;
   getLatency: (region: string) => number | null;
@@ -63,10 +65,32 @@ export const useServerStore = create<ServerStore>((set, get) => {
         if (signature !== fleetSignature) {
           fleetSignature = signature;
           ++fleetRevision;
-          set({ latencies: new Map() });
+          const previous = get();
+          const unchanged = new Set(resp.servers.filter(server => server.relay_available && previous.servers.some(old =>
+            old.region === server.region && old.ip === server.ip &&
+            (old.relay_port ?? 51821) === (server.relay_port ?? 51821),
+          )).map(server => server.region));
+          // Fleet refreshes can land while game-time probing is paused. Keep
+          // display readings for unchanged endpoints; Auto's native freshness
+          // checks still decide whether a reading may select a route.
+          const latencies = new Map([...previous.latencies].filter(([key]) =>
+            key.startsWith("relay:") && unchanged.has(key.slice(6)),
+          ));
+          for (const region of resp.regions) {
+            const known = region.servers.flatMap(id => {
+              const ms = latencies.get(`relay:${id}`);
+              return typeof ms === "number" ? [ms] : [];
+            });
+            const old = previous.regions.find(old => old.id === region.id);
+            const sameMembers = old && old.servers.length === region.servers.length &&
+              region.servers.every(id => unchanged.has(id) && old.servers.includes(id));
+            const ms = known.length ? Math.min(...known) : sameMembers ? previous.latencies.get(region.id) : null;
+            if (ms != null) latencies.set(region.id, ms);
+          }
+          set({ latencies });
           setPreviews([]);
         }
-        set({ regions: resp.regions, servers: resp.servers, source: resp.source,
+        set({ regions: resp.regions.map(regionPresentation), servers: resp.servers.map(serverPresentation), source: resp.source,
           isLoading: false, hasLoaded: true, error: null });
       } catch (error) {
         if (revision !== listRevision) return;
@@ -90,29 +114,44 @@ export const useServerStore = create<ServerStore>((set, get) => {
 
   fetchList: () => pendingRefresh ?? loadList(),
 
-  fetchLatencies: () => {
-    if (pendingLatencies) return pendingLatencies;
+  fetchLatencies: (cachedOnly = false) => {
+    if (pendingLatencies) {
+      if (!cachedOnly && pendingCachedOnly) {
+        // Closing Roblox may request a fresh round while a cached-only read
+        // is pending. Queue exactly one probe round after that read.
+        pendingCachedOnly = false;
+        const cached = pendingLatencies;
+        const queued: Promise<void> = cached.then(() => {
+          if (pendingLatencies === queued) pendingLatencies = null;
+          return get().fetchLatencies();
+        });
+        pendingLatencies = queued;
+      }
+      return pendingLatencies;
+    }
+    pendingCachedOnly = cachedOnly;
     const revision = fleetRevision;
-    pendingLatencies = (async () => {
+    const work = (async () => {
       try {
         const started = performance.now();
-        const entries = await serverGetLatencies();
+        const entries = await serverGetLatencies(cachedOnly);
         if (revision !== fleetRevision) return;
         const latencies = new Map<string, number | null>();
         for (const entry of entries) {
           latencies.set(entry.server_id ? `relay:${entry.server_id}` : entry.region, entry.latency_ms);
         }
         set({ latencies });
-        setPreviews(entries.flatMap(entry => entry.preview ? [{ ...entry.preview,
+        if (!cachedOnly) setPreviews(entries.flatMap(entry => entry.preview ? [{ ...entry.preview,
           expiresAt: started + Math.min(45_000, entry.preview.valid_for_ms) }] : []));
       } catch (error) {
-        if (revision === fleetRevision) setPreviews([]);
+        if (!cachedOnly && revision === fleetRevision) setPreviews([]);
         reportError("Failed to fetch server latencies", error, {
           dedupeKey: "server-fetch-latencies",
         });
       }
-    })().finally(() => { pendingLatencies = null; });
-    return pendingLatencies;
+    })().finally(() => { if (pendingLatencies === work) pendingLatencies = null; });
+    pendingLatencies = work;
+    return work;
   },
 
   refresh: () => {

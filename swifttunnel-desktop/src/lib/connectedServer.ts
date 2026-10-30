@@ -1,7 +1,26 @@
-import type { ServerInfo } from "./types";
+import type { ServerInfo, ServerRegion } from "./types";
+
+/** Presentation only: saved selections, endpoints and wire IDs stay unchanged. */
+export function relayDisplayLabel(id: string): string {
+  return /^middle-east(?:-\d+)?$/.test(id)
+    ? id.replace(/^middle-east/, "Qatar").replace(/-/g, " ")
+    : id;
+}
+
+export function regionPresentation(region: ServerRegion): ServerRegion {
+  return region.id === "middle-east"
+    ? { ...region, name: "Qatar", country_code: "QA" }
+    : region;
+}
+
+export function serverPresentation(server: ServerInfo): ServerInfo {
+  return /^middle-east(?:-\d+)?$/.test(server.region)
+    ? { ...server, name: relayDisplayLabel(server.region), country_code: "QA" }
+    : server;
+}
 
 function displayRelayId(id: string): string {
-  return id.split("-").map(part => {
+  return relayDisplayLabel(id).split("-").map(part => {
     if (/^(us|uk|uae)$/i.test(part)) return part.toUpperCase();
     return part.charAt(0).toUpperCase() + part.slice(1);
   }).join(" ");
