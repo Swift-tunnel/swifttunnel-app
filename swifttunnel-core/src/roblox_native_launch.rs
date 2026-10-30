@@ -20,10 +20,33 @@ pub fn official_player_for(client: RobloxClient) -> Result<PathBuf, String> {
         .ok_or("Windows could not find the Roblox installation.")?;
     find_player_for(&PathBuf::from(root), client)
 }
+pub fn installed_clients() -> Result<Vec<RobloxClient>, String> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .ok_or("Windows could not find the Roblox installation.")?;
+    Ok(installed_clients_at(Path::new(&base)))
+}
+fn installed_clients_at(base: &Path) -> Vec<RobloxClient> {
+    [RobloxClient::Standard, RobloxClient::Vng]
+        .into_iter()
+        .filter(|client| find_player(&installation_root(base, *client).join("Versions")).is_ok())
+        .collect()
+}
 fn find_player_for(base: &Path, client: RobloxClient) -> Result<PathBuf, String> {
-    find_player(&installation_root(base, client).join("Versions")).map_err(|_| match client {
-        RobloxClient::Standard => "Install Roblox from roblox.com first.".into(),
-        RobloxClient::Vng => "Install Roblox VNG from robloxapp.vnggames.com first.".into(),
+    find_player(&installation_root(base, client).join("Versions")).map_err(|_| {
+        let other = match client {
+            RobloxClient::Standard => RobloxClient::Vng,
+            RobloxClient::Vng => RobloxClient::Standard,
+        };
+        if find_player(&installation_root(base, other).join("Versions")).is_ok() {
+            return match client {
+                RobloxClient::Standard => "This game is set to Roblox, but only Roblox VNG was found. Use Change player to add it with Roblox VNG.".into(),
+                RobloxClient::Vng => "This game is set to Roblox VNG, but only Roblox was found. Use Change player to add it with Roblox.".into(),
+            };
+        }
+        match client {
+            RobloxClient::Standard => "Install Roblox from roblox.com first.".into(),
+            RobloxClient::Vng => "Install Roblox VNG from robloxapp.vnggames.com first.".into(),
+        }
     })
 }
 pub fn updater_running() -> bool {
@@ -334,6 +357,7 @@ mod tests {
     #[test]
     fn vng_and_standard_players_are_resolved_separately() {
         let base = std::env::temp_dir().join(format!("swift-native-vng-{}", std::process::id()));
+        assert!(installed_clients_at(&base).is_empty());
         for client in [RobloxClient::Standard, RobloxClient::Vng] {
             let version = installation_root(&base, client).join("Versions/version-player");
             fs::create_dir_all(&version).unwrap();
@@ -343,11 +367,27 @@ mod tests {
                 version.join("RobloxPlayerBeta.exe")
             );
         }
+        assert_eq!(
+            installed_clients_at(&base),
+            vec![RobloxClient::Standard, RobloxClient::Vng]
+        );
+        fs::remove_dir_all(installation_root(&base, RobloxClient::Standard)).unwrap();
+        assert_eq!(installed_clients_at(&base), vec![RobloxClient::Vng]);
+        assert!(
+            find_player_for(&base, RobloxClient::Standard)
+                .unwrap_err()
+                .contains("Use Change player")
+        );
+        let version =
+            installation_root(&base, RobloxClient::Standard).join("Versions/version-player");
+        fs::create_dir_all(&version).unwrap();
+        fs::write(version.join("RobloxPlayerBeta.exe"), b"fixture").unwrap();
         fs::remove_dir_all(installation_root(&base, RobloxClient::Vng)).unwrap();
+        assert_eq!(installed_clients_at(&base), vec![RobloxClient::Standard]);
         assert!(
             find_player_for(&base, RobloxClient::Vng)
                 .unwrap_err()
-                .contains("Install Roblox VNG")
+                .contains("Use Change player")
         );
         assert!(find_player_for(&base, RobloxClient::Standard).is_ok());
         fs::remove_dir_all(base).unwrap();

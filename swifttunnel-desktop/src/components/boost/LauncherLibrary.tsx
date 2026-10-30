@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Dialog, EmptyState, ErrorBanner, Icon, Row, Segmented, Toggle, Watermark, fieldClass } from "../ui";
 import { useGameLibraryStore } from "../../stores/gameLibraryStore";
 import { useVpnStore } from "../../stores/vpnStore";
-import { boostCloseRoblox, boostGetMetrics, gamesAddFavourite, gamesForget, gamesLaunch, gamesLaunchPlan, gamesRefreshMetadata, gamesSetNotifications, gamesDismissRecovery, gamesCreateShortcut, gamesSuggestServer } from "../../lib/commands";
+import { boostCloseRoblox, boostGetMetrics, gamesAddFavourite, gamesInstalledClients, gamesForget, gamesLaunch, gamesLaunchPlan, gamesRefreshMetadata, gamesSetNotifications, gamesDismissRecovery, gamesCreateShortcut, gamesSuggestServer } from "../../lib/commands";
 import { formatErrorMessage } from "../../lib/errors";
-import { gameEntryKey, gameLibraryEntries, gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "../../lib/robloxGames";
+import { gameEntryKey, gameLibraryEntries, clientForPastedGame, preferredGameClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "../../lib/robloxGames";
 import { defaultGamePreferences, executeGameLaunch, verifyGameLaunchLocation } from "../../lib/gameLaunchFlow";
 import { prepareGameConnection } from "../../lib/gameConnection";
 import type { GameLaunchPlan, RobloxClient, RobloxGameEntry } from "../../lib/types";
@@ -63,6 +63,8 @@ export function GameLibraryPanel() {
   const [filter, setFilter] = useState<"all" | "favourites">("all");
   const [input, setInput] = useState("");
   const [addClient, setAddClient] = useState<RobloxClient>("standard");
+  const [installedClients, setInstalledClients] = useState<RobloxClient[]>([]);
+  const explicitClient = useRef(false);
   const [adding, setAdding] = useState(false);
   const busy = useGameLibraryStore(s => s.actionBusy);
   const actionError = useGameLibraryStore(s => s.actionError);
@@ -84,7 +86,17 @@ export function GameLibraryPanel() {
     if(pendingAction==="copy"){const current=library.current;if(current)void run(()=>navigator.clipboard.writeText(gameShareUrl(current.place_id,current.job_id,current.client)),"Join link copied.");return;}
     const last=library.entries.filter(e=>e.last_played&&e.job_id).sort((a,b)=>(b.last_played??0)-(a.last_played??0))[0];
     const place=pendingAction.startsWith("play:")?parsePlaceInput(pendingAction.slice(5)):null;
-    const entry=place?(library.entries.find(e=>e.place_id===place&&e.client==="standard")??{place_id:place,name:`Place ${place}`,client:"standard" as const,job_id:null,last_played:null,favourite:false}):pendingAction==="rejoin"?last:null;
+    if (place) {
+      void run(async () => {
+        const installed = await gamesInstalledClients();
+        const client = preferredGameClient(installed, library.entries, library.current?.client);
+        const entry = library.entries.find(e => e.place_id === place && e.client === client)
+          ?? { place_id: place, name: `Place ${place}`, client, job_id: null, last_played: null, favourite: false };
+        await prepareLaunch(entry, null, null, true);
+      });
+      return;
+    }
+    const entry=pendingAction==="rejoin"?last:null;
     if(entry)void prepare(entry,pendingAction==="rejoin"?entry.job_id:null,null,pendingAction!=="rejoin");
   },[pendingAction,library,busy]);
 
@@ -102,6 +114,16 @@ export function GameLibraryPanel() {
     const place = parsePlaceInput(input);
     if (!place) { setError("Enter a Roblox game link or a numeric place ID."); return; }
     await run(async () => { await gamesAddFavourite(place, addClient); setInput(""); setAdding(false); setFilter("favourites"); });
+  }
+  async function openAdd(entry?: RobloxGameEntry) {
+    await run(async () => {
+      const installed = await gamesInstalledClients();
+      setInstalledClients(installed);
+      explicitClient.current = false;
+      setAddClient(preferredGameClient(installed, library?.entries ?? [], library?.current?.client));
+      setInput(entry?.place_id ?? "");
+      setAdding(true);
+    });
   }
   async function rejoinRecoveredGame() {
     const previous = library?.recovery;
@@ -155,7 +177,8 @@ export function GameLibraryPanel() {
 
   return <div className="flex flex-col gap-4">
     {(error || actionError || loadError || library?.warning) && <ErrorBanner tone="error">{error || actionError || loadError || library?.warning}</ErrorBanner>}
-    {failedEntry && <Button size="sm" variant="secondary" className="self-start" title="Ignores this game's preferred location." disabled={busy} onClick={() => void prepare(failedEntry, null, null, false)}>Play in any location</Button>}
+    {failedEntry && !actionError?.includes("Use Change player") && <Button size="sm" variant="secondary" className="self-start" title="Ignores this game's preferred location." disabled={busy} onClick={() => void prepare(failedEntry, null, null, false)}>Play in any location</Button>}
+    {failedEntry && actionError?.includes("Use Change player") && <Button size="sm" variant="secondary" className="self-start" disabled={busy} onClick={() => void openAdd(failedEntry)}>Change player</Button>}
     {(notice || progress) && <Notice busy={!!progress}>{progress ?? notice}</Notice>}
     {busy && !progress && !notice && <Notice busy>Finishing the previous game action...</Notice>}
     {library?.status && <Notice>{library.status}</Notice>}
@@ -167,7 +190,7 @@ export function GameLibraryPanel() {
     <div data-search-anchor="games_library" className="flex flex-wrap items-center gap-2">
       <div className="flex items-center gap-0.5">{(["all", "favourites"] as const).map(value => <button key={value} type="button" aria-pressed={filter === value} className={`h-[30px] rounded-[var(--radius-button)] px-3 text-[11.5px] font-medium transition-colors ${filter === value ? "bg-bg-active text-text-primary" : "text-text-muted hover:text-text-primary"}`} onClick={() => setFilter(value)}>{value === "all" ? "Recent & saved" : "Favourites"}</button>)}</div>
       <label className="relative min-w-[170px] flex-1"><Icon name="search" size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" /><input aria-label="Find a saved game" placeholder="Find a game" value={query} onChange={e => setQuery(e.target.value)} className="h-[30px] w-full rounded-[var(--radius-input)] border border-border-subtle bg-bg-card pl-8 pr-3 text-[11.5px] text-text-primary outline-none transition-colors placeholder:text-text-dimmed focus-visible:border-border-focus" /></label>
-      <Button data-search-anchor="games_add" size="sm" variant="secondary" disabled={locked || !library} onClick={() => { setError(null); setAdding(true); }}>Add game</Button>
+      <Button data-search-anchor="games_add" size="sm" variant="secondary" disabled={locked || !library} onClick={() => void openAdd()}>Add game</Button>
       <button type="button" title="Refresh games" aria-label="Refresh games" disabled={locked || loading} className={iconButtonClass} onClick={() => void run(() => gamesRefreshMetadata())}><Icon name="refresh" size={14} /></button>
     </div>
     {!library && loading && <div className="grid grid-cols-2 gap-3" aria-label="Loading games">{[1,2,3,4].map(i => <div key={i} className="h-[122px] animate-pulse rounded-[var(--radius-card)] bg-bg-card" />)}</div>}
@@ -198,8 +221,8 @@ export function GameLibraryPanel() {
     <GameServerDialog entry={servers} onClose={() => setServers(null)} onJoin={(entry, server, center) => { setServers(null); void prepare(entry, server.job_id, center.id, false); }} />
     <Dialog open={adding} onClose={() => { if (!busy) setAdding(false); }} title="Add a game" description="Paste its Roblox link or place ID.">
       <form onSubmit={e => { e.preventDefault(); void addFavourite(); }} className="flex flex-col gap-4">{error && <ErrorBanner tone="error">{error}</ErrorBanner>}
-        <div className="flex items-center justify-between gap-4"><span className="text-[12.5px] font-medium text-text-primary">Player</span><Segmented<RobloxClient> ariaLabel="Roblox player" value={addClient} disabled={busy} options={[{value:"standard",label:"Roblox"},{value:"vng",label:"Roblox VNG"}]} onChange={setAddClient} /></div>
-        <input autoFocus aria-label="Roblox game link or place ID" value={input} onChange={e => { setInput(e.target.value); const client=gameLinkClient(e.target.value); if(client) setAddClient(client); }} maxLength={2048} placeholder="https://www.roblox.com/games/..." disabled={busy} className={fieldClass} /><div className="flex justify-end gap-2"><Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => setAdding(false)}>Cancel</Button><Button type="submit" size="sm" loading={busy} disabled={!input.trim()}>Add favourite</Button></div></form>
+        <div className="flex items-center justify-between gap-4"><span className="text-[12.5px] font-medium text-text-primary">Player</span><Segmented<RobloxClient> ariaLabel="Roblox player" value={addClient} disabled={busy} options={[{value:"standard",label:"Roblox"},{value:"vng",label:"Roblox VNG"}]} onChange={client => { explicitClient.current = true; setAddClient(client); }} /></div>
+        <input autoFocus aria-label="Roblox game link or place ID" value={input} onChange={e => { setInput(e.target.value); setAddClient(clientForPastedGame(e.target.value, addClient, explicitClient.current, installedClients)); }} maxLength={2048} placeholder="https://www.roblox.com/games/..." disabled={busy} className={fieldClass} /><div className="flex justify-end gap-2"><Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => setAdding(false)}>Cancel</Button><Button type="submit" size="sm" loading={busy} disabled={!input.trim()}>Add favourite</Button></div></form>
     </Dialog>
     <Dialog open={!!review} onClose={() => { if (!busy) setReview(null); }} title={review?.blocked ? "That server is unavailable" : review?.running ? "Ready to change games?" : "Join this server?"}
       description={review?.blocked ? "It's full or gone. You can let Roblox pick another location." : review?.running ? review.plan.needs_close ? "Roblox will close first so this game's settings can be applied." : "This may leave your current game." : "Couldn't check whether this server still has room. Roblox may say it's full."}>

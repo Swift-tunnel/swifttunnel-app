@@ -673,6 +673,7 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             commands::games::games_get_library,
+            commands::games::games_installed_clients,
             commands::games::games_dismiss_recovery,
             commands::games::games_flags,
             commands::games::games_save_flags,

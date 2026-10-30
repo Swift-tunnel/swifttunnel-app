@@ -1,10 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { appendServerPage, gamePlayPlace, gameLibraryEntries, gameLinkClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "./robloxGames";
+import { appendServerPage, gamePlayPlace, gameLibraryEntries, gameLinkClient, clientForPastedGame, preferredGameClient, gameSessionDescription, gameShareUrl, parsePlaceInput } from "./robloxGames";
 import type { GameRouteStatus, RobloxGameSession, RobloxGameEntry, RobloxServerPage, RobloxDirectoryServer } from "./types";
 
 const session: RobloxGameSession = { place_id: "1818", job_id: "550e8400-e29b-41d4-a716-446655440000", ip: "128.116.47.33", client: "standard", fresh_join: true, observed_at: 1 };
 const route: GameRouteStatus = { game_location: "Mumbai", game_server_ip: session.ip, relay: "mumbai-01", estimated_path_ms: 26, bypassed: false };
 describe("game library", () => {
+  it("defaults to the installed VNG player even for a standard Roblox link", () => {
+    expect(preferredGameClient(["vng"], [])).toBe("vng");
+    expect(clientForPastedGame("https://www.roblox.com/games/1818", "vng", false, ["vng"])).toBe("vng");
+    expect(clientForPastedGame("1818", "vng", false, ["vng"])).toBe("vng");
+  });
+  it("keeps explicit player choices when links disagree and follows compatible links before a choice", () => {
+    expect(clientForPastedGame("https://www.roblox.com/games/1818", "vng", true, ["standard", "vng"])).toBe("vng");
+    expect(clientForPastedGame("https://robloxapp.vnggames.com/games/1818", "standard", true, ["standard", "vng"])).toBe("standard");
+    expect(clientForPastedGame("https://robloxapp.vnggames.com/games/1818", "standard", false, ["standard", "vng"])).toBe("vng");
+  });
+  it("prefers the current or most recent installed client without mutating the library", () => {
+    const entries: RobloxGameEntry[] = [
+      { place_id: "1818", name: "A", client: "standard", last_played: 1, job_id: null, favourite: true },
+      { place_id: "1819", name: "B", client: "vng", last_played: 2, job_id: null, favourite: true },
+    ];
+    expect(preferredGameClient(["standard", "vng"], entries)).toBe("vng");
+    expect(preferredGameClient(["standard", "vng"], entries, "standard")).toBe("standard");
+    expect(preferredGameClient(["standard"], entries, "vng")).toBe("standard");
+    expect(entries[0].client).toBe("standard");
+  });
   it("replaces stale server status on later pages without moving existing rows or exceeding 200", () => {
     const server = (id: number): RobloxDirectoryServer => ({ job_id: String(id), datacenter_id: 1, ip: null, first_seen: "", playing: 1, capacity: 10, availability: "available" });
     const previous: RobloxServerPage = { servers: Array.from({ length: 200 }, (_, i) => server(i)), next_cursor: 1, warning: null };

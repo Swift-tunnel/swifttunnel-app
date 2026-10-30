@@ -59,6 +59,7 @@ export const gamesGetLibrary = async () => {
   await waitForGamePreferencesSave().catch(() => {});
   return invoke<RobloxLibrarySnapshot>("games_get_library");
 };
+export const gamesInstalledClients = () => invoke<RobloxClient[]>("games_installed_clients");
 let pendingOverlayWindow: Promise<void> | null = null;
 export const ensureOverlayWindow = (): Promise<void> => {
   // A settings change can restart the driver while native creation is still

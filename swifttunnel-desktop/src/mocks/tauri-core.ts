@@ -590,6 +590,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
   system_restart_as_admin: () => {},
   system_launched_from_startup: () => false,
   system_show_notification: () => {},
+  games_installed_clients: () => ["standard"],
 };
 
 export async function invoke<T>(cmd: string, _args?: unknown): Promise<T> {

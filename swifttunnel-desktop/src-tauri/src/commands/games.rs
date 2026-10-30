@@ -437,6 +437,13 @@ impl GamesState {
 }
 
 #[tauri::command]
+pub async fn games_installed_clients() -> Result<Vec<RobloxClient>, String> {
+    tauri::async_runtime::spawn_blocking(swifttunnel_core::roblox_native_launch::installed_clients)
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn games_get_library(state: State<'_, AppState>) -> Result<LibrarySnapshot, String> {
     library_task(state.games.clone(), |games| {
         let library = games.library()?.clone();

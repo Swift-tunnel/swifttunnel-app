@@ -46,6 +46,19 @@ export function gameLinkClient(input: string): RobloxClient | null {
   return null;
 }
 
+export function preferredGameClient(installed: RobloxClient[], entries: RobloxGameEntry[], current?: RobloxClient): RobloxClient {
+  if (current && installed.includes(current)) return current;
+  const recent = entries.filter(entry => entry.last_played && installed.includes(entry.client))
+    .sort((a, b) => (b.last_played ?? 0) - (a.last_played ?? 0))[0];
+  return recent?.client ?? installed[0] ?? "standard";
+}
+
+export function clientForPastedGame(input: string, selected: RobloxClient, explicit: boolean, installed: RobloxClient[]): RobloxClient {
+  const linked = gameLinkClient(input);
+  if (explicit || !linked || (installed.length > 0 && !installed.includes(linked))) return selected;
+  return linked;
+}
+
 export function parsePlaceInput(input: string): string | null {
   let id = input.trim();
   if (!/^\d+$/.test(id)) {
