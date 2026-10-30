@@ -7,6 +7,8 @@ on:
       - "swifttunnel-core/**"
       - "swifttunnel-installer-cache/**"
       - "swifttunnel-msi-actions/**"
+      - "swifttunnel-msi-repair/**"
+      - "swifttunnel-testbench/**"
       - "scripts/*msi*"
       - "scripts/check-installer-ui.ps1"
       - "scripts/prepare-optional-component-tests.ps1"
@@ -19,6 +21,7 @@ on:
       - "scripts/prepare-release-attestation*"
       - "release-signing.toml"
       - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
   pull_request:
@@ -27,6 +30,8 @@ on:
       - "swifttunnel-core/**"
       - "swifttunnel-installer-cache/**"
       - "swifttunnel-msi-actions/**"
+      - "swifttunnel-msi-repair/**"
+      - "swifttunnel-testbench/**"
       - "scripts/*msi*"
       - "scripts/check-installer-ui.ps1"
       - "scripts/prepare-optional-component-tests.ps1"
@@ -39,6 +44,7 @@ on:
       - "scripts/prepare-release-attestation*"
       - "release-signing.toml"
       - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/ci.yml"
       - ".github/workflows/release.yml"
   workflow_dispatch:
@@ -149,6 +155,12 @@ jobs:
       - name: Check desktop backend
         run: cargo check -p swifttunnel-desktop
 
+      - name: Check Lite, Setup and MSI repair targets
+        run: cargo check -p swifttunnel-lite -p swifttunnel-setup -p swifttunnel-msi-repair --all-targets
+
+      - name: Test MSI repair logic
+        run: cargo test -p swifttunnel-msi-repair --lib --bins
+
       - name: Test core
         shell: pwsh
         run: |
@@ -218,6 +230,12 @@ jobs:
 
       - name: Check desktop backend
         run: cargo check -p swifttunnel-desktop
+
+      - name: Check Lite, Setup and MSI repair targets
+        run: cargo check -p swifttunnel-lite -p swifttunnel-setup -p swifttunnel-msi-repair --all-targets
+
+      - name: Test MSI repair logic
+        run: cargo test -p swifttunnel-msi-repair --lib --bins
 
       - name: Test core
         shell: pwsh
