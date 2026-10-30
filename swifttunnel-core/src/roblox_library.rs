@@ -8,6 +8,9 @@ use std::{
 
 const MAX_ENTRIES: usize = 50;
 const MAX_FAVOURITES: usize = 20;
+// Fifty valid entries can exceed the former 128 KiB read limit after JSON
+// escaping. Reads and writes share a budget with room for that bounded history.
+const MAX_LIBRARY_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,27 +123,36 @@ pub fn library_path() -> Result<PathBuf, String> {
 
 impl GameLibrary {
     pub fn load(path: &Path) -> Result<Self, String> {
+        crate::roblox_native_launch::safe_path(path)?;
         match fs::metadata(path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(format!("Could not read your game library: {e}")),
-            Ok(meta) if meta.len() > 128 * 1024 => {
+            Ok(meta) if meta.len() > MAX_LIBRARY_BYTES as u64 => {
                 return Err("Your game library is too large to read safely.".into());
             }
             _ => {}
         }
         let mut bytes = Vec::new();
         fs::File::open(path)
-            .and_then(|file| file.take(128 * 1024 + 1).read_to_end(&mut bytes))
+            .and_then(|file| {
+                file.take(MAX_LIBRARY_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+            })
             .map_err(|e| format!("Could not read your game library: {e}"))?;
-        if bytes.len() > 128 * 1024 {
+        if bytes.len() > MAX_LIBRARY_BYTES {
             return Err("Your game library is too large to read safely.".into());
         }
         let library: Self = serde_json::from_slice(&bytes).map_err(|_| {
             "Your game library could not be read. The original file has been kept.".to_string()
         })?;
-        if library.entries.len() > MAX_ENTRIES
-            || library.favourite_count() > MAX_FAVOURITES
-            || library.entries.iter().any(|entry| {
+        library.validate()?;
+        Ok(library)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.entries.len() > MAX_ENTRIES
+            || self.favourite_count() > MAX_FAVOURITES
+            || self.entries.iter().any(|entry| {
                 !valid_place_id(&entry.place_id)
                     || entry
                         .root_place_id
@@ -159,24 +171,32 @@ impl GameLibrary {
                     || entry.name.chars().any(char::is_control)
                     || entry.job_id.as_deref().is_some_and(|id| !valid_job_id(id))
             })
-            || library.entries.iter().enumerate().any(|(i, e)| {
-                library.entries[..i]
+            || self.entries.iter().enumerate().any(|(i, e)| {
+                self.entries[..i]
                     .iter()
                     .any(|other| other.place_id == e.place_id && other.client == e.client)
             })
         {
             return Err(
-                "Your game library contains invalid entries. The original file has been kept."
+                "Your game library contains invalid entries. Your saved library was left unchanged."
                     .into(),
             );
         }
-        Ok(library)
+        Ok(())
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|e| e.to_string())?;
+        if bytes.len() > MAX_LIBRARY_BYTES {
+            return Err(
+                "Your game library is too large to save. Remove some saved games and try again."
+                    .into(),
+            );
+        }
+        crate::roblox_native_launch::safe_path(path)?;
         let parent = path.parent().ok_or("Invalid game-library location.")?;
         fs::create_dir_all(parent).map_err(|e| format!("Could not save your game library: {e}"))?;
-        let bytes = serde_json::to_vec(self).map_err(|e| e.to_string())?;
         crate::atomic_file::replace(path, &bytes)
             .map_err(|e| format!("Could not save your game library: {e}"))
     }
@@ -525,6 +545,51 @@ pub fn join_url(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saves_validate_state_and_escape_expanded_metadata_remains_readable() {
+        let dir = std::env::temp_dir().join(format!(
+            "swift-library-save-guard-{:016x}",
+            rand::random::<u64>()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("games.json");
+        let mut previous = GameLibrary::default();
+        previous
+            .record_join("1818", JOB, RobloxClient::Standard, 1)
+            .unwrap();
+        previous.save(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        let mut invalid = previous.clone();
+        invalid.entries[0].place_id = "not-a-place".into();
+        assert!(invalid.save(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+
+        // URL parsing accepts leading C0 controls. Existing valid metadata
+        // can therefore expand significantly when escaped as JSON, even while
+        // every individual field remains inside its byte limit.
+        let icon = format!("{}https://tr.rbxcdn.com/icon.png", "\u{0001}".repeat(470));
+        assert!(valid_icon_url(&icon));
+        let mut large = GameLibrary::default();
+        for id in 1..=MAX_ENTRIES {
+            let id = id.to_string();
+            large
+                .record_join(&id, JOB, RobloxClient::Standard, 1)
+                .unwrap();
+            large.set_name(&id, RobloxClient::Standard, &"name".repeat(100));
+            large.set_icon(&id, RobloxClient::Standard, &icon);
+        }
+        assert!(large.validate().is_ok());
+        let bytes = serde_json::to_vec(&large).unwrap();
+        assert!(bytes.len() > 128 * 1024);
+        assert!(bytes.len() <= MAX_LIBRARY_BYTES);
+        large.save(&path).unwrap();
+        assert_eq!(GameLibrary::load(&path).unwrap().entries, large.entries);
+        fs::write(&path, vec![b' '; MAX_LIBRARY_BYTES + 1]).unwrap();
+        assert!(GameLibrary::load(&path).unwrap_err().contains("too large"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn preferences_reject_bad_frame_caps_and_icons_cannot_point_at_local_files() {
         let mut lib = GameLibrary::default();
