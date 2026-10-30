@@ -8,7 +8,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use swifttunnel_core::auth::{AuthError, AuthManager};
 use swifttunnel_core::settings::AppSettings;
@@ -317,8 +317,8 @@ fn check_ip_via_http(host: &str, path: &str) -> Result<String, String> {
     let addr = format!("{}:80", host)
         .to_socket_addrs()
         .map_err(|e| format!("DNS resolution failed: {}", e))?
-        .next()
-        .ok_or_else(|| "No addresses found".to_string())?;
+        .find(SocketAddr::is_ipv4)
+        .ok_or_else(|| "No IPv4 addresses found".to_string())?;
 
     let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(5))
         .map_err(|e| format!("Connect failed: {}", e))?;
@@ -331,26 +331,109 @@ fn check_ip_via_http(host: &str, path: &str) -> Result<String, String> {
 
     let mut stream = stream;
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: SwiftTunnel-Testbench/1.0\r\n\r\n",
+        "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\nUser-Agent: SwiftTunnel-Testbench/1.0\r\n\r\n",
         path, host
     );
     stream
         .write_all(request.as_bytes())
         .map_err(|e| format!("Write failed: {}", e))?;
 
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|e| format!("Read failed: {}", e))?;
+    read_public_ip_response(Duration::from_secs(5), |buffer, remaining| {
+        stream.set_read_timeout(Some(remaining))?;
+        stream.read(buffer)
+    })
+}
 
-    let body_start = response
-        .find("\r\n\r\n")
-        .ok_or_else(|| "Malformed HTTP response".to_string())?;
-    let ip = response[body_start + 4..].trim().to_string();
-    if ip.is_empty() {
-        return Err("Empty response body".to_string());
+fn read_public_ip_response(
+    timeout: Duration,
+    mut read: impl FnMut(&mut [u8], Duration) -> std::io::Result<usize>,
+) -> Result<String, String> {
+    const MAX_RESPONSE_BYTES: usize = 16 * 1024;
+    let deadline = Instant::now() + timeout;
+    let mut response = Vec::new();
+    let mut buffer = [0; 1024];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("Public-IP response timed out.".into());
+        }
+        let count = read(&mut buffer, remaining).map_err(|e| format!("Read failed: {e}"))?;
+        if count == 0 {
+            break;
+        }
+        if count > MAX_RESPONSE_BYTES.saturating_sub(response.len()) {
+            return Err("Public-IP response exceeded its size limit.".into());
+        }
+        response.extend_from_slice(&buffer[..count]);
     }
-    Ok(ip)
+    let response = std::str::from_utf8(&response)
+        .map_err(|_| "Public-IP response was not valid text.".to_string())?;
+    let (headers, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "Malformed HTTP response".to_string())?;
+    let mut status = headers
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_whitespace();
+    if !matches!(status.next(), Some("HTTP/1.0" | "HTTP/1.1")) || status.next() != Some("200") {
+        return Err("Public-IP service did not return HTTP 200.".into());
+    }
+    // HTTP/1.0 requests do not negotiate chunked framing. Fail over to the
+    // next service if a proxy supplies it anyway, rather than calling its
+    // framing or error page a changed public address.
+    if headers.lines().skip(1).any(|line| {
+        line.split_once(':')
+            .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("transfer-encoding"))
+    }) {
+        return Err("Public-IP response used unsupported transfer framing.".into());
+    }
+    body.trim()
+        .parse::<std::net::Ipv4Addr>()
+        .map(|ip| ip.to_string())
+        .map_err(|_| "Public-IP service did not return an IPv4 address.".into())
+}
+
+#[cfg(test)]
+mod public_ip_tests {
+    use super::*;
+
+    fn response(bytes: &[u8]) -> Result<String, String> {
+        let mut bytes = std::io::Cursor::new(bytes);
+        read_public_ip_response(Duration::from_secs(1), |buffer, _| bytes.read(buffer))
+    }
+
+    #[test]
+    fn only_successful_plain_ipv4_responses_can_identify_a_route() {
+        assert_eq!(
+            response(b"HTTP/1.0 200 OK\r\n\r\n203.0.113.1\n").unwrap(),
+            "203.0.113.1"
+        );
+        for bytes in [
+            &b"HTTP/1.1 200 OK\r\n\r\n<html>Proxy error</html>"[..],
+            &b"HTTP/1.1 403 Forbidden\r\n\r\n203.0.113.1"[..],
+            &b"HTTP/1.1 200 OK\r\n\r\n::1"[..],
+            &b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n203.0.113.1"[..],
+            &b"not HTTP\r\n\r\n203.0.113.1"[..],
+        ] {
+            assert!(response(bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn oversized_and_slow_drip_responses_do_not_grow_or_wait_indefinitely() {
+        let large = vec![b'x'; 16 * 1024 + 1];
+        assert!(response(&large).unwrap_err().contains("size limit"));
+        let mut reads = 0;
+        let result = read_public_ip_response(Duration::from_millis(5), |buffer, _| {
+            reads += 1;
+            std::thread::sleep(Duration::from_millis(10));
+            buffer[0] = b'x';
+            Ok(1)
+        });
+        assert!(result.unwrap_err().contains("timed out"));
+        assert_eq!(reads, 1);
+    }
 }
 
 pub fn run_udp_probe(
