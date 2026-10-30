@@ -360,7 +360,10 @@ mod tests {
 
     #[test]
     fn cloud_fields_are_optional_and_merge_with_the_main_table() {
-        let body: Response = serde_json::from_str(r#"{"method":"icmp_reference_matrix","generated_at_ms":1,"targets":[],"routes":[]}"#).unwrap();
+        let body: Response = serde_json::from_str(
+            r#"{"method":"icmp_reference_matrix","generated_at_ms":1,"targets":[],"routes":[]}"#,
+        )
+        .unwrap();
         assert!(body.cloud_targets.is_empty() && body.cloud_routes.is_empty());
         let body: Response = serde_json::from_str(r#"{"method":"icmp_reference_matrix","generated_at_ms":1,"targets":[],"routes":[],"cloud_targets":[{"ip":"34.18.186.248","location":"Doha"}],"cloud_routes":[]}"#).unwrap();
         assert_eq!(body.cloud_targets.len(), 1);

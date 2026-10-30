@@ -263,6 +263,7 @@ fn roblox_region_from_id(id: &str) -> Option<RobloxRegion> {
         "us-central" => Some(RobloxRegion::UsCentral),
         "us-west" => Some(RobloxRegion::UsWest),
         "brazil" => Some(RobloxRegion::Brazil),
+        "doha" => Some(RobloxRegion::Doha),
         _ => None,
     }
 }
@@ -270,6 +271,7 @@ fn roblox_region_from_id(id: &str) -> Option<RobloxRegion> {
 fn roblox_region_from_swifttunnel_region_id(id: &str) -> Option<RobloxRegion> {
     match id {
         "germany" => Some(RobloxRegion::Frankfurt),
+        "middle-east" => Some(RobloxRegion::Doha),
         other => roblox_region_from_id(other),
     }
 }
@@ -748,6 +750,23 @@ mod tests {
             resolved,
             Some((RobloxRegion::Tokyo, "Tokyo, JP".to_string()))
         );
+    }
+
+    #[test]
+    fn doha_resolver_ids_map_to_the_middle_east_relay_region() {
+        for (game_id, relay_id) in [(Some("doha"), None), (None, Some("middle-east"))] {
+            let response = GameServerRegionResponse {
+                provider: Some("fixture".into()),
+                location: None,
+                roblox_region_id: game_id.map(str::to_string),
+                swifttunnel_region_id: relay_id.map(str::to_string),
+                confidence: Some("high".into()),
+            };
+            let (region, _) =
+                resolve_api_response("34.18.186.248".parse().unwrap(), Some(response)).unwrap();
+            assert_eq!(region, RobloxRegion::Doha);
+            assert_eq!(region.best_swifttunnel_region(), Some("middle-east"));
+        }
     }
 
     #[test]

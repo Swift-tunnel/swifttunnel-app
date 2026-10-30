@@ -2309,7 +2309,7 @@ impl VpnConnection {
                                 tokio::time::timeout(Duration::from_millis(1500), async {
                                     let auth = auth_manager_for_lookup.as_ref()?;
                                     let token = auth.lock().await.get_access_token().await.ok()?;
-                                    Some(if crate::geolocation::is_roblox_game_server_ip(ip) {
+                                    Some(if super::route_measurements::can_measure(ip) {
                                         super::route_measurements::measure(ip, &token).await
                                     } else {
                                         Vec::new()
@@ -2661,7 +2661,7 @@ impl VpnConnection {
                     let result = tokio::time::timeout(Duration::from_secs(2), async {
                         let auth = auth.as_ref()?;
                         let token = auth.lock().await.get_access_token().await.ok()?;
-                        Some(if crate::geolocation::is_roblox_game_server_ip(ip) {
+                        Some(if super::route_measurements::can_measure(ip) {
                             super::route_measurements::measure(ip, &token).await
                         } else {
                             Vec::new()

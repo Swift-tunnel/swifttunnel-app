@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
+/// Probe policy only. A cloud subnet is not proof that a packet is Roblox.
+/// Callers must still discover a game destination through the existing routing
+/// and observed-session rules before requesting its measured path.
+pub(crate) fn can_measure(ip: Ipv4Addr) -> bool {
+    crate::geolocation::is_roblox_game_server_ip(ip) || ip.octets()[..2] == [34, 18]
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct RouteSample {
     relay: String,
@@ -117,6 +124,9 @@ pub(crate) fn choose_path_with_margin(
 
 /// No per-packet HTTP, process spawning, DNS target input, or unbounded body.
 pub(crate) async fn measure(ip: Ipv4Addr, access_token: &str) -> Vec<RouteSample> {
+    if !can_measure(ip) {
+        return Vec::new();
+    }
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     let client = crate::http_client::cached_client(&CLIENT, || {
         reqwest::Client::builder()
@@ -167,6 +177,18 @@ pub(crate) async fn measure(ip: Ipv4Addr, access_token: &str) -> Vec<RouteSample
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn doha_probe_policy_does_not_widen_speculative_game_routing() {
+        for ip in ["34.18.0.1", "34.18.186.248", "34.18.255.254"] {
+            let ip = ip.parse().unwrap();
+            assert!(can_measure(ip));
+            assert!(!crate::geolocation::is_roblox_game_server_ip(ip));
+        }
+        assert!(can_measure("128.116.47.33".parse().unwrap()));
+        for ip in ["34.17.186.248", "34.19.186.248", "127.0.0.1", "10.0.0.1"] {
+            assert!(!can_measure(ip.parse().unwrap()));
+        }
+    }
     fn servers() -> Vec<(String, SocketAddr, Option<u32>)> {
         vec![
             ("singapore".into(), "127.0.0.1:1".parse().unwrap(), Some(80)),

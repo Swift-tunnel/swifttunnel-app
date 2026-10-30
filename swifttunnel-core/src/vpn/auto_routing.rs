@@ -330,9 +330,12 @@ impl AutoRouter {
 
     /// Check if a game region is whitelisted (should bypass VPN).
     fn is_region_whitelisted(&self, region: &RobloxRegion) -> bool {
-        self.whitelisted_regions
-            .read()
-            .contains(region.display_name())
+        let regions = self.whitelisted_regions.read();
+        regions.contains(region.display_name())
+            || (*region == RobloxRegion::Doha
+                && ["Qatar", "Middle East", "middle-east"]
+                    .iter()
+                    .any(|alias| regions.contains(*alias)))
     }
 
     /// Update the list of available relay servers with cached latency data.
@@ -1265,6 +1268,16 @@ impl AutoRouter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn doha_bypass_preferences_accept_the_qatar_display_name_and_stable_id() {
+        let router = super::AutoRouter::new(true, "middle-east-03");
+        for label in ["Doha", "Qatar", "Middle East", "middle-east"] {
+            router.set_whitelisted_regions(vec![label.into()]);
+            assert!(router.is_region_whitelisted(&crate::geolocation::RobloxRegion::Doha));
+            assert!(!router.is_region_whitelisted(&crate::geolocation::RobloxRegion::Mumbai));
+        }
+    }
+
     use super::*;
     use crate::geolocation::RobloxRegion;
 
