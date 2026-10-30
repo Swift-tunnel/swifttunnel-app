@@ -18,6 +18,19 @@ pub struct SettingsSaveResult {
     warning: Option<String>,
 }
 
+static PREFERENCE_EFFECTS: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+fn publish_current_preferences<T>(
+    gate: &parking_lot::Mutex<()>,
+    current: impl FnOnce() -> T,
+    publish: impl FnOnce(T),
+) {
+    let _publication = gate.lock();
+    // A prior effect can outlive the save that requested it. Read only after
+    // admission, so late work cannot re-enable an older tracing/RPC preference.
+    publish(current());
+}
+
 #[derive(Debug, Clone)]
 struct DiagnosticsCommand {
     title: &'static str,
@@ -67,8 +80,6 @@ pub async fn settings_save(
     let result: Result<(bool, Option<String>), String> = tauri::async_runtime::spawn_blocking(move || {
         let mut new_settings = settings;
         new_settings.sanitize_in_place();
-        let discord_enabled = new_settings.enable_discord_rpc;
-        let wants_fps = overlay_wants_fps(&new_settings);
         let run_on_startup = new_settings.run_on_startup;
         // Repair must compare its requested preference against the same save
         // ordering that publishes the Windows registration.
@@ -87,15 +98,18 @@ pub async fn settings_save(
         };
         drop(publication);
 
-        {
-            let mut discord = discord_manager.lock();
-            discord.set_enabled(discord_enabled);
-        }
-
-        // The ETW FPS trace runs only while the in-game overlay is actually
-        // showing FPS. Other metrics stay lighter and avoid the real-time DXGI
-        // present trace entirely.
-        fps_monitor.set_enabled(wants_fps);
+        publish_current_preferences(
+            &PREFERENCE_EFFECTS,
+            || {
+                let current = settings_arc.lock();
+                (current.enable_discord_rpc, overlay_wants_fps(&current))
+            },
+            |(discord_enabled, wants_fps)| {
+                discord_manager.lock().set_enabled(discord_enabled);
+                // Never hold the settings lock through native trace shutdown.
+                fps_monitor.set_enabled(wants_fps);
+            },
+        );
 
         Ok((routing_changed, warning))
     })
@@ -664,6 +678,72 @@ pub async fn preset_save_to_downloads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preference_effects_read_the_latest_save_after_waiting_for_publication() {
+        let gate = std::sync::Arc::new(parking_lot::Mutex::new(()));
+        let latest = std::sync::Arc::new(parking_lot::Mutex::new(true));
+        let active_effect = gate.lock();
+        let (waiting_tx, waiting_rx) = std::sync::mpsc::channel();
+        let (applied_tx, applied_rx) = std::sync::mpsc::channel();
+        let worker_gate = gate.clone();
+        let worker_latest = latest.clone();
+        let worker = std::thread::spawn(move || {
+            waiting_tx.send(()).unwrap();
+            publish_current_preferences(
+                &worker_gate,
+                || {
+                    assert!(worker_gate.try_lock().is_none());
+                    *worker_latest.lock()
+                },
+                |enabled| {
+                    // The native effect must not run with settings held.
+                    assert!(worker_latest.try_lock().is_some());
+                    applied_tx.send(enabled).unwrap();
+                },
+            );
+        });
+        waiting_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // A newer save disables tracing while an older request is queued.
+        *latest.lock() = false;
+        assert!(applied_rx.try_recv().is_err());
+        drop(active_effect);
+        assert!(!applied_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn preference_effects_keep_a_newer_save_after_an_in_flight_effect() {
+        let gate = std::sync::Arc::new(parking_lot::Mutex::new(()));
+        let latest = std::sync::Arc::new(parking_lot::Mutex::new(true));
+        let applied = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let worker_gate = gate.clone();
+        let worker_latest = latest.clone();
+        let worker_applied = applied.clone();
+        let worker = std::thread::spawn(move || {
+            publish_current_preferences(
+                &worker_gate,
+                || *worker_latest.lock(),
+                |enabled| {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                    worker_applied.lock().push(enabled);
+                },
+            );
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        *latest.lock() = false;
+        resume_tx.send(()).unwrap();
+        publish_current_preferences(
+            &gate,
+            || *latest.lock(),
+            |enabled| applied.lock().push(enabled),
+        );
+        worker.join().unwrap();
+        assert_eq!(*applied.lock(), vec![true, false]);
+    }
 
     #[test]
     fn only_routing_preference_changes_need_the_connection_lock_after_saving() {
