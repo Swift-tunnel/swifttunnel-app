@@ -412,7 +412,7 @@ export function presetFileContents(preset: SwiftTunnelPreset): string {
     `SwiftTunnel config, "${preset.name}"`,
     `Created ${preset.created}`,
     "It only contains game/optimization settings, no account, login or region data.",
-    "Import it in SwiftTunnel → Home → Import config (paste this whole file).",
+    "Import it in SwiftTunnel → Optimize → Your presets → Import config. Paste this whole file.",
     "",
     encodePreset(preset),
     "",
