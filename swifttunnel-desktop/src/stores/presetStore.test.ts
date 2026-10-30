@@ -6,10 +6,11 @@ const h = vi.hoisted(() => ({
   settings: {} as typeof DEFAULT_SETTINGS,
   save: vi.fn(), update: vi.fn(), updateConfig: vi.fn(), activate: vi.fn(), runBatch: vi.fn(), toast: vi.fn(),
   warning: null as string | null,
+  optimization: { loaded: true, loading: false, batch: null as unknown, status: {} as Record<string, string> },
 }));
 vi.mock("./settingsStore", () => ({ useSettingsStore: { getState: () => ({ settings: h.settings, save: h.save, update: h.update }) } }));
 vi.mock("./boostStore", () => ({ useBoostStore: { getState: () => ({ updateConfig: h.updateConfig, robloxRunning: false, warning: h.warning }) } }));
-vi.mock("./optimizationStore", () => ({ useOptimizationStore: { getState: () => ({ status: {}, loaded: true, runBatch: h.runBatch }) } }));
+vi.mock("./optimizationStore", () => ({ useOptimizationStore: { getState: () => ({ ...h.optimization, runBatch: h.runBatch }) } }));
 vi.mock("./toastStore", () => ({ useToastStore: { getState: () => ({ addToast: h.toast }) } }));
 import { usePresetStore } from "./presetStore";
 
@@ -17,6 +18,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   h.settings = structuredClone(DEFAULT_SETTINGS);
   h.warning = null;
+  h.optimization = { loaded: true, loading: false, batch: null, status: {} };
   h.updateConfig.mockImplementation(async (json: string) => JSON.parse(json));
   h.save.mockResolvedValue(undefined);
   h.activate.mockResolvedValue({ ok: true, requiresReboot: false });
@@ -40,6 +42,31 @@ function addPreset(ids: string[] = []) {
   usePresetStore.setState({ presets: [preset] });
   return preset;
 }
+
+it.each(["unknown", "refreshing", "applying", "batch", "activating", "deactivating"])("does not save a misleading current preset while optimization state is %s", state => {
+  const write = vi.fn();
+  vi.stubGlobal("localStorage", { setItem: write });
+  if (state === "unknown") h.optimization.loaded = false;
+  if (state === "refreshing") h.optimization.loading = true;
+  if (state === "applying") usePresetStore.setState({ applyingId: "another" });
+  if (state === "batch") h.optimization.batch = { action: "apply", completed: 0, total: 0 };
+  if (state === "activating" || state === "deactivating") h.optimization.status.example = state;
+  expect(() => usePresetStore.getState().createFromCurrent("Snapshot")).toThrow(/Wait/);
+  expect(write).not.toHaveBeenCalled();
+  expect(usePresetStore.getState().presets).toEqual([]);
+  expect(usePresetStore.getState().activeId).toBe("previous");
+});
+
+it("captures confirmed active optimizations after pending changes finish", () => {
+  const write = vi.fn();
+  vi.stubGlobal("localStorage", { setItem: write });
+  h.optimization.status = { existing: "active", pending: "deactivating" };
+  expect(() => usePresetStore.getState().createFromCurrent("Snapshot")).toThrow(/finish/);
+  h.optimization.status.pending = "inactive";
+  const preset = usePresetStore.getState().createFromCurrent("Snapshot");
+  expect(preset.optimizations).toEqual(["existing"]);
+  expect(usePresetStore.getState().activeId).toBe(preset.id);
+});
 
 it("does not claim success or continue catalog changes when settings persistence fails", async () => {
   const { OPTIMIZATIONS } = await import("../components/optimization/optimizationCatalog");

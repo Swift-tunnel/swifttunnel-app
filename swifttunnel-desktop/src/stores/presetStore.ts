@@ -116,6 +116,13 @@ export const usePresetStore = create<PresetStore>((set, get) => ({
   applyingId: null,
 
   createFromCurrent: (name) => {
+    const optimizations = useOptimizationStore.getState();
+    if (!optimizations.loaded || optimizations.loading) {
+      throw new Error("Wait for optimization status to load before saving a preset. If it failed, retry the status check in Optimize.");
+    }
+    if (get().applyingId || optimizations.batch || Object.values(optimizations.status).some(status => status === "activating" || status === "deactivating")) {
+      throw new Error("Wait for the current settings changes to finish before saving a preset.");
+    }
     const settings = useSettingsStore.getState().settings;
     const base = buildPreset(name, settings, activeOptimizationIds());
     const preset: SavedPreset = { ...base, id: newId() };
