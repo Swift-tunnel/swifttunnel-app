@@ -199,6 +199,10 @@ impl ShellMonitorHandle {
 }
 
 pub fn run_testbench_harness(raw_args: &[String]) -> i32 {
+    // The website refuses clients older than its minimum, and without this the
+    // core reports its own crate version instead of the app version.
+    swifttunnel_core::auth::set_client_version(env!("CARGO_PKG_VERSION"));
+
     if let Err(err) = init_logging() {
         eprintln!("Failed to initialize harness logging: {err}");
     }
