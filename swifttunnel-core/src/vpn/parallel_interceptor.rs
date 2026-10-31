@@ -8025,7 +8025,7 @@ fn should_relay_udp_for_mode(
     super::process_cache::is_likely_gameplay_udp(dst_ip, dst_port, protocol)
         || (dst_port != super::process_cache::DNS_PORT
             && dst_port != 443
-            && super::game_destination::routing_candidate(dst_ip))
+            && super::game_destination::contains(dst_ip))
 }
 
 fn should_route_to_vpn_with_routing_flags(
@@ -9280,6 +9280,19 @@ fn run_v3_inbound_receiver(
     let mut packets_received = 0u64;
     let mut packets_injected = 0u64;
     let mut cloud_replies: ahash::AHashMap<Ipv4Addr, (u64, u64)> = ahash::AHashMap::new();
+    // Debug harnesses can count an exact or external peer without changing
+    // packet admission. Release builds keep the existing Doha-only diagnostics.
+    #[cfg(debug_assertions)]
+    let test_return_peer = std::env::var("SWIFTTUNNEL_TEST_RETURN_PEER")
+        .ok()
+        .and_then(|value| value.parse::<Ipv4Addr>().ok());
+    #[cfg(debug_assertions)]
+    let test_return_external =
+        std::env::var("SWIFTTUNNEL_TEST_RETURN_PEER").is_ok_and(|value| value == "external");
+    #[cfg(not(debug_assertions))]
+    let test_return_peer: Option<Ipv4Addr> = None;
+    #[cfg(not(debug_assertions))]
+    let test_return_external = false;
     let mut inject_errors = 0u64;
     let mut inject_skipped = 0u64;
 
@@ -9415,7 +9428,11 @@ fn run_v3_inbound_receiver(
                 let cloud_source = if ip_packet.len() >= 20 && ip_packet[0] >> 4 == 4 {
                     let src =
                         Ipv4Addr::new(ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]);
-                    super::cloud_game_routes::is_cloud_game_ip(src).then_some(src)
+                    (super::cloud_game_routes::is_cloud_game_ip(src)
+                        || test_return_peer == Some(src)
+                        || (test_return_external
+                            && !crate::geolocation::is_roblox_game_server_ip(src)))
+                    .then_some(src)
                 } else {
                     None
                 };
@@ -11755,6 +11772,53 @@ mod tests {
         assert_eq!(stats.get_bytes_rx(), 0);
         assert_eq!(stats.get_bytes_direct_tx(), 0);
         assert_eq!(stats.get_bytes_direct_rx(), 0);
+    }
+
+    #[test]
+    fn observed_non_doha_game_keeps_legacy_process_scoped_routing() {
+        const JOB: &str = "7e1d6a98-18bf-441b-bb67-39aa07c728be";
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                crate::vpn::game_destination::clear_for_session(JOB);
+            }
+        }
+        let _reset = Reset;
+        let ip = Ipv4Addr::new(18, 184, 7, 232);
+        assert!(crate::vpn::game_destination::register(
+            crate::vpn::game_destination::ObservedGame {
+                ip,
+                job_id: JOB.into(),
+                location: None,
+                region: None,
+                prelaunch: false,
+            }
+        ));
+        assert!(!crate::vpn::game_destination::routing_candidate(ip));
+        assert!(should_relay_udp_for_mode(ip, 30000, Protocol::Udp, false));
+        let src = Ipv4Addr::new(192, 168, 1, 100);
+        let mut snapshot = ProcessSnapshot::empty(["roblox".into()].into_iter().collect());
+        snapshot
+            .connections
+            .insert(ConnectionKey::new(src, 50000, Protocol::Udp), 1234);
+        snapshot
+            .pid_names
+            .insert(1234, "robloxplayerbeta.exe".into());
+        snapshot.tunnel_pids.insert(1234);
+        // A low UDP port outside the speculative ranges needs the log-observed
+        // fallback. High ports already qualify through the gameplay policy.
+        let frame = build_ipv4_frame(17, src, ip, 50000, 30000);
+        let mut cache = HashMap::new();
+        assert!(should_route_to_vpn_with_routing_flags(
+            &frame, &snapshot, &mut cache, false, true
+        ));
+        // Observing the destination must not admit a different application's socket.
+        snapshot.tunnel_pids.clear();
+        snapshot.pid_names.insert(1234, "browser.exe".into());
+        cache.clear();
+        assert!(!should_route_to_vpn_with_routing_flags(
+            &frame, &snapshot, &mut cache, false, true
+        ));
     }
 
     #[test]
