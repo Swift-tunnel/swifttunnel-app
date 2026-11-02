@@ -25,8 +25,9 @@
 </div>
 
 <p align="center">
-  <img src="docs/readme/screen-hero.png" alt="SwiftTunnel connected through a Singapore relay at 5 ms, in a game with an estimated game ping of 7 ms" width="100%">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-connect-dark.png"><img src="docs/readme/card-connect-light.png" alt="SwiftTunnel tunneled to Singapore: 7 ms to the relay, Roblox at 900 FPS" width="100%"></picture>
 </p>
+<p align="center"><sub>Numbers are for illustration. You can connect to any region we support.</sub></p>
 
 SwiftTunnel sends your Roblox traffic through a relay right next to the Roblox server you're playing on, so it takes a cleaner path than your internet provider's default route. Everything else on your PC stays on your normal connection.
 
@@ -91,6 +92,11 @@ Keeping Roblox separate from the rest of your traffic needs a network driver, an
   <img src="docs/readme/banner-routing-light.png" alt="01 Routing: Shorter route. Lower ping." width="100%">
 </picture>
 
+<p align="center">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-route-dark.png"><img src="docs/readme/card-route-light.png" alt="Routing: only Roblox takes the SwiftTunnel game lane, everything else goes direct. Example: 140 ms to 7 ms, 120 to 900 FPS" width="100%"></picture>
+</p>
+<p align="center"><sub>Only Roblox takes the game lane through the relay. Your provider's jumpy 140 ms becomes a steady 7 ms in this example, while Discord, browsers and downloads go direct, untouched.</sub></p>
+
 - **Automatic relay choice.** SwiftTunnel spots which Roblox server you joined and switches to the relay with the best route to it.
 - **Pick your own** relay whenever you prefer, and SwiftTunnel keeps it.
 - **Ping before you connect.** Every location shows an estimated ping up front, and you always see which relay you're on.
@@ -105,8 +111,9 @@ Keeping Roblox separate from the rest of your traffic needs a network driver, an
 </picture>
 
 <p align="center">
-  <img src="docs/readme/screen-games.png" alt="The Games library with favourites, Play and Rejoin" width="100%">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-games-dark.png"><img src="docs/readme/card-games-light.png" alt="Games: your Roblox games with Play, rejoin and favourites. Press Play, the relay connects, Roblox opens" width="100%"></picture>
 </p>
+<p align="center"><sub>Press Play on any game in your library. SwiftTunnel connects the best relay first, can pick a server with Matchmaker on the way, and then opens Roblox straight into the game.</sub></p>
 
 - Your Roblox games in one place, with favourites, shortcuts, rejoin and the last four games you played.
 - **One-press Play.** SwiftTunnel connects the right relay first, then launches Roblox straight into the game.
@@ -141,8 +148,9 @@ What happens when you press Play:
 </picture>
 
 <p align="center">
-  <img src="docs/readme/screen-matchmaker.png" alt="Matchmaker settings" width="100%">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-matchmaker-dark.png"><img src="docs/readme/card-matchmaker-light.png" alt="Matchmaker: cities you allow, closest server with 2 free slots picked" width="100%"></picture>
 </p>
+<p align="center"><sub>Matchmaker only looks at the cities you allow. Here Frankfurt is closest, but its 14 ms server has just one free slot, so it picks the 15 ms one with room for two friends.</sub></p>
 
 - Choose the Roblox datacenter cities you're happy to play in.
 - Let Matchmaker pick the **closest** server by ping, or the one with the **fewest players**.
@@ -155,16 +163,10 @@ What happens when you press Play:
   <img src="docs/readme/banner-roblox-light.png" alt="04 Roblox settings: Maximize your FPS." width="100%">
 </picture>
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/readme/screen-roblox-settings.png" alt="Roblox settings with FPS unlocked and the target FPS slider" width="100%"></td>
-    <td width="50%"><img src="docs/readme/screen-fastflags.png" alt="FastFlags with renderer, textures, anti-aliasing and more" width="100%"></td>
-  </tr>
-</table>
-
 <p align="center">
-  <img src="docs/readme/screen-fastflags-advanced.png" alt="The FastFlags advanced editor with an override list" width="100%">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-roblox-dark.png"><img src="docs/readme/card-roblox-light.png" alt="Roblox: FPS cap, graphics and window size, saved per game profile" width="100%"></picture>
 </p>
+<p align="center"><sub>Each game can have its own FPS cap, graphics and FastFlags. They are applied when Roblox starts and your normal settings come back as soon as it closes.</sub></p>
 
 - **FPS unlock** with a cap you choose, plus graphics, window size and fullscreen.
 - **Per-game profiles.** Give each game its own FPS cap and graphics. Your normal settings come back when Roblox closes.
@@ -181,8 +183,9 @@ What happens when you press Play:
 </picture>
 
 <p align="center">
-  <img src="docs/readme/screen-overlay.png" alt="Overlay settings with a live preview" width="100%">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-overlay-dark.png"><img src="docs/readme/card-overlay-light.png" alt="Overlay: FPS, ping, CPU, RAM and download on top of Roblox, toggled with Ctrl+Shift+O" width="100%"></picture>
 </p>
+<p align="center"><sub>The overlay sits on top of Roblox while you play. Choose which stats it shows, where it sits, its size and its color, and hide it any time with Ctrl+Shift+O.</sub></p>
 
 - Live stats on top of Roblox: **FPS, game ping, relay, play time, Roblox's CPU and RAM, GPU, temperatures, upload, download and the time.**
 - Straight or layered, three sizes, six accent colors, and nine positions on screen.
@@ -195,12 +198,10 @@ What happens when you press Play:
   <img src="docs/readme/banner-optimize-light.png" alt="06 Optimize: Tune Windows. Undo anytime." width="100%">
 </picture>
 
-<table>
-  <tr>
-    <td width="50%"><img src="docs/readme/screen-optimize.png" alt="Game Boost tweaks" width="100%"></td>
-    <td width="50%"><img src="docs/readme/screen-speedup.png" alt="Speed Up tweaks by category" width="100%"></td>
-  </tr>
-</table>
+<p align="center">
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/readme/card-optimize-dark.png"><img src="docs/readme/card-optimize-light.png" alt="Optimize: Windows tweaks switched on or off, with a saved snapshot and Undo all" width="100%"></picture>
+</p>
+<p align="center"><sub>SwiftTunnel saves how Windows was before changing anything, applies only the tweaks you pick, and can undo one of them or all of them later.</sub></p>
 
 - **Game Boost** presets in four levels: Beginner, Intermediate, Advanced and Expert.
 - **Speed Up** tweaks for System, Performance, System Response, Network, Input, File System, Memory and Cache, Windows Services, Startup and Shutdown, and Privacy.
