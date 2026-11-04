@@ -327,6 +327,9 @@ impl Engine {
             log::warn!("Automatic update checks could not start: {error}");
         }
         spawn_installation_lookup(shared.clone());
+        if let Err(error) = spawn_flag_reapply(shared.clone()) {
+            log::warn!("FFlag recovery after Roblox updates could not start: {error}");
+        }
 
         // The profile is re-fetched once at startup, because a ban applied
         // since the last session is only visible on the server until
@@ -2004,6 +2007,86 @@ async fn refresh_fleet(shared: &Arc<Shared>) -> Result<(), String> {
     }
     shared.notify();
     Ok(())
+}
+
+/// Put the saved FFlags back after Roblox updates itself, as the full app does.
+///
+/// FFlags live inside Roblox's `version-<hash>` folder, so every Roblox update
+/// throws them away. The full app re-applies them at startup and whenever the
+/// installed version changes; Lite did neither, so a Lite player's Ultraboost
+/// or custom flags silently stopped working at the next Roblox update and the
+/// switch then read as off.
+fn spawn_flag_reapply(shared: Arc<Shared>) -> Result<(), String> {
+    const FIRST_CHECK_AFTER: Duration = Duration::from_secs(5);
+    const THEN_EVERY: Duration = Duration::from_secs(60);
+    std::thread::Builder::new()
+        .name("lite-flag-reapply".into())
+        .spawn(move || {
+            // None until the first success, so flags lost to an update made
+            // while Lite was closed are restored too.
+            let mut last_seen: Option<String> = None;
+            let mut wait = FIRST_CHECK_AFTER;
+            loop {
+                let deadline = Instant::now() + wait;
+                while Instant::now() < deadline {
+                    if shared.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                wait = THEN_EVERY;
+                let saved = |shared: &Shared| {
+                    shared
+                        .settings
+                        .read()
+                        .ok()
+                        .map(|s| s.config.roblox_settings.clone())
+                        .filter(|config| config.ultraboost || config.custom_fflags_enabled)
+                };
+                // Nothing of ours to restore: skip the install scan entirely.
+                if saved(&shared).is_none() {
+                    continue;
+                }
+                let current = RobloxOptimizer::install_fingerprint();
+                if last_seen.as_deref() == Some(current.as_str()) {
+                    continue;
+                }
+                // A launch-scoped profile owns the files until it is restored,
+                // and Lite's own apply or reset must not interleave with this.
+                if swifttunnel_core::roblox_game_profile::pending()
+                    || swifttunnel_core::roblox_launch_flags::pending()
+                {
+                    continue;
+                }
+                let Some(_edit) = shared.roblox_edits.try_enter() else {
+                    continue;
+                };
+                // Read again under the gate: an apply may just have changed it.
+                let Some(config) = saved(&shared) else {
+                    continue;
+                };
+                match RobloxOptimizer::new().reapply_saved_client_fflags(&config) {
+                    Ok(()) => {
+                        log::info!("Roblox install changed; reapplied saved FFlags");
+                        last_seen = Some(current);
+                        let roblox = read_roblox(&config);
+                        shared.edit(|s| {
+                            let error = s.roblox.error.take();
+                            s.roblox = roblox;
+                            s.roblox.error = error;
+                        });
+                        shared.notify();
+                    }
+                    // A file can stay locked while Roblox updates. Retry next
+                    // minute instead of forgetting this version.
+                    Err(error) => {
+                        log::warn!("Could not reapply FFlags after a Roblox update: {error}")
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|error| format!("Could not start the Lite FFlag worker: {error}"))
 }
 
 fn spawn_game_logs(shared: Arc<Shared>) -> Result<(), String> {

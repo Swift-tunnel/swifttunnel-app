@@ -340,3 +340,20 @@ commits, tests next to each fix.
   it. Lite runs it on a worker at startup and its connect waits for it with
   the full app's 20 s bound (`connect_policy::wait_for_startup_recovery`).
   Compile-checked for Windows; Lite and desktop suites pass under Wine.
+
+### 22. Lite lost Ultraboost and custom FFlags at every Roblox update
+
+- File: `swifttunnel-lite/src/engine.rs` (new `spawn_flag_reapply`).
+- Why it matters: FFlags live in Roblox's `version-<hash>` folder, which
+  each Roblox update replaces. The full app re-applies saved flags at
+  startup and whenever the installed version changes
+  (`spawn_roblox_version_watcher`). Lite did neither, so a Lite player's
+  Ultraboost or custom flags stopped working at the next Roblox update, and
+  Lite then showed the switch as off.
+- Status: fixed. Lite runs the same check: shortly after startup and then
+  every minute, when flags are saved and the install fingerprint changed, it
+  re-applies them with `reapply_saved_client_fflags`, skipping while a
+  launch-scoped profile is pending and holding Lite's Roblox-edit gate so it
+  cannot interleave with Apply or Reset. No unit test: the loop only drives
+  existing core calls that have their own tests. Compile-checked for
+  Windows; Lite suite passes under Wine.
