@@ -272,3 +272,55 @@ in Windows CI. Frontend tests (`npm test`) run here.
 - Fix: keep the previous reference when the new value is equal (both are small plain JSON, compared by
   their serialised form). Changes still apply immediately.
 - Test: `keeps unchanged poll results so subscribers do not re-render` in `vpnStore.test.ts`.
+
+## Checked, no change
+
+So the next pass does not redo these:
+
+- **UDP relay sender / inbound receiver loops** (`udp_relay.rs`, `run_v3_inbound_receiver`): 50ms socket
+  and channel timeouts, pings only while game data flows (20Hz) and backed off when idle. Per-packet
+  work is a pool buffer copy, a few atomics and one uncontended mutex (`last_receive_time`).
+- **Reader routing helpers** (`packet_is_tunnel_process_flow`, `is_roblox_game_server_ip`,
+  `game_destination::contains`, `auto_router.is_lookup_pending`): hash lookups, mask compares and
+  atomics; `is_lookup_pending` only locks while a lookup is pending.
+- **FPS monitor** (`fps_monitor.rs`): ETW DXGI trace runs only while the overlay wants FPS and a game
+  is running; the callback is a handful of atomics and the trace is event-ID filtered.
+- **Logging**: release builds log at Info (`logging.rs`), so hot-path `debug!`/`trace!` are filtered by
+  `log::max_level`. Hot-path warnings are already sampled (`n <= 5 || n.is_power_of_two()`).
+- **Frontend idle handling**: CSS animations pause via `html.app-idle`; polls use
+  `useFocusAwareInterval`; relay latency scans stop while Roblox runs; the traffic graph, session clock
+  and transfer counters hold while the window is behind the game. The overlay window is created only
+  when the overlay is enabled and hides itself (window hidden, not just transparent) when Roblox is not
+  in front. i18n's MutationObserver ignores live counters.
+- **Overlay heartbeat**: the main window pushes a render payload every second even when unchanged; that
+  payload is the overlay's heartbeat (it hides after 4.5s without one), so it stays.
+- **Discord RPC**: event-driven mailbox, re-sends the unchanged presence only every 30s.
+- **Lite** (`swifttunnel-lite`): poll interval stretches to 5s when idle and repaints only on change.
+- **RAM cleaner**: no automatic cleaning any more (`auto_ram_clean` is retired); the manual button still
+  purges the standby list, which is the user's explicit action.
+- **GPU preference** (`high_performance_gpu_value`): already edits only the `GpuPreference` entry and
+  keeps the rest of the per-app string, unlike item 13.
+- **Ultraboost FFlags**: every flag lowers render cost (lowest texture/FRM quality, 1x MSAA, grass off,
+  voxelizer paused, CSG LOD 0, D3D11 preferred). Nothing in the set lowers FPS; it is opt-in.
+- **Other boosts** (MMCSS, Game Mode, timer resolution, fullscreen optimizations, Game Bar, priority,
+  affinity): all opt-in, defaults off; `Win32PrioritySeparation=0x26` is effectively the client default.
+- **WebView2 `CalculateNativeWinOcclusion` disabled** (`apply_webview2_resource_tuning`): re-enabling it
+  would let Chromium throttle the covered main window, but the main window's JS drives the overlay
+  every second and must not be throttled to once a minute. Left as is; items 12 and 20 cut what it
+  paints instead.
+
+## Open items
+
+- **Roblox at HIGH priority** (High Priority boost): starves normal-priority threads system-wide in
+  CPU-bound scenes. SwiftTunnel's own packet threads were raised to compensate (item 7), but audio,
+  input helpers and voice in other apps still wait. Consider `ABOVE_NORMAL_PRIORITY_CLASS`; it is a
+  behaviour change to a named feature, so it needs a product decision.
+- **API-tunneling fast refresh** (`run_cache_refresher`): in Route Assist / Full Country Ban modes the
+  refresher reads both the TCP and the UDP owner tables every 100ms. Only the TCP side needs that
+  cadence (short HTTPS flows); the UDP table could stay at the 2s fallback with the previous UDP rows
+  carried over.
+- **Event-driven route checks**: replace the 2s default-route probe (item 16) with
+  `NotifyRouteChange2` / `NotifyIpInterfaceChange`.
+- **`last_receive_time` mutex per inbound packet** (`udp_relay.rs`): could become an atomic timestamp.
+- **Packet-thread priority trade-off** (item 7): measure on the testbench with a saturating download
+  running alongside a game.
