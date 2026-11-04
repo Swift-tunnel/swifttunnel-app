@@ -243,6 +243,16 @@ impl RebindState {
     }
 }
 
+/// Minimum gap between PowerShell default-route lookups; see
+/// `get_default_route_info_powershell`.
+const POWERSHELL_ROUTE_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
+
+fn powershell_route_fallback_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| {
+        now.saturating_duration_since(last) >= POWERSHELL_ROUTE_FALLBACK_INTERVAL
+    })
+}
+
 /// How often a connected session re-probes the default route.
 ///
 /// The connection monitor asks every 500ms. Each probe enumerates every
@@ -1662,6 +1672,26 @@ impl ParallelInterceptor {
     }
 
     fn get_default_route_info_powershell() -> Option<DefaultRouteInfo> {
+        // The last resort when the native lookups find no default route, which
+        // is exactly what happens for the whole of an outage (cable out, Wi-Fi
+        // dropped mid-match). The connected session re-probes every couple of
+        // seconds, so without a limit this started a PowerShell process each
+        // time, under the driver lock, for as long as the network was down.
+        static LAST: parking_lot::Mutex<Option<(Instant, Option<DefaultRouteInfo>)>> =
+            parking_lot::Mutex::new(None);
+        let mut last = LAST.lock();
+        let now = Instant::now();
+        if let Some((at, cached)) = *last
+            && !powershell_route_fallback_due(Some(at), now)
+        {
+            return cached;
+        }
+        let info = Self::get_default_route_info_powershell_uncached();
+        *last = Some((now, info));
+        info
+    }
+
+    fn get_default_route_info_powershell_uncached() -> Option<DefaultRouteInfo> {
         let script = r#"
             $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
                 Sort-Object @{Expression='RouteMetric';Descending=$false}, @{Expression='InterfaceMetric';Descending=$false} |
@@ -16660,6 +16690,20 @@ mod tests {
         assert!(route_change_check_due(
             Some(start),
             start + Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn powershell_route_fallback_runs_at_most_every_thirty_seconds() {
+        let start = Instant::now();
+        assert!(powershell_route_fallback_due(None, start));
+        assert!(!powershell_route_fallback_due(
+            Some(start),
+            start + Duration::from_secs(29)
+        ));
+        assert!(powershell_route_fallback_due(
+            Some(start),
+            start + Duration::from_secs(30)
         ));
     }
 }

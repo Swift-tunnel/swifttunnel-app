@@ -248,3 +248,17 @@ in Windows CI. Frontend tests (`npm test`) run here.
   record by one packet. Test: `first_outbound_time_is_recorded_once_per_relay`.
 - Not changed: `last_receive_time` is still a mutex written per inbound packet. It holds an `Instant`
   read by health checks; turning it into an atomic is a wider change for an uncontended lock.
+
+### 19. A network outage started a PowerShell process every route probe (fixed)
+- `swifttunnel-core/src/vpn/parallel_interceptor.rs`, `get_default_route_info_powershell` (new
+  `POWERSHELL_ROUTE_FALLBACK_INTERVAL`).
+- `get_default_route_info_for_targets` tries `GetBestInterfaceEx`, then the native route table, then
+  `Get-NetRoute` in PowerShell (5s timeout). With no default route (cable unplugged, Wi-Fi dropped,
+  adapter resetting) the first two always fail, so every probe from the connected session (every
+  500ms before item 16, every 2s now) spawned PowerShell while holding the driver lock: hundreds of
+  milliseconds of CPU each, for the whole outage, right when the player is waiting for the game to
+  reconnect.
+- Fix: the PowerShell fallback runs at most once per 30s and reuses its last answer in between
+  (callers are serialized, so concurrent probes cannot spawn several either). When the network is
+  back the native lookups succeed and the fallback is not consulted at all.
+- Test: `powershell_route_fallback_runs_at_most_every_thirty_seconds`.
