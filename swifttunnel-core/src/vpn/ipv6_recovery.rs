@@ -700,7 +700,16 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
 
     let show_text = format!("{}{}", show_output.stdout, show_output.stderr);
 
-    if !delete_output.success && !show_text.contains("No rules match") {
+    // A failed delete is fine when the rule was already gone. netsh says so
+    // only in translated text, so ask the firewall policy store first.
+    let already_gone = match firewall_rule_in_policy_store(IPV6_BLOCK_RULE_NAME) {
+        Ok(present) => !present,
+        Err(error) => {
+            log::warn!("Could not read the firewall policy store: {error}");
+            show_text.contains("No rules match")
+        }
+    };
+    if !delete_output.success && !already_gone {
         log::warn!(
             "Could not verify IPv6 block firewall rule removal for adapter {}: {}",
             adapter_name,
@@ -714,6 +723,41 @@ fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
         adapter_name
     );
     true
+}
+
+/// Whether one `FirewallRules` value describes a rule named `name`.
+///
+/// Values look like `v2.30|Action=Block|Dir=Out|...|Name=<name>|...`.
+fn firewall_rule_data_has_name(data: &str, name: &str) -> bool {
+    data.split('|').any(|field| {
+        field
+            .strip_prefix("Name=")
+            .is_some_and(|v| v.eq_ignore_ascii_case(name))
+    })
+}
+
+/// Whether the persistent Windows Firewall policy holds a rule named `name`.
+/// netsh-added rules live here, and it reads without the firewall service.
+#[cfg(windows)]
+fn firewall_rule_in_policy_store(name: &str) -> std::io::Result<bool> {
+    use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
+    let rules = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(
+        r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules",
+    )?;
+    for value in rules.enum_values() {
+        let (_, value) = value?;
+        if let Ok(data) = <String as winreg::types::FromRegValue>::from_reg_value(&value)
+            && firewall_rule_data_has_name(&data, name)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(not(windows))]
+fn firewall_rule_in_policy_store(_name: &str) -> std::io::Result<bool> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// Read the driver's current static filter table as owned entries.
@@ -1212,6 +1256,35 @@ mod tests {
 
         let after_delete = read_ipv6_marker();
         assert_eq!(after_delete, None);
+    }
+
+    #[test]
+    fn firewall_rule_names_are_read_from_policy_store_values() {
+        let ours = format!(
+            "v2.30|Action=Block|Active=TRUE|Dir=Out|RA6=2000::/3|Name={IPV6_BLOCK_RULE_NAME}|"
+        );
+        assert!(firewall_rule_data_has_name(&ours, IPV6_BLOCK_RULE_NAME));
+        assert!(firewall_rule_data_has_name(
+            &format!("v2.30|Name={}|", IPV6_BLOCK_RULE_NAME.to_ascii_lowercase()),
+            IPV6_BLOCK_RULE_NAME
+        ));
+        // Only the Name field counts, and only the whole name.
+        assert!(!firewall_rule_data_has_name(
+            &format!("v2.30|Action=Block|Desc={IPV6_BLOCK_RULE_NAME}|Name=Other|"),
+            IPV6_BLOCK_RULE_NAME
+        ));
+        assert!(!firewall_rule_data_has_name(
+            &format!("v2.30|Name={IPV6_BLOCK_RULE_NAME}-Old|"),
+            IPV6_BLOCK_RULE_NAME
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn missing_firewall_rule_is_not_in_the_policy_store() {
+        assert!(
+            !firewall_rule_in_policy_store("SwiftTunnel-No-Such-Rule-For-Tests").unwrap_or(false)
+        );
     }
 
     #[test]

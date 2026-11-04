@@ -108,7 +108,7 @@ commits, tests next to each fix.
   `powercfg /list` now shows the plan's GUID. No unit test: the branch only
   runs against a real powercfg; compile-checked for Windows.
 
-### 7. Legacy IPv6 firewall-rule recovery checks English netsh text (open)
+### 7. Legacy IPv6 firewall-rule recovery checked English netsh text
 
 - File: `swifttunnel-core/src/vpn/ipv6_recovery.rs`
   (`restore_firewall_rule_marker`, and the PowerShell in
@@ -119,5 +119,12 @@ commits, tests next to each fix.
   cleared and recovery reports failure on every launch. Only markers from
   the old firewall-rule method are affected; current versions use
   WinpkFilter static filters.
-- Status: not fixed yet. A locale-independent check needs the firewall
-  policy store (registry) or the COM API, not netsh text.
+- Status: fixed. After a failed delete, the rule counts as gone when the
+  persistent firewall policy store
+  (`...\SharedAccess\Parameters\FirewallPolicy\FirewallRules`) has no
+  value whose `Name=` field is the rule name. The English text is kept only
+  as a fallback when the store cannot be read. The PowerShell variant in
+  `restore_command` is not on the live recovery path (firewall-rule markers
+  go to `restore_firewall_rule_marker`) and was left as is. Tests run under
+  Wine; the two `recorded_ipv6_legacy_binding_*` tests in this module fail
+  under Wine before and after the change because Wine has no PowerShell.
