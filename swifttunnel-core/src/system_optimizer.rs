@@ -757,9 +757,11 @@ impl SystemOptimizer {
                 // (or an earlier app session — the in-memory `imported` flag
                 // resets on restart while the Windows plan persists) already
                 // installed it. That's success, not a failure.
+                // powercfg translates that message, so also check by GUID.
                 if format!("{stderr}\n{stdout}")
                     .to_lowercase()
                     .contains("already exists")
+                    || Self::is_power_plan_installed(SWIFTTUNNEL_POWER_PLAN_GUID) == Some(true)
                 {
                     self.swifttunnel_power_plan_imported = true;
                     self.persist_snapshot()?;

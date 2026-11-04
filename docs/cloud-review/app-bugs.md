@@ -94,3 +94,30 @@ commits, tests next to each fix.
 - Status: fixed. Both also match `(os error 5)` and `0x80070005`, which
   Windows does not translate. Tests use German and French messages and
   check that `(os error 50)` / `(os error 53)` do not match.
+
+### 6. SwiftTunnel power plan import treated a translated "already exists" as failure
+
+- File: `swifttunnel-core/src/system_optimizer.rs`
+  (`import_swifttunnel_power_plan`).
+- Why it matters: when `powercfg /import` fails because the fixed-GUID plan
+  is already installed, the code accepted that only if the output said
+  "already exists" in English. On other languages, if `powercfg /list`
+  could not see the plan beforehand (a race with another apply, or a list
+  timeout), applying the SwiftTunnel power plan failed.
+- Status: fixed. A failed import also counts as success when
+  `powercfg /list` now shows the plan's GUID. No unit test: the branch only
+  runs against a real powercfg; compile-checked for Windows.
+
+### 7. Legacy IPv6 firewall-rule recovery checks English netsh text (open)
+
+- File: `swifttunnel-core/src/vpn/ipv6_recovery.rs`
+  (`restore_firewall_rule_marker`, and the PowerShell in
+  `Ipv6Marker::restore_command`).
+- Why it matters: when `netsh ... delete rule` fails because the rule is
+  already gone, removal is confirmed only by the English text
+  `No rules match`. On other languages a leftover legacy marker is never
+  cleared and recovery reports failure on every launch. Only markers from
+  the old firewall-rule method are affected; current versions use
+  WinpkFilter static filters.
+- Status: not fixed yet. A locale-independent check needs the firewall
+  policy store (registry) or the COM API, not netsh text.
