@@ -119,13 +119,69 @@ struct PlayerHandle {
 impl PlayerHandle {
     #[cfg(windows)]
     fn open(pid: u32) -> Option<Self> {
-        use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
-        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.ok()?;
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+        // Query rights let CPU/RAM samples come from this handle too. If the
+        // player refuses them, presence checks still work on SYNCHRONIZE and
+        // samples fall back to sysinfo.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            )
+        }
+        .or_else(|_| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) })
+        .ok()?;
         Some(Self { pid, handle })
     }
 
     #[cfg(not(windows))]
     fn open(_pid: u32) -> Option<Self> {
+        None
+    }
+
+    /// Total CPU time (kernel + user, 100ns units) and working set in bytes,
+    /// the same working-set figure sysinfo reports as `memory()`.
+    #[cfg(windows)]
+    fn usage(&self) -> Option<(u64, u64)> {
+        use windows::Win32::Foundation::FILETIME;
+        use windows::Win32::System::ProcessStatus::{
+            K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+        };
+        use windows::Win32::System::Threading::GetProcessTimes;
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        unsafe {
+            GetProcessTimes(
+                self.handle,
+                &mut created,
+                &mut exited,
+                &mut kernel,
+                &mut user,
+            )
+        }
+        .ok()?;
+        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ..Default::default()
+        };
+        if !unsafe { K32GetProcessMemoryInfo(self.handle, &mut counters, counters.cb) }.as_bool() {
+            return None;
+        }
+        let ticks =
+            |time: FILETIME| (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime);
+        Some((
+            ticks(kernel).saturating_add(ticks(user)),
+            counters.WorkingSetSize as u64,
+        ))
+    }
+
+    #[cfg(not(windows))]
+    fn usage(&self) -> Option<(u64, u64)> {
         None
     }
 
@@ -151,7 +207,7 @@ impl Drop for PlayerHandle {
     }
 }
 
-// The handle is only waited on and closed; both are thread-safe.
+// The handle is only waited on, queried and closed; all are thread-safe.
 #[cfg(windows)]
 unsafe impl Send for PlayerHandle {}
 
@@ -161,6 +217,9 @@ pub struct PerformanceMonitor {
     last_full_scan: Option<std::time::Instant>,
     last_metrics: PerformanceMetrics,
     last_metrics_sample: Option<(std::time::Instant, Option<u32>)>,
+    /// CPU baseline for samples read from `player_handle`: (pid, when, total
+    /// CPU time in 100ns units).
+    handle_cpu_baseline: Option<(u32, std::time::Instant, u64)>,
     #[cfg(test)]
     full_scans: usize,
     #[cfg(test)]
@@ -178,6 +237,7 @@ impl PerformanceMonitor {
             last_full_scan: None,
             last_metrics: PerformanceMetrics::default(),
             last_metrics_sample: None,
+            handle_cpu_baseline: None,
             #[cfg(test)]
             full_scans: 0,
             #[cfg(test)]
@@ -200,6 +260,21 @@ impl PerformanceMonitor {
         let sample_due = self.last_metrics_sample.is_none_or(|(at, _)| {
             now.saturating_duration_since(at) >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL
         });
+        if sample_due && let Some((pid, cpu_usage, ram_usage)) = self.sample_held_player(now) {
+            metrics.process_id = Some(pid);
+            metrics.roblox_running = true;
+            metrics.cpu_usage = cpu_usage;
+            metrics.ram_usage = ram_usage;
+            self.system.refresh_memory();
+            metrics.ram_total = self.system.total_memory() as f64 / 1024.0 / 1024.0;
+            self.last_metrics_sample = Some((now, metrics.process_id));
+            #[cfg(test)]
+            {
+                self.metric_samples += 1;
+            }
+            self.last_metrics = metrics.clone();
+            return;
+        }
         // Presence remains fresh even when another consumer just sampled the
         // CPU counters. Do not overwrite their baseline with a near-zero gap.
         metrics.process_id = self.refresh_player(false, sample_due);
@@ -237,6 +312,35 @@ impl PerformanceMonitor {
         self.last_metrics = metrics.clone();
     }
 
+    /// Sample CPU and RAM of the confirmed player from its held handle.
+    ///
+    /// The overlay asks for a sample every second for the whole match. Going
+    /// through sysinfo for that meant `ProcessesToUpdate::Some`, which on
+    /// Windows still snapshots every process and thread on the machine and
+    /// then filters. The held handle answers the same two questions with two
+    /// cheap queries, and it was opened only after the name check, so the
+    /// PID cannot have been reused. `None` falls back to the sysinfo path.
+    fn sample_held_player(&mut self, now: std::time::Instant) -> Option<(u32, f32, f64)> {
+        let handle = self.player_handle.as_ref()?;
+        let pid = handle.pid;
+        if self.last_metrics.process_id != Some(pid) || !handle.is_running() {
+            return None;
+        }
+        let Some((cpu_time, working_set)) = handle.usage() else {
+            self.handle_cpu_baseline = None;
+            return None;
+        };
+        let cpu_usage = match self.handle_cpu_baseline {
+            Some((baseline_pid, at, baseline)) if baseline_pid == pid => {
+                held_process_cpu_percent(baseline, cpu_time, now.saturating_duration_since(at))
+            }
+            // First sample for this player: no interval yet, as with sysinfo.
+            _ => 0.0,
+        };
+        self.handle_cpu_baseline = Some((pid, now, cpu_time));
+        Some((pid, cpu_usage, working_set as f64 / 1024.0 / 1024.0))
+    }
+
     /// Find the in-game Roblox player process (the thing whose FPS/CPU/RAM we
     /// report, and what "Roblox running" on the dashboard means). Only the
     /// player counts — the launcher/app host lingering in the background does
@@ -267,6 +371,11 @@ impl PerformanceMonitor {
         let pid = self.refresh_player_with_sysinfo(force_discovery, sample_metrics);
         if pid != self.player_handle.as_ref().map(|handle| handle.pid) {
             self.player_handle = pid.and_then(PlayerHandle::open);
+            self.handle_cpu_baseline = self.player_handle.as_ref().and_then(|handle| {
+                handle
+                    .usage()
+                    .map(|(cpu_time, _)| (handle.pid, std::time::Instant::now(), cpu_time))
+            });
         }
         pid
     }
@@ -358,6 +467,21 @@ impl PerformanceMonitor {
     }
 }
 
+/// Share of the whole machine's CPU used between two process CPU-time
+/// readings, on the same 0-100 scale as `normalize_process_cpu`.
+fn held_process_cpu_percent(before_100ns: u64, after_100ns: u64, elapsed: Duration) -> f32 {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .max(1) as f64;
+    let wall_100ns = elapsed.as_nanos() as f64 / 100.0;
+    if wall_100ns <= 0.0 {
+        return 0.0;
+    }
+    let used = after_100ns.saturating_sub(before_100ns) as f64;
+    ((used / (wall_100ns * cores)) * 100.0).clamp(0.0, 100.0) as f32
+}
+
 fn normalize_process_cpu(raw_cpu: f32) -> f32 {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -392,6 +516,42 @@ mod polling_tests {
         // Roblox player, so it is dropped along with its handle.
         assert_eq!(monitor.get_roblox_pid(), None);
         assert!(monitor.player_handle.is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn metric_samples_of_a_held_player_do_not_snapshot_the_system() {
+        let mut monitor = PerformanceMonitor::new();
+        let pid = std::process::id();
+        monitor.last_metrics.process_id = Some(pid);
+        monitor.player_handle = PlayerHandle::open(pid);
+        assert!(monitor.player_handle.as_ref().unwrap().usage().is_some());
+        let start = std::time::Instant::now();
+        let mut metrics = PerformanceMetrics::default();
+        for step in 0..3 {
+            monitor.update_metrics_at(&mut metrics, start + Duration::from_secs(step));
+            assert_eq!(metrics.process_id, Some(pid));
+            assert!(metrics.roblox_running);
+            assert!(metrics.ram_usage > 0.0);
+            assert!((0.0..=100.0).contains(&metrics.cpu_usage));
+        }
+        assert_eq!(monitor.metric_samples, 3);
+        assert_eq!(monitor.full_scans, 0);
+    }
+
+    #[test]
+    fn held_player_cpu_is_a_share_of_the_whole_machine() {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as f32;
+        // One core fully busy for one second.
+        let one_core = held_process_cpu_percent(0, 10_000_000, Duration::from_secs(1));
+        assert!((one_core - 100.0 / cores).abs() < 0.01);
+        assert_eq!(held_process_cpu_percent(5, 5, Duration::from_secs(1)), 0.0);
+        assert_eq!(held_process_cpu_percent(0, 10, Duration::ZERO), 0.0);
+        // A counter that went backwards (cannot happen for one process) clamps.
+        assert_eq!(held_process_cpu_percent(10, 5, Duration::from_secs(1)), 0.0);
+        assert!(held_process_cpu_percent(0, u64::MAX, Duration::from_secs(1)) <= 100.0);
     }
 
     #[test]

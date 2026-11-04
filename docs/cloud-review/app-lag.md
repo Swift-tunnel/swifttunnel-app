@@ -143,3 +143,18 @@ in Windows CI. Frontend tests (`npm test`) run here.
   anyway. The comment said `Always` protected against PID reuse leaving a stale name, but the exe flag
   never refreshes `name`; sysinfo handles PID reuse itself by comparing start times and rebuilding the
   entry. So the scan now uses `ProcessRefreshKind::new()`. Same names, same PID-reuse behaviour.
+
+### 11. The overlay's once-a-second CPU/RAM sample snapshotted every process on the PC (fixed)
+- `swifttunnel-core/src/performance_monitor.rs`, `update_metrics_at` (new `sample_held_player`,
+  `PlayerHandle::usage`).
+- Item 6 made presence checks use a held handle, but every *metrics* sample still went through sysinfo
+  `ProcessesToUpdate::Some(&[pid])`, which on Windows is a full `SystemProcessInformation` snapshot of
+  every process and thread. The overlay requests one each second (`boost_get_metrics`) for the whole
+  match, as does the Boost page while it is open.
+- Fix: the player handle is now opened with `PROCESS_QUERY_LIMITED_INFORMATION` as well (falling back to
+  `SYNCHRONIZE` only if refused). A sample of the confirmed player reads `GetProcessTimes` and
+  `K32GetProcessMemoryInfo` from it: CPU is the CPU-time delta over wall time across all cores (same
+  0-100 scale as before), RAM is the working set, which is the figure sysinfo reported. Discovery,
+  player changes and a handle without query rights still go through sysinfo as before.
+- Tests: `held_player_cpu_is_a_share_of_the_whole_machine`, and on Windows
+  `metric_samples_of_a_held_player_do_not_snapshot_the_system`.
