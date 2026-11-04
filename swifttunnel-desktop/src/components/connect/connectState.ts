@@ -254,3 +254,15 @@ export function resolveConnectStatus(input: {
 
   return { kind: "text", text: formatDriverSetupMessage(input.vpnError || stateLabel(input.vpnState)) };
 }
+
+/**
+ * The session card's "Default FPS cap" value.
+ *
+ * With unlock off SwiftTunnel leaves Roblox's FramerateCap alone, so the cap
+ * is whatever Roblox's own menu set (60, 144, 240...), not 60. The slider's
+ * top position stores 99999 and is labelled "Uncapped" there.
+ */
+export function defaultFpsCapLabel(unlockFps: boolean, targetFps: number): string {
+  if (!unlockFps) return "Set in Roblox";
+  return targetFps >= 9999 ? "Uncapped" : String(targetFps);
+}

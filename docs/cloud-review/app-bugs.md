@@ -253,9 +253,9 @@ commits, tests next to each fix.
   the typed value when on, 60 when off. The full app's meaning of
   `unlock_fps: false` (do not touch the cap) is unchanged. Test added; Lite
   suite passes under Wine.
-- Related, not changed: the full app's session card shows "Default FPS cap
-  60" when unlock is off, although Roblox may still be at a higher cap set
-  in its own menu.
+- Related: the full app's session card showed "Default FPS cap 60" when
+  unlock is off, although Roblox may be at a higher cap set in its own
+  menu, and showed the slider's "uncapped" value as 99999. Fixed in #23.
 
 ### 16. A full-app "uncapped" frame rate locked Lite's Apply
 
@@ -357,3 +357,14 @@ commits, tests next to each fix.
   cannot interleave with Apply or Reset. No unit test: the loop only drives
   existing core calls that have their own tests. Compile-checked for
   Windows; Lite suite passes under Wine.
+
+### 23. Session card misreported the FPS cap
+
+- Files: `swifttunnel-desktop/src/components/connect/SessionCards.tsx`,
+  `swifttunnel-desktop/src/components/connect/connectState.ts`
+  (new `defaultFpsCapLabel`).
+- Why it matters: with unlock off SwiftTunnel leaves Roblox's cap alone, but
+  the card said "60"; with the slider at its top position it said "99999"
+  instead of "Uncapped".
+- Status: fixed: "Set in Roblox", "Uncapped" or the number. Test added;
+  `tsc` and the frontend suite pass.

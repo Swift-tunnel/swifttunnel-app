@@ -14,6 +14,7 @@ import { useVpnStore } from "../../stores/vpnStore";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { Flag } from "../ui/Flag";
 import { relayDisplayLabel } from "../../lib/connectedServer";
+import { defaultFpsCapLabel } from "./connectState";
 
 function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -221,7 +222,7 @@ function RobloxCard() {
       )}
 
       <div className="mt-auto flex flex-wrap items-center gap-2">
-        <Chip label="Default FPS cap" value={roblox.unlock_fps ? String(roblox.target_fps) : "60"} />
+        <Chip label="Default FPS cap" value={defaultFpsCapLabel(roblox.unlock_fps, roblox.target_fps)} />
         <Chip label="Global profile" value={profile} />
         <Chip label="Default graphics" value={String(roblox.graphics_quality)} />
       </div>

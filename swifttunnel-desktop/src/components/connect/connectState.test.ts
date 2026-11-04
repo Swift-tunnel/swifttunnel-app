@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  defaultFpsCapLabel,
   isConnectActionBusy,
   isDriverMissing,
   isDriverVersionTooOld,
@@ -9,6 +10,12 @@ import {
 } from "./connectState";
 
 describe("connect state helpers", () => {
+  it("labels the default FPS cap without claiming 60 when Roblox owns it", () => {
+    expect(defaultFpsCapLabel(false, 240)).toBe("Set in Roblox");
+    expect(defaultFpsCapLabel(true, 240)).toBe("240");
+    expect(defaultFpsCapLabel(true, 99999)).toBe("Uncapped");
+  });
+
   it("formats known VPN states for the connect status line", () => {
     expect(stateLabel("fetching_config")).toBe("Resolving relay…");
     expect(stateLabel("connected")).toBe("Connected");
