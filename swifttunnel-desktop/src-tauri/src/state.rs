@@ -116,7 +116,7 @@ impl AppState {
     }
 
     /// Sync the Roblox client's on-disk window settings into the in-memory
-    /// config. Moved out of `new()`: it repairs file ACLs (spawns icacls) and
+    /// config. Moved out of `new()`: it clears a read-only attribute on and
     /// reads Roblox's settings file, which is too slow for the setup path.
     pub fn sync_roblox_window_settings(&self) {
         let optimizer = self.roblox_optimizer.lock();

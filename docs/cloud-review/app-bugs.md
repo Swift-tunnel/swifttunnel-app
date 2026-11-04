@@ -190,3 +190,18 @@ commits, tests next to each fix.
   the file's own line ending. UTF-16 files (BOM or NUL bytes) are refused
   with a clear message instead of being corrupted. Tests cover a
   Windows-1252 CRLF file round trip and UTF-16 refusal; run under Wine.
+
+### 12. Dead restore-point helpers with wrong behaviour; stale comment
+
+- Files: `swifttunnel-core/src/system_optimizer.rs`
+  (`create_restore_point`, `open_system_restore`),
+  `swifttunnel-desktop/src/lib/utils.ts` (`countryFlag`),
+  `swifttunnel-desktop/src-tauri/src/state.rs`.
+- Why it matters: nothing calls these. `create_restore_point` hard-coded
+  `C:\`, detected throttling by English text, and reported success when
+  Windows silently skipped the restore point, so wiring it up later would
+  have misled users. `countryFlag` produced invalid code points for
+  non-letters. The `sync_roblox_window_settings` comment said it spawns
+  icacls; it only clears a read-only attribute.
+- Status: removed the dead code and corrected the comment. Windows check,
+  `tsc` and the frontend suite pass.
