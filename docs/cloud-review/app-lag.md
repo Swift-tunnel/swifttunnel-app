@@ -334,3 +334,8 @@ So the next pass does not redo these:
   borderless-fullscreen game stops DWM using independent flip for the game, which adds composition
   latency. It is inherent to an overlay window, opt-in, and the window is hidden whenever Roblox is not
   in front; the Overlay tab could mention it.
+- **Boost presets switch Roblox graphics to Automatic** (`boostConfig.ts`, Balanced preset):
+  `graphics_quality: "Manual"` maps to level 0, which Roblox reads as *Automatic*. Automatic quality
+  changes level on its own as frame time moves, which some players notice as hitching. If "Manual" was
+  meant as "keep my level", the preset should leave `graphics_quality` as it is. Tests pin the current
+  mapping, so this needs a product decision.
