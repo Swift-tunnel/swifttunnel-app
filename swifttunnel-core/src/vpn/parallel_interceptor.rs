@@ -5834,6 +5834,9 @@ fn run_packet_reader(
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
     let mut passthrough_to_adapter: EthMRequest<BATCH_SIZE>;
     let mut passthrough_to_mstcp: EthMRequest<BATCH_SIZE>;
+    // Set when the previous read filled the whole batch: the driver queue may
+    // still hold packets, so read again without waiting on the event.
+    let mut drain_more = false;
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
@@ -5891,7 +5894,25 @@ fn run_packet_reader(
         // Using 100ms timeout allows responsive stop_flag checking while
         // avoiding 1000Hz polling that wastes CPU when idle
         // (When packets arrive, event signals immediately - no added latency)
-        let wait_result = unsafe { WaitForSingleObject(b.event, 100) };
+        //
+        // Packets held for an owner lookup are replayed on the next pass, so
+        // wake sooner while any are waiting instead of after the full 100ms.
+        let wait_result = if drain_more {
+            WAIT_OBJECT_0
+        } else {
+            let timeout_ms = reader_wait_timeout_ms(!cloud_pending.is_empty());
+            unsafe { WaitForSingleObject(b.event, timeout_ms) }
+        };
+        let draining = std::mem::take(&mut drain_more);
+        if wait_result == WAIT_OBJECT_0 {
+            // Reset before reading, not after the batch. The event is
+            // manual-reset: clearing it after processing would also clear a
+            // signal for packets that arrived mid-batch, leaving them queued
+            // until the next arrival or the 100ms timeout.
+            unsafe {
+                let _ = ResetEvent(b.event);
+            }
+        }
         if wait_result == WAIT_TIMEOUT {
             // A timeout is the normal idle path. Do not call read_packets()
             // with an empty queue: WinpkFilter can report ERROR_INVALID_PARAMETER
@@ -5972,6 +5993,9 @@ fn run_packet_reader(
                 }
                 n
             }
+            // A follow-up read after a full batch can find the queue empty,
+            // which WinpkFilter reports as an error. That is not a dead handle.
+            Err(_) if draining => 0,
             Err(e) => {
                 match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
                     RebindDecision::Stop => break,
@@ -6015,10 +6039,8 @@ fn run_packet_reader(
             }
         };
 
+        drain_more = packets_read == BATCH_SIZE;
         if packets_read == 0 && cloud_pending.is_empty() {
-            unsafe {
-                let _ = ResetEvent(b.event);
-            }
             continue;
         }
 
@@ -6302,10 +6324,6 @@ fn run_packet_reader(
                 .driver
                 .send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp);
         }
-
-        unsafe {
-            let _ = ResetEvent(b.event);
-        }
     }
 
     // Cleanup is handled by `impl Drop for ReaderBindings` when `bindings`
@@ -6313,6 +6331,12 @@ fn run_packet_reader(
 
     log::info!("Packet reader stopped");
     Ok(())
+}
+
+/// Packet-event wait for the reader. Idle waits stay long so a quiet adapter
+/// costs nothing; held cloud-game packets need a quick replay pass.
+fn reader_wait_timeout_ms(has_held_packets: bool) -> u32 {
+    if has_held_packets { 10 } else { 100 }
 }
 
 /// Worker thread - processes packets and routes to VPN or passthrough
@@ -9589,6 +9613,12 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reader_wakes_quickly_only_while_cloud_packets_are_held() {
+        assert_eq!(super::reader_wait_timeout_ms(false), 100);
+        assert!(super::reader_wait_timeout_ms(true) <= 10);
+    }
+
     #[test]
     fn binding_preflight_timeout_cannot_request_adapter_choice_or_recommend_a_down_adapter() {
         use super::{
