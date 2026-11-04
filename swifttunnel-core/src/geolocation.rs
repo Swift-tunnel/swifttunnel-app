@@ -264,6 +264,8 @@ fn roblox_region_from_id(id: &str) -> Option<RobloxRegion> {
         "us-west" => Some(RobloxRegion::UsWest),
         "brazil" => Some(RobloxRegion::Brazil),
         "doha" => Some(RobloxRegion::Doha),
+        "jakarta" => Some(RobloxRegion::Jakarta),
+        "tel-aviv" | "tel_aviv" => Some(RobloxRegion::TelAviv),
         _ => None,
     }
 }
@@ -272,6 +274,7 @@ fn roblox_region_from_swifttunnel_region_id(id: &str) -> Option<RobloxRegion> {
     match id {
         "germany" => Some(RobloxRegion::Frankfurt),
         "middle-east" => Some(RobloxRegion::Doha),
+        "israel" => Some(RobloxRegion::TelAviv),
         other => roblox_region_from_id(other),
     }
 }
@@ -750,6 +753,37 @@ mod tests {
             resolved,
             Some((RobloxRegion::Tokyo, "Tokyo, JP".to_string()))
         );
+    }
+
+    #[test]
+    fn every_relay_region_the_resolver_can_name_maps_back_to_its_game_region() {
+        // A relay id with no reverse mapping made the resolver's answer
+        // read as "no region" (cached for hours), so Jakarta and Tel Aviv
+        // servers were never routed to their own relays.
+        for region in RobloxRegion::all_regions() {
+            let relay = region.best_swifttunnel_region().unwrap();
+            let back = roblox_region_from_swifttunnel_region_id(relay).unwrap();
+            assert_eq!(
+                back.best_swifttunnel_region(),
+                Some(relay),
+                "{region:?} via {relay}"
+            );
+        }
+        for (id, region) in [
+            ("jakarta", RobloxRegion::Jakarta),
+            ("israel", RobloxRegion::TelAviv),
+        ] {
+            let response = GameServerRegionResponse {
+                provider: Some("fixture".into()),
+                location: None,
+                roblox_region_id: None,
+                swifttunnel_region_id: Some(id.into()),
+                confidence: Some("high".into()),
+            };
+            let (resolved, _) =
+                resolve_api_response("1.2.3.4".parse().unwrap(), Some(response)).unwrap();
+            assert_eq!(resolved, region);
+        }
     }
 
     #[test]
