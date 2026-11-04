@@ -324,3 +324,13 @@ So the next pass does not redo these:
 - **`last_receive_time` mutex per inbound packet** (`udp_relay.rs`): could become an atomic timestamp.
 - **Packet-thread priority trade-off** (item 7): measure on the testbench with a saturating download
   running alongside a game.
+- **Installer-source preservation on every launch** (`swifttunnel-desktop/src-tauri/src/lib.rs`
+  `installer-maintenance` thread → `swifttunnel_msi_repair::preserve_installer_sources`): each start,
+  including autostart at login, reads the registered MSI into memory, hashes it, verifies the cached
+  copy and compares both files again (about four full reads of the package) before rewriting the
+  SourceList. It could stop early when the SourceList already points at an identical cached copy.
+  Left alone here because it is installer-repair code.
+- **The overlay itself costs some FPS while visible**: a transparent always-on-top window over a
+  borderless-fullscreen game stops DWM using independent flip for the game, which adds composition
+  latency. It is inherent to an overlay window, opt-in, and the window is hidden whenever Roblox is not
+  in front; the Overlay tab could mention it.
