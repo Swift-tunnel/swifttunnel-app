@@ -15,6 +15,10 @@ From pass 2, Windows tests also run locally under Wine: install
 `cargo test -p swifttunnel-core --lib --target x86_64-pc-windows-gnu --no-run`
 and run the printed `.exe` with `/usr/lib/wine/wine64`. Wine is not Windows
 (no WFP, no NDIS driver), so failures there still need checking on CI.
+The desktop crate's tests also run under Wine after copying
+`WebView2Loader.dll` (from the `webview2-com-sys` build output) next to the
+test `.exe`. Tests that start `powershell` fail under Wine because it has
+none; that accounts for every Wine failure seen so far.
 
 There is no `AGENTS.md` in the repository (checked in pass 2), so these
 passes follow the repository's existing conventions: rustfmt, small
