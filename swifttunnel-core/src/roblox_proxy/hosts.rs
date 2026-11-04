@@ -897,14 +897,40 @@ fn ensure_exists_at(path: &std::path::Path) -> Result<bool, String> {
 /// delete it. Refusing to work in that case turned a machine with no hosts file
 /// into "country ban bypass unavailable on this network", which is wrong and
 /// unfixable by the person reading it, since the wording blamed their network.
-fn read_hosts_or_empty(path: &std::path::Path) -> Result<String, String> {
-    match crate::utils::read_text_file_bounded(path, 16 * 1024 * 1024, "Hosts file") {
-        Ok(text) => Ok(text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-        Err(e) => Err(format!(
-            "Failed to read hosts file '{}': {e}",
+///
+/// Returned as bytes. Windows reads the hosts file in the ANSI code page, and
+/// many are not UTF-8: a comment in Windows-1252 or 1251 written by an older
+/// Notepad or an ad-block tool made a UTF-8-only read fail, which disabled the
+/// country-ban bypass and blocked clean-up of our own entries. Editing whole
+/// lines as bytes keeps every other line exactly as it was.
+fn read_hosts_or_empty(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    let bytes = match crate::utils::read_file_bounded(path, 16 * 1024 * 1024, "Hosts file") {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!(
+                "Failed to read hosts file '{}': {e}",
+                path.display()
+            ));
+        }
+    };
+    // UTF-16 text has NUL bytes in it. Appending ASCII lines would corrupt
+    // it, so leave such a file alone.
+    if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) || bytes.contains(&0) {
+        return Err(format!(
+            "The hosts file '{}' is saved as UTF-16, which SwiftTunnel cannot edit safely. It was left unchanged.",
             path.display()
-        )),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// The line ending the file already uses, so added lines match it.
+fn hosts_newline(content: &[u8]) -> &'static [u8] {
+    if content.windows(2).any(|pair| pair == b"\r\n") {
+        b"\r\n"
+    } else {
+        b"\n"
     }
 }
 
@@ -928,15 +954,7 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
     }
 
     let content = read_hosts_or_empty(&path)?;
-
-    let clean = remove_marker_block(&content);
-    let block = build_hosts_block(overrides);
-
-    let mut out = clean;
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&block);
+    let out = with_marker_block(&content, overrides);
 
     fs::write(&path, &out)
         .map_err(|e| format!("Failed to write hosts file '{}': {e}", path.display()))?;
@@ -1261,7 +1279,9 @@ pub fn has_overrides() -> bool {
         return false;
     };
     match read_hosts_or_empty(&path) {
-        Ok(content) => content.contains(MARKER_START),
+        Ok(content) => content
+            .windows(MARKER_START.len())
+            .any(|window| window == MARKER_START.as_bytes()),
         Err(_) => false,
     }
 }
@@ -1271,35 +1291,58 @@ pub fn has_overrides() -> bool {
 // ---------------------------------------------------------------------------
 
 /// Remove the marker-delimited block from the hosts file content.
-fn remove_marker_block(content: &str) -> String {
-    let mut result = String::with_capacity(content.len());
+///
+/// Works on bytes so lines in any ASCII-compatible encoding, and their line
+/// endings, are kept exactly. Trailing blank lines collapse to one newline.
+fn remove_marker_block(content: impl AsRef<[u8]>) -> Vec<u8> {
+    let content = content.as_ref();
+    let newline = hosts_newline(content);
+    let mut result = Vec::with_capacity(content.len());
     let mut inside_block = false;
 
-    for line in content.lines() {
-        let trimmed = line.trim();
+    for line in content.split(|&byte| byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        let trimmed = line.trim_ascii();
 
-        if trimmed == MARKER_START {
+        if trimmed == MARKER_START.as_bytes() {
             inside_block = true;
             continue;
         }
-        if trimmed == MARKER_END {
+        if trimmed == MARKER_END.as_bytes() {
             inside_block = false;
             continue;
         }
 
         if !inside_block {
-            result.push_str(line);
-            result.push('\n');
+            result.extend_from_slice(line);
+            result.extend_from_slice(newline);
         }
     }
 
-    // Collapse trailing blank lines to a single newline
-    let trimmed = result.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        return String::new();
+    while result
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        result.pop();
     }
-    let mut out = trimmed.to_string();
-    out.push('\n');
+    if result.is_empty() {
+        return result;
+    }
+    result.extend_from_slice(newline);
+    result
+}
+
+/// `content` with our block replaced by one for `overrides`.
+fn with_marker_block(content: &[u8], overrides: &[HostOverride]) -> Vec<u8> {
+    let newline = hosts_newline(content);
+    let mut out = remove_marker_block(content);
+    if !out.is_empty() && !out.ends_with(b"\n") {
+        out.extend_from_slice(newline);
+    }
+    for line in build_hosts_block(overrides).lines() {
+        out.extend_from_slice(line.as_bytes());
+        out.extend_from_slice(newline);
+    }
     out
 }
 
@@ -1512,18 +1555,53 @@ mod tests {
         assert!(error.contains("exceeds"));
         assert_eq!(fs::metadata(&path).unwrap().len(), 16 * 1024 * 1024 + 1);
         fs::remove_file(&path).unwrap();
-        assert_eq!(read_hosts_or_empty(&path).unwrap(), "");
+        assert_eq!(read_hosts_or_empty(&path).unwrap(), b"");
+    }
+
+    #[test]
+    fn hosts_edits_keep_non_utf8_lines_and_line_endings_byte_for_byte() {
+        // Windows-1252 "é" in a comment and CRLF endings, as older Notepad saves.
+        let original = b"# caf\xe9 blocker\r\n127.0.0.1 localhost\r\n".to_vec();
+        let overrides = [HostOverride {
+            domain: "clientsettings.roblox.com".into(),
+            ip: Ipv4Addr::new(128, 116, 0, 1),
+        }];
+        let applied = with_marker_block(&original, &overrides);
+        assert!(applied.starts_with(&original));
+        assert!(applied.ends_with(b"# SwiftTunnel Roblox Proxy - END\r\n"));
+        assert!(
+            !applied
+                .windows(2)
+                .any(|pair| pair[1] == b'\n' && pair[0] != b'\r')
+        );
+        assert_eq!(remove_marker_block(&applied), original);
+        // Re-applying replaces our block rather than adding a second one.
+        assert_eq!(with_marker_block(&applied, &overrides), applied);
+    }
+
+    #[test]
+    fn utf16_hosts_files_are_refused_without_changing_them() {
+        let dir = HostsFixture::new();
+        let path = dir.0.join("hosts");
+        for original in [
+            &b"\xff\xfe1\x002\x007\x00"[..],
+            &b"1\x002\x007\x00.\x000\x00"[..],
+        ] {
+            fs::write(&path, original).unwrap();
+            assert!(read_hosts_or_empty(&path).unwrap_err().contains("UTF-16"));
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }
     }
 
     #[test]
     fn remove_marker_block_empty_input() {
-        assert_eq!(remove_marker_block(""), "");
+        assert_eq!(remove_marker_block(""), b"");
     }
 
     #[test]
     fn remove_marker_block_no_markers() {
         let input = "127.0.0.1 localhost\n::1 localhost\n";
-        assert_eq!(remove_marker_block(input), input);
+        assert_eq!(remove_marker_block(input), input.as_bytes());
     }
 
     #[test]
@@ -1537,7 +1615,7 @@ mod tests {
 ::1 localhost
 ";
         let expected = "127.0.0.1 localhost\n::1 localhost\n";
-        assert_eq!(remove_marker_block(input), expected);
+        assert_eq!(remove_marker_block(input), expected.as_bytes());
     }
 
     #[test]
@@ -1549,7 +1627,7 @@ mod tests {
 # SwiftTunnel Roblox Proxy - END
 ";
         let expected = "127.0.0.1 localhost\n";
-        assert_eq!(remove_marker_block(input), expected);
+        assert_eq!(remove_marker_block(input), expected.as_bytes());
     }
 
     #[test]
@@ -1559,7 +1637,7 @@ mod tests {
 127.66.0.1 clientsettings.roblox.com
 # SwiftTunnel Roblox Proxy - END
 ";
-        assert_eq!(remove_marker_block(input), "");
+        assert_eq!(remove_marker_block(input), b"");
     }
 
     #[test]

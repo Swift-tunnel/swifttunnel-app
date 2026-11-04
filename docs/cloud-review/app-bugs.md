@@ -173,3 +173,20 @@ commits, tests next to each fix.
   its default level. If confirmed, the usual fix is an "at log on" scheduled
   task with "run with highest privileges", which also needs uninstall and
   `--cleanup` support, so it is larger than this bug hunt's scope.
+
+### 11. Non-UTF-8 hosts files disabled the country-ban bypass
+
+- File: `swifttunnel-core/src/roblox_proxy/hosts.rs`
+  (`read_hosts_or_empty`, `remove_marker_block`, `write_overrides`,
+  `has_overrides`).
+- Why it matters: the hosts file was read with a UTF-8-only reader. Windows
+  reads hosts in the ANSI code page, and files with a Windows-1252/1251
+  comment (older Notepad, ad-block and "privacy" tools) are common on
+  non-English PCs. Every read failed, so applying the bootstrap overrides
+  failed (bypass unavailable), removing our stale block failed, and
+  `has_overrides` reported none. Writes also rewrote CRLF files as LF.
+- Status: fixed. The file is handled as bytes and edited line by line, so
+  other lines and the file's line endings are kept exactly; added lines use
+  the file's own line ending. UTF-16 files (BOM or NUL bytes) are refused
+  with a clear message instead of being corrupted. Tests cover a
+  Windows-1252 CRLF file round trip and UTF-16 refusal; run under Wine.
