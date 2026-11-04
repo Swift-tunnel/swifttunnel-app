@@ -39,6 +39,8 @@ windows = { version = "0.62", features = [
     "Win32_Media",
     # Service Control Manager for BFE auto-start
     "Win32_System_Services",
+    # PowerReadACValueIndex: powercfg /query output is translated
+    "Win32_System_Power",
     # GetSystemMetrics for RDP session detection
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",

@@ -68,3 +68,15 @@ commits, tests next to each fix.
   `dwCurrentState` from the service control manager, and
   `service_state_name`. Both callers use it; the text parsers are gone.
   Tests run under Wine (see environment notes).
+
+### 4. Core parking tweak read its original value from translated powercfg text
+
+- File: `swifttunnel-core/src/optimizations.rs` (`read_power_ac`).
+- Why it matters: the snapshot looked for the English line
+  `Current AC Power Setting Index:` in `powercfg /query` output. powercfg
+  translates it, so on non-English Windows the "Disable core parking" tweak
+  always failed with "Couldn't read the original power setting".
+- Status: fixed. The value is read with `PowerReadACValueIndex`; the two
+  powercfg aliases the tweak uses map to their GUIDs in `power_guid`. Added
+  the `Win32_System_Power` feature of the `windows` crate. A test checks
+  that every `PowerAc` action's aliases resolve. Tests run under Wine.

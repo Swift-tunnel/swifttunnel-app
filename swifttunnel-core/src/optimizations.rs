@@ -1679,30 +1679,46 @@ fn valid_scheme_guid(value: &str) -> bool {
         })
 }
 
-#[cfg(windows)]
-fn read_power_ac(scheme: &str, subgroup: &str, setting: &str) -> Option<u32> {
-    let out = crate::run_hidden_command_with_timeout(
-        "powercfg",
-        &["/query", scheme, subgroup, setting],
-        std::time::Duration::from_secs(20),
-    );
-    if !out.success {
+/// A power scheme, subgroup or setting GUID, by GUID or by the powercfg
+/// alias of a setting this module changes.
+fn power_guid(value: &str) -> Option<u128> {
+    let guid = match value {
+        "SCHEME_CURRENT" => return None,
+        "SUB_PROCESSOR" => "54533251-82be-4824-96c1-47b60b740d00",
+        "CPMINCORES" => "0cc5b647-c1df-4637-891a-dec35c318583",
+        other => other,
+    };
+    if !valid_scheme_guid(guid) {
         return None;
     }
-    let text = out.stdout;
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Current AC Power Setting Index:") {
-            let token = rest.trim();
-            let parsed = if let Some(hex) = token.strip_prefix("0x") {
-                u32::from_str_radix(hex, 16).ok()
-            } else {
-                token.parse::<u32>().ok()
-            };
-            return parsed;
-        }
-    }
-    None
+    u128::from_str_radix(&guid.replace('-', ""), 16).ok()
+}
+
+/// The AC value of a power setting in `scheme`.
+///
+/// Read through the power API: `powercfg /query` translates its
+/// "Current AC Power Setting Index" label, so parsing it failed on every
+/// non-English Windows install.
+#[cfg(windows)]
+fn read_power_ac(scheme: &str, subgroup: &str, setting: &str) -> Option<u32> {
+    use windows::Win32::Foundation::ERROR_SUCCESS;
+    use windows::Win32::System::Power::PowerReadACValueIndex;
+    use windows::core::GUID;
+
+    let scheme = GUID::from_u128(power_guid(scheme)?);
+    let subgroup = GUID::from_u128(power_guid(subgroup)?);
+    let setting = GUID::from_u128(power_guid(setting)?);
+    let mut value = 0u32;
+    let status = unsafe {
+        PowerReadACValueIndex(
+            None,
+            Some(&scheme),
+            Some(&subgroup),
+            Some(&setting),
+            &mut value,
+        )
+    };
+    (status == ERROR_SUCCESS).then_some(value)
 }
 
 #[cfg(windows)]
@@ -1905,6 +1921,42 @@ mod tests {
         assert_eq!(service_start_keyword(Some(4)).unwrap(), "disabled");
     }
 
+    #[test]
+    fn power_guids_resolve_aliases_and_reject_anything_else() {
+        assert_eq!(
+            power_guid("SUB_PROCESSOR"),
+            Some(0x54533251_82be_4824_96c1_47b60b740d00)
+        );
+        assert_eq!(
+            power_guid("CPMINCORES"),
+            Some(0x0cc5b647_c1df_4637_891a_dec35c318583)
+        );
+        assert_eq!(
+            power_guid("381B4222-F694-41F0-9685-FF5BB260DF2E"),
+            Some(0x381b4222_f694_41f0_9685_ff5bb260df2e)
+        );
+        // Every alias an action names must resolve, or its snapshot fails.
+        for tweak in TWEAKS {
+            for action in tweak.actions {
+                if let Action::PowerAc {
+                    subgroup, setting, ..
+                } = action
+                {
+                    assert!(power_guid(subgroup).is_some(), "{subgroup}");
+                    assert!(power_guid(setting).is_some(), "{setting}");
+                }
+            }
+        }
+        for invalid in [
+            "SCHEME_CURRENT",
+            "not-a-setting",
+            "",
+            "{381b4222-f694-41f0-9685-ff5bb260df2e}",
+        ] {
+            assert_eq!(power_guid(invalid), None, "{invalid}");
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn incomplete_legacy_power_and_service_undo_records_do_not_run_system_changes() {
@@ -1934,6 +1986,10 @@ mod tests {
             .is_err()
         );
         assert!(set_power_ac("SCHEME_CURRENT", "invalid", "invalid", 0).is_err());
+        assert_eq!(
+            read_power_ac("not-a-guid", "SUB_PROCESSOR", "CPMINCORES"),
+            None
+        );
         let service = Action::ServiceDisable {
             name: "not-a-service",
         };
