@@ -7800,8 +7800,18 @@ fn auto_routing_packet_action(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InlineCacheEntry {
     Active,
-    FinSeen,
+    /// A local FIN was seen at this time. Kept so the teardown ACKs still use
+    /// the relay, then dropped once the close is long over.
+    FinSeen(Instant),
 }
+
+/// How long a flow whose local FIN was seen stays cached. A normal close sends
+/// only one local FIN, so without this every gracefully closed flow stayed
+/// cached until a RST or port reuse. Over a long session the cache reached its
+/// 10,000-entry cap, after which new flows were relayed for their SYN only and
+/// then fell back to the direct path mid-connection. A minute covers the
+/// teardown ACKs with plenty of margin.
+const INLINE_FIN_SEEN_TTL: Duration = Duration::from_secs(60);
 
 type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), InlineCacheEntry>;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
@@ -7815,8 +7825,18 @@ fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache, api_tu
     // UDP ownership entries must track the newest process snapshot, but captured
     // Route Assist TCP flows must survive owner-table refreshes after their SYN
     // was MSS-clamped and relayed. RST packets evict TCP entries immediately;
-    // FIN must stay cached so the final teardown ACK still uses the relay.
-    inline_cache.retain(|(_, _, protocol), _| *protocol == Protocol::Tcp);
+    // FIN must stay cached so the final teardown ACK still uses the relay,
+    // but only for a while (`INLINE_FIN_SEEN_TTL`).
+    let now = Instant::now();
+    inline_cache.retain(|(_, _, protocol), entry| {
+        *protocol == Protocol::Tcp
+            && match entry {
+                InlineCacheEntry::Active => true,
+                InlineCacheEntry::FinSeen(at) => {
+                    now.saturating_duration_since(*at) < INLINE_FIN_SEEN_TTL
+                }
+            }
+    });
 }
 
 fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool {
@@ -8324,14 +8344,14 @@ where
                 let flags = tcp_flags.unwrap_or(0);
                 if (flags & 0x04) != 0 {
                     true
-                } else if *entry == InlineCacheEntry::FinSeen {
+                } else if matches!(*entry, InlineCacheEntry::FinSeen(_)) {
                     // Bare ACKs after a local FIN can still acknowledge
                     // in-flight server data in a half-closed connection.
                     // Keep routing until RST, a second FIN, or a future SYN
                     // reclassifies a recycled port.
                     (flags & 0x01) != 0
                 } else if (flags & 0x01) != 0 {
-                    *entry = InlineCacheEntry::FinSeen;
+                    *entry = InlineCacheEntry::FinSeen(Instant::now());
                     false
                 } else {
                     false
@@ -12953,6 +12973,32 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_refresh_drops_long_closed_tcp_inline_entries() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let Some(long_ago) =
+            Instant::now().checked_sub(INLINE_FIN_SEEN_TTL + Duration::from_secs(1))
+        else {
+            return;
+        };
+        let mut inline_cache: InlineCache = HashMap::new();
+        inline_cache.insert((src_ip, 40000, Protocol::Tcp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            (src_ip, 40001, Protocol::Tcp),
+            InlineCacheEntry::FinSeen(Instant::now()),
+        );
+        inline_cache.insert(
+            (src_ip, 40002, Protocol::Tcp),
+            InlineCacheEntry::FinSeen(long_ago),
+        );
+
+        prune_inline_cache_on_snapshot_refresh(&mut inline_cache, true);
+
+        assert!(inline_cache.contains_key(&(src_ip, 40000, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&(src_ip, 40001, Protocol::Tcp)));
+        assert!(!inline_cache.contains_key(&(src_ip, 40002, Protocol::Tcp)));
+    }
+
+    #[test]
     fn test_tcp_inline_cache_hit_keeps_fin_seen_through_half_close_acks() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
@@ -12976,10 +13022,10 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert_eq!(
+        assert!(matches!(
             inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
-            Some(&InlineCacheEntry::FinSeen)
-        );
+            Some(InlineCacheEntry::FinSeen(_))
+        ));
 
         assert!(should_route_to_vpn_with_inline_cache(
             &ack_frame,
@@ -12987,10 +13033,10 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert_eq!(
+        assert!(matches!(
             inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
-            Some(&InlineCacheEntry::FinSeen)
-        );
+            Some(InlineCacheEntry::FinSeen(_))
+        ));
 
         assert!(should_route_to_vpn_with_inline_cache(
             &ack_frame,
@@ -12998,10 +13044,10 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert_eq!(
+        assert!(matches!(
             inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
-            Some(&InlineCacheEntry::FinSeen)
-        );
+            Some(InlineCacheEntry::FinSeen(_))
+        ));
 
         assert!(should_route_to_vpn_with_inline_cache(
             &second_fin_frame,
@@ -13049,7 +13095,10 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::FinSeen);
+        inline_cache.insert(
+            (src_ip, src_port, Protocol::Tcp),
+            InlineCacheEntry::FinSeen(Instant::now()),
+        );
 
         assert!(!should_route_to_vpn_with_inline_cache(
             &syn_frame,

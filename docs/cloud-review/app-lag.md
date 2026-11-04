@@ -35,3 +35,16 @@ in Windows CI. Frontend tests (`npm test`) run here.
   destination the SYN goes direct whoever owns it, so the lookup is now skipped there. Routing is
   unchanged; only the diagnostic owner field is missing in that case.
 - Test: `test_route_assist_skips_owner_lookup_for_unrelated_https_syn`.
+
+### 3. Closed TCP flows leaked in the reader's inline cache (fixed)
+- `swifttunnel-core/src/vpn/parallel_interceptor.rs`, `InlineCacheEntry`, `prune_inline_cache_on_snapshot_refresh`
+  and the FIN handling in the inline-cache phase.
+- An entry was only evicted on RST, a second local FIN, or port reuse. A normal close sends one local
+  FIN, so every gracefully closed relayed TCP flow stayed as `FinSeen` forever, and snapshot refreshes
+  kept all TCP entries. Over a long Full Country Ban / Route Assist session the map grew until its
+  10,000-entry cap. After that new flows were not cached: their SYN was relayed and later packets went
+  direct, which breaks those connections midway. That is memory growth turning into a correctness bug.
+- Fix: `FinSeen` now records when the FIN was seen, and the existing prune on snapshot refresh drops
+  entries older than 60s. Test: `test_snapshot_refresh_drops_long_closed_tcp_inline_entries`.
+- Not fixed: `Active` TCP entries for flows that die without FIN/RST (timeouts) still only leave on port
+  reuse. They are rare; tracking a last-seen time per packet would add a clock read on the hot path.
