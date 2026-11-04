@@ -4,7 +4,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
-import { useLiveUpdates } from "../../lib/useLiveUpdates";
+import { useLiveStoreValue, useLiveUpdates } from "../../lib/useLiveUpdates";
 import { useAuthStore } from "../../stores/authStore";
 import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
@@ -30,7 +30,7 @@ export function TopBar() {
   const activeTab = useSettingsStore((s) => s.activeTab);
   const setTab = useSettingsStore((s) => s.setTab);
   const vpnState = useVpnStore((s) => s.state);
-  const ping = useVpnStore((s) => s.ping);
+  const ping = useLiveStoreValue(useVpnStore, (s) => s.ping);
   const robloxRunning = useBoostStore((s) => s.robloxRunning);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
   const email = useAuthStore((s) => s.email);

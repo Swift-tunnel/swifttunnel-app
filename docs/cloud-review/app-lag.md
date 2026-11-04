@@ -158,3 +158,20 @@ in Windows CI. Frontend tests (`npm test`) run here.
   player changes and a handle without query rights still go through sysinfo as before.
 - Tests: `held_player_cpu_is_a_share_of_the_whole_machine`, and on Windows
   `metric_samples_of_a_held_player_do_not_snapshot_the_system`.
+
+### 12. In-game ping and Roblox stats re-rendered the hidden Connect tab every second (fixed)
+- `swifttunnel-desktop/src/components/connect/ConnectTab.tsx` (`ping`), `SessionCards.tsx`
+  (`RobloxCard` cpu/RAM/FPS, `SessionCards` session stats), `shell/TopBar.tsx` and `shell/Sidebar.tsx`
+  (`ping`); new `useLiveStoreValue` / `liveSelector` in `lib/useLiveUpdates.ts`.
+- While a game runs, the overlay driver refreshes ping and Roblox CPU/RAM/FPS every second, and each
+  ping reading also updates the session statistics. `ConnectTab` subscribed to `ping` at the top of the
+  tab and used it as a `useMemo` dependency of the region list, so every new reading re-rendered the
+  whole tab and rebuilt every region row, all while the window was behind the game. WebView2 occlusion
+  tracking is disabled on purpose (`apply_webview2_resource_tuning`), so those DOM changes were also
+  painted. The other readouts did the same on a smaller scale.
+- The app already pauses cosmetic updates while unfocused (`useLiveUpdates`, `idle_when_unfocused`),
+  but these readouts were not using it. `useLiveStoreValue` subscribes normally while live; while paused
+  its selector returns one constant, so store writes do not re-render the component at all, and the value
+  catches up the moment the window is back in front. Only display values use it; routing, overlay and
+  session bookkeeping still read the stores directly.
+- Test: `src/lib/useLiveUpdates.test.ts`. Frontend suite, `tsc` and `vite build` pass.

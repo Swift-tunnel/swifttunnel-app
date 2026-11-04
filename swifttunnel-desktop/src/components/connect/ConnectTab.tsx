@@ -11,7 +11,7 @@ import { formatConnectedServerLabel, relayDisplayLabel, regionPresentation } fro
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useRelayLatencyPolling } from "../../lib/useRelayLatencyPolling";
-import { useLiveUpdates } from "../../lib/useLiveUpdates";
+import { useLiveStoreValue, useLiveUpdates } from "../../lib/useLiveUpdates";
 import { useTrafficSamples } from "../../lib/useTrafficSamples";
 import { RouteDiagram } from "./RouteDiagram";
 import { RelayPicker } from "./RelayPicker";
@@ -47,7 +47,9 @@ export function ConnectTab() {
   const gameRoute = useVpnStore((s) => s.gameRoute);
   const serverEndpoint = useVpnStore((s) => s.serverEndpoint);
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
-  const ping = useVpnStore((s) => s.ping);
+  // Display and ordering only. Held while in game, so a new reading does not
+  // re-render the whole tab and every region row behind the game.
+  const ping = useLiveStoreValue(useVpnStore, (s) => s.ping);
   const connectedAt = useVpnStore((s) => s.connectedAt);
   const driverSetupState = useVpnStore((s) => s.driverSetupState);
   const driverSetupError = useVpnStore((s) => s.driverSetupError);
