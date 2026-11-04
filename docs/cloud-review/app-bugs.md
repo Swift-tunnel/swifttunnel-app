@@ -237,3 +237,20 @@ commits, tests next to each fix.
   the session itself was not split).
 - Status: fixed to match the full app, with a test. Lite suite passes under
   Wine.
+
+### 15. Lite's "Unlock FPS" switch could not be turned off
+
+- File: `swifttunnel-lite/src/engine.rs` (`apply_roblox`, new
+  `frame_cap_to_write`).
+- Why it matters: Lite has no saved unlock setting; it shows the switch as
+  on whenever Roblox's `FramerateCap` is above 60, and its toggle sets the
+  draft to 60 "so the client stops running at the raised cap". But Apply
+  passed `unlock_fps: false`, which core reads as "leave the cap alone". The
+  raised cap stayed, and after Apply the re-read turned the switch back on.
+- Status: fixed. Lite always sends `unlock_fps: true` with the cap to write:
+  the typed value when on, 60 when off. The full app's meaning of
+  `unlock_fps: false` (do not touch the cap) is unchanged. Test added; Lite
+  suite passes under Wine.
+- Related, not changed: the full app's session card shows "Default FPS cap
+  60" when unlock is off, although Roblox may still be at a higher cap set
+  in its own menu.

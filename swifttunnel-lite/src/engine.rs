@@ -875,8 +875,9 @@ impl Engine {
         state.focus = None;
 
         let config = RobloxSettingsConfig {
-            unlock_fps: draft.unlock_fps,
-            target_fps: draft.fps().unwrap_or(DEFAULT_FRAME_CAP),
+            // Always write the cap: see `frame_cap_to_write`.
+            unlock_fps: true,
+            target_fps: frame_cap_to_write(draft.unlock_fps, draft.fps()),
             graphics_quality: quality_of(draft.quality),
             window_fullscreen: draft.fullscreen,
             ultraboost: draft.ultraboost,
@@ -2615,6 +2616,19 @@ fn describe(state: &ConnectionState) -> String {
     }
 }
 
+/// The FramerateCap Lite writes. Lite keeps no unlock setting of its own: the
+/// switch shows whether Roblox's cap is above 60, so switching it off has to
+/// write 60. Passing `unlock_fps: false` instead tells core to leave the cap
+/// alone, so Roblox kept the raised cap and the switch turned itself back on
+/// after Apply.
+fn frame_cap_to_write(unlock: bool, typed: Option<u32>) -> u32 {
+    if unlock {
+        typed.unwrap_or(DEFAULT_FRAME_CAP)
+    } else {
+        DEFAULT_FRAME_CAP
+    }
+}
+
 /// Bypass and Auto contradict each other, so turning Bypass on turns Auto off,
 /// as the full app does and as Route Assist already did here. Leaving both on
 /// only lasted until the next launch, when loading the settings turned Auto
@@ -2844,9 +2858,28 @@ fn open_logs() {
 
 #[cfg(test)]
 mod tests {
-    use super::{keep_current_window_size, level_of, quality_of, toggle_country_ban};
+    use super::{
+        DEFAULT_FRAME_CAP, frame_cap_to_write, keep_current_window_size, level_of, quality_of,
+        toggle_country_ban,
+    };
     use swifttunnel_core::settings::AppSettings;
     use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
+
+    #[test]
+    fn switching_unlock_off_writes_the_default_cap() {
+        assert_eq!(frame_cap_to_write(false, Some(240)), DEFAULT_FRAME_CAP);
+        assert_eq!(frame_cap_to_write(true, Some(240)), 240);
+        assert_eq!(frame_cap_to_write(true, None), DEFAULT_FRAME_CAP);
+        let config = RobloxSettingsConfig {
+            unlock_fps: true,
+            target_fps: frame_cap_to_write(false, Some(240)),
+            ..RobloxSettingsConfig::default()
+        };
+        assert_eq!(
+            config.checked_frame_cap(),
+            Ok(Some(DEFAULT_FRAME_CAP as i32))
+        );
+    }
 
     #[test]
     fn enabling_country_ban_bypass_turns_auto_routing_off() {
