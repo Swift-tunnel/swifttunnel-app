@@ -900,6 +900,12 @@ impl Engine {
                     }
                 },
                 || {
+                    // Read after Roblox has closed, since it saves its window on exit.
+                    let mut config = config.clone();
+                    keep_current_window_size(
+                        &mut config,
+                        optimizer.read_current_settings().ok().and_then(|current| current.window_size),
+                    );
                     let mut warnings = optimizer.apply_optimizations(&config).map_err(|e| e.to_string())?;
                     if let Ok(mut guard) = shared.settings.write() {
                         let roblox = &mut guard.config.roblox_settings;
@@ -2609,22 +2615,32 @@ fn describe(state: &ConnectionState) -> String {
     }
 }
 
+/// Lite's chips offer Auto, Low and Max, but a player may have picked any
+/// level in Roblox's own menu. Both directions keep that level: collapsing 2..=9
+/// to Automatic here made every Apply, even one that only changed the frame
+/// cap, overwrite the player's graphics level with Automatic.
 fn quality_of(level: u32) -> GraphicsQuality {
-    match level {
-        0 => GraphicsQuality::Automatic,
-        1 => GraphicsQuality::Level1,
-        10 => GraphicsQuality::Level10,
-        _ => GraphicsQuality::Automatic,
+    if level > 10 {
+        return GraphicsQuality::Automatic;
     }
+    GraphicsQuality::from_level(level as i32)
 }
 
 /// Roblox stores the quality level as a number, so this is its own scale
 /// rather than the enum the writer takes. 0 is automatic.
 fn level_of(quality: i32) -> u32 {
-    match quality {
-        1 => 1,
-        10 => 10,
-        _ => 0,
+    u32::try_from(quality)
+        .ok()
+        .filter(|level| *level <= 10)
+        .unwrap_or(0)
+}
+
+/// Lite has no window-size control. Write back the size Roblox already has,
+/// or every Apply reset the player's windowed size to the default.
+fn keep_current_window_size(config: &mut RobloxSettingsConfig, current: Option<(u32, u32)>) {
+    if let Some((width, height)) = current {
+        config.window_width = width;
+        config.window_height = height;
     }
 }
 
@@ -2817,6 +2833,30 @@ fn open_logs() {
 
 #[cfg(test)]
 mod tests {
+    use super::{keep_current_window_size, level_of, quality_of};
+    use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
+
+    #[test]
+    fn every_roblox_quality_level_survives_a_read_and_apply() {
+        for level in 0..=10 {
+            assert_eq!(level_of(quality_of(level).to_level()), level, "{level}");
+        }
+        assert_eq!(quality_of(11), GraphicsQuality::Automatic);
+        assert_eq!(level_of(-1), 0);
+        assert_eq!(level_of(21), 0);
+    }
+
+    #[test]
+    fn applying_keeps_the_window_size_roblox_already_has() {
+        let mut config = RobloxSettingsConfig::default();
+        keep_current_window_size(&mut config, Some((1600, 900)));
+        assert_eq!((config.window_width, config.window_height), (1600, 900));
+        let defaults = RobloxSettingsConfig::default();
+        let mut unknown = defaults.clone();
+        keep_current_window_size(&mut unknown, None);
+        assert_eq!(unknown, defaults);
+    }
+
     #[tokio::test]
     async fn automatic_download_is_not_polled_while_busy_and_a_new_game_drops_active_work() {
         use super::*;

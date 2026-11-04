@@ -209,3 +209,19 @@ commits, tests next to each fix.
   icacls; it only clears a read-only attribute.
 - Status: removed the dead code and corrected the comment. Windows check,
   `tsc` and the frontend suite pass.
+
+### 13. Lite's Apply reset Roblox graphics level and window size
+
+- File: `swifttunnel-lite/src/engine.rs` (`quality_of`, `level_of`,
+  `apply_roblox`).
+- Why it matters: Lite offers Auto, Low and Max, but read Roblox's saved
+  level through `level_of`, which mapped every level except 1 and 10 to
+  Automatic. Any Apply, even one that only changed the frame cap, then wrote
+  Automatic over a level the player chose in Roblox's own menu (2 to 9).
+  The same Apply built its config with `..RobloxSettingsConfig::default()`,
+  so it also replaced Roblox's saved windowed size (`StartScreenSize`) with
+  the default.
+- Status: fixed. Levels 0 to 10 round-trip unchanged (no chip is selected
+  for 2 to 9, which is accurate), and Apply writes back the window size
+  Roblox already has, read after Roblox is closed. Tests cover both; the
+  Lite suite (90 tests) passes under Wine.
