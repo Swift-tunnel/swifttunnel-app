@@ -38,6 +38,7 @@ pub(crate) mod route_measurements;
 pub mod route_preview;
 pub mod servers;
 pub mod split_tunnel;
+mod stale_network_state;
 pub mod tso_recovery;
 pub mod tunnel_mode_recovery;
 pub mod udp_relay;
@@ -68,6 +69,7 @@ pub use split_tunnel::{
     SplitTunnelDriverHealth, StaleCleanupReport, get_apps_for_preset_set, get_apps_for_presets,
     get_tunnel_apps_for_presets,
 };
+pub use stale_network_state::recover_stale_network_state;
 pub use tso_recovery::{emergency_tso_restore, recover_tso_on_startup};
 pub use tunnel_mode_recovery::recover_tunnel_mode_on_startup;
 pub use udp_relay::{RelayAuthAckStatus, RelayContext, RelayPingSnapshot, UdpRelay};

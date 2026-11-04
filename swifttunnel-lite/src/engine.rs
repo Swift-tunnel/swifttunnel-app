@@ -133,6 +133,9 @@ struct Shared {
     /// Automatic reconnects that failed since the tunnel was last up, and the
     /// earliest time the next one may start.
     reconnect_backoff: std::sync::Mutex<ReconnectBackoff>,
+    /// True once the startup clean-up of a previous session's network state
+    /// has run. Connect waits for it, as the full app does.
+    startup_recovery_done: tokio::sync::watch::Receiver<bool>,
 }
 
 /// Paces automatic reconnects. Without it a reconnect that kept failing (no
@@ -266,6 +269,7 @@ impl Engine {
         // It finishes when Shared drops its sender, without blocking the GUI.
         drop(settings_writer);
 
+        let (startup_recovery_signal, startup_recovery_done) = tokio::sync::watch::channel(false);
         let shared = Arc::new(Shared {
             runtime: runtime.into(),
             auth: Arc::new(tokio::sync::Mutex::new(auth)),
@@ -308,6 +312,7 @@ impl Engine {
             intentional_disconnect: AtomicBool::new(false),
             was_connected: AtomicBool::new(false),
             reconnect_backoff: std::sync::Mutex::new(ReconnectBackoff::default()),
+            startup_recovery_done,
         });
 
         // Own shutdown before launching workers. A later startup failure must
@@ -340,6 +345,22 @@ impl Engine {
                     shared.notify();
                 }
             });
+        }
+
+        // A previous session that crashed or was killed can leave hosts-file
+        // overrides, WFP filters, an adapter in tunnel mode and adapter
+        // settings behind, some of which survive a reboot. Lite never ran
+        // this clean-up, so a Lite-only player kept them until the full app
+        // was opened. If the worker panics the sender is dropped and connect
+        // reports that recovery stopped, rather than connecting mid-reset.
+        if let Err(error) = std::thread::Builder::new()
+            .name("lite-network-recovery".into())
+            .spawn(move || {
+                swifttunnel_core::vpn::recover_stale_network_state();
+                let _ = startup_recovery_signal.send(true);
+            })
+        {
+            log::warn!("Could not start network recovery: {error}");
         }
 
         // Recovery is independent of adapter discovery. A slow recovery must
@@ -1617,6 +1638,11 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
     if shared.stop.load(Ordering::Relaxed) {
         return Err("SwiftTunnel is closing.".into());
     }
+    swifttunnel_core::vpn::connect_policy::wait_for_startup_recovery(
+        shared.startup_recovery_done.clone(),
+        Duration::from_secs(20),
+    )
+    .await?;
     let mut settings = shared
         .settings
         .read()

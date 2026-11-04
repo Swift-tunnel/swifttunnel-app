@@ -323,3 +323,20 @@ commits, tests next to each fix.
   while Roblox runs (automatic reconnects are not affected). The check runs
   on the worker task, not the window thread. Test added; Lite suite passes
   under Wine.
+
+### 21. Lite never cleaned up network state left by a crashed session
+
+- Files: new `swifttunnel-core/src/vpn/stale_network_state.rs`
+  (`recover_stale_network_state`, moved from
+  `swifttunnel-desktop/src-tauri/src/lib.rs`), `swifttunnel-lite/src/engine.rs`
+  (`Engine::new`, `connect`).
+- Why it matters: the full app runs a startup clean-up (stale hosts-file
+  overrides, WFP filters, adapters left in WinpkFilter tunnel mode, TSO and
+  IPv6 markers, leftover adapter bindings) and makes Connect wait for it.
+  Lite ran none of it. After Lite crashed, was killed or lost power
+  mid-session, a Lite-only player kept those changes; the hosts overrides
+  and disabled large-send offload also survive a reboot.
+- Status: fixed. The routine moved to core unchanged and both clients call
+  it. Lite runs it on a worker at startup and its connect waits for it with
+  the full app's 20 s bound (`connect_policy::wait_for_startup_recovery`).
+  Compile-checked for Windows; Lite and desktop suites pass under Wine.
