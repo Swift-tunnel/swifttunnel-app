@@ -1649,32 +1649,21 @@ fn service_start_keyword(start_type: Option<u32>) -> Result<&'static str, String
     }
 }
 
-fn parse_service_running(text: &str) -> Option<bool> {
-    let state = text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("STATE")
-            .and_then(|rest| rest.trim().strip_prefix(':'))
-    })?;
-    match state.split_whitespace().next()? {
-        "1" => Some(false),
-        "4" => Some(true),
-        _ => None, // Starting, stopping or paused is not a stable original state.
+/// Whether a service is in a state an undo record can restore: running or
+/// stopped. Starting, stopping or paused is not a stable original state.
+fn stable_service_running(state: u32) -> Option<bool> {
+    match state {
+        1 => Some(false),
+        4 => Some(true),
+        _ => None,
     }
 }
 
 #[cfg(windows)]
 fn read_service_running(name: &str) -> Option<bool> {
-    // `sc query` blocks on the service control manager, which a hung service
-    // can hold. Reporting "unknown" beats stalling the caller.
-    let out = crate::run_hidden_command_with_timeout(
-        "sc",
-        &["query", name],
-        std::time::Duration::from_secs(20),
-    );
-    if !out.success {
-        return None;
-    }
-    parse_service_running(&out.stdout)
+    crate::utils::query_service_state(name)
+        .ok()
+        .and_then(stable_service_running)
 }
 
 // ── powercfg helpers (Windows) ──────────────────────────────────────────────
@@ -1903,12 +1892,12 @@ mod tests {
 
     #[test]
     fn service_snapshots_reject_unstable_states_and_never_invent_a_start_type() {
-        assert_eq!(parse_service_running("STATE : 4 RUNNING"), Some(true));
-        assert_eq!(parse_service_running("STATE : 1 STOPPED"), Some(false));
-        assert_eq!(parse_service_running("STATE : 2 START_PENDING"), None);
-        assert_eq!(parse_service_running("STATE : 3 STOP_PENDING"), None);
-        assert_eq!(parse_service_running("STATE : 7 PAUSED"), None);
-        assert_eq!(parse_service_running("Access denied"), None);
+        assert_eq!(stable_service_running(4), Some(true));
+        assert_eq!(stable_service_running(1), Some(false));
+        assert_eq!(stable_service_running(2), None);
+        assert_eq!(stable_service_running(3), None);
+        assert_eq!(stable_service_running(7), None);
+        assert_eq!(stable_service_running(0), None);
         assert!(service_start_keyword(None).is_err());
         assert!(service_start_keyword(Some(1)).is_err());
         assert_eq!(service_start_keyword(Some(2)).unwrap(), "auto");

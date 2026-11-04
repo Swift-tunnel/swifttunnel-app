@@ -1216,26 +1216,6 @@ impl WindowsFirewallRepairResponse {
     }
 }
 
-fn parse_windows_service_state(output: &str) -> Option<String> {
-    for line in output.lines() {
-        let trimmed = line.trim();
-        if !trimmed.to_ascii_uppercase().starts_with("STATE") {
-            continue;
-        }
-
-        let Some((_, rest)) = trimmed.split_once(':') else {
-            continue;
-        };
-        let mut fields = rest.split_whitespace();
-        let _state_code = fields.next();
-        if let Some(state) = fields.next() {
-            return Some(state.to_ascii_uppercase());
-        }
-    }
-
-    None
-}
-
 #[cfg(windows)]
 #[derive(Clone, Debug)]
 struct WindowsRepairCommandOutput {
@@ -1382,15 +1362,15 @@ fn backup_windows_firewall_policy() -> Result<FirewallPolicyBackup, String> {
 
 #[cfg(windows)]
 fn query_firewall_service(name: &str, display_name: &str) -> WindowsFirewallServiceStatus {
-    let query = run_windows_repair_command("sc", &["query", name], Duration::from_secs(5));
-    let state = parse_windows_service_state(&format!("{}\n{}", query.stdout, query.stderr))
-        .unwrap_or_else(|| {
-            if query.success {
-                "unknown".to_string()
-            } else {
-                "query_failed".to_string()
-            }
-        });
+    // Read the state from the service control manager: `sc query` labels
+    // are translated, so its text cannot be parsed on non-English Windows.
+    let (state, message) = match swifttunnel_core::utils::query_service_state(name) {
+        Ok(code) => (
+            swifttunnel_core::utils::service_state_name(code).to_string(),
+            format!("service state {code}"),
+        ),
+        Err(error) => ("query_failed".to_string(), error),
+    };
 
     WindowsFirewallServiceStatus {
         name: name.to_string(),
@@ -1398,7 +1378,7 @@ fn query_firewall_service(name: &str, display_name: &str) -> WindowsFirewallServ
         state,
         start_attempted: false,
         start_succeeded: false,
-        message: query.summary("sc query"),
+        message,
     }
 }
 
@@ -2176,44 +2156,6 @@ pub async fn system_repair_driver(
 #[cfg(test)]
 mod windows_firewall_repair_tests {
     use super::*;
-
-    #[test]
-    fn parse_windows_service_state_reads_running_state() {
-        let output = r#"
-SERVICE_NAME: MpsSvc
-        TYPE               : 20  WIN32_SHARE_PROCESS
-        STATE              : 4  RUNNING
-"#;
-
-        assert_eq!(
-            parse_windows_service_state(output).as_deref(),
-            Some("RUNNING")
-        );
-    }
-
-    #[test]
-    fn parse_windows_service_state_reads_start_pending_state() {
-        let output = r#"
-SERVICE_NAME: MpsSvc
-        TYPE               : 20  WIN32_SHARE_PROCESS
-        STATE              : 2  START_PENDING
-"#;
-
-        assert_eq!(
-            parse_windows_service_state(output).as_deref(),
-            Some("START_PENDING")
-        );
-    }
-
-    #[test]
-    fn parse_windows_service_state_ignores_unrelated_text() {
-        assert_eq!(
-            parse_windows_service_state(
-                "The following command was not found: advfirewall firewall add rule."
-            ),
-            None
-        );
-    }
 
     #[test]
     fn unsupported_windows_firewall_response_is_not_successful() {

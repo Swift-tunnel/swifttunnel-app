@@ -286,6 +286,59 @@ pub fn normalize_guid_ascii_lowercase(value: &str) -> Option<String> {
     None
 }
 
+/// `dwCurrentState` of a Windows service, read from the service control
+/// manager.
+///
+/// Use this rather than parsing `sc query`: sc translates its field labels
+/// (`STATE` is `STATUS` on German Windows, `ÉTAT` on French), so text
+/// parsing silently failed outside English installs.
+#[cfg(windows)]
+pub fn query_service_state(name: &str) -> Result<u32, String> {
+    use windows::Win32::System::Services::{
+        CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_MANAGER_CONNECT,
+        SERVICE_QUERY_STATUS, SERVICE_STATUS,
+    };
+    use windows::core::PCWSTR;
+
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+            .map_err(|e| format!("could not open the service control manager: {e}"))?;
+        let result = match OpenServiceW(scm, PCWSTR(wide.as_ptr()), SERVICE_QUERY_STATUS) {
+            Ok(service) => {
+                let mut status = SERVICE_STATUS::default();
+                let queried = QueryServiceStatus(service, &mut status)
+                    .map(|()| status.dwCurrentState.0)
+                    .map_err(|e| format!("could not query service {name}: {e}"));
+                let _ = CloseServiceHandle(service);
+                queried
+            }
+            Err(e) => Err(format!("could not open service {name}: {e}")),
+        };
+        let _ = CloseServiceHandle(scm);
+        result
+    }
+}
+
+#[cfg(not(windows))]
+pub fn query_service_state(_name: &str) -> Result<u32, String> {
+    Err("Windows services are only available on Windows".to_string())
+}
+
+/// The `sc query` name for a `dwCurrentState` value.
+pub fn service_state_name(state: u32) -> &'static str {
+    match state {
+        1 => "STOPPED",
+        2 => "START_PENDING",
+        3 => "STOP_PENDING",
+        4 => "RUNNING",
+        5 => "CONTINUE_PENDING",
+        6 => "PAUSE_PENDING",
+        7 => "PAUSED",
+        _ => "unknown",
+    }
+}
+
 /// Check if the current process has administrator privileges
 ///
 /// Returns true if running with elevated privileges, false otherwise.
@@ -1032,6 +1085,24 @@ mod error_chain_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_state_names_match_sc_query() {
+        assert_eq!(service_state_name(1), "STOPPED");
+        assert_eq!(service_state_name(2), "START_PENDING");
+        assert_eq!(service_state_name(4), "RUNNING");
+        assert_eq!(service_state_name(7), "PAUSED");
+        assert_eq!(service_state_name(0), "unknown");
+        assert_eq!(service_state_name(8), "unknown");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn query_service_state_reads_a_core_service_and_rejects_a_missing_one() {
+        // The RPC endpoint mapper runs on every supported Windows install.
+        assert_eq!(query_service_state("RpcSs"), Ok(4));
+        assert!(query_service_state("SwiftTunnelNoSuchService").is_err());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn cancelling_a_blocking_step_keeps_its_operation_owned_until_it_returns() {

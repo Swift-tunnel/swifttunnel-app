@@ -10,6 +10,12 @@ Rust changes were compile-checked with
 `cargo check --target x86_64-pc-windows-gnu` (MinGW) where possible;
 Windows-only tests still need CI.
 
+From pass 2, Windows tests also run locally under Wine: install
+`gcc-mingw-w64-x86-64` and `wine64`, build with
+`cargo test -p swifttunnel-core --lib --target x86_64-pc-windows-gnu --no-run`
+and run the printed `.exe` with `/usr/lib/wine/wine64`. Wine is not Windows
+(no WFP, no NDIS driver), so failures there still need checking on CI.
+
 There is no `AGENTS.md` in the repository (checked in pass 2), so these
 passes follow the repository's existing conventions: rustfmt, small
 commits, tests next to each fix.
@@ -47,3 +53,18 @@ commits, tests next to each fix.
   deletes each copy and reports the first failure. Tests cover German and
   Japanese output, duplicates and truncated records. Compile-checked for
   Windows; the parser tests were also run on Linux from an extracted copy.
+
+### 3. Service state read from translated `sc query` text
+
+- Files: `swifttunnel-core/src/optimizations.rs` (`read_service_running`),
+  `swifttunnel-desktop/src-tauri/src/commands/system.rs`
+  (`query_firewall_service`).
+- Why it matters: both parsed the `STATE` line of `sc query`. sc translates
+  that label (`STATUS` in German, `ÉTAT` in French), so on non-English
+  Windows every service-disable optimization failed with "Couldn't read the
+  original service state", and the Windows Firewall repair reported the
+  firewall services as `unknown` and always tried to start them.
+- Status: fixed. Added `utils::query_service_state`, which reads
+  `dwCurrentState` from the service control manager, and
+  `service_state_name`. Both callers use it; the text parsers are gone.
+  Tests run under Wine (see environment notes).
