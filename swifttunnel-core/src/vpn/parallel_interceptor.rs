@@ -243,6 +243,19 @@ impl RebindState {
     }
 }
 
+/// How often a connected session re-probes the default route.
+///
+/// The connection monitor asks every 500ms. Each probe enumerates every
+/// adapter with `GetAdaptersAddresses` several times (interface state twice,
+/// the point-to-point check, the network signature), which is a heavy query
+/// into the network stack, and it ran for the whole session just to notice a
+/// rare Ethernet/Wi-Fi switch. Two seconds still catches that switch quickly.
+const ROUTE_CHANGE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+fn route_change_check_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= ROUTE_CHANGE_CHECK_INTERVAL)
+}
+
 /// Sleep for `total`, waking at most every 50ms to check `stop_flag`. Returns
 /// `true` if the caller should exit because `stop_flag` is set. Used during
 /// the reader rebind backoff so disconnect stays responsive.
@@ -1170,6 +1183,8 @@ pub struct ParallelInterceptor {
     queue_full_events: Arc<AtomicU64>,
     /// Last time we attempted to rebind adapters due to default-route changes.
     last_rebind_at: Option<Instant>,
+    /// Last default-route probe, see `ROUTE_CHANGE_CHECK_INTERVAL`.
+    last_route_check_at: Option<Instant>,
 }
 
 impl ParallelInterceptor {
@@ -1246,6 +1261,7 @@ impl ParallelInterceptor {
             udp_tunneling_enabled: Arc::new(AtomicBool::new(true)),
             queue_full_events: Arc::new(AtomicU64::new(0)),
             last_rebind_at: None,
+            last_route_check_at: None,
         }
     }
 
@@ -4999,6 +5015,10 @@ impl ParallelInterceptor {
         {
             return Ok(false);
         }
+        if !route_change_check_due(self.last_route_check_at, now) {
+            return Ok(false);
+        }
+        self.last_route_check_at = Some(now);
 
         let prev_default_if_index = self.default_route_if_index;
         let prev_default_next_hop = self.default_route_next_hop;
@@ -16635,5 +16655,20 @@ mod tests {
             !interruptible_sleep(Duration::from_millis(0), &stop_false),
             "total=0 with stop_flag=false should return false"
         );
+    }
+
+    #[test]
+    fn default_route_is_probed_at_most_every_two_seconds() {
+        let start = Instant::now();
+        assert!(route_change_check_due(None, start));
+        assert!(!route_change_check_due(Some(start), start));
+        assert!(!route_change_check_due(
+            Some(start),
+            start + Duration::from_millis(1500)
+        ));
+        assert!(route_change_check_due(
+            Some(start),
+            start + Duration::from_secs(2)
+        ));
     }
 }

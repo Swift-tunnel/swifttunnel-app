@@ -213,3 +213,18 @@ in Windows CI. Frontend tests (`npm test`) run here.
 - Fix: each regex needs a fixed piece of text (`! Joining game '`, `UDMUX Address = `), so check for
   it with `contains` first (about 15ns for both). Matches are unchanged; existing watcher tests cover
   the parsing.
+
+### 16. Default-route probe enumerated every network adapter several times a second (fixed)
+- `swifttunnel-core/src/vpn/parallel_interceptor.rs`, `maybe_rebind_on_default_route_change` (new
+  `ROUTE_CHANGE_CHECK_INTERVAL`), called from the connection monitor's 500ms refresh tick in
+  `vpn/connection.rs`.
+- Outside the 5s post-rebind cooldown, every tick re-probed the default route: `GetBestInterfaceEx`
+  per target, then `GetAdaptersAddresses` for the interface's up state, again for the point-to-point
+  check, again for the network signature (`list_network_adapters`), and again for the current adapter's
+  state. That is 4-8 full adapter enumerations per second for the whole session. `GetAdaptersAddresses`
+  queries the network stack per adapter and gets slower with VPN/virtual adapters installed, and it
+  ran just to notice a rare Ethernet/Wi-Fi switch.
+- Fix: probe at most every 2s. A network switch is still picked up within about 2s (it was 0.5s);
+  nothing else on the tick changes. Test: `default_route_is_probed_at_most_every_two_seconds`.
+- Not changed: an event-driven version (`NotifyRouteChange2` / `NotifyIpInterfaceChange`) would remove
+  the polling entirely but is a larger change; worth doing separately.
