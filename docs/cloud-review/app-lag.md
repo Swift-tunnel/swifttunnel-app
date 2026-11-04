@@ -23,3 +23,15 @@ in Windows CI. Frontend tests (`npm test`) run here.
   again without waiting (an empty-queue error on that follow-up read is treated as benign, not counted
   against the rebind budget). Also wait 10ms instead of 100ms while cloud-game packets are held for an
   owner lookup, so they replay promptly. Test: `reader_wakes_quickly_only_while_cloud_packets_are_held`.
+
+### 2. TCP owner-table lookup on the packet reader for every new HTTPS connection (fixed)
+- `swifttunnel-core/src/vpn/parallel_interceptor.rs`, `tcp_api_bootstrap_owner` in
+  `should_route_to_vpn_with_routing_flags_and_tcp_owner_process_lookup`.
+- With API tunneling on, the first SYN of *any* process's connection to port 80/443 (browser, Discord,
+  launchers) called `GetExtendedTcpTable` twice, scanned the whole table, and could `OpenProcess` the
+  owner, all on the single reader thread. The code's own estimate is about 500us per lookup, so a page
+  load with 20+ connections stalled every queued packet, Roblox's included, for milliseconds.
+- The owner only matters for Route Assist control hosts and Full Country Ban web traffic. For any other
+  destination the SYN goes direct whoever owns it, so the lookup is now skipped there. Routing is
+  unchanged; only the diagnostic owner field is missing in that case.
+- Test: `test_route_assist_skips_owner_lookup_for_unrelated_https_syn`.

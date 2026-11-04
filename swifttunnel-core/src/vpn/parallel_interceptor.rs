@@ -8429,11 +8429,19 @@ where
             && matches!(dst_port, 80 | 443)
             && country_ban_relays_web
             && !dst_is_direct_tcp;
-        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit {
-            tcp_owner_lookup(src_ip, src_port)
-        } else {
-            None
-        };
+        // The owner lookup reads the whole TCP table (and may open the owning
+        // process) on the reader thread, stalling every queued packet. Only do
+        // it when the owner can change the decision: a Route Assist control
+        // host, or Full Country Ban web traffic. Elsewhere the SYN stays
+        // direct whoever owns it.
+        let owner_can_change_decision =
+            is_route_assist_http_dst || is_full_country_ban_owner_missing_http_dst;
+        let tcp_api_bootstrap_owner =
+            if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && owner_can_change_decision {
+                tcp_owner_lookup(src_ip, src_port)
+            } else {
+                None
+            };
         let (tcp_api_bootstrap_owned_by_tunnel, tcp_api_bootstrap_owned_by_browser) =
             if is_tcp_api_bootstrap_syn && snapshot_tunnel_hit {
                 (true, false)
@@ -14078,6 +14086,44 @@ mod tests {
             },
         ));
         assert!(inline_cache.is_empty());
+    }
+
+    #[test]
+    fn test_route_assist_skips_owner_lookup_for_unrelated_https_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let web_ip = Ipv4Addr::new(142, 250, 80, 46);
+        let src_port = 40003;
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["robloxplayerbeta.exe".to_string()].into_iter().collect(),
+            tunnel_pids: [1234].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, web_ip, src_port, 443, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+        let lookups = std::cell::Cell::new(0u32);
+
+        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |_, _| {
+                lookups.set(lookups.get() + 1);
+                Some(1234)
+            },
+        ));
+        assert_eq!(
+            lookups.get(),
+            0,
+            "an unrelated HTTPS SYN must not read the TCP owner table on the reader"
+        );
     }
 
     #[test]
