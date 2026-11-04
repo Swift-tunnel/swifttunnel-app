@@ -670,11 +670,19 @@ impl Engine {
             let shared = shared.clone();
             async move {
                 let operation = operation;
+                let full_ban = shared
+                    .settings
+                    .read()
+                    .is_ok_and(|settings| settings.enable_country_ban);
                 let outcome = if connected {
                     let mut vpn = shared.vpn.lock().await;
                     vpn.disconnect()
                         .await
                         .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))
+                } else if let Some(message) =
+                    full_ban_connect_refusal(full_ban, RobloxOptimizer::player_is_running)
+                {
+                    Err(message.to_string())
                 } else {
                     connect(&shared).await
                 };
@@ -2703,6 +2711,19 @@ fn describe(state: &ConnectionState) -> String {
     }
 }
 
+/// Full Country Ban only helps connections Roblox opens after the tunnel is
+/// up: an already-running client keeps its login and game connections on the
+/// blocked direct path. The full app refuses this connect; Lite now does too.
+/// Only the Connect button checks it, not an automatic reconnect mid-game.
+const FULL_BAN_ROBLOX_RUNNING: &str = "Close Roblox before connecting with Full Country Ban. Then connect SwiftTunnel and reopen Roblox so login and game traffic use the bypass.";
+
+fn full_ban_connect_refusal(
+    full_ban: bool,
+    roblox_running: impl FnOnce() -> bool,
+) -> Option<&'static str> {
+    (full_ban && roblox_running()).then_some(FULL_BAN_ROBLOX_RUNNING)
+}
+
 /// The FramerateCap Lite writes. Lite keeps no unlock setting of its own: the
 /// switch shows whether Roblox's cap is above 60, so switching it off has to
 /// write 60. Passing `unlock_fps: false` instead tells core to leave the cap
@@ -2946,8 +2967,8 @@ fn open_logs() {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_FRAME_CAP, frame_cap_to_write, keep_current_window_size, level_of, quality_of,
-        toggle_country_ban,
+        DEFAULT_FRAME_CAP, FULL_BAN_ROBLOX_RUNNING, frame_cap_to_write, full_ban_connect_refusal,
+        keep_current_window_size, level_of, quality_of, toggle_country_ban,
     };
     use swifttunnel_core::settings::AppSettings;
     use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
@@ -2983,6 +3004,20 @@ mod tests {
         backoff.reset();
         assert!(backoff.due(start));
         assert_eq!(backoff.failures, 0);
+    }
+
+    #[test]
+    fn full_ban_connect_is_refused_only_while_roblox_runs() {
+        assert_eq!(
+            full_ban_connect_refusal(true, || true),
+            Some(FULL_BAN_ROBLOX_RUNNING)
+        );
+        assert_eq!(full_ban_connect_refusal(true, || false), None);
+        // Without Full Country Ban the process check is not even made.
+        assert_eq!(
+            full_ban_connect_refusal(false, || panic!("checked Roblox")),
+            None
+        );
     }
 
     #[test]

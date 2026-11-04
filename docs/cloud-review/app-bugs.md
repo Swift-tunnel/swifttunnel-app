@@ -306,3 +306,18 @@ commits, tests next to each fix.
   control in the app can produce.
 - Status: fixed. Imported caps are clamped to 30..99999. Test added (fails
   before, passes after); frontend suite passes.
+
+### 20. Lite connected Full Country Ban with Roblox already open
+
+- File: `swifttunnel-lite/src/engine.rs` (`primary`, new
+  `full_ban_connect_refusal`).
+- Why it matters: Full Country Ban only covers connections Roblox opens
+  after the tunnel is up. The full app refuses to connect it while Roblox is
+  running and tells the player to close Roblox first; that check lives in
+  the desktop UI store, so Lite skipped it. Lite players in blocked
+  countries got a "Connected" tunnel while Roblox's existing login and game
+  connections stayed on the blocked direct path.
+- Status: fixed. Lite's Connect button now refuses with the same message
+  while Roblox runs (automatic reconnects are not affected). The check runs
+  on the worker task, not the window thread. Test added; Lite suite passes
+  under Wine.
