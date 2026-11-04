@@ -341,9 +341,8 @@ fn find_inf_in_extract_dir_with_limit(
 ///
 /// Returns `None` in the healthy cases (not installed at all, or installed
 /// and working), so the caller should only cleanup when this returns `Some`.
-// TODO: handle multi-oem case — `find_installed_driver_published_name` only
-// returns the first match, so if the store has multiple stale ndisrd_lwf.inf
-// entries we'd only detect one. Rare in practice.
+// Detection only needs one stale entry; `remove_installed_driver_package`
+// deletes every ndisrd_lwf.inf copy the store holds.
 #[cfg(windows)]
 fn detect_broken_install() -> Option<String> {
     match swifttunnel_core::vpn::winpkfilter::find_installed_driver_published_name() {
@@ -356,11 +355,10 @@ fn detect_broken_install() -> Option<String> {
 /// extract the MSI payload via `msiexec /a`, locate the INF, and hand off
 /// to pnputil via the existing `install_driver_from_package_dir`.
 ///
-/// The pre-extract cleanup is mandatory: `install_driver_from_package_dir`
-/// short-circuits as success if the INF is already in the driver store,
-/// even when the driver is broken at runtime. Without cleanup, the
-/// fallback would silently claim success on exactly the state it was
-/// trying to fix.
+/// The pre-extract cleanup is mandatory: pnputil treats a package already
+/// in the driver store as installed, even when the driver is broken at
+/// runtime. Without cleanup, the fallback would silently claim success on
+/// exactly the state it was trying to fix.
 ///
 /// Caller owns `extract_dir` lifecycle — on `Ok`, caller may delete it;
 /// on `Err`, caller should preserve it for support triage.

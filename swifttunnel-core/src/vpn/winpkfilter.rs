@@ -758,41 +758,64 @@ pub fn install_driver_from_package_dir(_package_dir: &Path) -> Result<(), String
     Err("WinpkFilter installation is only supported on Windows".to_string())
 }
 
-#[cfg(windows)]
-fn parse_enum_drivers_output(output: &str, original_name: &str) -> Option<String> {
-    let target_name = original_name.to_ascii_lowercase();
-    let mut published_name: Option<String> = None;
-    let mut current_original_name: Option<String> = None;
+/// Published names (`oemNN.inf`) of every Driver Store package whose original
+/// INF is `original_name`, in `pnputil /enum-drivers` order.
+///
+/// pnputil localizes its field labels ("Published Name", "Nom publié",
+/// "Veröffentlichter Name", ...), so matching labels found nothing on
+/// non-English Windows. The values are not localized: each record is a block
+/// of lines, and the two values that matter are single tokens ending a line.
+/// A record may also list the same INF more than once across driver versions,
+/// so every match is returned rather than the first.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_enum_drivers_output(output: &str, original_name: &str) -> Vec<String> {
+    fn is_published_name(token: &str) -> bool {
+        let lower = token.to_ascii_lowercase();
+        lower
+            .strip_prefix("oem")
+            .and_then(|rest| rest.strip_suffix(".inf"))
+            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+    }
+
+    let mut matches = Vec::new();
+    let mut published_name: Option<&str> = None;
+    let mut original_matches = false;
 
     for line in output.lines().chain(std::iter::once("")) {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            if current_original_name.as_deref() == Some(target_name.as_str()) {
-                return published_name;
+        let Some(token) = line.split_whitespace().last() else {
+            if original_matches
+                && let Some(name) = published_name
+                && !matches
+                    .iter()
+                    .any(|m: &String| m.eq_ignore_ascii_case(name))
+            {
+                matches.push(name.to_string());
             }
             published_name = None;
-            current_original_name = None;
-            continue;
-        }
-
-        let Some((key, value)) = trimmed.split_once(':') else {
+            original_matches = false;
             continue;
         };
-
-        let key = key.trim().to_ascii_lowercase();
-        let value = value.trim();
-        match key.as_str() {
-            "published name" => published_name = Some(value.to_string()),
-            "original name" => current_original_name = Some(value.to_ascii_lowercase()),
-            _ => {}
+        // A value printed without a space after its label ("Name:oem7.inf",
+        // or a full-width colon) is still the last token on the line.
+        let token = token.rsplit([':', '\u{ff1a}']).next().unwrap_or(token);
+        if is_published_name(token) {
+            published_name = Some(token);
+        } else if token.eq_ignore_ascii_case(original_name) {
+            original_matches = true;
         }
     }
 
-    None
+    matches
 }
 
 #[cfg(windows)]
 pub fn find_installed_driver_published_name() -> Result<Option<String>, String> {
+    Ok(installed_driver_published_names()?.into_iter().next())
+}
+
+/// Every Driver Store package published for the WinpkFilter INF.
+#[cfg(windows)]
+fn installed_driver_published_names() -> Result<Vec<String>, String> {
     let output = crate::run_hidden_command_with_timeout(
         "pnputil",
         &["/enum-drivers"],
@@ -817,8 +840,7 @@ pub fn find_installed_driver_published_name() -> Result<Option<String>, String> 
         ));
     }
 
-    let stdout = output.stdout.as_str();
-    Ok(parse_enum_drivers_output(stdout, DRIVER_INF_NAME))
+    Ok(parse_enum_drivers_output(&output.stdout, DRIVER_INF_NAME))
 }
 
 #[cfg(not(windows))]
@@ -828,14 +850,31 @@ pub fn find_installed_driver_published_name() -> Result<Option<String>, String> 
 
 #[cfg(windows)]
 pub fn remove_installed_driver_package() -> Result<(), String> {
-    let Some(published_name) = find_installed_driver_published_name()? else {
+    let published_names = installed_driver_published_names()?;
+    if published_names.is_empty() {
         log::info!("WinpkFilter driver package is not present in the Driver Store");
         return Ok(());
-    };
+    }
 
+    // Remove every stale copy. Leaving one behind lets the next pnputil
+    // install treat the package as present and skip the repair it was for.
+    // Keep going after a failure so one locked package does not leave the
+    // rest in place, then report the first failure.
+    let mut first_error = None;
+    for published_name in &published_names {
+        if let Err(error) = delete_driver_package(published_name) {
+            log::warn!("{}", error);
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+#[cfg(windows)]
+fn delete_driver_package(published_name: &str) -> Result<(), String> {
     let output = crate::run_hidden_command_with_timeout(
         "pnputil",
-        &["/delete-driver", &published_name, "/uninstall", "/force"],
+        &["/delete-driver", published_name, "/uninstall", "/force"],
         DRIVER_COMMAND_TIMEOUT,
     );
     if output.timed_out {
@@ -1065,9 +1104,7 @@ mod tests {
 
     #[test]
     fn parse_enum_drivers_output_finds_matching_package() {
-        #[cfg(windows)]
-        {
-            let output = r"
+        let output = r"
 Microsoft PnP Utility
 
 Published Name:     oem7.inf
@@ -1078,30 +1115,21 @@ Published Name:     oem8.inf
 Original Name:      something_else.inf
 ";
 
-            assert_eq!(
-                parse_enum_drivers_output(output, DRIVER_INF_NAME).as_deref(),
-                Some("oem7.inf")
-            );
-        }
+        assert_eq!(
+            parse_enum_drivers_output(output, DRIVER_INF_NAME),
+            vec!["oem7.inf".to_string()]
+        );
     }
 
     #[test]
     fn parse_enum_drivers_output_returns_none_for_empty_output() {
-        #[cfg(windows)]
-        {
-            assert_eq!(parse_enum_drivers_output("", DRIVER_INF_NAME), None);
-            assert_eq!(
-                parse_enum_drivers_output("Microsoft PnP Utility\n\n", DRIVER_INF_NAME),
-                None
-            );
-        }
+        assert!(parse_enum_drivers_output("", DRIVER_INF_NAME).is_empty());
+        assert!(parse_enum_drivers_output("Microsoft PnP Utility\n\n", DRIVER_INF_NAME).is_empty());
     }
 
     #[test]
     fn parse_enum_drivers_output_returns_none_when_no_match() {
-        #[cfg(windows)]
-        {
-            let output = r"
+        let output = r"
 Microsoft PnP Utility
 
 Published Name:     oem5.inf
@@ -1112,24 +1140,78 @@ Published Name:     oem6.inf
 Original Name:      yet_another.inf
 Provider Name:      AnotherVendor
 ";
-            assert_eq!(parse_enum_drivers_output(output, DRIVER_INF_NAME), None);
-        }
+        assert!(parse_enum_drivers_output(output, DRIVER_INF_NAME).is_empty());
     }
 
     #[test]
     fn parse_enum_drivers_output_case_insensitive_original_name() {
-        #[cfg(windows)]
-        {
-            let output = r"
-Published Name:     oem12.inf
+        let output = r"
+Published Name:     OEM12.INF
 Original Name:      NDISRD_LWF.INF
 Provider Name:      NDISAPI
 ";
-            assert_eq!(
-                parse_enum_drivers_output(output, DRIVER_INF_NAME).as_deref(),
-                Some("oem12.inf")
-            );
-        }
+        assert_eq!(
+            parse_enum_drivers_output(output, DRIVER_INF_NAME),
+            vec!["OEM12.INF".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_enum_drivers_output_reads_localized_pnputil_labels() {
+        // pnputil translates its labels; only the values are stable.
+        let german = "Microsoft-PnP-Dienstprogramm\r\n\r\n\
+Veröffentlichter Name:  oem41.inf\r\n\
+Ursprünglicher Name:    ndisrd_lwf.inf\r\n\
+Anbietername:           NT KERNEL RESOURCES\r\n\r\n\
+Veröffentlichter Name:  oem42.inf\r\n\
+Ursprünglicher Name:    netrtwlane.inf\r\n";
+        assert_eq!(
+            parse_enum_drivers_output(german, DRIVER_INF_NAME),
+            vec!["oem41.inf".to_string()]
+        );
+        let japanese = "公開名：oem3.inf\n元の名前：ndisrd_lwf.inf\n";
+        assert_eq!(
+            parse_enum_drivers_output(japanese, DRIVER_INF_NAME),
+            vec!["oem3.inf".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_enum_drivers_output_returns_every_stale_copy_once() {
+        let output = r"
+Published Name:     oem7.inf
+Original Name:      ndisrd_lwf.inf
+Driver Version:     01/01/2023 3.4.8.1
+
+Published Name:     oem8.inf
+Original Name:      other.inf
+
+Published Name:     oem19.inf
+Original Name:      ndisrd_lwf.inf
+Driver Version:     06/01/2025 3.6.2.1
+
+Published Name:     oem7.inf
+Original Name:      ndisrd_lwf.inf
+";
+        assert_eq!(
+            parse_enum_drivers_output(output, DRIVER_INF_NAME),
+            vec!["oem7.inf".to_string(), "oem19.inf".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_enum_drivers_output_ignores_records_without_a_published_name() {
+        // A truncated record must not borrow the previous record's name.
+        let output =
+            "Published Name: oem7.inf\nOriginal Name: other.inf\n\nOriginal Name: ndisrd_lwf.inf\n";
+        assert!(parse_enum_drivers_output(output, DRIVER_INF_NAME).is_empty());
+        assert!(
+            parse_enum_drivers_output(
+                "Published Name: oem.inf\nOriginal Name: ndisrd_lwf.inf\n",
+                DRIVER_INF_NAME
+            )
+            .is_empty()
+        );
     }
 
     #[test]

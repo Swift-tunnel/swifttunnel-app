@@ -10,6 +10,10 @@ Rust changes were compile-checked with
 `cargo check --target x86_64-pc-windows-gnu` (MinGW) where possible;
 Windows-only tests still need CI.
 
+There is no `AGENTS.md` in the repository (checked in pass 2), so these
+passes follow the repository's existing conventions: rustfmt, small
+commits, tests next to each fix.
+
 ## Pass 1
 
 ### 1. Resolver answers for Jakarta and Tel Aviv were discarded
@@ -22,3 +26,24 @@ Windows-only tests still need CI.
   cached for hours, so those game servers were never routed to their relays.
 - Status: fixed. Added the missing mappings and a round-trip test over
   `all_regions()`. Compile-checked for Windows; test run pending (Windows CI).
+
+## Pass 2
+
+### 2. Driver Store lookup failed on non-English Windows and missed duplicates
+
+- File: `swifttunnel-core/src/vpn/winpkfilter.rs`
+  (`parse_enum_drivers_output`, `remove_installed_driver_package`).
+- Why it matters: the parser matched the English labels `Published Name`
+  and `Original Name` in `pnputil /enum-drivers` output. pnputil translates
+  those labels, so on German, French, Japanese, ... Windows the WinpkFilter
+  package was never found. Driver repair then skipped removing the stale
+  package, install verification reported the package missing after a good
+  install, and `driver_install_evidence` lost one of its signals. Separately,
+  only the first matching package was removed, so a store holding two stale
+  `ndisrd_lwf.inf` copies kept one (the old TODO in
+  `commands/system.rs`).
+- Status: fixed. The parser now keys on the values (`oemNN.inf` and the INF
+  name, which pnputil does not translate) and returns every match; removal
+  deletes each copy and reports the first failure. Tests cover German and
+  Japanese output, duplicates and truncated records. Compile-checked for
+  Windows; the parser tests were also run on Linux from an extracted copy.
