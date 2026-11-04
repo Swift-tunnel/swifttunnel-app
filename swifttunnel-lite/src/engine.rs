@@ -130,6 +130,39 @@ struct Shared {
     /// Whether the tunnel has been up at least once, so a failed first connect
     /// is not retried forever behind a dialog nobody asked for.
     was_connected: AtomicBool,
+    /// Automatic reconnects that failed since the tunnel was last up, and the
+    /// earliest time the next one may start.
+    reconnect_backoff: std::sync::Mutex<ReconnectBackoff>,
+}
+
+/// Paces automatic reconnects. Without it a reconnect that kept failing (no
+/// network, relay fleet down, broken driver) restarted every 5 s poll for as
+/// long as Lite stayed open, re-running auth, fleet and driver setup each time.
+#[derive(Debug, Default)]
+struct ReconnectBackoff {
+    failures: u32,
+    next_attempt: Option<Instant>,
+}
+
+impl ReconnectBackoff {
+    const FIRST_DELAY: Duration = Duration::from_secs(5);
+    const MAX_DELAY: Duration = Duration::from_secs(120);
+
+    fn due(&self, now: Instant) -> bool {
+        self.next_attempt.is_none_or(|at| now >= at)
+    }
+
+    fn failed(&mut self, now: Instant) {
+        let delay = Self::FIRST_DELAY
+            .saturating_mul(1 << self.failures.min(5))
+            .min(Self::MAX_DELAY);
+        self.failures = self.failures.saturating_add(1);
+        self.next_attempt = Some(now + delay);
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 impl Shared {
@@ -274,6 +307,7 @@ impl Engine {
             roblox_revision: AtomicU64::new(0),
             intentional_disconnect: AtomicBool::new(false),
             was_connected: AtomicBool::new(false),
+            reconnect_backoff: std::sync::Mutex::new(ReconnectBackoff::default()),
         });
 
         // Own shutdown before launching workers. A later startup failure must
@@ -2214,6 +2248,11 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                         ..
                     } => {
                         shared.was_connected.store(true, Ordering::Relaxed);
+                        shared
+                            .reconnect_backoff
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .reset();
                         since = Some(*started);
                         tunnel.status = Status::Connected;
                         tunnel.game_route = game_route;
@@ -2468,6 +2507,15 @@ fn maybe_reconnect(shared: &Arc<Shared>) {
         return;
     }
 
+    if !shared
+        .reconnect_backoff
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .due(Instant::now())
+    {
+        return;
+    }
+
     // A lockout means the server will refuse the ticket anyway.
     if shared
         .snapshot
@@ -2498,6 +2546,11 @@ fn maybe_reconnect(shared: &Arc<Shared>) {
         async move {
             let operation = operation;
             if let Err(error) = connect(&shared).await {
+                shared
+                    .reconnect_backoff
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .failed(Instant::now());
                 shared.edit(|s| {
                     s.tunnel.status = Status::Error;
                     s.tunnel.detail = error;
@@ -2864,6 +2917,27 @@ mod tests {
     };
     use swifttunnel_core::settings::AppSettings;
     use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
+
+    #[test]
+    fn failed_automatic_reconnects_back_off_up_to_two_minutes() {
+        use super::ReconnectBackoff;
+        use std::time::Instant;
+        let start = Instant::now();
+        let mut backoff = ReconnectBackoff::default();
+        assert!(backoff.due(start));
+        let mut delays = Vec::new();
+        for _ in 0..8 {
+            backoff.failed(start);
+            let next = backoff.next_attempt.unwrap();
+            assert!(!backoff.due(start));
+            assert!(backoff.due(next));
+            delays.push((next - start).as_secs());
+        }
+        assert_eq!(delays, [5, 10, 20, 40, 80, 120, 120, 120]);
+        backoff.reset();
+        assert!(backoff.due(start));
+        assert_eq!(backoff.failures, 0);
+    }
 
     #[test]
     fn switching_unlock_off_writes_the_default_cap() {

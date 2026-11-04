@@ -266,3 +266,16 @@ commits, tests next to each fix.
 - Status: fixed. The draft remembers the cap it was read with, and that
   untouched value is accepted; newly typed values keep Lite's 30 to 1000
   range. Test added; Lite suite (93 tests) passes under Wine.
+
+### 17. Lite's auto-reconnect retried every 5 seconds forever
+
+- File: `swifttunnel-lite/src/engine.rs` (`maybe_reconnect`, new
+  `ReconnectBackoff`).
+- Why it matters: with Auto-reconnect on (opt-in), a reconnect that failed
+  left the state at Error with `was_connected` still set, so the next idle
+  poll (5 s) started another full connect: token refresh, fleet refresh and
+  split-tunnel driver setup, indefinitely, for as long as the network or
+  relay stayed down.
+- Status: fixed. Failed automatic reconnects back off 5, 10, 20, 40, 80 s,
+  then every 120 s; a connected session resets the backoff. Manual connects
+  are not affected. Test added; Lite suite (94 tests) passes under Wine.
