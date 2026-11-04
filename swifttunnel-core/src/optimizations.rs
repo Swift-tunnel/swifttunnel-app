@@ -39,6 +39,16 @@ enum Action {
         name: &'static str,
         value: &'static [u8],
     },
+    /// Set one `key=value;` entry inside a shared registry string, leaving the
+    /// string's other entries alone (see `semicolon_settings`). Captured as a
+    /// `RegString` snapshot of the whole original string.
+    RegStringEntry {
+        hive: Hive,
+        path: &'static str,
+        name: &'static str,
+        key: &'static str,
+        value: &'static str,
+    },
     /// Create `default_path` and set its DEFAULT value to `value`, capturing
     /// whether `owned_path` (the topmost key this tweak introduces) already
     /// existed. Revert deletes the whole `owned_path` tree when we created it.
@@ -232,12 +242,15 @@ const TWEAKS: &[Tweak] = &[
         requires_admin: false,
         requires_reboot: false,
         // Windows 11 "Optimizations for windowed games" — lower-latency present
-        // path for borderless/windowed games.
-        actions: &[Action::RegString {
+        // path for borderless/windowed games. The same string holds the
+        // player's other Windows graphics settings (VRR for windowed games,
+        // Auto HDR), so only this entry is changed.
+        actions: &[Action::RegStringEntry {
             hive: Hive::Hkcu,
             path: r"Software\Microsoft\DirectX\UserGpuPreferences",
             name: "DirectXUserGlobalSettings",
-            value: "SwapEffectUpgradeEnable=1;",
+            key: "SwapEffectUpgradeEnable",
+            value: "1",
         }],
     },
     Tweak {
@@ -1297,6 +1310,9 @@ fn capture_action(action: &Action) -> Result<ActionSnapshot, String> {
         },
         Action::RegString {
             hive, path, name, ..
+        }
+        | Action::RegStringEntry {
+            hive, path, name, ..
         } => ActionSnapshot::RegString {
             value: read_reg_string(*hive, path, name)?,
         },
@@ -1370,6 +1386,17 @@ fn apply_action(action: &Action, snapshot: &ActionSnapshot) -> Result<(), String
             name,
             value,
         } => write_reg_string(*hive, path, name, value),
+        Action::RegStringEntry {
+            hive,
+            path,
+            name,
+            key,
+            value,
+        } => {
+            let current = read_reg_string(*hive, path, name)?;
+            let updated = crate::semicolon_settings::set_entry(current.as_deref(), key, value);
+            write_reg_string(*hive, path, name, &updated)
+        }
         Action::RegBinary {
             hive,
             path,
@@ -1433,6 +1460,26 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
             Some(v) => write_reg_string(*hive, path, name, v),
             None => delete_reg_value(*hive, path, name),
         },
+        (
+            Action::RegStringEntry {
+                hive,
+                path,
+                name,
+                key,
+                ..
+            },
+            ActionSnapshot::RegString { value },
+        ) => {
+            let current = read_reg_string(*hive, path, name)?;
+            match crate::semicolon_settings::restore_entry(
+                current.as_deref(),
+                value.as_deref(),
+                key,
+            ) {
+                Some(restored) => write_reg_string(*hive, path, name, &restored),
+                None => delete_reg_value(*hive, path, name),
+            }
+        }
         (
             Action::RegBinary {
                 hive, path, name, ..

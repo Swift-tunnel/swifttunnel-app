@@ -261,7 +261,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     requiresAdmin: false,
     requiresReboot: false,
     changes: [
-      'HKCU\\...\\DirectX\\UserGpuPreferences → DirectXUserGlobalSettings = "SwapEffectUpgradeEnable=1;"',
+      'HKCU\\...\\DirectX\\UserGpuPreferences → DirectXUserGlobalSettings: SwapEffectUpgradeEnable=1 (other entries kept)',
     ],
   },
   {

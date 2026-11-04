@@ -46,6 +46,7 @@ pub mod roblox_watcher;
 #[cfg(windows)]
 pub mod roblox_window;
 pub mod rolling_log;
+pub mod semicolon_settings;
 pub mod settings;
 pub mod single_client;
 pub mod structs;

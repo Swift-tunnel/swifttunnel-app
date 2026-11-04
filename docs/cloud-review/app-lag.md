@@ -175,3 +175,18 @@ in Windows CI. Frontend tests (`npm test`) run here.
   catches up the moment the window is back in front. Only display values use it; routing, overlay and
   session bookkeeping still read the stores directly.
 - Test: `src/lib/useLiveUpdates.test.ts`. Frontend suite, `tsc` and `vite build` pass.
+
+### 13. "Optimizations for Windowed Games" switched off the player's VRR and Auto HDR (fixed)
+- `swifttunnel-core/src/optimizations.rs`, tweak `windowed_games_optimizations_enable` (new
+  `Action::RegStringEntry`), new `swifttunnel-core/src/semicolon_settings.rs`.
+- Windows keeps several graphics settings in one string,
+  `HKCU\Software\Microsoft\DirectX\UserGpuPreferences\DirectXUserGlobalSettings`, for example
+  `VRROptimizeEnable=1;AutoHDREnable=1;SwapEffectUpgradeEnable=1;`. The tweak wrote the whole value as
+  `SwapEffectUpgradeEnable=1;`, which silently turned off "Variable refresh rate" for windowed games
+  (and Auto HDR) for anyone who had it on. Losing VRR on a G-Sync/FreeSync monitor shows up exactly as
+  the stutter and tearing players blame on the "optimization".
+- Fix: the tweak now sets only its own `SwapEffectUpgradeEnable` entry and keeps the rest. Undo uses
+  the same snapshot format as before: it puts our entry back to its original value (or removes it),
+  keeps changes the player made in the meantime, and adds back original entries that are now missing,
+  so reverting on a machine where an older build wiped the string restores VRR/Auto HDR too.
+- Tests: `semicolon_settings` unit tests (run on Linux in a scratch crate).
