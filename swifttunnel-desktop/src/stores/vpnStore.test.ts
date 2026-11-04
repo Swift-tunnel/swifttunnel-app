@@ -306,6 +306,28 @@ describe("stores/vpnStore", () => {
     expect(store.getState().ping).toBe(21);
     expect(store.getState().bytesDown).toBe(8);
   });
+  it("keeps unchanged poll results so subscribers do not re-render", async () => {
+    const store = await loadStore();
+    const route = { game_location: "Singapore", relay: "mumbai", estimated_path_ms: 50, bypassed: false };
+    const poll = (processes: string[], ms: number) => ({
+      ...connectedState("mumbai"),
+      tunneled_processes: processes,
+      game_route: { ...route, estimated_path_ms: ms },
+    });
+    vpnGetState.mockResolvedValue(poll(["RobloxPlayerBeta.exe"], 50));
+    await store.getState().fetchState();
+    const first = store.getState();
+    // Same values, new objects from JSON.
+    vpnGetState.mockResolvedValue(poll(["RobloxPlayerBeta.exe"], 50));
+    await store.getState().fetchState();
+    expect(store.getState().tunneledProcesses).toBe(first.tunneledProcesses);
+    expect(store.getState().gameRoute).toBe(first.gameRoute);
+    // Real changes still land.
+    vpnGetState.mockResolvedValue(poll(["RobloxPlayerBeta.exe", "Other.exe"], 61));
+    await store.getState().fetchState();
+    expect(store.getState().tunneledProcesses).toEqual(["RobloxPlayerBeta.exe", "Other.exe"]);
+    expect(store.getState().gameRoute?.estimated_path_ms).toBe(61);
+  });
   it("discards game route details when disconnected or moved to another relay", async () => {
     const store = await loadStore();
     vpnGetState.mockResolvedValue({ ...connectedState("mumbai"), game_route: {

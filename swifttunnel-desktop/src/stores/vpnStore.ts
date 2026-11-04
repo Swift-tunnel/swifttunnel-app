@@ -239,6 +239,21 @@ function coalesceSessionRead<T>(read: () => Promise<T>): () => Promise<T> {
   };
 }
 
+/**
+ * Keep the previous value when a poll returns an equal one.
+ *
+ * `fetchState` runs every 2s while the window is focused and builds a fresh
+ * `tunneledProcesses` array and `gameRoute` object from JSON each time.
+ * Zustand compares by reference, so the whole Connect tab (which selects both)
+ * re-rendered on every poll even when nothing had changed. Both values are
+ * small plain JSON, so comparing their serialised form is cheap and exact.
+ */
+export function keepIfUnchanged<T>(previous: T, next: T): T {
+  if (previous === next) return previous;
+  if (previous === null || next === null || typeof next !== "object") return next;
+  return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+}
+
 const clearedSessionTelemetry = {
   bytesUp: 0, bytesDown: 0, packetsTunneled: 0, packetsBypassed: 0,
   ping: null, pingReadings: 0, diagnostics: null,
@@ -555,16 +570,16 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         return {
           ...(sessionChanged ? clearedSessionTelemetry : {}),
           state: resp.state,
-          gameRoute: nowConnected
+          gameRoute: keepIfUnchanged(current.gameRoute, nowConnected
             ? (resp.game_route
               ? (resp.game_route.relay === resp.region ? resp.game_route : null)
               : null)
-            : null,
+            : null),
           region: resp.region,
           serverEndpoint: resp.server_endpoint,
           assignedIp: resp.assigned_ip,
           splitTunnelActive: resp.split_tunnel_active,
-          tunneledProcesses: resp.tunneled_processes,
+          tunneledProcesses: keepIfUnchanged(current.tunneledProcesses, resp.tunneled_processes),
           error: resp.error,
           connectedAt,
         };

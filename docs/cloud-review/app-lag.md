@@ -262,3 +262,13 @@ in Windows CI. Frontend tests (`npm test`) run here.
   (callers are serialized, so concurrent probes cannot spawn several either). When the network is
   back the native lookups succeed and the fallback is not consulted at all.
 - Test: `powershell_route_fallback_runs_at_most_every_thirty_seconds`.
+
+### 20. Every state poll re-rendered the Connect tab even when nothing changed (fixed)
+- `swifttunnel-desktop/src/stores/vpnStore.ts`, `fetchState` (new `keepIfUnchanged`).
+- `fetchState` polls every 2s while the window is focused (15s otherwise) and wrote a new
+  `tunneledProcesses` array and `gameRoute` object parsed from JSON each time. Zustand compares by
+  reference and `ConnectTab` selects both, so the whole tab and its children re-rendered on every poll
+  with identical values (`LauncherLibrary` too, through `gameRoute`).
+- Fix: keep the previous reference when the new value is equal (both are small plain JSON, compared by
+  their serialised form). Changes still apply immediately.
+- Test: `keeps unchanged poll results so subscribers do not re-render` in `vpnStore.test.ts`.
