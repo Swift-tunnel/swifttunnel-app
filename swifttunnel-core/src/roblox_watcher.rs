@@ -183,7 +183,15 @@ impl Drop for RobloxWatcher {
     }
 }
 
+/// Literal every join line contains. `regex-lite` has no literal prefilter, so
+/// without this each log line paid for a full regex scan (~4us) per pattern.
+const JOIN_MARKER: &str = "! Joining game '";
+const UDMUX_MARKER: &str = "UDMUX Address = ";
+
 fn parse_join(line: &str) -> Option<(String, String, Ipv4Addr)> {
+    if !line.contains(JOIN_MARKER) {
+        return None;
+    }
     static JOIN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let pattern = JOIN.get_or_init(|| {
         Regex::new(r"! Joining game '([0-9a-fA-F\-]+)' place (\d+) at (\d+\.\d+\.\d+\.\d+)")
@@ -374,8 +382,15 @@ fn watch_logs(
                         events.push(event);
                     }
                     for line in lines {
-                        // Try each pattern
-                        for pattern in [joining_pattern, udmux_pattern] {
+                        // Try each pattern, skipping the regex unless its
+                        // fixed text is present (most lines match neither).
+                        for (marker, pattern) in [
+                            (JOIN_MARKER, joining_pattern),
+                            (UDMUX_MARKER, udmux_pattern),
+                        ] {
+                            if !line.contains(marker) {
+                                continue;
+                            }
                             if let Some(caps) = pattern.captures(&line)
                                 && let Some(ip_match) = caps.get(1)
                                 && let Ok(ip) = ip_match.as_str().parse::<Ipv4Addr>()

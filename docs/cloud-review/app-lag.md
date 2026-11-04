@@ -202,3 +202,14 @@ in Windows CI. Frontend tests (`npm test`) run here.
   with an explanation; nothing is changed. Single-CCD X3D parts and every other CPU behave as before,
   and revert still works for anyone who already applied it. The catalog description says so.
 - Test: `core_parking_stays_on_for_dual_ccd_x3d_processors` (Windows CI).
+
+### 15. The Roblox log tailer ran three full regex scans on every log line (fixed)
+- `swifttunnel-core/src/roblox_watcher.rs`, `parse_join` and the server-IP pattern loop in `watch_logs`.
+- Every new line of the Roblox log went through `parse_join`'s regex and then the "joining" and "UDMUX"
+  regexes. `regex-lite` has no literal prefilter, so each call scans the whole line: about 12us per line
+  for the three, measured on a typical 160-character line. The tailer catches up on up to 256 KB per
+  poll, so attaching to a long log or a burst of logging on a teleport cost tens of milliseconds of CPU
+  per second.
+- Fix: each regex needs a fixed piece of text (`! Joining game '`, `UDMUX Address = `), so check for
+  it with `contains` first (about 15ns for both). Matches are unchanged; existing watcher tests cover
+  the parsing.
