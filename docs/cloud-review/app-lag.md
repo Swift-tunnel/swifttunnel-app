@@ -228,3 +228,12 @@ in Windows CI. Frontend tests (`npm test`) run here.
   nothing else on the tick changes. Test: `default_route_is_probed_at_most_every_two_seconds`.
 - Not changed: an event-driven version (`NotifyRouteChange2` / `NotifyIpInterfaceChange`) would remove
   the polling entirely but is a larger change; worth doing separately.
+
+### 17. Packet workers polled at 200Hz after every packet (fixed)
+- `swifttunnel-core/src/vpn/parallel_interceptor.rs`, `run_packet_worker` (new `WORKER_IDLE_WAKE`).
+- Workers waited with `recv_timeout(5ms)` for ten timeouts after any packet, then 150ms. The timeout
+  never affected latency (`recv_timeout` returns as soon as work is queued); it only bounds the stop
+  check. So a worker that received a packet every game tick (the slow path the reader uses while a
+  relay MTU refresh is due, or for non-fast-path tunnel traffic) woke about 200 times a second between
+  packets, on up to four workers.
+- Fix: a constant 150ms wait. Same stop responsiveness as the idle case had, no extra wake-ups.

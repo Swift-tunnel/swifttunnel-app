@@ -6382,6 +6382,9 @@ fn reader_wait_timeout_ms(has_held_packets: bool) -> u32 {
     if has_held_packets { 10 } else { 100 }
 }
 
+/// Longest a packet worker sleeps before rechecking its stop flag.
+const WORKER_IDLE_WAKE: Duration = Duration::from_millis(150);
+
 /// Worker thread - processes packets and routes to VPN or passthrough
 #[allow(clippy::too_many_arguments)]
 fn run_packet_worker(
@@ -6438,31 +6441,19 @@ fn run_packet_worker(
     let mut relay_success = 0u64;
     let mut relay_fail = 0u64;
 
-    // Adaptive timeout: short when active, longer when idle to save CPU
-    // This is the key optimization - avoid 1000Hz polling when no packets
-    let mut consecutive_timeouts = 0u32;
-
     loop {
         if stop_flag.load(Ordering::Acquire) {
             break;
         }
 
-        // Adaptive timeout based on recent activity:
-        // - 5ms when recently active (gaming latency acceptable)
-        // - 150ms after 10 consecutive timeouts (idle, save CPU)
-        // The reader thread has the event-driven wakeup, workers just need
-        // to process what the reader dispatches to them
-        let timeout_ms = if consecutive_timeouts > 10 { 150 } else { 5 };
-
-        let work = match receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
-            Ok(w) => {
-                consecutive_timeouts = 0; // Reset on successful receive
-                w
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
-                continue;
-            }
+        // `recv_timeout` returns as soon as the reader dispatches work, so the
+        // timeout adds no latency; it only bounds how long a stop request
+        // waits. This used to drop to 5ms for ten timeouts after every packet,
+        // which made a worker fed one packet per game tick wake ~200 times a
+        // second in between for nothing.
+        let work = match receiver.recv_timeout(WORKER_IDLE_WAKE) {
+            Ok(w) => w,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
