@@ -1609,12 +1609,11 @@ impl ParallelInterceptor {
             }
         }
 
-        // Fallback: raw GUID without braces somewhere in the string.
-        for start in 0..=bytes.len().saturating_sub(36) {
-            let candidate = &bytes[start..start + 36];
-            if is_guid_ascii(candidate) {
-                return internal_name.get(start..start + 36);
-            }
+        // Fallback: raw GUID without braces somewhere in the string. Names
+        // shorter than a GUID (`\DEVICE\NDISWANIP`) have no window to check;
+        // the old `0..=len.saturating_sub(36)` range sliced past their end.
+        if let Some(start) = bytes.windows(36).position(is_guid_ascii) {
+            return internal_name.get(start..start + 36);
         }
 
         None
@@ -13576,6 +13575,31 @@ mod tests {
             !ParallelInterceptor::is_nonfatal_winpkfilter_validation_failure(
                 "WinpkFilter binding nt_ndisrd is still disabled on adapter: Ethernet"
             )
+        );
+    }
+
+    #[test]
+    fn guid_extraction_handles_names_shorter_than_a_guid() {
+        for name in ["", "wan-bh", "\\DEVICE\\NDISWANIP", "\\DEVICE\\{NDISWANBH}"] {
+            assert_eq!(
+                ParallelInterceptor::extract_guid_ascii_lowercase(name),
+                None,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            ParallelInterceptor::extract_guid_ascii_lowercase(
+                "\\DEVICE\\5C6D9A3B-1A2B-4C3D-8E9F-0A1B2C3D4E5F"
+            )
+            .as_deref(),
+            Some("5c6d9a3b-1a2b-4c3d-8e9f-0a1b2c3d4e5f")
+        );
+        assert_eq!(
+            ParallelInterceptor::extract_guid_ascii_lowercase(
+                "5C6D9A3B-1A2B-4C3D-8E9F-0A1B2C3D4E5F"
+            )
+            .as_deref(),
+            Some("5c6d9a3b-1a2b-4c3d-8e9f-0a1b2c3d4e5f")
         );
     }
 

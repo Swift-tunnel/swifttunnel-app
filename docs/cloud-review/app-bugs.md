@@ -143,3 +143,18 @@ commits, tests next to each fix.
 - Status: fixed. Both keep `Option<Instant>` for "no attempt yet". The other
   `now - duration` uses are in tests. Test for the Discord helper runs
   under Wine.
+
+### 9. Adapter GUID extraction panicked on names shorter than a GUID
+
+- File: `swifttunnel-core/src/vpn/parallel_interceptor.rs`
+  (`extract_guid_str_from_internal_name`).
+- Why it matters: the braceless fallback looped over
+  `0..=len.saturating_sub(36)` and sliced `bytes[start..start + 36]`. For a
+  name under 36 bytes with no `{GUID}` (for example the NDIS 5 style
+  `\DEVICE\NDISWANIP`, or any short adapter name a driver reports) the range
+  is `0..=0` and the slice runs past the end, panicking inside physical
+  adapter selection during connect. NDIS 6 usually names WAN miniports by
+  GUID, which is likely why it has not shown up in the field.
+- Status: fixed with `bytes.windows(36).position(..)`, which yields nothing
+  for short names. Test covers empty, short, braced non-GUID and raw GUID
+  names. Runs under Wine; the standalone pattern was confirmed to panic.
