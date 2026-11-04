@@ -48,3 +48,15 @@ in Windows CI. Frontend tests (`npm test`) run here.
   entries older than 60s. Test: `test_snapshot_refresh_drops_long_closed_tcp_inline_entries`.
 - Not fixed: `Active` TCP entries for flows that die without FIN/RST (timeouts) still only leave on port
   reuse. They are rare; tracking a last-seen time per packet would add a clock read on the hot path.
+
+### 4. Every Apply switched the PC to the Windows Balanced power plan (fixed; likely cause of "lower FPS after optimizing")
+- `swifttunnel-core/src/system_optimizer.rs`, `apply_optimizations_checked` (`set_power_plan` call), default
+  `power_plan: PowerPlan::Balanced` in `structs.rs`.
+- `powercfg /setactive <Balanced>` ran on every apply, so any Apply (including a single network toggle,
+  which applies the whole config) moved players off High Performance, Ultimate, AMD Ryzen or OEM gaming
+  plans onto Balanced for as long as the app ran. Balanced allows core parking and a low minimum
+  processor state, so clocks ramp more slowly: lower and less stable FPS in CPU-bound Roblox scenes.
+- The UI only offers the SwiftTunnel plan toggle; Balanced is the "not using our plan" value. `restore()`
+  runs before every apply and puts the user's original plan back, so the fix is to not switch when the
+  config says Balanced. HighPerformance / Ultimate / SwiftTunnel still switch as before.
+- Test: `default_balanced_plan_keeps_the_users_own_power_plan`.
