@@ -237,3 +237,14 @@ in Windows CI. Frontend tests (`npm test`) run here.
   relay MTU refresh is due, or for non-fast-path tunnel traffic) woke about 200 times a second between
   packets, on up to four workers.
 - Fix: a constant 150ms wait. Same stop responsiveness as the idle case had, no extra wake-ups.
+
+### 18. Every outbound game packet took a mutex to check a one-time timestamp (fixed)
+- `swifttunnel-core/src/vpn/udp_relay.rs`, `record_outbound_activity` (new `first_outbound_recorded`).
+- `forward_outbound` runs for every tunneled packet on the packet reader thread, and it locked
+  `first_outbound_time` each time only to find it already set. That value is written once per relay
+  (and reset on `switch_relay`) for the no-traffic health check.
+- Fix: a relaxed `AtomicBool` hint, written only under the mutex, skips the lock once the time is
+  recorded; `switch_relay` clears both together. A stale hint right after a switch just defers the
+  record by one packet. Test: `first_outbound_time_is_recorded_once_per_relay`.
+- Not changed: `last_receive_time` is still a mutex written per inbound packet. It holds an `Instant`
+  read by health checks; turning it into an atomic is a wider change for an uncontended lock.

@@ -805,6 +805,10 @@ pub struct UdpRelay {
     last_receive_time: parking_lot::Mutex<Option<Instant>>,
     /// First outbound activity since creation or relay switch.
     first_outbound_time: parking_lot::Mutex<Option<Instant>>,
+    /// Lock-free "already recorded" hint for `first_outbound_time`, so the
+    /// per-packet send path does not take that mutex on every packet. Only
+    /// written while holding the mutex.
+    first_outbound_recorded: AtomicBool,
     /// Set to true if the sender thread panics. Connection manager polls this so the
     /// state machine can transition to Error instead of silently halting tunneling.
     sender_panicked: Arc<AtomicBool>,
@@ -1219,6 +1223,7 @@ impl UdpRelay {
             inject_error_streak: AtomicU32::new(0),
             last_receive_time: parking_lot::Mutex::new(None),
             first_outbound_time: parking_lot::Mutex::new(None),
+            first_outbound_recorded: AtomicBool::new(false),
             sender_panicked,
         })
     }
@@ -1233,10 +1238,17 @@ impl UdpRelay {
     fn record_outbound_activity(&self) {
         self.last_activity_ms
             .store(now_mono_ms(), Ordering::Relaxed);
+        // Called for every outbound packet. Only the first one per relay
+        // needs the mutex; a stale `true` right after a switch just defers
+        // the record to the next packet.
+        if self.first_outbound_recorded.load(Ordering::Relaxed) {
+            return;
+        }
         let mut first = self.first_outbound_time.lock();
         if first.is_none() {
             *first = Some(Instant::now());
         }
+        self.first_outbound_recorded.store(true, Ordering::Relaxed);
     }
 
     fn build_ping_frame(&self) -> [u8; PING_FRAME_LEN] {
@@ -2568,7 +2580,11 @@ impl UdpRelay {
         self.unanswered_keepalives.store(0, Ordering::Relaxed);
         self.inject_error_streak.store(0, Ordering::Relaxed);
         *self.last_receive_time.lock() = None;
-        *self.first_outbound_time.lock() = None;
+        {
+            let mut first = self.first_outbound_time.lock();
+            *first = None;
+            self.first_outbound_recorded.store(false, Ordering::Relaxed);
+        }
         // Reset RTT telemetry: the old relay's readings must never be shown
         // as the new relay's ping. The UI reports "no data" until the first
         // pong from the new relay arrives.
@@ -3551,6 +3567,25 @@ mod tests {
             outcome,
             RelaySendOutcome::Enqueued(SESSION_ID_LEN + max_payload)
         );
+    }
+
+    #[test]
+    fn first_outbound_time_is_recorded_once_per_relay() {
+        let relay = UdpRelay::new("127.0.0.1:51821".parse().unwrap()).unwrap();
+        assert!(relay.first_outbound_time.lock().is_none());
+        relay.forward_outbound(&[0x45, 0, 0, 20]).unwrap();
+        let first = relay
+            .first_outbound_time
+            .lock()
+            .expect("first send recorded");
+        relay.forward_outbound(&[0x45, 0, 0, 20]).unwrap();
+        assert_eq!(*relay.first_outbound_time.lock(), Some(first));
+
+        // A new relay starts its own no-traffic clock on its first send.
+        relay.switch_relay("127.0.0.1:51822".parse().unwrap());
+        assert!(relay.first_outbound_time.lock().is_none());
+        relay.forward_outbound(&[0x45, 0, 0, 20]).unwrap();
+        assert!(relay.first_outbound_time.lock().is_some());
     }
 
     #[test]
