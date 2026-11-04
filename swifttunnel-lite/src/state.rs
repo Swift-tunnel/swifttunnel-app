@@ -459,6 +459,10 @@ pub struct RobloxDraft {
     pub unlock_fps: bool,
     /// The frame cap as typed, which may not be a number yet.
     pub fps_text: String,
+    /// Roblox's cap when the draft was made. Stays valid even outside Lite's
+    /// typing range: the full app allows up to 99999 ("uncapped"), and
+    /// refusing that untouched value blocked every other change here.
+    pub read_fps: u32,
     pub quality: u32,
     pub fullscreen: bool,
     pub ultraboost: bool,
@@ -475,6 +479,7 @@ impl RobloxDraft {
         Self {
             unlock_fps: truth.unlock_fps,
             fps_text: truth.target_fps.to_string(),
+            read_fps: truth.target_fps,
             quality: truth.quality,
             fullscreen: truth.fullscreen,
             ultraboost: truth.ultraboost,
@@ -493,7 +498,7 @@ impl RobloxDraft {
     /// the GPU and buys nothing a monitor can show.
     pub fn fps(&self) -> Option<u32> {
         let value: u32 = self.fps_text.trim().parse().ok()?;
-        (30..=1000).contains(&value).then_some(value)
+        ((30..=1000).contains(&value) || value == self.read_fps).then_some(value)
     }
 }
 
@@ -594,6 +599,22 @@ mod roblox_draft_tests {
         });
         state.roblox_busy = true;
         state
+    }
+
+    #[test]
+    fn an_uncapped_frame_rate_from_the_full_app_does_not_block_other_changes() {
+        let mut state = State::default();
+        state.roblox.unlock_fps = true;
+        state.roblox.target_fps = 99999;
+        state.edit_roblox(|draft| draft.quality = 10);
+        let draft = state.roblox_view();
+        assert_eq!(draft.fps(), Some(99999));
+        assert!(draft.ready());
+        assert!(state.roblox_dirty());
+        // Typing a new out-of-range value is still refused.
+        state.edit_roblox(|draft| draft.fps_text = "5000".into());
+        assert_eq!(state.roblox_view().fps(), None);
+        assert!(!state.roblox_view().ready());
     }
 
     #[test]

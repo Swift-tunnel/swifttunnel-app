@@ -254,3 +254,15 @@ commits, tests next to each fix.
 - Related, not changed: the full app's session card shows "Default FPS cap
   60" when unlock is off, although Roblox may still be at a higher cap set
   in its own menu.
+
+### 16. A full-app "uncapped" frame rate locked Lite's Apply
+
+- File: `swifttunnel-lite/src/state.rs` (`RobloxDraft::fps`).
+- Why it matters: the full app lets players pick caps up to 99999
+  ("uncapped"); Lite accepts only 30 to 1000. Lite reads the cap from
+  Roblox's file, so for such a player its draft was never `ready()`, and no
+  Lite change (graphics, fullscreen, Ultraboost) could be applied until they
+  retyped the cap to something lower.
+- Status: fixed. The draft remembers the cap it was read with, and that
+  untouched value is accepted; newly typed values keep Lite's 30 to 1000
+  range. Test added; Lite suite (93 tests) passes under Wine.
