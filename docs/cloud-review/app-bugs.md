@@ -166,13 +166,15 @@ commits, tests next to each fix.
 ### 10. Run-on-startup for the full app may be blocked by Windows (open, needs Windows check)
 
 - Files: `swifttunnel-core/src/autostart.rs` (`sync_run_on_startup`),
-  `swifttunnel-desktop/src-tauri/build.rs` (manifest).
+  `swifttunnel-desktop/src-tauri/build.rs` and `swifttunnel-lite/build.rs`
+  (manifests).
 - Why it matters: the desktop exe's manifest is `requireAdministrator`, and
   run-on-startup (on by default) registers it under
   `HKCU\...\CurrentVersion\Run`. With UAC on, Windows does not elevate Run
   entries at sign-in and normally skips programs that need elevation, so
-  the full app may never start with Windows. Lite runs as the user and is
-  not affected.
+  the full app may never start with Windows. Lite's release manifest
+  (`swifttunnel-lite/build.rs`) also requires administrator, so its Run
+  entry has the same problem.
 - Status: not changed. Confirming needs a real Windows sign-in with UAC at
   its default level. If confirmed, the usual fix is an "at log on" scheduled
   task with "run with highest privileges", which also needs uninstall and
