@@ -158,3 +158,18 @@ commits, tests next to each fix.
 - Status: fixed with `bytes.windows(36).position(..)`, which yields nothing
   for short names. Test covers empty, short, braced non-GUID and raw GUID
   names. Runs under Wine; the standalone pattern was confirmed to panic.
+
+### 10. Run-on-startup for the full app may be blocked by Windows (open, needs Windows check)
+
+- Files: `swifttunnel-core/src/autostart.rs` (`sync_run_on_startup`),
+  `swifttunnel-desktop/src-tauri/build.rs` (manifest).
+- Why it matters: the desktop exe's manifest is `requireAdministrator`, and
+  run-on-startup (on by default) registers it under
+  `HKCU\...\CurrentVersion\Run`. With UAC on, Windows does not elevate Run
+  entries at sign-in and normally skips programs that need elevation, so
+  the full app may never start with Windows. Lite runs as the user and is
+  not affected.
+- Status: not changed. Confirming needs a real Windows sign-in with UAC at
+  its default level. If confirmed, the usual fix is an "at log on" scheduled
+  task with "run with highest privileges", which also needs uninstall and
+  `--cleanup` support, so it is larger than this bug hunt's scope.
