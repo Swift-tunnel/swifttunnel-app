@@ -104,8 +104,60 @@ fn metrics_refresh_kind() -> ProcessRefreshKind {
     ProcessRefreshKind::new().with_cpu().with_memory()
 }
 
+/// An open handle to the confirmed player process. While the handle is open
+/// Windows cannot reuse its PID, so "still running" is one non-blocking wait
+/// instead of a sysinfo refresh. sysinfo's `ProcessesToUpdate::Some` still
+/// snapshots every process and thread on the machine (512KiB+ buffer), and
+/// presence polls come from the overlay, the join watcher and the window-size
+/// watcher several times a second while Roblox runs.
+struct PlayerHandle {
+    pid: u32,
+    #[cfg(windows)]
+    handle: windows::Win32::Foundation::HANDLE,
+}
+
+impl PlayerHandle {
+    #[cfg(windows)]
+    fn open(pid: u32) -> Option<Self> {
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+        let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.ok()?;
+        Some(Self { pid, handle })
+    }
+
+    #[cfg(not(windows))]
+    fn open(_pid: u32) -> Option<Self> {
+        None
+    }
+
+    #[cfg(windows)]
+    fn is_running(&self) -> bool {
+        use windows::Win32::Foundation::WAIT_TIMEOUT;
+        use windows::Win32::System::Threading::WaitForSingleObject;
+        unsafe { WaitForSingleObject(self.handle, 0) == WAIT_TIMEOUT }
+    }
+
+    #[cfg(not(windows))]
+    fn is_running(&self) -> bool {
+        false
+    }
+}
+
+#[cfg(windows)]
+impl Drop for PlayerHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+// The handle is only waited on and closed; both are thread-safe.
+#[cfg(windows)]
+unsafe impl Send for PlayerHandle {}
+
 pub struct PerformanceMonitor {
     system: System,
+    player_handle: Option<PlayerHandle>,
     last_full_scan: Option<std::time::Instant>,
     last_metrics: PerformanceMetrics,
     last_metrics_sample: Option<(std::time::Instant, Option<u32>)>,
@@ -122,6 +174,7 @@ impl PerformanceMonitor {
         // `update_metrics` call performs the initial scan instead.
         Self {
             system: System::new(),
+            player_handle: None,
             last_full_scan: None,
             last_metrics: PerformanceMetrics::default(),
             last_metrics_sample: None,
@@ -202,6 +255,27 @@ impl PerformanceMonitor {
     /// across metrics, the overlay and launch tracking, rather than each caller
     /// scanning every process. Destructive operations request fresh discovery.
     fn refresh_player(&mut self, force_discovery: bool, sample_metrics: bool) -> Option<u32> {
+        let known = self.last_metrics.process_id;
+        if !force_discovery
+            && !sample_metrics
+            && let Some(handle) = &self.player_handle
+            && Some(handle.pid) == known
+            && handle.is_running()
+        {
+            return known;
+        }
+        let pid = self.refresh_player_with_sysinfo(force_discovery, sample_metrics);
+        if pid != self.player_handle.as_ref().map(|handle| handle.pid) {
+            self.player_handle = pid.and_then(PlayerHandle::open);
+        }
+        pid
+    }
+
+    fn refresh_player_with_sysinfo(
+        &mut self,
+        force_discovery: bool,
+        sample_metrics: bool,
+    ) -> Option<u32> {
         let refresh = if sample_metrics {
             metrics_refresh_kind()
         } else {
@@ -301,6 +375,24 @@ impl Default for PerformanceMonitor {
 #[cfg(test)]
 mod polling_tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn presence_polls_of_a_live_player_use_the_held_handle_not_a_snapshot() {
+        let mut monitor = PerformanceMonitor::new();
+        let pid = std::process::id();
+        monitor.last_metrics.process_id = Some(pid);
+        monitor.player_handle = PlayerHandle::open(pid);
+        assert!(monitor.player_handle.is_some());
+        for _ in 0..10 {
+            assert_eq!(monitor.poll_roblox_pid(), Some(pid));
+        }
+        assert_eq!(monitor.full_scans, 0);
+        // Fresh discovery still verifies by name; this test process is not a
+        // Roblox player, so it is dropped along with its handle.
+        assert_eq!(monitor.get_roblox_pid(), None);
+        assert!(monitor.player_handle.is_none());
+    }
 
     #[test]
     fn overlapping_metrics_consumers_share_a_sample_without_deferring_the_next_due_sample() {

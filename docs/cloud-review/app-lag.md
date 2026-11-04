@@ -71,3 +71,16 @@ in Windows CI. Frontend tests (`npm test`) run here.
   preference behave as before. Test updated in `cpu_selection_respects_allocations_groups_and_available_cores`.
 - Not changed: "Prefer P-cores" still excludes E-cores and "Unbind CPU0" still removes CPU0. Both are
   explicit opt-ins named for exactly that behaviour.
+
+### 6. "Is Roblox still running?" polls took a full system process snapshot (fixed)
+- `swifttunnel-core/src/performance_monitor.rs`, `refresh_player`. Callers while Roblox runs: overlay
+  `overlay_game_monitor` (1/s), game-join watcher (every 1.5s), window-size watcher (every 2s), plus
+  metrics consumers.
+- sysinfo 0.32 on Windows implements `ProcessesToUpdate::Some(&[pid])` with
+  `NtQuerySystemInformation(SystemProcessInformation)` over the whole machine (512KiB+ buffer, every
+  process and thread) and then filters. So each presence check was a full snapshot, about 1-3 per second
+  during gameplay.
+- Fix: once a player is confirmed, hold an `OpenProcess(SYNCHRONIZE)` handle. Presence-only polls are a
+  `WaitForSingleObject(h, 0)`. The open handle also prevents PID reuse, so the check stays exact. Metrics
+  samples and forced discovery still go through sysinfo unchanged.
+- Test (Windows): `presence_polls_of_a_live_player_use_the_held_handle_not_a_snapshot`.
