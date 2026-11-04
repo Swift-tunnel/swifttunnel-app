@@ -60,3 +60,14 @@ in Windows CI. Frontend tests (`npm test`) run here.
   runs before every apply and puts the user's original plan back, so the fix is to not switch when the
   config says Balanced. HighPerformance / Ultimate / SwiftTunnel still switch as before.
 - Test: `default_balanced_plan_keeps_the_users_own_power_plan`.
+
+### 5. CPU Sets pinned Roblox to the cores that happened to be unparked (fixed)
+- `swifttunnel-core/src/vpn/process_performance.rs`, `select_cpu_set_ids`.
+- The CPU Sets boost dropped every CPU set flagged "parked" before calling `SetProcessDefaultCpuSets`.
+  Parking is a transient power hint; when Roblox starts on Balanced (or with the AMD X3D driver parking a
+  CCD) many cores can be parked at that instant. Roblox was then restricted to that subset for the whole
+  session, nothing re-evaluated it, and fewer cores means lower FPS.
+- Fix: no longer filter on `parked`. Reserved-for-other-process, CPU0 unbinding and the P-core
+  preference behave as before. Test updated in `cpu_selection_respects_allocations_groups_and_available_cores`.
+- Not changed: "Prefer P-cores" still excludes E-cores and "Unbind CPU0" still removes CPU0. Both are
+  explicit opt-ins named for exactly that behaviour.
