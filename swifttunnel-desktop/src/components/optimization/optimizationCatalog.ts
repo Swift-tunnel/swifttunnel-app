@@ -342,7 +342,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "core_parking_disable",
     name: "Disable Core Parking (on AC)",
     description:
-      "Keeps all CPU cores unparked while plugged in, avoiding wake-up stutter.",
+      "Keeps all CPU cores unparked while plugged in, avoiding wake-up stutter. Not available on Ryzen 9 X3D processors, which rely on parking to keep games on their cache cores.",
     tier: "Intermediate",
     category: "Performance",
     safety: "caution",

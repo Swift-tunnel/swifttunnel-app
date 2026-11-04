@@ -190,3 +190,15 @@ in Windows CI. Frontend tests (`npm test`) run here.
   keeps changes the player made in the meantime, and adds back original entries that are now missing,
   so reverting on a machine where an older build wiped the string restores VRR/Auto HDR too.
 - Tests: `semicolon_settings` unit tests (run on Linux in a scratch crate).
+
+### 14. "Disable Core Parking" lowered FPS on dual-CCD Ryzen X3D processors (fixed)
+- `swifttunnel-core/src/optimizations.rs`, `apply` (`core_parking_disable`, new
+  `cpu_steers_games_with_core_parking`).
+- The tweak sets the active plan's `CPMINCORES` (AC) to 100%. On the Ryzen 9 X3D parts (7900X3D,
+  7950X3D, 9900X3D, 9950X3D) AMD's driver keeps games on the CCD with 3D V-Cache by parking the other
+  CCD while a game runs. With parking disabled Roblox's threads spread over both CCDs, which is a
+  well-known FPS loss on these chips, and the tweak advertises the opposite ("avoiding stutter").
+- Fix: on a Ryzen 9 X3D (read from the registry `ProcessorNameString`) applying this tweak is refused
+  with an explanation; nothing is changed. Single-CCD X3D parts and every other CPU behave as before,
+  and revert still works for anyone who already applied it. The catalog description says so.
+- Test: `core_parking_stays_on_for_dual_ccd_x3d_processors` (Windows CI).
