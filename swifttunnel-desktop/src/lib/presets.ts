@@ -230,7 +230,9 @@ function sanitizePreset(parsed: unknown): SwiftTunnelPreset {
           D.roblox_settings.graphics_quality,
         ),
         unlock_fps: asBool(r.unlock_fps, D.roblox_settings.unlock_fps),
-        target_fps: asNum(r.target_fps, 1, 99999, D.roblox_settings.target_fps),
+        // Same range as the FPS slider. A shared preset must not be able to
+        // cap Roblox at 1 FPS, which no control in the app can produce.
+        target_fps: asNum(r.target_fps, 30, 99999, D.roblox_settings.target_fps),
         window_width: asNum(
           r.window_width,
           100,

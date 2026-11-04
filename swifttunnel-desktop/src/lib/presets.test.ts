@@ -126,6 +126,23 @@ describe("presets", () => {
     expect(() => decodePreset("SWT1.@@@not-base64@@@")).toThrow();
   });
 
+  it("keeps imported frame caps within the FPS slider's range", () => {
+    for (const [input, expected] of [[1, 30], [0, 30], [-50, 30], [29.4, 30], [144, 144], [99999, 99999]]) {
+      const preset = {
+        v: 1,
+        name: "caps",
+        config: {
+          roblox_settings: { unlock_fps: true, target_fps: input },
+          overlay: {},
+          network_settings: {},
+          system_optimization: {},
+        },
+        optimizations: [],
+      };
+      expect(decodePreset(JSON.stringify(preset)).config.roblox_settings.target_fps).toBe(expected);
+    }
+  });
+
   it("rebuilds hostile / out-of-range input into safe settings, dropping unknown fields", () => {
     const hostile = {
       v: 1,

@@ -295,3 +295,14 @@ commits, tests next to each fix.
   after 30 min; a completed check still waits six hours. Network calls still
   happen only while idle. Test added; Lite suite (95 tests) passes under
   Wine.
+
+### 19. Shared presets could set Roblox's frame cap as low as 1 FPS
+
+- File: `swifttunnel-desktop/src/lib/presets.ts` (`decodePreset`).
+- Why it matters: imported presets clamp every field, but `target_fps` was
+  clamped to 1..99999 while the FPS slider, Lite and the launcher import all
+  use a 30 minimum. A shared preset (from another player) with
+  `target_fps: 1` and unlock on would cap Roblox at 1 FPS, a value no
+  control in the app can produce.
+- Status: fixed. Imported caps are clamped to 30..99999. Test added (fails
+  before, passes after); frontend suite passes.
