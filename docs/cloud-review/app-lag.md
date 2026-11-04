@@ -112,8 +112,8 @@ in Windows CI. Frontend tests (`npm test`) run here.
   different process. PIDs without one are looked up fresh, so the PID-reuse guarantee is unchanged. In
   steady state only new owners are opened.
 - Test: `connection_name_refresh_reuses_names_only_for_persisting_sockets`.
-- Follow-ups: the unchanged-snapshot republish is fixed in item 9. Still open: the 5s full sysinfo scan
-  with `UpdateKind::Always`.
+- Follow-ups: the unchanged-snapshot republish is fixed in item 9, and the 5s full scan's exe lookups in
+  item 10.
 
 ## Pass 2
 
@@ -132,3 +132,14 @@ in Windows CI. Frontend tests (`npm test`) run here.
   owner, port retention expiring) still publishes immediately.
 - Test: `identical_refresh_keeps_the_live_snapshot_and_version` (run on Linux by compiling
   `process_cache.rs` standalone; the module has no Windows dependencies).
+
+### 10. The 5s full process scan read every process's exe path for nothing (fixed)
+- `swifttunnel-core/src/vpn/parallel_interceptor.rs`, `run_cache_refresher`, full-scan branch.
+- While in a game with API tunneling on, the refresher's full scan (every 5s) asked sysinfo for
+  `with_exe(UpdateKind::Always)`. In sysinfo 0.32 that is a `GetModuleFileNameExW` on every process
+  on the machine, which reads the target's PEB across process boundaries: a few hundred of those every
+  5 seconds, competing with the game.
+- The code only reads `process.name()`, which comes from the system process list sysinfo fetches
+  anyway. The comment said `Always` protected against PID reuse leaving a stale name, but the exe flag
+  never refreshes `name`; sysinfo handles PID reuse itself by comparing start times and rebuilding the
+  entry. So the scan now uses `ProcessRefreshKind::new()`. Same names, same PID-reuse behaviour.

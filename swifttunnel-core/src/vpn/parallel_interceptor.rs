@@ -6979,7 +6979,7 @@ fn run_cache_refresher(
     api_tunneling_enabled: Arc<AtomicBool>,
     mut initial_refresh_done: Option<crossbeam_channel::Sender<()>>,
 ) {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     use windows::Win32::NetworkManagement::IpHelper::*;
 
     log::info!(
@@ -7179,14 +7179,18 @@ fn run_cache_refresher(
             last_full_process_scan = Some(Instant::now());
 
             // Full process scan - expensive, so it runs on a wall-clock interval.
-            // `UpdateKind::Always` so sysinfo overwrites the cached exe name
-            // when a PID has been reused by a different process since the last
-            // refresh (C7); `OnlyIfNotSet` would leave the stale tunnel-app
-            // name in place and let that app's traffic route incorrectly.
+            //
+            // Only `name()` is read below, and sysinfo takes that from the
+            // system process list it fetches anyway. PID reuse is handled by
+            // sysinfo itself: an entry whose start time no longer matches is
+            // rebuilt from scratch, name included. Asking for `exe` (this used
+            // `with_exe(UpdateKind::Always)`) never refreshed the name; it only
+            // added a cross-process `GetModuleFileNameExW` for every process on
+            // the machine every 5 seconds while the player was in a game.
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+                ProcessRefreshKind::new(),
             );
 
             for pid in connections.values() {
