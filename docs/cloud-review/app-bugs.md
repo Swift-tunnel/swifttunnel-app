@@ -225,3 +225,15 @@ commits, tests next to each fix.
   for 2 to 9, which is accurate), and Apply writes back the window size
   Roblox already has, read after Roblox is closed. Tests cover both; the
   Lite suite (90 tests) passes under Wine.
+
+### 14. Lite left Auto routing on when Bypass Country Bans was enabled
+
+- File: `swifttunnel-lite/src/engine.rs` (`toggle`, new `toggle_country_ban`).
+- Why it matters: the full app and Lite's own Route Assist switch turn Auto
+  routing off when a TCP-relaying mode is enabled, but Lite's Bypass switch
+  did not. The connect then chose an Auto region the user could not see was
+  in effect, and on the next launch loading the settings turned Auto off
+  silently (core already blocks mid-session relay switching for bypass, so
+  the session itself was not split).
+- Status: fixed to match the full app, with a test. Lite suite passes under
+  Wine.

@@ -665,7 +665,7 @@ impl Engine {
                     s.auto_routing_enabled = false;
                 }
             }),
-            Flag::CountryBan => self.settings(|s| s.enable_country_ban = !s.enable_country_ban),
+            Flag::CountryBan => self.settings(toggle_country_ban),
             Flag::RunOnStartup => {
                 self.change_startup(!state.run_on_startup);
             }
@@ -2615,6 +2615,17 @@ fn describe(state: &ConnectionState) -> String {
     }
 }
 
+/// Bypass and Auto contradict each other, so turning Bypass on turns Auto off,
+/// as the full app does and as Route Assist already did here. Leaving both on
+/// only lasted until the next launch, when loading the settings turned Auto
+/// off without a word.
+fn toggle_country_ban(settings: &mut AppSettings) {
+    settings.enable_country_ban = !settings.enable_country_ban;
+    if settings.enable_country_ban {
+        settings.auto_routing_enabled = false;
+    }
+}
+
 /// Lite's chips offer Auto, Low and Max, but a player may have picked any
 /// level in Roblox's own menu. Both directions keep that level: collapsing 2..=9
 /// to Automatic here made every Apply, even one that only changed the frame
@@ -2833,8 +2844,23 @@ fn open_logs() {
 
 #[cfg(test)]
 mod tests {
-    use super::{keep_current_window_size, level_of, quality_of};
+    use super::{keep_current_window_size, level_of, quality_of, toggle_country_ban};
+    use swifttunnel_core::settings::AppSettings;
     use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
+
+    #[test]
+    fn enabling_country_ban_bypass_turns_auto_routing_off() {
+        let mut settings = AppSettings {
+            auto_routing_enabled: true,
+            ..AppSettings::default()
+        };
+        toggle_country_ban(&mut settings);
+        assert!(settings.enable_country_ban);
+        assert!(!settings.auto_routing_enabled);
+        toggle_country_ban(&mut settings);
+        assert!(!settings.enable_country_ban);
+        assert!(!settings.auto_routing_enabled);
+    }
 
     #[test]
     fn every_roblox_quality_level_survives_a_read_and_apply() {
