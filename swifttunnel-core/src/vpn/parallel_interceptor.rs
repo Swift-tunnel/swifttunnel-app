@@ -4766,6 +4766,7 @@ impl ParallelInterceptor {
             // failure instead of treating it as a clean disconnect. A reader
             // *error* return is the driver-handle-loss class (rebind budget
             // exhausted / acquire failed); a reader *panic* is an internal bug.
+            raise_packet_thread_priority("Packet reader");
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 run_packet_reader(
                     physical_idx,
@@ -4830,6 +4831,7 @@ impl ParallelInterceptor {
                         // return and a panic are the InternalThreadFailed class:
                         // the NDIS adapter handle is still valid, the injection
                         // thread itself died.
+                        raise_packet_thread_priority("Inbound receiver");
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             run_v3_inbound_receiver(relay, config, inbound_stop, throughput)
                         }));
@@ -5311,6 +5313,27 @@ impl Drop for ParallelInterceptor {
 ///
 /// Logs the outcome. The return value is the *previous* mask, and zero means
 /// the call failed. A failed request retains the thread's prior affinity.
+/// Run a latency-critical packet thread (reader, inbound receiver, relay
+/// sender) at time-critical priority. These threads block on events or
+/// sockets and do microseconds of work per packet. At normal priority any
+/// CPU-saturating thread above priority 8 preempts them, including Roblox
+/// itself when the High Priority boost puts it at base 13, and every
+/// preempted batch becomes extra ping. Time-critical is still below the
+/// realtime class, so it cannot starve the system.
+pub(crate) fn raise_packet_thread_priority(thread_name: &str) {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+        };
+        if let Err(e) = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) {
+            log::warn!("{thread_name}: could not raise thread priority: {e}");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = thread_name;
+}
+
 fn set_thread_affinity(core_id: usize) {
     #[cfg(target_os = "windows")]
     unsafe {

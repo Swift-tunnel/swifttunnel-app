@@ -974,6 +974,7 @@ impl UdpRelay {
         let sender_handle = std::thread::Builder::new()
             .name("udp-relay-sender".to_string())
             .spawn(move || {
+                crate::vpn::parallel_interceptor::raise_packet_thread_priority("UDP relay sender");
                 // Wrap the entire body in catch_unwind so a panic here doesn't
                 // silently halt tunneling — instead we surface it via the
                 // sender_panicked flag that the connection manager polls.

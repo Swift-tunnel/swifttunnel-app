@@ -84,3 +84,18 @@ in Windows CI. Frontend tests (`npm test`) run here.
   `WaitForSingleObject(h, 0)`. The open handle also prevents PID reuse, so the check stays exact. Metrics
   samples and forced discovery still go through sysinfo unchanged.
 - Test (Windows): `presence_polls_of_a_live_player_use_the_held_handle_not_a_snapshot`.
+
+### 7. Packet threads ran at normal priority under a High-priority Roblox (fixed)
+- `swifttunnel-core/src/vpn/parallel_interceptor.rs` (reader and V3 inbound receiver spawns,
+  `raise_packet_thread_priority`), `swifttunnel-core/src/vpn/udp_relay.rs` (`udp-relay-sender`).
+- The High Priority boost (in every preset) puts Roblox in `HIGH_PRIORITY_CLASS` (base 13). Roblox runs a
+  worker thread per core, so in CPU-bound scenes any normal-priority thread (base 8), including our own
+  packet reader, relay sender and inbound injector, waits for Windows' starvation boost (up to a few
+  seconds) before running. Each delayed batch is extra ping exactly when the game is busiest.
+- Fix: those three threads now run at `THREAD_PRIORITY_TIME_CRITICAL` (15, still below the realtime
+  class). They block on the driver event or a socket and do microseconds of work per packet.
+- Trade-off: during a saturating download the reader (which sees every adapter packet) now wins its core
+  over Roblox. Its per-packet work is small and Roblox's threads spread over other cores; worth
+  measuring on the testbench with a 1 Gbps download running alongside a game.
+- Not changed: Roblox's own priority stays High as the boost promises. Lowering it to AboveNormal
+  would be a behaviour change to a named feature; see open items.
