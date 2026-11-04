@@ -3332,13 +3332,18 @@ impl VpnConnection {
                     run_relay_renewal_until_terminal(refresh_state, async move {
                         let client = AuthClient::new();
                         let mut delay = RELAY_LEASE_REFRESH_INTERVAL;
-                        let mut last_attempt = tokio::time::Instant::now() - Duration::from_secs(5);
+                        // None before the first renewal. Subtracting 5 s from
+                        // now panics within 5 s of boot on Windows.
+                        let mut last_attempt: Option<tokio::time::Instant> = None;
                         loop {
                             relay_for_refresh.wait_for_lease_refresh(delay).await;
                             // The hint is not an authorization. Bound API work even
                             // if control frames are duplicated or spoofed.
-                            tokio::time::sleep_until(last_attempt + Duration::from_secs(5)).await;
-                            last_attempt = tokio::time::Instant::now();
+                            if let Some(last_attempt) = last_attempt {
+                                tokio::time::sleep_until(last_attempt + Duration::from_secs(5))
+                                    .await;
+                            }
+                            last_attempt = Some(tokio::time::Instant::now());
 
                             let (region, addr) = router_for_refresh
                                 .as_ref()

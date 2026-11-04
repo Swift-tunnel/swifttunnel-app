@@ -128,3 +128,18 @@ commits, tests next to each fix.
   go to `restore_firewall_rule_marker`) and was left as is. Tests run under
   Wine; the two `recorded_ipv6_legacy_binding_*` tests in this module fail
   under Wine before and after the change because Wine has no PowerShell.
+
+### 8. `Instant::now() - interval` panics shortly after Windows boots
+
+- Files: `swifttunnel-core/src/discord_rpc/manager.rs` (`rpc_thread_main`),
+  `swifttunnel-core/src/vpn/connection.rs` (relay lease renewal task).
+- Why it matters: on Windows, `Instant` counts from boot, and subtracting
+  a `Duration` larger than the uptime panics ("overflow when subtracting
+  duration from instant"). The Discord presence thread started with
+  `Instant::now() - 30s`, so an autostart within 30 s of boot (fast SSD,
+  auto sign-in, run-on-startup is on by default) killed the thread and
+  Discord presence never worked that session. The relay renewal task did
+  the same with 5 s.
+- Status: fixed. Both keep `Option<Instant>` for "no attempt yet". The other
+  `now - duration` uses are in tests. Test for the Discord helper runs
+  under Wine.

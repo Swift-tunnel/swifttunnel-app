@@ -34,6 +34,11 @@ pub struct DiscordManager {
     connected_at: Option<Instant>,
 }
 
+/// Whether enough time has passed since the last Discord connect attempt.
+fn connect_attempt_due(last_attempt: Option<Instant>) -> bool {
+    last_attempt.is_none_or(|at| at.elapsed() >= RECONNECT_INTERVAL)
+}
+
 impl DiscordManager {
     /// Create a new Discord manager. Only spawns the background thread when enabled.
     pub fn new(enabled: bool) -> Self {
@@ -75,7 +80,10 @@ impl DiscordManager {
         info!("Discord RPC thread started");
 
         let mut client: Option<DiscordIpcClient> = None;
-        let mut last_connect_attempt = Instant::now() - RECONNECT_INTERVAL;
+        // None until the first attempt. `Instant::now() - RECONNECT_INTERVAL`
+        // panicked when the app autostarted within 30 s of boot, because
+        // Windows counts Instant from boot, and took Discord presence with it.
+        let mut last_connect_attempt: Option<Instant> = None;
         let mut latest_state: Option<DiscordState> = None;
 
         loop {
@@ -108,8 +116,8 @@ impl DiscordManager {
                     latest_state = Some(state.clone());
                 }
                 // Try to connect if not connected and enough time has passed
-                if client.is_none() && last_connect_attempt.elapsed() >= RECONNECT_INTERVAL {
-                    last_connect_attempt = Instant::now();
+                if client.is_none() && connect_attempt_due(last_connect_attempt) {
+                    last_connect_attempt = Some(Instant::now());
                     match Self::try_connect() {
                         Ok(c) => {
                             info!("Connected to Discord IPC");
@@ -386,6 +394,15 @@ impl Drop for DiscordManager {
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn first_connect_attempt_is_due_without_subtracting_from_now() {
+        assert!(connect_attempt_due(None));
+        assert!(!connect_attempt_due(Some(Instant::now())));
+        if let Some(old) = Instant::now().checked_sub(RECONNECT_INTERVAL) {
+            assert!(connect_attempt_due(Some(old)));
+        }
+    }
 
     #[test]
     fn drop_does_not_wait_forever_for_a_stalled_rpc_worker() {
