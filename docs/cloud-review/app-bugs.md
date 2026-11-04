@@ -80,3 +80,17 @@ commits, tests next to each fix.
   powercfg aliases the tweak uses map to their GUIDs in `power_guid`. Added
   the `Win32_System_Power` feature of the `windows` crate. A test checks
   that every `PowerAc` action's aliases resolve. Tests run under Wine.
+
+### 5. Translated "Access is denied" was not treated as a permission problem
+
+- Files: `swifttunnel-core/src/vpn/error_messages.rs`
+  (`user_friendly_error`, new `is_access_denied`),
+  `swifttunnel-desktop/src/stores/vpnStore.ts` (`isPermissionMessage`).
+- Why it matters: both matched only the English OS text. On non-English
+  Windows an access-denied split-tunnel setup error fell through to the
+  generic "run a repair" message, and the store treated a raw access-denied
+  driver error as driver-repairable and ran an automatic driver repair
+  instead of reporting the permission problem.
+- Status: fixed. Both also match `(os error 5)` and `0x80070005`, which
+  Windows does not translate. Tests use German and French messages and
+  check that `(os error 50)` / `(os error 53)` do not match.

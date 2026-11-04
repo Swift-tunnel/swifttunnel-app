@@ -981,6 +981,22 @@ describe("stores/vpnStore", () => {
     );
   });
 
+  it("treats translated access-denied errors as permission problems", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnConnect.mockRejectedValueOnce(
+      new Error(
+        "Failed to open NDISRD: Zugriff verweigert (os error 5). Reset the driver service.",
+      ),
+    );
+
+    const useVpnStore = await loadStore();
+    await useVpnStore.getState().connect("singapore", ["roblox"]);
+
+    expect(systemRepairDriver).not.toHaveBeenCalled();
+    expect(vpnConnect).toHaveBeenCalledTimes(1);
+    expect(useVpnStore.getState().state).toBe("error");
+  });
+
   it("repairs elevated Windows driver-access blocks once before failing", async () => {
     systemCheckDriver.mockResolvedValue(driverStatus());
     systemRepairDriver.mockResolvedValueOnce(driverStatus());

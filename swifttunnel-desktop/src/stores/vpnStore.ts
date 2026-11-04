@@ -105,7 +105,10 @@ function isPermissionMessage(message: string): boolean {
     haystack.includes("run swifttunnel as administrator") ||
     haystack.includes("access is denied") ||
     haystack.includes("access denied") ||
-    haystack.includes("process is not elevated")
+    haystack.includes("process is not elevated") ||
+    // Windows translates the access-denied text; the codes are not translated.
+    haystack.includes("(os error 5)") ||
+    haystack.includes("0x80070005")
   );
 }
 

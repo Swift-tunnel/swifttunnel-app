@@ -25,10 +25,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
                 device_installation_service_guidance()
             } else if lc.contains("timed out") || lc.contains("timeout") {
                 "Driver initialization timed out.\n\nPlease restart your computer and try again.".to_string()
-            } else if lc.contains("administrator")
-                || lc.contains("access denied")
-                || lc.contains("access is denied")
-            {
+            } else if lc.contains("administrator") || is_access_denied(&lc) {
                 admin_or_access_denied_message(crate::utils::is_administrator())
             } else if driver_reboot_pending(msg) {
                 "Restart Windows to finish setting up SwiftTunnel's network filter, then connect again.\n\nIf this still appears after restarting, contact support with your log file.".to_string()
@@ -208,6 +205,17 @@ fn is_windows_firewall_setup_error(lowercase_msg: &str) -> bool {
         && !lowercase_msg.contains("administrator privileges required")
         && !lowercase_msg.contains("access denied")
         && !lowercase_msg.contains("access is denied")
+}
+
+/// Whether a lowercased error is Windows' ERROR_ACCESS_DENIED.
+///
+/// The OS text is translated ("Zugriff verweigert", "Accès refusé"), so also
+/// match the codes Rust and the windows crate append to it.
+fn is_access_denied(lc: &str) -> bool {
+    lc.contains("access denied")
+        || lc.contains("access is denied")
+        || lc.contains("(os error 5)")
+        || lc.contains("0x80070005")
 }
 
 fn admin_or_access_denied_message(is_admin: bool) -> String {
@@ -499,6 +507,21 @@ mod tests {
         let msg = user_friendly_error(&error);
         assert_eq!(msg, "This account is banned: abuse.");
         assert_eq!(short_error(&error), "Account banned");
+    }
+
+    #[test]
+    fn test_translated_access_denied_is_still_an_access_problem() {
+        let expected = admin_or_access_denied_message(crate::utils::is_administrator());
+        for raw in [
+            "Failed to open NDISRD: Zugriff verweigert (os error 5)",
+            "Failed to install WFP filter: Accès refusé. (0x80070005)",
+        ] {
+            let error = VpnError::SplitTunnelSetupFailed(raw.to_string());
+            assert_eq!(user_friendly_error(&error), expected, "{raw}");
+        }
+        // Other error numbers that merely start with 5 are not access denied.
+        assert!(!is_access_denied("network name not found (os error 53)"));
+        assert!(!is_access_denied("bad network path (os error 50)"));
     }
 
     #[test]
