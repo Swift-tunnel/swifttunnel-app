@@ -1738,12 +1738,37 @@ async fn download_while_idle<T>(
 }
 
 /// Check for automatic updates in the background and hand off only while idle.
+/// How one pass of the automatic update worker ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdatePass {
+    /// Checked: current, installed or not retried. Nothing to do for hours.
+    Checked,
+    /// Skipped before any network work: tunnel in use, Roblox open, another
+    /// update running or updates switched off. Cheap to look again soon.
+    Deferred,
+    /// An update was found, but activity started during the download or
+    /// handover. Retry once things are quiet, without re-downloading often.
+    Interrupted,
+    /// The check or download failed: offline, GitHub down, bad signature.
+    Failed,
+}
+
+/// When the update worker looks again. Every outcome used to wait six hours,
+/// so a player who was connected or had Roblox open 45 s after launch (the
+/// usual case) went six hours without the update.
+fn update_retry_after(pass: UpdatePass) -> Duration {
+    match pass {
+        UpdatePass::Checked => Duration::from_secs(6 * 60 * 60),
+        UpdatePass::Deferred => Duration::from_secs(60),
+        UpdatePass::Interrupted => Duration::from_secs(10 * 60),
+        UpdatePass::Failed => Duration::from_secs(30 * 60),
+    }
+}
+
 fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
     // Long enough that a launch is not competing with a download, short enough
     // that somebody who opens Lite, updates, and plays is covered.
     const FIRST_CHECK_AFTER: Duration = Duration::from_secs(45);
-    // A session left open for days should not stay on an old build.
-    const THEN_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 
     std::thread::Builder::new().name("lite-auto-update".into()).spawn(move || {
         let mut wait = FIRST_CHECK_AFTER;
@@ -1758,12 +1783,13 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-            wait = THEN_EVERY;
+            wait = update_retry_after(UpdatePass::Checked);
 
             if shared.stop.load(Ordering::Relaxed) {
                 return;
             }
             if !shared.automatic_updates_allowed() {
+                wait = update_retry_after(UpdatePass::Deferred);
                 continue;
             }
 
@@ -1775,10 +1801,12 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
                 .unwrap_or(true);
             if in_use || shared.busy.is_busy() {
                 log::debug!("auto-update: in use, deferring");
+                wait = update_retry_after(UpdatePass::Deferred);
                 continue;
             }
 
             let Some(_update_job) = shared.update_busy.try_enter() else {
+                wait = update_retry_after(UpdatePass::Deferred);
                 continue;
             };
 
@@ -1797,6 +1825,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
                 // trying again later.
                 Err(error) => {
                     log::info!("auto-update: could not check ({error})");
+                    wait = update_retry_after(UpdatePass::Failed);
                     continue;
                 }
             };
@@ -1815,6 +1844,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
             }
 
             if !shared.automatic_updates_allowed() {
+                wait = update_retry_after(UpdatePass::Deferred);
                 continue;
             }
 
@@ -1841,6 +1871,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
                     log::debug!("auto-update: activity or preferences changed, download cancelled");
                     shared.edit(|s| s.update = UpdateState::Idle);
                     shared.notify();
+                    wait = update_retry_after(UpdatePass::Interrupted);
                     continue;
                 }
                 Some(Err(error)) => {
@@ -1850,6 +1881,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
                     log::warn!("auto-update: not applying it ({error})");
                     shared.edit(|s| s.update = UpdateState::Idle);
                     shared.notify();
+                    wait = update_retry_after(UpdatePass::Failed);
                     continue;
                 }
             };
@@ -1860,6 +1892,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
             let Some(_operation) = shared.busy.try_enter() else {
                 shared.edit(|s| s.update = UpdateState::Idle);
                 shared.notify();
+                wait = update_retry_after(UpdatePass::Interrupted);
                 continue;
             };
             if !shared.connection_is_idle() || !shared.automatic_updates_allowed() {
@@ -1868,6 +1901,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
                 );
                 shared.edit(|s| s.update = UpdateState::Idle);
                 shared.notify();
+                wait = update_retry_after(UpdatePass::Interrupted);
                 continue;
             }
 
@@ -2917,6 +2951,18 @@ mod tests {
     };
     use swifttunnel_core::settings::AppSettings;
     use swifttunnel_core::structs::{GraphicsQuality, RobloxSettingsConfig};
+
+    #[test]
+    fn deferred_update_checks_come_back_soon_and_completed_ones_wait() {
+        use super::{UpdatePass, update_retry_after};
+        let deferred = update_retry_after(UpdatePass::Deferred);
+        let interrupted = update_retry_after(UpdatePass::Interrupted);
+        let failed = update_retry_after(UpdatePass::Failed);
+        let checked = update_retry_after(UpdatePass::Checked);
+        assert!(deferred.as_secs() <= 60);
+        assert!(deferred < interrupted && interrupted < failed && failed < checked);
+        assert_eq!(checked.as_secs(), 6 * 60 * 60);
+    }
 
     #[test]
     fn failed_automatic_reconnects_back_off_up_to_two_minutes() {

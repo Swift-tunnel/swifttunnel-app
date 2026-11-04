@@ -279,3 +279,19 @@ commits, tests next to each fix.
 - Status: fixed. Failed automatic reconnects back off 5, 10, 20, 40, 80 s,
   then every 120 s; a connected session resets the backoff. Manual connects
   are not affected. Test added; Lite suite (94 tests) passes under Wine.
+
+### 18. Lite postponed automatic updates by six hours whenever it was busy
+
+- File: `swifttunnel-lite/src/engine.rs` (`spawn_auto_update`, new
+  `UpdatePass` / `update_retry_after`).
+- Why it matters: the worker checks 45 s after launch, then sets its wait to
+  six hours before doing anything. Every skip (tunnel connected, Roblox
+  open, another update running) and every failure then waited the full six
+  hours. For a client people open to play, the first check usually lands
+  while connected or in game, so updates were in practice delayed by six
+  hours per session.
+- Status: fixed. Skips made before any network work retry after 60 s;
+  updates interrupted by activity after 10 min; failed checks or downloads
+  after 30 min; a completed check still waits six hours. Network calls still
+  happen only while idle. Test added; Lite suite (95 tests) passes under
+  Wine.
