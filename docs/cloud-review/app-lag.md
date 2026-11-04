@@ -112,6 +112,23 @@ in Windows CI. Frontend tests (`npm test`) run here.
   different process. PIDs without one are looked up fresh, so the PID-reuse guarantee is unchanged. In
   steady state only new owners are opened.
 - Test: `connection_name_refresh_reuses_names_only_for_persisting_sockets`.
-- Not fixed yet: the snapshot is still republished (and `version` bumped) every tick even when nothing
-  changed, which makes the reader drop its UDP inline entries and run a `retain` 10 times a second.
-  Also the 5s full sysinfo scan with `UpdateKind::Always`. See open items.
+- Follow-ups: the unchanged-snapshot republish is fixed in item 9. Still open: the 5s full sysinfo scan
+  with `UpdateKind::Always`.
+
+## Pass 2
+
+### 9. Unchanged owner tables republished the process snapshot 10 times a second (fixed)
+- `swifttunnel-core/src/vpn/process_cache.rs`, `update`, `update_with_tcp_ports`,
+  `update_with_recent_tcp_ports` (new `snapshot_inputs_unchanged`).
+- With API tunneling on and Roblox running, the cache refresher samples every 100ms. Each sample built a
+  brand-new `ProcessSnapshot` (lowercased every process name, rebuilt the connection map clone, tunnel
+  PID and port sets) and bumped `version`, even when the TCP/UDP owner tables were identical to the last
+  sample, which is the usual case mid-match. On a version change the packet reader drops every UDP
+  entry from its inline routing cache and `retain`s the rest, so it also re-derived the routing of the
+  game's UDP flow from the snapshot ten times a second.
+- Fix: before publishing, compare the inputs (connections, owner names, explicit UDP/TCP ports) with the
+  live snapshot; if they match, keep it and its version. Everything else in a snapshot is derived from
+  those inputs plus the fixed `tunnel_apps`, so routing is unchanged. Any real change (new socket, new
+  owner, port retention expiring) still publishes immediately.
+- Test: `identical_refresh_keeps_the_live_snapshot_and_version` (run on Linux by compiling
+  `process_cache.rs` standalone; the module has no Windows dependencies).

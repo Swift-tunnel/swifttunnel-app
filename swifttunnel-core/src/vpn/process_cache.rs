@@ -522,6 +522,39 @@ impl LockFreeProcessCache {
         })
     }
 
+    /// Whether publishing these inputs would rebuild the snapshot already live.
+    ///
+    /// With API tunneling on and Roblox running, the refresher samples every
+    /// 100ms and the owner tables are usually identical between samples.
+    /// Republishing anyway rebuilt every map and set, and the version bump made
+    /// the packet reader throw away its UDP routing cache and rescan the rest,
+    /// ten times a second for the whole session. Everything else in a snapshot
+    /// is derived from these inputs and the fixed `tunnel_apps`.
+    fn snapshot_inputs_unchanged(
+        &self,
+        connections: &AHashMap<ConnectionKey, u32>,
+        pid_names: &AHashMap<u32, String>,
+        explicit_tunnel_udp_ports: &AHashSet<u16>,
+        explicit_tunnel_tcp_ports: &AHashSet<u16>,
+    ) -> bool {
+        let current = self.current.load();
+        current.connections == *connections
+            && current.explicit_tunnel_udp_ports == *explicit_tunnel_udp_ports
+            && current.explicit_tunnel_tcp_ports == *explicit_tunnel_tcp_ports
+            && current.pid_names.len() == pid_names.len()
+            && pid_names.iter().all(|(pid, name)| {
+                current.pid_names.get(pid).is_some_and(|lower| {
+                    // Stored names are `to_lowercase()`d. The ASCII check
+                    // avoids allocating for the usual all-ASCII image name.
+                    if name.is_ascii() {
+                        lower.len() == name.len() && lower.eq_ignore_ascii_case(name)
+                    } else {
+                        *lower == name.to_lowercase()
+                    }
+                })
+            })
+    }
+
     /// Create new lock-free cache
     pub fn new(tunnel_apps: Vec<String>) -> Self {
         let apps: AHashSet<String> = tunnel_apps.into_iter().map(|s| s.to_lowercase()).collect();
@@ -589,8 +622,16 @@ impl LockFreeProcessCache {
     ) {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
         self.merge_recent_immediate_processes(&mut pid_names);
-        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports) = self.clone_explicit_ports();
+        if self.snapshot_inputs_unchanged(
+            &connections,
+            &pid_names,
+            &explicit_tunnel_udp_ports,
+            &explicit_tunnel_tcp_ports,
+        ) {
+            return;
+        }
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let new_snapshot = self.snapshot_from_parts(
             connections,
             pid_names,
@@ -617,8 +658,16 @@ impl LockFreeProcessCache {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
         self.merge_recent_immediate_processes(&mut pid_names);
         let explicit_tunnel_tcp_ports = self.replace_explicit_tcp_ports_locked(tcp_ports);
-        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
+        if self.snapshot_inputs_unchanged(
+            &connections,
+            &pid_names,
+            &explicit_tunnel_udp_ports,
+            &explicit_tunnel_tcp_ports,
+        ) {
+            return;
+        }
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let new_snapshot = self.snapshot_from_parts(
             connections,
             pid_names,
@@ -646,8 +695,16 @@ impl LockFreeProcessCache {
         self.merge_recent_immediate_processes(&mut pid_names);
         let explicit_tunnel_tcp_ports =
             self.retain_recent_explicit_tcp_ports_locked(tcp_ports, retain_for);
-        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
+        if self.snapshot_inputs_unchanged(
+            &connections,
+            &pid_names,
+            &explicit_tunnel_udp_ports,
+            &explicit_tunnel_tcp_ports,
+        ) {
+            return;
+        }
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
         let new_snapshot = self.snapshot_from_parts(
             connections,
             pid_names,
@@ -922,6 +979,71 @@ mod tests {
 
         // New snapshot has the connection
         assert!(snap2.should_tunnel(Ipv4Addr::new(192, 168, 1, 1), 8080, Protocol::Tcp));
+    }
+
+    #[test]
+    fn identical_refresh_keeps_the_live_snapshot_and_version() {
+        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()]);
+        let sample = || {
+            let mut connections = HashMap::new();
+            connections.insert(
+                ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 1), 50000, Protocol::Udp),
+                1234,
+            );
+            connections.insert(
+                ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 1), 50001, Protocol::Tcp),
+                99,
+            );
+            let mut pid_names = HashMap::new();
+            pid_names.insert(1234, "RobloxPlayerBeta.exe".to_string());
+            pid_names.insert(99, "Explorer.EXE".to_string());
+            (connections, pid_names)
+        };
+
+        let (connections, pid_names) = sample();
+        cache.update_with_recent_tcp_ports(
+            connections,
+            pid_names,
+            &[50001],
+            Duration::from_secs(30),
+        );
+        let first = cache.get_snapshot();
+
+        // The refresher's steady state: the same tables again.
+        for _ in 0..3 {
+            let (connections, pid_names) = sample();
+            cache.update_with_recent_tcp_ports(
+                connections,
+                pid_names,
+                &[50001],
+                Duration::from_secs(30),
+            );
+        }
+        let (connections, pid_names) = sample();
+        cache.update(connections, pid_names);
+        assert!(Arc::ptr_eq(&first, &cache.get_snapshot()));
+
+        // Any real change still publishes.
+        let (mut connections, pid_names) = sample();
+        connections.insert(
+            ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 1), 50002, Protocol::Udp),
+            1234,
+        );
+        cache.update_with_recent_tcp_ports(
+            connections,
+            pid_names,
+            &[50001],
+            Duration::from_secs(30),
+        );
+        let changed = cache.get_snapshot();
+        assert_eq!(changed.version, first.version + 1);
+        assert!(changed.tunnel_udp_ports.contains(&50002));
+
+        // A renamed owner is a change too, even with the same tables.
+        let (connections, mut pid_names) = sample();
+        pid_names.insert(99, "Other.exe".to_string());
+        cache.update(connections, pid_names);
+        assert_eq!(cache.get_snapshot().version, changed.version + 1);
     }
 
     #[test]
