@@ -6913,17 +6913,52 @@ fn lookup_process_name_by_pid(_pid: u32) -> Option<String> {
 
 /// Resolve current owners once per PID without retaining names across samples.
 /// A reused PID must not inherit the previous process's tunnel membership.
+#[cfg(test)]
 fn collect_connection_pid_names(
     connections: &ahash::AHashMap<ConnectionKey, u32>,
+    lookup: impl FnMut(u32) -> Option<String>,
+) -> ahash::AHashMap<u32, String> {
+    collect_connection_pid_names_since(
+        connections,
+        &ahash::AHashMap::new(),
+        &ahash::AHashMap::new(),
+        lookup,
+    )
+}
+
+/// Resolve current owners once per PID, reusing a name from the previous
+/// sample only when that PID still owns a socket it owned then.
+///
+/// At the 100ms API-tunneling cadence, opening every owner process (browser,
+/// Discord, svchost: often 50-150 PIDs) was hundreds of `OpenProcess` calls a
+/// second during gameplay. A socket that is still there with the same owner
+/// proves the owner has not exited, so its PID cannot have been reused by a
+/// different process. PIDs without such a socket are looked up fresh, so a
+/// reused PID still never inherits the previous process's tunnel membership.
+fn collect_connection_pid_names_since(
+    connections: &ahash::AHashMap<ConnectionKey, u32>,
+    previous_connections: &ahash::AHashMap<ConnectionKey, u32>,
+    previous_names: &ahash::AHashMap<u32, String>,
     mut lookup: impl FnMut(u32) -> Option<String>,
 ) -> ahash::AHashMap<u32, String> {
-    let mut attempted = ahash::AHashSet::new();
     let mut names = ahash::AHashMap::new();
-    for &pid in connections.values() {
-        if attempted.insert(pid) {
-            if let Some(name) = lookup(pid) {
-                names.insert(pid, name);
+    if !previous_names.is_empty() {
+        for (key, &pid) in connections {
+            if previous_connections.get(key) == Some(&pid)
+                && !names.contains_key(&pid)
+                && let Some(name) = previous_names.get(&pid)
+            {
+                names.insert(pid, name.clone());
             }
+        }
+    }
+    let mut attempted = ahash::AHashSet::new();
+    for &pid in connections.values() {
+        if !names.contains_key(&pid)
+            && attempted.insert(pid)
+            && let Some(name) = lookup(pid)
+        {
+            names.insert(pid, name);
         }
     }
     names
@@ -6968,6 +7003,10 @@ fn run_cache_refresher(
     let mut refresh_count = 0u64;
     let mut first_run = true;
     let mut last_full_process_scan: Option<Instant> = None;
+    // The previous fast-path sample, so owner names can be carried over for
+    // PIDs whose sockets persist (see `collect_connection_pid_names_since`).
+    let mut previous_connections: ahash::AHashMap<ConnectionKey, u32> = ahash::AHashMap::new();
+    let mut previous_names: ahash::AHashMap<u32, String> = ahash::AHashMap::new();
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
@@ -7182,8 +7221,15 @@ fn run_cache_refresher(
             // machine even for ProcessesToUpdate::Some. At the 100ms cadence
             // that repeated enumeration competes with the game. Query only
             // each current owner's image through a fresh process handle.
-            pid_names = collect_connection_pid_names(&connections, lookup_process_name_by_pid);
+            pid_names = collect_connection_pid_names_since(
+                &connections,
+                &previous_connections,
+                &previous_names,
+                lookup_process_name_by_pid,
+            );
         }
+        previous_connections.clone_from(&connections);
+        previous_names.clone_from(&pid_names);
 
         // Also log connections owned by tunnel apps
         if refresh_count < 10 && !tunnel_pids_found.is_empty() {
@@ -9853,6 +9899,44 @@ mod tests {
         assert_eq!(calls, vec![10, 20]);
         assert_eq!(names.len(), 1);
         assert_eq!(names[&20], "RobloxPlayerBeta.exe");
+    }
+
+    #[test]
+    fn connection_name_refresh_reuses_names_only_for_persisting_sockets() {
+        let kept = ConnectionKey::new(Ipv4Addr::LOCALHOST, 123, Protocol::Tcp);
+        let previous = ahash::AHashMap::from_iter([
+            (kept.clone(), 10),
+            (
+                ConnectionKey::new(Ipv4Addr::LOCALHOST, 200, Protocol::Udp),
+                30,
+            ),
+        ]);
+        let previous_names = ahash::AHashMap::from_iter([
+            (10, "RobloxPlayerBeta.exe".to_string()),
+            (30, "RobloxPlayerBeta.exe".to_string()),
+        ]);
+        // PID 10 keeps its socket; PID 30's old socket is gone and the PID now
+        // owns a different one, so it may be a reused PID and is looked up.
+        let current = ahash::AHashMap::from_iter([
+            (kept, 10),
+            (
+                ConnectionKey::new(Ipv4Addr::LOCALHOST, 124, Protocol::Tcp),
+                10,
+            ),
+            (
+                ConnectionKey::new(Ipv4Addr::LOCALHOST, 201, Protocol::Udp),
+                30,
+            ),
+        ]);
+        let mut calls = Vec::new();
+        let names =
+            collect_connection_pid_names_since(&current, &previous, &previous_names, |pid| {
+                calls.push(pid);
+                Some("other.exe".to_string())
+            });
+        assert_eq!(calls, vec![30]);
+        assert_eq!(names[&10], "RobloxPlayerBeta.exe");
+        assert_eq!(names[&30], "other.exe");
     }
 
     #[test]

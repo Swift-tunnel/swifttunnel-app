@@ -99,3 +99,19 @@ in Windows CI. Frontend tests (`npm test`) run here.
   measuring on the testbench with a 1 Gbps download running alongside a game.
 - Not changed: Roblox's own priority stays High as the boost promises. Lowering it to AboveNormal
   would be a behaviour change to a named feature; see open items.
+
+### 8. Cache refresher opened every socket owner's process 10 times a second (fixed)
+- `swifttunnel-core/src/vpn/parallel_interceptor.rs`, `run_cache_refresher` fast path and
+  `collect_connection_pid_names_since`.
+- With API tunneling on and Roblox running, the refresher runs every 100ms. On each tick it called
+  `OpenProcess` + `K32GetProcessImageFileNameW` + `CloseHandle` (plus a 1KB buffer and a String) for every
+  distinct PID that owns a TCP or UDP socket: typically 50-150 PIDs, so roughly 500-1500 process opens per
+  second for the whole game session.
+- Fix: carry a PID's name over from the previous sample when that PID still owns a socket it owned
+  then. A persisting socket proves the owner did not exit, so the PID cannot have been reused by a
+  different process. PIDs without one are looked up fresh, so the PID-reuse guarantee is unchanged. In
+  steady state only new owners are opened.
+- Test: `connection_name_refresh_reuses_names_only_for_persisting_sockets`.
+- Not fixed yet: the snapshot is still republished (and `version` bumped) every tick even when nothing
+  changed, which makes the reader drop its UDP inline entries and run a `retain` 10 times a second.
+  Also the 5s full sysinfo scan with `UpdateKind::Always`. See open items.
