@@ -31,13 +31,20 @@ pub struct GameMonitor {
 }
 
 pub fn monitor_for_player(pid: u32) -> Option<GameMonitor> {
-    let mut search = FindWindow { pid, window: None };
     unsafe {
-        let _ = EnumWindows(
-            Some(window_callback),
-            LPARAM((&mut search as *mut FindWindow) as isize),
-        );
-        let window = search.window?;
+        // The overlay usually samples while Roblox is foreground. Reuse that
+        // exact window when it qualifies, including its current monitor/DPI.
+        let foreground = GetForegroundWindow();
+        let window = if is_player_window(foreground, pid) {
+            foreground
+        } else {
+            let mut search = FindWindow { pid, window: None };
+            let _ = EnumWindows(
+                Some(window_callback),
+                LPARAM((&mut search as *mut FindWindow) as isize),
+            );
+            search.window?
+        };
         let monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -105,17 +112,26 @@ struct FindWindow {
     pid: u32,
     window: Option<HWND>,
 }
-unsafe extern "system" fn window_callback(window: HWND, data: LPARAM) -> BOOL {
+
+fn is_player_window(window: HWND, player_pid: u32) -> bool {
+    if window.0.is_null() || player_pid == 0 {
+        return false;
+    }
     unsafe {
-        let search = &mut *(data.0 as *mut FindWindow);
         let mut pid = 0;
         GetWindowThreadProcessId(window, Some(&mut pid));
-        if pid == search.pid
+        pid == player_pid
             && IsWindowVisible(window).as_bool()
             && GetWindow(window, GW_OWNER)
                 .ok()
                 .is_none_or(|owner| owner.0.is_null())
-        {
+    }
+}
+
+unsafe extern "system" fn window_callback(window: HWND, data: LPARAM) -> BOOL {
+    unsafe {
+        let search = &mut *(data.0 as *mut FindWindow);
+        if is_player_window(window, search.pid) {
             search.window = Some(window);
             return false.into();
         }
