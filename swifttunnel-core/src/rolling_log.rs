@@ -98,11 +98,8 @@ impl RollingLog {
                 old.seek(SeekFrom::Start(self.size - self.max))?;
                 io::copy(&mut old.take(self.max), &mut File::create(&self.previous)?)?;
             } else {
-                match std::fs::remove_file(&self.previous) {
-                    Ok(()) => {}
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(e),
-                }
+                // Replace the archive in one operation. Deleting it first
+                // loses both logs if the active file cannot be renamed.
                 std::fs::rename(&self.path, &self.previous)?;
             }
             Ok(())
@@ -202,6 +199,22 @@ mod tests {
         drop(blocker);
         log.write_all(b"x").unwrap();
         assert_eq!(std::fs::read(dir.current()).unwrap(), b"12345678x");
+    }
+
+    #[test]
+    fn an_archive_survives_when_the_current_log_disappears_during_rotation() {
+        let dir = Fixture::new();
+        let mut log = dir.open();
+        log.write_all(b"1234567890abcdef").unwrap();
+        std::fs::write(dir.previous(), b"previous failure").unwrap();
+        log.file.take();
+        std::fs::remove_file(dir.current()).unwrap();
+
+        log.rotate().unwrap();
+        log.write_all(b"new log").unwrap();
+
+        assert_eq!(std::fs::read(dir.previous()).unwrap(), b"previous failure");
+        assert_eq!(std::fs::read(dir.current()).unwrap(), b"new log");
     }
 
     #[test]

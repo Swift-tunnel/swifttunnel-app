@@ -5,6 +5,37 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[cfg(windows)]
+pub(crate) fn known_folder_path(id: &windows::core::GUID) -> std::io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::io;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::{Component, Prefix};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+
+    let raw =
+        unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }.map_err(io::Error::from)?;
+    if raw.0.is_null() {
+        return Err(io::Error::other("Windows did not return the folder"));
+    }
+    let path = PathBuf::from(OsString::from_wide(unsafe { raw.as_wide() }));
+    unsafe { CoTaskMemFree(Some(raw.0.cast())) };
+    if !path.is_absolute()
+        || !matches!(path.components().next(), Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Expected a local Windows folder",
+        ));
+    }
+    Ok(path)
+}
+
 /// Compare lexical path components without resolving links or parent traversal.
 /// Windows uses ordinal UTF-16 case comparison; other platforms stay exact.
 pub(crate) fn paths_match(left: &Path, right: &Path) -> bool {
@@ -1647,5 +1678,39 @@ mod tests {
         assert!(!out.success);
         assert!(!out.timed_out, "a missing program is not a timeout");
         assert!(!out.stderr.is_empty(), "the caller needs a reason to show");
+    }
+}
+
+/// Whether `message` differs from the last one recorded in `last`, recording
+/// it if so.
+///
+/// For results that are polled: the first answer and every changed answer are
+/// worth a log line, the identical repeats in between are not.
+pub fn changed_since_last(last: &std::sync::Mutex<String>, message: &str) -> bool {
+    // A poisoned slot only means an earlier logger panicked. Log rather than
+    // go quiet.
+    let Ok(mut last) = last.lock() else {
+        return true;
+    };
+    if *last == message {
+        return false;
+    }
+    *last = message.to_owned();
+    true
+}
+
+#[cfg(test)]
+mod changed_since_last_tests {
+    use super::changed_since_last;
+
+    #[test]
+    fn repeats_are_dropped_and_changes_are_kept() {
+        let last = std::sync::Mutex::new(String::new());
+        assert!(changed_since_last(&last, "adapters=5"));
+        assert!(!changed_since_last(&last, "adapters=5"));
+        assert!(!changed_since_last(&last, "adapters=5"));
+        assert!(changed_since_last(&last, "adapters=7"));
+        // Going back to an earlier answer is a change too.
+        assert!(changed_since_last(&last, "adapters=5"));
     }
 }

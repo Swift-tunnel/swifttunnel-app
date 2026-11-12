@@ -934,6 +934,19 @@ impl NetworkBooster {
 /// SwiftTunnel artifacts and removes them. Used by `--cleanup` (NSIS
 /// uninstaller) and the `system_cleanup` Tauri command.
 pub fn cleanup_all_system_state() -> Result<()> {
+    cleanup_system_state(crate::vpn::SplitTunnelDriver::remove_driver_for_uninstall)
+}
+
+/// Restore system state from a Windows Installer uninstall action. The
+/// running MSI owns the Windows Installer transaction, so remove the driver
+/// with the direct Windows tools.
+pub fn cleanup_system_state_for_msi_uninstall() -> Result<()> {
+    cleanup_system_state(crate::vpn::SplitTunnelDriver::remove_driver_during_msi_uninstall)
+}
+
+fn cleanup_system_state(
+    remove_driver: impl FnOnce() -> std::result::Result<bool, String>,
+) -> Result<()> {
     if let Err(error) = crate::vpn::process_performance::recover_gpu_preferences() {
         warn!("Cleanup: runtime GPU originals remain for recovery: {error}");
     }
@@ -996,7 +1009,7 @@ pub fn cleanup_all_system_state() -> Result<()> {
     // permanently stuck (often the reason they are uninstalling in the first
     // place), which is worse than a stale driver that a subsequent install
     // will replace.
-    if let Err(e) = crate::vpn::split_tunnel::SplitTunnelDriver::remove_driver_for_uninstall() {
+    if let Err(e) = remove_driver() {
         warn!("Cleanup: driver removal failed (non-fatal): {}", e);
     }
 

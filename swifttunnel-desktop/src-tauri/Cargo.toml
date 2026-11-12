@@ -50,8 +50,16 @@ sysinfo = { version = "0.32", default-features = false, features = ["system", "w
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Inspect the WebView2 error returned by Tauri without matching localized text.
+tauri-runtime = "~2.12.2"
+wry = { version = "0.57", default-features = false }
+webview2-com = "0.39"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_Threading",
     "Win32_System_Com",
     "Win32_UI_Shell",

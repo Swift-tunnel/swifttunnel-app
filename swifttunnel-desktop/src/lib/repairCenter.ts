@@ -860,7 +860,7 @@ async function checkRouteAssist(
 
   return {
     status: "checked",
-    summary: "Route Assist state checked.",
+    summary: "Route Assist setting read. This does not test whether Roblox loads.",
     nextStep: routeAssistNextStep,
     changed: false,
     reversible: false,

@@ -39,6 +39,16 @@ enum Action {
         name: &'static str,
         value: &'static [u8],
     },
+    /// Set one `key=value;` entry inside a shared registry string, leaving the
+    /// string's other entries alone (see `semicolon_settings`). Captured as a
+    /// `RegString` snapshot of the whole original string.
+    RegStringEntry {
+        hive: Hive,
+        path: &'static str,
+        name: &'static str,
+        key: &'static str,
+        value: &'static str,
+    },
     /// Create `default_path` and set its DEFAULT value to `value`, capturing
     /// whether `owned_path` (the topmost key this tweak introduces) already
     /// existed. Revert deletes the whole `owned_path` tree when we created it.
@@ -232,12 +242,15 @@ const TWEAKS: &[Tweak] = &[
         requires_admin: false,
         requires_reboot: false,
         // Windows 11 "Optimizations for windowed games" — lower-latency present
-        // path for borderless/windowed games.
-        actions: &[Action::RegString {
+        // path for borderless/windowed games. The same string holds the
+        // player's other Windows graphics settings (VRR for windowed games,
+        // Auto HDR), so only this entry is changed.
+        actions: &[Action::RegStringEntry {
             hive: Hive::Hkcu,
             path: r"Software\Microsoft\DirectX\UserGpuPreferences",
             name: "DirectXUserGlobalSettings",
-            value: "SwapEffectUpgradeEnable=1;",
+            key: "SwapEffectUpgradeEnable",
+            value: "1",
         }],
     },
     Tweak {
@@ -1155,6 +1168,36 @@ pub fn active_ids() -> Result<Vec<String>, String> {
     Ok(load_all()?.keys().cloned().collect())
 }
 
+const CORE_PARKING_TWEAK: &str = "core_parking_disable";
+const CORE_PARKING_X3D_MESSAGE: &str = "Not applied: on this Ryzen 9 X3D processor, Windows parks the cores without the extra game cache so games run on the faster ones. Turning parking off spreads Roblox across both halves of the chip and usually lowers FPS.";
+
+/// Dual-CCD Ryzen X3D parts (7900X3D, 7950X3D, 9900X3D, 9950X3D) rely on core
+/// parking: AMD's driver parks the CCD without 3D V-Cache while a game runs,
+/// so the game's threads land on the cache CCD. Forcing every core unparked
+/// defeats that and costs FPS in exactly the CPU-bound scenes the tweak is
+/// meant to help. Every Ryzen 9 X3D has two CCDs; the Ryzen 7/5 X3D parts
+/// have one and are unaffected.
+fn cpu_steers_games_with_core_parking(processor_name: &str) -> bool {
+    let name = processor_name.to_ascii_lowercase();
+    name.contains("ryzen 9") && name.contains("x3d")
+}
+
+#[cfg(windows)]
+fn processor_name() -> Option<String> {
+    read_reg_string(
+        Hive::Hklm,
+        r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
+        "ProcessorNameString",
+    )
+    .ok()
+    .flatten()
+}
+
+#[cfg(not(windows))]
+fn processor_name() -> Option<String> {
+    None
+}
+
 /// Apply a tweak. Returns whether a restart is required to finish.
 /// No-op (returns Ok) if the tweak is already applied.
 pub fn apply(id: &str) -> Result<bool, String> {
@@ -1167,6 +1210,12 @@ pub fn apply(id: &str) -> Result<bool, String> {
             return Err("A previous change did not finish. Revert this optimization before applying it again.".into());
         }
         return Ok(tweak.requires_reboot); // already applied
+    }
+
+    if id == CORE_PARKING_TWEAK
+        && processor_name().is_some_and(|name| cpu_steers_games_with_core_parking(&name))
+    {
+        return Err(CORE_PARKING_X3D_MESSAGE.to_string());
     }
 
     if tweak.requires_admin && !crate::utils::is_administrator() {
@@ -1297,6 +1346,9 @@ fn capture_action(action: &Action) -> Result<ActionSnapshot, String> {
         },
         Action::RegString {
             hive, path, name, ..
+        }
+        | Action::RegStringEntry {
+            hive, path, name, ..
         } => ActionSnapshot::RegString {
             value: read_reg_string(*hive, path, name)?,
         },
@@ -1370,6 +1422,17 @@ fn apply_action(action: &Action, snapshot: &ActionSnapshot) -> Result<(), String
             name,
             value,
         } => write_reg_string(*hive, path, name, value),
+        Action::RegStringEntry {
+            hive,
+            path,
+            name,
+            key,
+            value,
+        } => {
+            let current = read_reg_string(*hive, path, name)?;
+            let updated = crate::semicolon_settings::set_entry(current.as_deref(), key, value);
+            write_reg_string(*hive, path, name, &updated)
+        }
         Action::RegBinary {
             hive,
             path,
@@ -1433,6 +1496,26 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
             Some(v) => write_reg_string(*hive, path, name, v),
             None => delete_reg_value(*hive, path, name),
         },
+        (
+            Action::RegStringEntry {
+                hive,
+                path,
+                name,
+                key,
+                ..
+            },
+            ActionSnapshot::RegString { value },
+        ) => {
+            let current = read_reg_string(*hive, path, name)?;
+            match crate::semicolon_settings::restore_entry(
+                current.as_deref(),
+                value.as_deref(),
+                key,
+            ) {
+                Some(restored) => write_reg_string(*hive, path, name, &restored),
+                None => delete_reg_value(*hive, path, name),
+            }
+        }
         (
             Action::RegBinary {
                 hive, path, name, ..
@@ -2235,6 +2318,25 @@ mod tests {
                 assert_eq!(was_running, None);
             }
             _ => panic!("expected service snapshot"),
+        }
+    }
+
+    #[test]
+    fn core_parking_stays_on_for_dual_ccd_x3d_processors() {
+        for name in [
+            "AMD Ryzen 9 7950X3D 16-Core Processor",
+            "AMD Ryzen 9 7900X3D 12-Core Processor",
+            "AMD Ryzen 9 9950X3D 16-Core Processor          ",
+        ] {
+            assert!(cpu_steers_games_with_core_parking(name), "{name}");
+        }
+        for name in [
+            "AMD Ryzen 7 7800X3D 8-Core Processor",
+            "AMD Ryzen 7 5800X3D 8-Core Processor",
+            "AMD Ryzen 9 7950X 16-Core Processor",
+            "13th Gen Intel(R) Core(TM) i9-13900K",
+        ] {
+            assert!(!cpu_steers_games_with_core_parking(name), "{name}");
         }
     }
 }

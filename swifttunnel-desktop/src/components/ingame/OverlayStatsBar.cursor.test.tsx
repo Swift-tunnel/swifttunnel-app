@@ -6,6 +6,8 @@ const h = vi.hoisted(() => ({
   render: null as ((event: { payload: OverlayRenderPayload }) => Promise<void>) | null,
   cursor: vi.fn(),
   ignore: vi.fn(),
+  hide: vi.fn(),
+  show: vi.fn(),
   move: vi.fn(),
   save: vi.fn(),
   report: vi.fn(),
@@ -22,7 +24,7 @@ vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     setSize: async () => {}, setPosition: h.move,
     setIgnoreCursorEvents: h.ignore,
-    hide: async () => {}, show: async () => {},
+    hide: h.hide, show: h.show,
     outerPosition: async () => ({ x: 100, y: 100 }),
   }),
   currentMonitor: async () => null,
@@ -66,6 +68,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.effects = []; h.render = null; cleanup = []; h.listenError = null;
   h.ignore.mockResolvedValue(undefined);
+  h.hide.mockResolvedValue(undefined);
+  h.show.mockResolvedValue(undefined);
   h.move.mockResolvedValue(undefined);
   h.save.mockResolvedValue(undefined);
   h.payload = {
@@ -84,6 +88,30 @@ afterEach(async () => {
 });
 
 describe("overlay cursor availability", () => {
+  it("hides when render updates stop during a stalled drag and discards the late cursor reply", async () => {
+    await mountAndDrag();
+    let release!: (cursor: { x: number; y: number; left_down: boolean }) => void;
+    h.cursor.mockReturnValueOnce(new Promise(resolve => { release = resolve; }));
+    await vi.advanceTimersByTimeAsync(16);
+    let releaseClickThrough!: () => void;
+    h.ignore.mockReturnValueOnce(new Promise<void>(resolve => { releaseClickThrough = resolve; }));
+    await vi.advanceTimersByTimeAsync(4500);
+    expect(h.ignore).toHaveBeenLastCalledWith(true);
+    expect(h.hide).toHaveBeenCalledOnce();
+
+    // A new render may restore the bar before the old drag reply arrives.
+    const reopening = h.render!({ payload: h.payload! });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.show).toHaveBeenCalledOnce();
+    releaseClickThrough();
+    await reopening;
+    expect(h.show).toHaveBeenCalledTimes(2);
+    release({ x: 900, y: 700, left_down: false });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.move).not.toHaveBeenCalled();
+    expect(h.save).not.toHaveBeenCalled();
+  });
+
   it("cancels a drag and releases clicks on a failed cursor read, without saving a false position", async () => {
     await mountAndDrag();
     h.cursor.mockRejectedValueOnce(new Error("cursor is on another desktop"));

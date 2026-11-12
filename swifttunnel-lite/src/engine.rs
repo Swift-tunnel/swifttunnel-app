@@ -13,7 +13,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -54,6 +54,8 @@ pub const WM_ENGINE_QUIT_READY: u32 = WM_APP + 3;
 /// judge than one that holds still, and the full app measures on connect for
 /// the same reason.
 const PING_INTERVAL: Duration = Duration::from_secs(30);
+/// How long an exit waits for a just-ended session's report before stopping it.
+const SESSION_REPORT_EXIT_WAIT: Duration = Duration::from_secs(3);
 
 /// Roblox's own default. At or below this counts as still capped.
 const DEFAULT_FRAME_CAP: u32 = 60;
@@ -85,7 +87,8 @@ struct Snapshot {
     roblox_reset: ResetState,
     roblox_reset_note: Option<String>,
     driver: Driver,
-    lockout: Option<Lockout>,
+    account_lockout: Option<Lockout>,
+    update_required: Option<String>,
     /// Progress of the in-app update, shown on the update-required screen.
     update: UpdateState,
     tunnel: Tunnel,
@@ -116,6 +119,7 @@ struct Shared {
     hwnd: AtomicIsize,
     ui_update: crate::ui_update::UiUpdate,
     stop: AtomicBool,
+    worker_wake: WorkerWake,
     /// Serializes connect, disconnect, uninstall and installer handoff.
     busy: OperationGate,
     /// One update check/download at a time, whether manual or automatic.
@@ -127,9 +131,13 @@ struct Shared {
     /// Set when the user pressed Disconnect, so auto-reconnect knows the
     /// tunnel went down on purpose and leaves it down.
     intentional_disconnect: AtomicBool,
+    /// Whether the player has been told that uninstalling with Roblox open
+    /// leaves Lite's Roblox changes behind. The next press goes ahead.
+    uninstall_roblox_warned: AtomicBool,
     /// Whether the tunnel has been up at least once, so a failed first connect
     /// is not retried forever behind a dialog nobody asked for.
     was_connected: AtomicBool,
+    reconnect_backoff: std::sync::Mutex<crate::reconnect_backoff::ReconnectBackoff>,
 }
 
 impl Shared {
@@ -165,7 +173,23 @@ impl Shared {
     }
 
     fn edit<T>(&self, f: impl FnOnce(&mut Snapshot) -> T) -> Option<T> {
-        self.snapshot.write().ok().map(|mut s| f(&mut s))
+        let (result, game_changed) = {
+            let mut snapshot = self.snapshot.write().ok()?;
+            let was_running = snapshot.roblox.running;
+            let result = f(&mut snapshot);
+            (result, was_running != snapshot.roblox.running)
+        };
+        // Waiters read the snapshot under the wake lock, so release the
+        // snapshot before notifying to preserve lock order.
+        if game_changed {
+            self.worker_wake.notify();
+        }
+        Some(result)
+    }
+
+    fn request_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.worker_wake.notify();
     }
 
     // Called after reserving busy, so a new connect cannot race this check.
@@ -188,7 +212,7 @@ impl Shared {
                 .is_ok_and(|settings| settings.update_settings.auto_check)
             // Roblox can be running directly while the tunnel is disconnected.
             // Check afresh before checking/downloading and at installer handoff;
-            // the UI snapshot can be up to twenty seconds behind while idle.
+            // the UI snapshot can still lag behind a new process.
             && !RobloxOptimizer::player_is_running()
     }
 
@@ -197,6 +221,17 @@ impl Shared {
         if let Err(error) = self.settings_save_signal.flush(Duration::from_secs(3)) {
             log::warn!("Could not finish settings saving before exit: {error}");
         }
+    }
+
+    /// Disconnect hands its end-of-session report to a background task. Give
+    /// it a moment before the process goes, then stop it. Only for threads
+    /// outside the runtime; async code awaits the same call directly.
+    fn finish_session_reports_before_exit(&self) {
+        self.runtime.block_on(
+            swifttunnel_core::vpn::connection::finish_pending_session_reports(
+                SESSION_REPORT_EXIT_WAIT,
+            ),
+        );
     }
 }
 
@@ -247,11 +282,12 @@ impl Engine {
                 uninstall_busy: false,
                 signed_in,
                 email,
-                roblox: read_roblox(&roblox_intent),
+                roblox: read_roblox(&roblox_intent, RobloxOptimizer::player_is_running()),
                 roblox_reset: ResetState::default(),
                 roblox_reset_note: None,
                 driver: read_driver(),
-                lockout: lockout_of(&auth_state, banned_reason.clone()),
+                account_lockout: account_lockout_of(&auth_state, banned_reason.clone()),
+                update_required: update_required_message(),
                 update: UpdateState::default(),
                 server_list: DynamicServerList::new_empty(),
                 regions: Vec::new(),
@@ -266,6 +302,7 @@ impl Engine {
             hwnd: AtomicIsize::new(0),
             ui_update: crate::ui_update::UiUpdate::default(),
             stop: AtomicBool::new(false),
+            worker_wake: WorkerWake::default(),
             busy: OperationGate::default(),
             update_busy: OperationGate::default(),
             roblox_edits: OperationGate::default(),
@@ -273,7 +310,9 @@ impl Engine {
             adapter_scan: OperationGate::default(),
             roblox_revision: AtomicU64::new(0),
             intentional_disconnect: AtomicBool::new(false),
+            uninstall_roblox_warned: AtomicBool::new(false),
             was_connected: AtomicBool::new(false),
+            reconnect_backoff: std::sync::Mutex::new(Default::default()),
         });
 
         // Own shutdown before launching workers. A later startup failure must
@@ -363,7 +402,14 @@ impl Engine {
             state.uninstall_note = snapshot.uninstall_note.clone();
             state.standalone = matches!(
                 snapshot.installation,
-                Some(crate::uninstall::Installed::Standalone(_))
+                Some(
+                    crate::uninstall::Installed::Standalone(_)
+                        | crate::uninstall::Installed::Unregistered
+                )
+            );
+            state.unregistered = matches!(
+                snapshot.installation,
+                Some(crate::uninstall::Installed::Unregistered)
             );
             state.installation_unknown = snapshot.installation.is_none()
                 || matches!(
@@ -386,7 +432,10 @@ impl Engine {
             state.roblox = snapshot.roblox.clone();
             state.roblox_reset = snapshot.roblox_reset;
             state.roblox_reset_note = snapshot.roblox_reset_note.clone();
-            state.lockout = snapshot.lockout.clone();
+            state.lockout = visible_lockout(
+                snapshot.account_lockout.as_ref(),
+                snapshot.update_required.as_deref(),
+            );
             state.update = snapshot.update.clone();
             state.driver = snapshot.driver.clone();
             state.tunnel = snapshot.tunnel.clone();
@@ -828,7 +877,7 @@ impl Engine {
                     .read()
                     .map(|s| s.config.roblox_settings.clone())
                     .unwrap_or_default();
-                let roblox = read_roblox(&intent);
+                let roblox = read_roblox(&intent, RobloxOptimizer::player_is_running());
                 shared.edit(|s| {
                     s.roblox = roblox;
                     s.roblox_reset = ResetState::Idle;
@@ -926,7 +975,7 @@ impl Engine {
                 .read()
                 .map(|s| s.config.roblox_settings.clone())
                 .unwrap_or_default();
-                let roblox = read_roblox(&intent);
+            let roblox = read_roblox(&intent, RobloxOptimizer::player_is_running());
                 shared.edit(|s| {
                     s.roblox = roblox;
                 s.roblox.error = error;
@@ -1061,8 +1110,9 @@ impl Engine {
                         log::info!(
                             "update: installer started, closing so it can replace this build"
                         );
-                        shared.stop.store(true, Ordering::Relaxed);
+                        shared.request_stop();
                         shared.flush_settings_before_exit();
+                        shared.finish_session_reports_before_exit();
                         std::process::exit(0);
                     }
                     Err(error) => {
@@ -1135,10 +1185,8 @@ impl Engine {
                             let exe_dir = std::env::current_exe()
                                 .ok()
                                 .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-                            let program_files = std::path::PathBuf::from(
-                                std::env::var("ProgramFiles")
-                                    .unwrap_or_else(|_| "C:\\Program Files".to_string()),
-                            );
+                            let program_files =
+                                swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
                             SplitTunnelDriver::install_driver_from_bundled_package(
                                 None,
                                 exe_dir.as_deref(),
@@ -1480,7 +1528,7 @@ fn apply_startup_preference(
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.request_stop();
     }
 }
 
@@ -1494,7 +1542,7 @@ impl Engine {
         let hwnd = shared.hwnd.load(Ordering::Relaxed);
         spawn_exit_cleanup(
             move || {
-                shared.stop.store(true, Ordering::Relaxed);
+                shared.request_stop();
                 shared.intentional_disconnect.store(true, Ordering::Relaxed);
                 shared.was_connected.store(false, Ordering::Relaxed);
                 // Repair/install may be past its disconnect phase while still
@@ -1509,6 +1557,11 @@ impl Engine {
                     if !idle {
                         vpn.disconnect().await.map_err(|error| error.to_string())?;
                     }
+                    // Also covers a disconnect made just before quitting.
+                    swifttunnel_core::vpn::connection::finish_pending_session_reports(
+                        SESSION_REPORT_EXIT_WAIT,
+                    )
+                    .await;
                     Ok(())
                 });
                 // The detached settings worker must get its final snapshot before
@@ -1582,9 +1635,11 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
 
     let token = {
         let auth = shared.auth.lock().await;
-        auth.get_access_token()
-            .await
-            .map_err(|error| friendly_auth_error(&error))?
+        let token = auth.get_access_token().await;
+        // Refresh may revoke the session, discover a ban or require an app
+        // update. Publish it on failure too, before returning from Connect.
+        publish_auth(shared, &auth);
+        token.map_err(|error| friendly_auth_error(&error))?
     };
 
     if settings.custom_relay_server.is_empty() {
@@ -1636,21 +1691,28 @@ async fn connect(shared: &Arc<Shared>) -> Result<(), String> {
         &settings,
         &settings.selected_region,
     ));
-    vpn.connect(
-        &token,
-        &region,
-        apps,
-        custom_relay,
-        auto_routing,
-        available,
-        settings.whitelisted_regions.clone(),
-        binding,
-        settings.game_process_performance,
-        settings.enable_api_tunneling,
-        settings.enable_country_ban,
-    )
-    .await
-    .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e))
+    let result = vpn
+        .connect(
+            &token,
+            &region,
+            apps,
+            custom_relay,
+            auto_routing,
+            available,
+            settings.whitelisted_regions.clone(),
+            binding,
+            settings.game_process_performance,
+            settings.enable_api_tunneling,
+            settings.enable_country_ban,
+        )
+        .await
+        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+    if result.is_ok() {
+        if let Ok(mut retry) = shared.reconnect_backoff.lock() {
+            retry.reset();
+        }
+    }
+    result
 }
 
 // ── Background threads ──────────────────────────────────────────────────────
@@ -1703,41 +1765,31 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
     const FIRST_CHECK_AFTER: Duration = Duration::from_secs(45);
     // A session left open for days should not stay on an old build.
     const THEN_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+    const RETRY_WHEN_IDLE: Duration = Duration::from_secs(5 * 60);
 
     std::thread::Builder::new().name("lite-auto-update".into()).spawn(move || {
+        swifttunnel_core::lite_update::clear_completed_install_attempt(env!("CARGO_PKG_VERSION"));
         let mut wait = FIRST_CHECK_AFTER;
 
         loop {
-            // Wake often so a close is noticed promptly rather than after
-            // hours.
-            let deadline = Instant::now() + wait;
-            while Instant::now() < deadline {
-                if shared.stop.load(Ordering::Relaxed) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            wait = THEN_EVERY;
-
-            if shared.stop.load(Ordering::Relaxed) {
+            if !shared.worker_wake.wait_for_delay(&shared.stop, wait) {
                 return;
             }
-            if !shared.automatic_updates_allowed() {
-                continue;
-            }
-
+            wait = THEN_EVERY;
             // Connected, or busy connecting: leave it alone and come back.
             let in_use = shared
                 .snapshot
                 .read()
                 .map(|s| s.tunnel.status != Status::Disconnected)
                 .unwrap_or(true);
-            if in_use || shared.busy.is_busy() {
+            if in_use || shared.busy.is_busy() || !shared.automatic_updates_allowed() {
                 log::debug!("auto-update: in use, deferring");
+                wait = RETRY_WHEN_IDLE;
                 continue;
             }
 
             let Some(_update_job) = shared.update_busy.try_enter() else {
+                wait = RETRY_WHEN_IDLE;
                 continue;
             };
 
@@ -1774,6 +1826,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
             }
 
             if !shared.automatic_updates_allowed() {
+                wait = RETRY_WHEN_IDLE;
                 continue;
             }
 
@@ -1800,6 +1853,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
                     log::debug!("auto-update: activity or preferences changed, download cancelled");
                     shared.edit(|s| s.update = UpdateState::Idle);
                     shared.notify();
+                    wait = RETRY_WHEN_IDLE;
                     continue;
                 }
                 Some(Err(error)) => {
@@ -1819,6 +1873,7 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
             let Some(_operation) = shared.busy.try_enter() else {
                 shared.edit(|s| s.update = UpdateState::Idle);
                 shared.notify();
+                wait = RETRY_WHEN_IDLE;
                 continue;
             };
             if !shared.connection_is_idle() || !shared.automatic_updates_allowed() {
@@ -1827,18 +1882,17 @@ fn spawn_auto_update(shared: Arc<Shared>) -> Result<(), String> {
                 );
                 shared.edit(|s| s.update = UpdateState::Idle);
                 shared.notify();
+                wait = RETRY_WHEN_IDLE;
                 continue;
             }
 
-            // Written before the handover: the process exits straight after
-            // and gets no later chance.
-            swifttunnel_core::lite_update::record_install_attempt(&update.version);
-
             match swifttunnel_core::lite_update::launch_installer(&staged) {
                 Ok(()) => {
+                    swifttunnel_core::lite_update::record_install_attempt(&update.version);
                     log::info!("auto-update: installer started, closing so it can replace us");
-                    shared.stop.store(true, Ordering::Relaxed);
+                    shared.request_stop();
                     shared.flush_settings_before_exit();
+                    shared.finish_session_reports_before_exit();
                     std::process::exit(0);
                 }
                 Err(error) => {
@@ -2021,7 +2075,10 @@ fn spawn_regions(shared: Arc<Shared>) -> Result<(), String> {
             };
             let mut next_refresh = Instant::now();
             let mut until_round = Duration::ZERO;
-            while wait_for_picker_round(&shared.stop, &game_running, until_round) {
+            while shared
+                .worker_wake
+                .wait_for_round(&shared.stop, &game_running, until_round)
+            {
                 until_round = PING_INTERVAL;
                 if Instant::now() >= next_refresh {
                     match runtime.block_on(refresh_fleet(&shared)) {
@@ -2051,13 +2108,13 @@ fn spawn_regions(shared: Arc<Shared>) -> Result<(), String> {
                     let mut tasks = tokio::task::JoinSet::new();
                     let mut measured = Vec::new();
                     for (id, ip, port) in targets {
-                        if shared.stop.load(Ordering::Relaxed) || game_running() {
-                            break;
-                        }
                         if tasks.len() >= 8 {
                             if let Some(Ok(row)) = tasks.join_next().await {
                                 measured.push(row);
                             }
+                        }
+                        if shared.stop.load(Ordering::Relaxed) || game_running() {
+                            break;
                         }
                         tasks.spawn_blocking(move || {
                             let ping = servers::measure_latency_icmp(&ip);
@@ -2079,6 +2136,13 @@ fn spawn_regions(shared: Arc<Shared>) -> Result<(), String> {
                     continue;
                 }
                 let samples = runtime.block_on(swifttunnel_core::vpn::route_preview::fetch());
+                if shared.stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if game_running() {
+                    until_round = Duration::ZERO;
+                    continue;
+                }
                 shared.edit(|s| {
                     for (id, ip, port, ping) in measured {
                         s.server_list.set_endpoint_latency(&id, &ip, port, ping);
@@ -2111,25 +2175,56 @@ fn spawn_regions(shared: Arc<Shared>) -> Result<(), String> {
         .map_err(|error| format!("Could not start the Lite region worker: {error}"))
 }
 
-/// Keep picker-only probes off the connection during play. A game opening
-/// interrupts the idle cadence; its exit starts a fresh round immediately.
-fn wait_for_picker_round(
-    stop: &AtomicBool,
-    game_running: impl Fn() -> bool,
-    interval: Duration,
-) -> bool {
-    let mut due = Instant::now() + interval;
-    loop {
-        if stop.load(Ordering::Relaxed) {
-            return false;
+#[derive(Default)]
+struct WorkerWake {
+    gate: Mutex<()>,
+    changed: Condvar,
+}
+
+impl WorkerWake {
+    fn notify(&self) {
+        let _guard = self.gate.lock().unwrap_or_else(|error| error.into_inner());
+        self.changed.notify_all();
+    }
+
+    fn wait_for_delay(&self, stop: &AtomicBool, delay: Duration) -> bool {
+        let guard = self.gate.lock().unwrap_or_else(|error| error.into_inner());
+        let (_guard, _) = self
+            .changed
+            .wait_timeout_while(guard, delay, |_| !stop.load(Ordering::Relaxed))
+            .unwrap_or_else(|error| error.into_inner());
+        !stop.load(Ordering::Relaxed)
+    }
+
+    /// Picker work pauses during play and resumes immediately after exit.
+    fn wait_for_round(
+        &self,
+        stop: &AtomicBool,
+        game_running: impl Fn() -> bool,
+        interval: Duration,
+    ) -> bool {
+        let mut due = Instant::now() + interval;
+        let mut guard = self.gate.lock().unwrap_or_else(|error| error.into_inner());
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
+            let now = Instant::now();
+            if game_running() {
+                due = now;
+                guard = self
+                    .changed
+                    .wait(guard)
+                    .unwrap_or_else(|error| error.into_inner());
+            } else if now >= due {
+                return true;
+            } else {
+                (guard, _) = self
+                    .changed
+                    .wait_timeout(guard, due - now)
+                    .unwrap_or_else(|error| error.into_inner());
+            }
         }
-        let now = Instant::now();
-        if game_running() {
-            due = now;
-        } else if now >= due {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(250));
     }
 }
 
@@ -2153,6 +2248,7 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
             let mut since: Option<Instant> = None;
             let mut roblox_tick: u32 = 0;
             let mut running = false;
+            let mut last_player_check: Option<Instant> = None;
             let mut last_settings_warning = None;
 
             while !shared.stop.load(Ordering::Relaxed) {
@@ -2166,12 +2262,11 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                         .unwrap_or(Status::Disconnected),
                     Status::Connected | Status::Working
                 );
-                let period = if idle { 5 } else { 1 };
-                for _ in 0..period * 4 {
-                    if shared.stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(250));
+                if !shared
+                    .worker_wake
+                    .wait_for_delay(&shared.stop, Duration::from_secs(if idle { 5 } else { 1 }))
+                {
+                    return;
                 }
 
                 let (state, throughput, game_route) = shared.runtime.block_on(async {
@@ -2234,7 +2329,6 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                 // is recorded as each relay ticket is issued and where the
                 // limit is actually enforced, so this is a readout of the
                 // server's decision rather than a second opinion about it.
-                let locked = update_required_message().map(Lockout::UpdateRequired);
                 let spent = free_tier_spent();
 
                 let free_tier = match free_tier_grace_seconds() {
@@ -2242,33 +2336,31 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                     None => free_tier_quota().0.map(|left| left.max(0) as u32),
                 };
 
-                // Reconciled against what SwiftTunnel last asked for, since
-                // the FFlag switches cannot be read back off Roblox's config
-                // on their own.
-                // Cheap, and the answer changes when Windows updates or
-                // another VPN installs its own copy of the same driver.
-                let driver = (roblox_tick % 20 == 0).then(read_driver);
-
-                let read_revision = shared.roblox_revision.load(Ordering::Acquire);
-                let roblox_intent = shared
-                    .settings
-                    .read()
-                    .map(|s| s.config.roblox_settings.clone())
-                    .unwrap_or_default();
-
                 // Neither of these is free. "Is Roblox running" walks the
                 // process table and settings means reading a file off disk,
                 // and both answer a question that changes when a person does
                 // something, not several times a second.
                 roblox_tick += 1;
-                if roblox_tick % 4 == 0 || roblox_tick == 1 {
+                // Count elapsed time rather than polls: disconnected polls
+                // are five seconds apart, so every fourth poll left the
+                // readout and picker-probe pause stale for twenty seconds.
+                if last_player_check.is_none_or(|at| at.elapsed() >= Duration::from_secs(4)) {
                     running = RobloxOptimizer::player_is_running();
+                    last_player_check = Some(Instant::now());
                 }
                 let refresh = roblox_tick % 20 == 0;
+                let driver = refresh.then(read_driver);
                 // File/process reads can stall. Never hold the snapshot lock
                 // the Win32 thread needs while performing those reads.
-                let refreshed_roblox = (refresh && !shared.roblox_edits.is_busy())
-                    .then(|| read_roblox(&roblox_intent));
+                let refreshed_roblox = (refresh && !shared.roblox_edits.is_busy()).then(|| {
+                    let revision = shared.roblox_revision.load(Ordering::Acquire);
+                    let intent = shared
+                        .settings
+                        .read()
+                        .map(|s| s.config.roblox_settings.clone())
+                        .unwrap_or_default();
+                    (revision, read_roblox(&intent, running))
+                });
 
                 let settings_warning = shared.settings_save_signal.warning();
                 let settings_changed = settings_warning != last_settings_warning;
@@ -2281,7 +2373,7 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                             s.driver.clone(),
                             s.free_tier_secs,
                             s.free_tier_spent,
-                            s.lockout.clone(),
+                            s.update_required.clone(),
                         );
 
                         // A connect in flight owns the readout: the state
@@ -2295,7 +2387,7 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                             s.tunnel.bytes_down = tunnel.bytes_down;
                         }
                         s.free_tier_secs = free_tier;
-                        if let Some(fresh) = driver.clone()
+                        if let Some(fresh) = driver
                             && !s.driver.repairing
                         {
                             s.driver = Driver {
@@ -2303,12 +2395,10 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                                 ..fresh
                             };
                         }
-                        if let Some(locked) = locked.clone() {
-                            s.lockout = Some(locked);
-                        }
+                        s.update_required = update_required_message();
                         s.free_tier_spent = spent;
                         s.roblox.running = running;
-                        if let Some(fresh) = refreshed_roblox
+                        if let Some((read_revision, fresh)) = refreshed_roblox
                             && !shared.roblox_edits.is_busy()
                             && read_revision == shared.roblox_revision.load(Ordering::Acquire)
                         {
@@ -2326,7 +2416,7 @@ fn spawn_poller(shared: Arc<Shared>) -> Result<(), String> {
                                 s.driver.clone(),
                                 s.free_tier_secs,
                                 s.free_tier_spent,
-                                s.lockout.clone(),
+                                s.update_required.clone(),
                             )
                     })
                     .unwrap_or(false);
@@ -2432,9 +2522,9 @@ fn update_discord(shared: &Arc<Shared>) {
 /// Bring the tunnel back up if it dropped on its own.
 ///
 /// Only when it had been up, only when the user did not ask for it to go down,
-/// and never while a connect is already in flight. The retry is one attempt
-/// per poll: core's own candidate rotation handles a relay that is refusing,
-/// so hammering it from here would add nothing but load.
+/// and never while a connect is already in flight. Core rotates candidates
+/// within each attempt; repeated failed rounds back off here so a persistent
+/// outage cannot trigger a full auth/fleet/connect round every idle poll.
 fn maybe_reconnect(shared: &Arc<Shared>) {
     if shared.busy.is_busy()
         || shared.intentional_disconnect.load(Ordering::Relaxed)
@@ -2465,8 +2555,16 @@ fn maybe_reconnect(shared: &Arc<Shared>) {
     if shared
         .snapshot
         .read()
-        .map(|s| s.lockout.is_some())
+        .map(|s| s.account_lockout.is_some() || s.update_required.is_some())
         .unwrap_or(false)
+    {
+        return;
+    }
+
+    if !shared
+        .reconnect_backoff
+        .lock()
+        .is_ok_and(|retry| retry.ready(Instant::now()))
     {
         return;
     }
@@ -2491,6 +2589,13 @@ fn maybe_reconnect(shared: &Arc<Shared>) {
         async move {
             let operation = operation;
             if let Err(error) = connect(&shared).await {
+                if let Ok(mut retry) = shared.reconnect_backoff.lock() {
+                    let wait = retry.failed(Instant::now());
+                    log::info!(
+                        "Automatic reconnect failed; retrying after at least {}s",
+                        wait.as_secs()
+                    );
+                }
                 shared.edit(|s| {
                     s.tunnel.status = Status::Error;
                     s.tunnel.detail = error;
@@ -2529,11 +2634,14 @@ fn driver_snapshot(health: SplitTunnelDriverHealth) -> Driver {
     }
 }
 
-/// A ban is a lockout; an outdated build is decided separately, by the API.
-fn lockout_of(state: &AuthState, banned_reason: Option<String>) -> Option<Lockout> {
-    if let Some(message) = update_required_message() {
-        return Some(Lockout::UpdateRequired(message));
-    }
+fn visible_lockout(account: Option<&Lockout>, update_required: Option<&str>) -> Option<Lockout> {
+    update_required
+        .map(|message| Lockout::UpdateRequired(message.into()))
+        .or_else(|| account.cloned())
+}
+
+/// An account lockout survives a temporary build lockout.
+fn account_lockout_of(state: &AuthState, banned_reason: Option<String>) -> Option<Lockout> {
     match state {
         AuthState::Banned(_) => Some(Lockout::Banned(banned_reason.unwrap_or_default())),
         AuthState::LoggedIn { .. } => None,
@@ -2564,6 +2672,11 @@ fn free_tier_spent() -> bool {
 /// screen, and a sign-out left the app fully usable until it was restarted.
 async fn refresh_auth(shared: &Arc<Shared>) {
     let auth = shared.auth.lock().await;
+    publish_auth(shared, &auth);
+}
+
+/// Caller holds the account-action lock through publication.
+fn publish_auth(shared: &Shared, auth: &AuthManager) {
     let signed_in = auth.is_logged_in();
     let email = auth.get_user().map(|u| u.email);
     let auth_state = auth.get_state();
@@ -2574,7 +2687,8 @@ async fn refresh_auth(shared: &Arc<Shared>) {
     shared.edit(|s| {
         s.signed_in = signed_in;
         s.email = email;
-        s.lockout = lockout_of(&auth_state, reason);
+        s.account_lockout = account_lockout_of(&auth_state, reason);
+        s.update_required = update_required_message();
     });
 }
 
@@ -2610,22 +2724,20 @@ fn describe(state: &ConnectionState) -> String {
 }
 
 fn quality_of(level: u32) -> GraphicsQuality {
-    match level {
-        0 => GraphicsQuality::Automatic,
-        1 => GraphicsQuality::Level1,
-        10 => GraphicsQuality::Level10,
-        _ => GraphicsQuality::Automatic,
-    }
+    i32::try_from(level)
+        .ok()
+        .filter(|level| (0..=10).contains(level))
+        .map(GraphicsQuality::from_level)
+        .unwrap_or(GraphicsQuality::Automatic)
 }
 
 /// Roblox stores the quality level as a number, so this is its own scale
 /// rather than the enum the writer takes. 0 is automatic.
 fn level_of(quality: i32) -> u32 {
-    match quality {
-        1 => 1,
-        10 => 10,
-        _ => 0,
-    }
+    u32::try_from(quality)
+        .ok()
+        .filter(|level| *level <= 10)
+        .unwrap_or(0)
 }
 
 /// Resolve the player's executable, close it, and wait before settings writes.
@@ -2662,10 +2774,9 @@ fn close_roblox_for_changes(roblox: &RobloxOptimizer) -> Result<std::path::PathB
 /// up here. The FFlag switches cannot be fully read back (all core can tell
 /// is whether the flags are present), so the saved intent is passed in and
 /// reconciled against reality by `effective_roblox_config`.
-fn read_roblox(intent: &RobloxSettingsConfig) -> Roblox {
+fn read_roblox(intent: &RobloxSettingsConfig, running: bool) -> Roblox {
     let optimizer = RobloxOptimizer::new();
     let installed = optimizer.is_roblox_installed();
-    let running = optimizer.is_roblox_running();
 
     // Turns the saved intent into what is really in force: it clears
     // ultraboost when the flags are not in ClientAppSettings.json, and clears
@@ -2678,7 +2789,7 @@ fn read_roblox(intent: &RobloxSettingsConfig) -> Roblox {
             running,
             ultraboost: effective.ultraboost,
             custom_fflags: effective.custom_fflags_enabled,
-            custom_json: effective.custom_fflags_json.clone(),
+            custom_json: effective.custom_fflags_json,
             target_fps: DEFAULT_FRAME_CAP,
             ..Roblox::default()
         };
@@ -2747,15 +2858,36 @@ impl Engine {
     /// been removed leaves a machine that looks like it only has internet when
     /// SwiftTunnel is installed, which is the state people uninstall to escape.
     fn uninstall(&self, state: &mut State) {
-        let crate::uninstall::Installed::Standalone(product_code) =
-            crate::uninstall::how_installed()
-        else {
+        // `None` is the copy Windows has no record of: Lite removes itself.
+        let product_code = match crate::uninstall::how_installed() {
+            crate::uninstall::Installed::Standalone(product_code) => Some(product_code.clone()),
+            crate::uninstall::Installed::Unregistered => None,
+            _ => {
+                self.shared.edit(|s| {
+                    s.uninstall_note = Some(
+                        "Use Windows Settings > Apps to select the installation to remove.".into(),
+                    )
+                });
+                return;
+            }
+        };
+        // Cleanup cannot restore Roblox's settings while the player is open,
+        // and once Lite is gone nothing is left that could. Real uninstalls
+        // logged "Failed to undo Roblox changes" for exactly this reason. Say
+        // so once; a second press goes ahead.
+        if swifttunnel_core::roblox_optimizer::RobloxOptimizer::player_is_running()
+            && !self
+                .shared
+                .uninstall_roblox_warned
+                .swap(true, Ordering::SeqCst)
+        {
             self.shared.edit(|s| {
-                s.uninstall_note =
-                    Some("Use Windows Settings > Apps to select the installation to remove.".into())
+                s.uninstall_note = Some(
+                    "Roblox is open. Close it first so Lite can undo its Roblox changes. Press Uninstall again to continue anyway.".into(),
+                )
             });
             return;
-        };
+        }
         let Some(operation) = self.shared.busy.try_enter() else {
             self.shared.edit(|s| {
                 s.uninstall_note =
@@ -2763,7 +2895,7 @@ impl Engine {
             });
             return;
         };
-        let product_code = product_code.clone();
+        let direct = product_code.is_none();
         self.shared
             .intentional_disconnect
             .store(true, Ordering::SeqCst);
@@ -2783,9 +2915,21 @@ impl Engine {
                                 .to_string()
                         })
                     },
-                    move || crate::uninstall::start(&product_code),
+                    move || match product_code {
+                        Some(product_code) => crate::uninstall::start(&product_code),
+                        None => crate::uninstall::remove_directly(),
+                    },
                 )
                 .await;
+                if direct && result.is_ok() {
+                    shared.request_stop();
+                    shared.flush_settings_before_exit();
+                    swifttunnel_core::vpn::connection::finish_pending_session_reports(
+                        SESSION_REPORT_EXIT_WAIT,
+                    )
+                    .await;
+                    std::process::exit(0);
+                }
                 shared.edit(|s| {
                     s.uninstall_busy = false;
                     s.uninstall_note = Some(match result {
@@ -2817,6 +2961,65 @@ fn open_logs() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shutdown_wakes_all_sleeping_lite_workers_without_waiting_for_deadlines() {
+        use super::*;
+        use std::sync::mpsc;
+        let wake = Arc::new(WorkerWake::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (started, ready) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                let (wake, stop, started, done) =
+                    (wake.clone(), stop.clone(), started.clone(), done.clone());
+                std::thread::spawn(move || {
+                    let _ = started.send(());
+                    let _ = done.send(wake.wait_for_delay(&stop, Duration::from_secs(30)));
+                })
+            })
+            .collect();
+        for _ in &workers {
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        wake.notify();
+        for worker in workers {
+            assert!(!finished.recv_timeout(Duration::from_secs(2)).unwrap());
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn applying_an_unrelated_setting_preserves_every_saved_graphics_level() {
+        for level in 0..=10 {
+            assert_eq!(super::quality_of(super::level_of(level)).to_level(), level);
+        }
+        for invalid in [-1, 11, i32::MAX] {
+            assert_eq!(super::level_of(invalid), 0);
+        }
+        assert_eq!(
+            super::quality_of(u32::MAX),
+            super::GraphicsQuality::Automatic
+        );
+    }
+
+    #[test]
+    fn a_cleared_update_gate_reveals_the_existing_account_state() {
+        use super::{Lockout, visible_lockout};
+        for account in [
+            None,
+            Some(Lockout::SignedOut),
+            Some(Lockout::Banned("reason".into())),
+        ] {
+            assert_eq!(
+                visible_lockout(account.as_ref(), Some("update")),
+                Some(Lockout::UpdateRequired("update".into()))
+            );
+            assert_eq!(visible_lockout(account.as_ref(), None), account);
+        }
+    }
+
     #[tokio::test]
     async fn automatic_download_is_not_polled_while_busy_and_a_new_game_drops_active_work() {
         use super::*;
@@ -3072,14 +3275,16 @@ mod tests {
         };
         use std::time::Duration;
         for shutdown in [false, true] {
+            let wake = Arc::new(super::WorkerWake::default());
             let stop = Arc::new(AtomicBool::new(false));
             let game = Arc::new(AtomicBool::new(true));
             let (checks, checked) = mpsc::sync_channel(1);
             let (done, finished) = mpsc::channel();
             let worker_stop = stop.clone();
             let worker_game = game.clone();
+            let worker_wake = wake.clone();
             let worker = std::thread::spawn(move || {
-                done.send(super::wait_for_picker_round(
+                done.send(worker_wake.wait_for_round(
                     &worker_stop,
                     || {
                         let running = worker_game.load(Ordering::SeqCst);
@@ -3097,9 +3302,11 @@ mod tests {
             } else {
                 game.store(false, Ordering::SeqCst);
             }
+            wake.notify();
             let result = finished.recv_timeout(Duration::from_secs(2));
             // Always retire an owned worker before asserting the deadline.
             stop.store(true, Ordering::SeqCst);
+            wake.notify();
             worker.join().unwrap();
             assert_eq!(result.unwrap(), !shutdown);
         }
@@ -3113,14 +3320,16 @@ mod tests {
             mpsc,
         };
         use std::time::Duration;
+        let wake = Arc::new(super::WorkerWake::default());
         let stop = Arc::new(AtomicBool::new(false));
         let game = Arc::new(AtomicBool::new(false));
         let (checks, checked) = mpsc::channel();
         let (done, finished) = mpsc::channel();
         let worker_stop = stop.clone();
         let worker_game = game.clone();
+        let worker_wake = wake.clone();
         let worker = std::thread::spawn(move || {
-            let result = super::wait_for_picker_round(
+            let result = worker_wake.wait_for_round(
                 &worker_stop,
                 || {
                     let running = worker_game.load(Ordering::SeqCst);
@@ -3133,10 +3342,13 @@ mod tests {
         });
         assert!(!checked.recv_timeout(Duration::from_secs(2)).unwrap());
         game.store(true, Ordering::SeqCst);
+        wake.notify();
         while !checked.recv_timeout(Duration::from_secs(2)).unwrap() {}
         game.store(false, Ordering::SeqCst);
+        wake.notify();
         let result = finished.recv_timeout(Duration::from_secs(2));
         stop.store(true, Ordering::SeqCst);
+        wake.notify();
         worker.join().unwrap();
         assert!(result.unwrap());
     }

@@ -18,7 +18,7 @@
          The product display name is not the executable filename. -->
     <CustomAction Id="RunCleanupOnUninstall"
                   FileKey="Path"
-                  ExeCommand="--cleanup"
+                  ExeCommand="--cleanup --msi-uninstall"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />

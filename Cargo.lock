@@ -4577,10 +4577,13 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tauri-runtime",
  "tokio",
  "url",
+ "webview2-com",
  "windows 0.62.2",
  "winreg 0.52.0",
+ "wry",
 ]
 
 [[package]]
@@ -4619,6 +4622,7 @@ dependencies = [
  "handlebars",
  "serde_json",
  "static_vcruntime",
+ "swifttunnel-msi-repair",
  "windows-registry 0.5.3",
 ]
 
@@ -4628,6 +4632,7 @@ version = "0.1.0"
 dependencies = [
  "static_vcruntime",
  "swifttunnel-installer-cache",
+ "windows 0.62.2",
  "windows-registry 0.5.3",
 ]
 

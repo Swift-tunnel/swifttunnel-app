@@ -63,7 +63,7 @@ pub async fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Resu
         return Ok(());
     }
 
-    let window =
+    let builder =
         tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title(title)
             .inner_size(width, height)
@@ -74,9 +74,15 @@ pub async fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Resu
             .resizable(false)
             .focused(false)
             .shadow(false)
-            .visible(false)
-            .build()
-            .map_err(|e| format!("failed to create {label}: {e}"))?;
+            .visible(false);
+    #[cfg(windows)]
+    let builder = match app.try_state::<crate::startup_window::RecoveryWebviewProfile>() {
+        Some(profile) => builder.data_directory(profile.0.clone()),
+        None => builder,
+    };
+    let window = builder
+        .build()
+        .map_err(|e| format!("failed to create {label}: {e}"))?;
 
     // Same treatment the startup path used to apply: a normal topmost window
     // activates when clicked, which knocks Roblox out of the foreground and
@@ -409,14 +415,16 @@ fn winpkfilter_msi_candidate_paths(
         candidates.push(dir.join("resources").join(msi_name));
     }
 
-    let install_root = program_files_dir.join("SwiftTunnel");
-    candidates.push(
-        install_root
-            .join("resources")
-            .join("drivers")
-            .join(msi_name),
-    );
-    candidates.push(install_root.join("drivers").join(msi_name));
+    if program_files_dir.is_absolute() {
+        let install_root = program_files_dir.join("SwiftTunnel");
+        candidates.push(
+            install_root
+                .join("resources")
+                .join("drivers")
+                .join(msi_name),
+        );
+        candidates.push(install_root.join("drivers").join(msi_name));
+    }
 
     candidates
 }
@@ -1804,9 +1812,7 @@ pub async fn system_install_driver(
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let program_files_dir = PathBuf::from(
-            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
-        );
+        let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
         tauri::async_runtime::spawn_blocking(move || {
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
@@ -1832,6 +1838,60 @@ pub async fn system_install_driver(
 
 /// Force a full driver reinstall regardless of what the health check says.
 ///
+/// Driver work runs on a blocking thread with many early returns. A shared
+/// handle lets each step mark its stage and the command record where it ended.
+#[cfg(windows)]
+#[derive(Clone)]
+struct DriverSupportLog(
+    std::sync::Arc<std::sync::Mutex<swifttunnel_core::support_log::Operation>>,
+    &'static str,
+);
+
+#[cfg(windows)]
+impl DriverSupportLog {
+    fn start(kind: &'static str) -> Self {
+        let operation =
+            swifttunnel_core::support_log::Operation::start(kind, "wait_for_driver_lock");
+        Self(std::sync::Arc::new(std::sync::Mutex::new(operation)), kind)
+    }
+
+    fn stage(&self, next: &'static str) {
+        if let Ok(mut operation) = self.0.lock() {
+            operation.stage(next);
+        }
+    }
+
+    /// The message can hold paths and installer text, so only the fixed
+    /// status words are written here. The stage is the last step attempted.
+    fn finish(&self, result: &Result<DriverCheckResponse, String>) {
+        let Ok(mut operation) = self.0.lock() else {
+            return;
+        };
+        match result {
+            Ok(response) => {
+                log::info!(
+                    "[support] op={} id={} event=result ready={} installed={} restart_required={} status={} recommended_action={} observed=ready,installed,status inferred=recommended_action",
+                    self.1,
+                    operation.id(),
+                    response.ready,
+                    response.installed,
+                    response.reboot_required,
+                    response.status,
+                    response.recommended_action,
+                );
+                if response.ready {
+                    operation.succeed("driver_ready");
+                } else if response.reboot_required {
+                    operation.fail("restart_required");
+                } else {
+                    operation.fail("driver_not_ready");
+                }
+            }
+            Err(_) => operation.fail("stage_failed"),
+        }
+    }
+}
+
 /// `system_repair_driver` deliberately short-circuits when the driver reports
 /// healthy — right for automated Repair-all, but useless when the driver
 /// *reports* ready yet misbehaves in practice (corrupted files, flaky binding
@@ -1850,15 +1910,15 @@ pub async fn system_reinstall_driver(
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let program_files_dir = PathBuf::from(
-            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
-        );
+        let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
         let binding_preference = {
             let mut settings = state.settings.lock();
             repair_binding_preference_from_settings(&mut settings)
         };
 
-        tauri::async_runtime::spawn_blocking(move || {
+        let support = DriverSupportLog::start("driver_reinstall");
+        let steps = support.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -1867,6 +1927,7 @@ pub async fn system_reinstall_driver(
             let mut reinstall_errors: Vec<String> = Vec::new();
 
             if is_admin {
+                steps.stage("bundled_package");
                 match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
                     resource_dir.as_deref(),
                     exe_dir.as_deref(),
@@ -1898,6 +1959,7 @@ pub async fn system_reinstall_driver(
                     .push("not elevated; using the elevated installer instead".to_string());
             }
 
+            steps.stage("windows_installer");
             match install_winpkfilter_driver_from_msi(
                 &app,
                 resource_dir.as_deref(),
@@ -1925,7 +1987,9 @@ pub async fn system_reinstall_driver(
             }
         })
         .await
-        .map_err(|e| format!("Driver reinstall task failed: {}", e))?
+        .map_err(|e| format!("Driver reinstall task failed: {}", e))?;
+        support.finish(&result);
+        result
     }
 
     #[cfg(not(windows))]
@@ -1946,20 +2010,21 @@ pub async fn system_repair_driver(
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let program_files_dir = PathBuf::from(
-            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
-        );
+        let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
         let binding_preference = {
             let mut settings = state.settings.lock();
             repair_binding_preference_from_settings(&mut settings)
         };
 
-        tauri::async_runtime::spawn_blocking(move || {
+        let support = DriverSupportLog::start("driver_repair");
+        let steps = support.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
             use swifttunnel_core::vpn::DriverRecommendedAction;
 
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
+            steps.stage("health_and_binding_check");
             let post_repair_preflight =
                 || swifttunnel_core::vpn::preflight_binding_for_connect(binding_preference.clone());
             let initial = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
@@ -1999,6 +2064,7 @@ pub async fn system_repair_driver(
                 && (initial.ready
                     || current.recommended_action == DriverRecommendedAction::ResetService)
             {
+                steps.stage("service_reset");
                 match swifttunnel_core::vpn::SplitTunnelDriver::restart_driver_service()
                     .and_then(|_| {
                         swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
@@ -2101,6 +2167,7 @@ pub async fn system_repair_driver(
                 }
 
                 if is_admin {
+                    steps.stage("bundled_package");
                     match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
                         resource_dir.as_deref(),
                         exe_dir.as_deref(),
@@ -2132,6 +2199,7 @@ pub async fn system_repair_driver(
                     );
                 }
 
+                steps.stage("windows_installer");
                 match install_winpkfilter_driver_from_msi(
                     &app,
                     resource_dir.as_deref(),
@@ -2165,7 +2233,9 @@ pub async fn system_repair_driver(
             Ok(response)
         })
         .await
-        .map_err(|e| format!("Driver repair task failed: {}", e))?
+        .map_err(|e| format!("Driver repair task failed: {}", e))?;
+        support.finish(&result);
+        result
     }
 
     #[cfg(not(windows))]
@@ -3336,23 +3406,49 @@ pub async fn system_uninstall(
         // Resolve the product before disconnecting or cleaning up. The native
         // API includes visible per-user installations and selects Desktop's
         // upgrade family, not the first display-name match in HKLM.
-        let mut uninstall_command = tauri::async_runtime::spawn_blocking(|| {
+        enum Route {
+            Installer(std::process::Command),
+            /// Windows has no usable uninstall record for this copy.
+            Direct(swifttunnel_core::direct_uninstall::Plan),
+        }
+        let route = tauri::async_runtime::spawn_blocking(|| {
             let exe = std::env::current_exe()
                 .map_err(|e| format!("Failed to locate SwiftTunnel: {e}"))?;
             let dir = exe.parent().ok_or("Failed to locate the install folder")?;
-            if let Some(code) = swifttunnel_core::msi_uninstall::desktop_product_code(dir)? {
-                let mut command = swifttunnel_core::hidden_command("msiexec.exe");
-                command.args(["/x", &code, "/norestart"]);
-                return Ok::<_, String>(command);
+            // A record whose installer package has gone cannot be uninstalled
+            // by Windows: msiexec would only show its "network resource is
+            // unavailable" error. That copy is removed directly instead.
+            let product = swifttunnel_core::msi_uninstall::desktop_product_code(dir)?;
+            if let Some(code) = &product
+                && !swifttunnel_core::direct_uninstall::registration_is_broken(
+                    swifttunnel_core::direct_uninstall::Client::Desktop,
+                    &exe,
+                    code,
+                )?
+            {
+                let msiexec = swifttunnel_installer_cache::windows_installer_path()
+                    .map_err(|error| format!("Could not locate Windows Installer: {error}"))?;
+                let mut command = swifttunnel_core::hidden_command(&msiexec.to_string_lossy());
+                command.args(["/x", code, "/norestart"]);
+                return Ok::<_, String>(Route::Installer(command));
             }
             let legacy = dir.join("uninstall.exe");
-            if legacy.is_file() {
-                return Ok(swifttunnel_core::hidden_command(&legacy.to_string_lossy()));
+            if product.is_none() && legacy.is_file() {
+                return Ok(Route::Installer(swifttunnel_core::hidden_command(
+                    &legacy.to_string_lossy(),
+                )));
             }
-            Err("No SwiftTunnel uninstaller was found. Open Windows Settings > Apps, or run the current SwiftTunnel installer to repair the installation first.".to_string())
+            swifttunnel_core::direct_uninstall::plan_for_running_client(
+                swifttunnel_core::direct_uninstall::Client::Desktop,
+            )
+            .map(Route::Direct)
+            .map_err(|reason| {
+                format!("Windows has no uninstaller for this copy of SwiftTunnel, and it could not be removed directly. {reason}")
+            })
         })
         .await
         .map_err(|e| format!("Could not check the installation: {e}"))??;
+        let direct = matches!(&route, Route::Direct(_));
 
         let conn_state = state.vpn_state_handle.borrow().clone();
         if !matches!(
@@ -3369,6 +3465,19 @@ pub async fn system_uninstall(
                 log::warn!("Uninstall proceeding despite disconnect error: {}", e);
             }
         }
+        let direct_gate = if direct {
+            let guard = state.vpn_connection.lock().await;
+            if !matches!(
+                *state.vpn_state_handle.borrow(),
+                swifttunnel_core::vpn::ConnectionState::Disconnected
+            ) || guard.split_tunnel_handle().is_some()
+            {
+                return Err("Disconnect SwiftTunnel before retrying uninstall.".into());
+            }
+            Some(guard)
+        } else {
+            None
+        };
 
         // Run the same stateless cleanup the MSI/NSIS uninstaller is supposed
         // to invoke with `--cleanup`, but do it while the elevated app binary
@@ -3384,16 +3493,35 @@ pub async fn system_uninstall(
         .await
         .map_err(|e| format!("Pre-uninstall cleanup task failed: {e}"))?
         {
+            if direct {
+                log::warn!("Network cleanup stopped direct uninstall: {e}");
+                return Err("Run Internet recovery in Repair, then retry uninstall.".into());
+            }
             log::warn!("Uninstall pre-cleanup failed; continuing to uninstaller: {e}");
         }
 
-        // Start the native uninstaller before closing so launch failures reach
-        // the user. Full MSI UI keeps missing-source and installer-busy errors
-        // visible after this process exits.
-        uninstall_command
-            .spawn()
-            .map_err(|e| format!("Could not start Windows uninstall: {e}"))?;
+        match route {
+            // Start the native uninstaller before closing so launch failures
+            // reach the user. Full MSI UI keeps missing-source and
+            // installer-busy errors visible after this process exits.
+            Route::Installer(mut command) => {
+                command
+                    .spawn()
+                    .map_err(|e| format!("Could not start Windows uninstall: {e}"))?;
+            }
+            Route::Direct(plan) => {
+                log::warn!(
+                    "Uninstall: Windows has no registration for this installation; removing its files directly"
+                );
+                tauri::async_runtime::spawn_blocking(move || {
+                    swifttunnel_core::direct_uninstall::finish(plan)
+                })
+                .await
+                .map_err(|e| format!("Could not remove SwiftTunnel: {e}"))??;
+            }
+        }
 
+        drop(direct_gate);
         app.exit(0);
         Ok(())
     }
@@ -3642,119 +3770,89 @@ pub struct CopyLogFileResponse {
     pub file_path: String,
 }
 
+/// A small allowlist keeps the webview from putting arbitrary text in the
+/// support log. Report each failed surface once per process.
+#[tauri::command]
+pub fn system_record_ui_failure(window: tauri::WebviewWindow, page: Option<String>, kind: String) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static REPORTED: AtomicU32 = AtomicU32::new(0);
+    let (bit, surface) = match (window.label(), page.as_deref()) {
+        ("main", None) => (0, "main_window"),
+        ("overlay-stats", None) => (1, "overlay"),
+        ("main", Some("connect")) => (2, "connect"),
+        ("main", Some("optimization")) => (3, "optimization"),
+        ("main", Some("games")) => (4, "games"),
+        ("main", Some("ingame")) => (5, "ingame"),
+        ("main", Some("network")) => (6, "network"),
+        ("main", Some("repair")) => (7, "repair"),
+        ("main", Some("settings")) => (8, "settings"),
+        _ => return,
+    };
+    let mask = 1 << bit;
+    if REPORTED.fetch_or(mask, Ordering::Relaxed) & mask != 0 {
+        return;
+    }
+    let kind = match kind.as_str() {
+        "type_error" => "type_error",
+        "reference_error" => "reference_error",
+        "range_error" => "range_error",
+        "syntax_error" => "syntax_error",
+        _ => "other",
+    };
+    log::warn!("[support] event=ui_load_failed surface={surface} kind={kind}");
+}
+
 /// Copy the SwiftTunnel log FILE to the clipboard (not its contents).
 ///
 /// Pasting in Discord, Outlook, or File Explorer attaches the actual file
 /// rather than the raw text — makes it easy for users to hand a log over
 /// to support staff.
 #[tauri::command]
-pub async fn system_copy_log_to_clipboard() -> Result<CopyLogFileResponse, String> {
-    // Multiple windows/IPC callers must not start parallel clipboard helpers.
-    // The worker owns the permit even if the caller stops waiting.
-    static COPY_LOG: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-    let _permit = COPY_LOG.try_acquire().map_err(|_| {
-        "A log copy is already running. Wait for it to finish, then retry.".to_string()
-    })?;
-    let path = crate::logging::log_file_path();
-    let path_str = path.to_string_lossy().to_string();
-
-    if !path.exists() {
-        return Err(format!(
-            "Log file not found at {}. Try connecting once so the app can write logs, then retry.",
-            path_str
-        ));
-    }
-
+pub async fn system_copy_log_to_clipboard(
+    window: tauri::WebviewWindow,
+) -> Result<CopyLogFileResponse, String> {
     #[cfg(windows)]
     {
-        let escaped = path_str.replace('\'', "''");
-        let script = format!(
-            r#"
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms
-$files = New-Object System.Collections.Specialized.StringCollection
-[void]$files.Add('{}')
+        use std::time::Instant;
+        use windows::Win32::Foundation::HWND;
 
-for ($i = 0; $i -lt 5; $i++) {{
-    try {{
-        [System.Windows.Forms.Clipboard]::SetFileDropList($files)
-        exit 0
-    }} catch {{
-        if ($i -eq 4) {{
-            throw
-        }}
-        Start-Sleep -Milliseconds 100
-    }}
-}}
-"#,
-            escaped
-        );
-
-        // Bounded, because this is the button people reach for when the app is
-        // already misbehaving. Two tickets on 2026-08-24 reported Copy log doing
-        // nothing at all: the previous `output()` here had no deadline, so on a
-        // machine where PowerShell will not start it simply never returned and
-        // the button stayed dead with nothing to report. Reinstalling could not
-        // help, because the broken part was Windows rather than the app.
-        const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(15);
-
-        let script_for_thread = script.clone();
-        let outcome = tauri::async_runtime::spawn_blocking(move || {
-            let _permit = _permit;
-            swifttunnel_core::run_hidden_command_with_timeout(
-                "powershell",
-                &[
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-STA",
-                    "-Command",
-                    &script_for_thread,
-                ],
-                CLIPBOARD_TIMEOUT,
-            )
-        })
-        .await
-        .map_err(|e| format!("Clipboard task failed: {}", e))?;
-
-        if !outcome.success {
-            // Failing is survivable; leaving the user with nothing is not. Hand
-            // back the path so they can attach the file by hand, which is the
-            // only thing they actually needed from this button.
-            let reason = outcome.stderr.trim();
-            log::warn!(
-                "Copy log helper failed (timed_out={}): {}",
-                outcome.timed_out,
-                if reason.is_empty() {
-                    "no output"
-                } else {
-                    reason
-                }
-            );
-
-            return Err(if outcome.timed_out {
-                format!(
-                    "Windows did not respond, so the log could not be copied.                      Open this folder and attach swifttunnel.log by hand: {}",
-                    path.parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or(path_str)
-                )
-            } else {
-                format!(
-                    "Could not copy the log. Open this folder and attach                      swifttunnel.log by hand: {}",
-                    path.parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or(path_str)
-                )
-            });
+        // Keep the permit in the worker. A stuck clipboard operation can
+        // outlive the UI deadline, so another click must not stack up workers.
+        static COPY_LOG: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let permit = COPY_LOG.try_acquire().map_err(|_| {
+            "A log copy is already running. Wait for it to finish, then retry.".to_string()
+        })?;
+        let path = crate::logging::log_file_path();
+        if !path.is_file() {
+            return Err(format!(
+                "Log file not found at {}. Open SwiftTunnel and try again.",
+                path.display()
+            ));
         }
 
-        Ok(CopyLogFileResponse {
-            file_path: path_str,
-        })
+        let file_path = path.to_string_lossy().into_owned();
+        let timeout = Duration::from_secs(15);
+        let deadline = Instant::now() + timeout;
+        let worker = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let _permit = permit;
+            let owner = window.hwnd().map_err(|error| error.to_string())?;
+            crate::log_clipboard::copy_file(HWND(owner.0), &path, deadline)
+                .map_err(|error| error.to_string())
+        });
+        match tokio::time::timeout(timeout, worker).await {
+            Ok(Ok(Ok(()))) => return Ok(CopyLogFileResponse { file_path }),
+            Ok(Ok(Err(error))) => log::warn!("Could not copy log to clipboard: {error}"),
+            Ok(Err(error)) => log::warn!("Log clipboard worker failed: {error}"),
+            Err(_) => log::warn!("Log clipboard worker timed out"),
+        }
+        Err(format!(
+            "Could not copy the log. Attach this file manually: {file_path}"
+        ))
     }
 
     #[cfg(not(windows))]
     {
+        let _ = window;
         Err("Copying the log file to the clipboard is only supported on Windows".to_string())
     }
 }

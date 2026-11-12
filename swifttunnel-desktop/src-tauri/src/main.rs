@@ -36,9 +36,7 @@ fn install_driver_for_installer() -> Result<(), String> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let program_files_dir = std::path::PathBuf::from(
-        std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
-    );
+    let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
     let force_reinstall =
         initial.recommended_action == swifttunnel_core::vpn::DriverRecommendedAction::Reinstall;
 
@@ -131,7 +129,18 @@ fn main() {
     // --cleanup: stateless removal of all SwiftTunnel system modifications.
     // Used by the MSI/NSIS uninstaller to clean up before removing files.
     if is_cleanup {
-        match swifttunnel_core::network_booster::cleanup_all_system_state() {
+        use swifttunnel_core::network_booster::{
+            cleanup_all_system_state, cleanup_system_state_for_msi_uninstall,
+        };
+        let result = if std::env::args_os()
+            .skip(1)
+            .any(|arg| arg == "--msi-uninstall")
+        {
+            cleanup_system_state_for_msi_uninstall()
+        } else {
+            cleanup_all_system_state()
+        };
+        match result {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 eprintln!("Cleanup failed: {}", e);

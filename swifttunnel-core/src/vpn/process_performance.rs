@@ -730,11 +730,12 @@ pub(crate) fn select_cpu_set_ids(
                 && !(unbind_cpu0 && set.group == 0 && set.logical_processor_index == 0)
         })
         .collect();
-    let mut candidates: Vec<&CpuSetDescriptor> =
-        eligible.iter().copied().filter(|set| !set.parked).collect();
-    if candidates.is_empty() {
-        candidates = eligible;
-    }
+    // Do not filter on the CPU Set "parked" flag. It is a moment-to-moment
+    // power-management hint: a core parked when Roblox starts is unparked as
+    // soon as load rises. Excluding parked cores pinned Roblox for the whole
+    // session to whatever happened to be awake at that instant (often very few
+    // cores on Balanced, or one CCD on dual-CCD X3D parts), which costs FPS.
+    let mut candidates: Vec<&CpuSetDescriptor> = eligible;
 
     if prefer_performance_cores
         // Windows documents higher EfficiencyClass values as faster cores.
@@ -1221,7 +1222,10 @@ mod tests {
             parked,
             cpu_set(5, 1, 0),
         ];
-        assert_eq!(select_cpu_set_ids(&sets, true, true), vec![2]);
+        // A core parked at selection time is still a valid target: parking is
+        // transient and Roblox must not lose it for the whole session.
+        assert_eq!(select_cpu_set_ids(&sets, true, true), vec![3]);
+        assert_eq!(select_cpu_set_ids(&sets, false, true), vec![2, 3, 5]);
         assert_eq!(
             select_cpu_set_ids(&[reserved, parked], false, false),
             vec![3]

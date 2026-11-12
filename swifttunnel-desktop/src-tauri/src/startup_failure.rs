@@ -5,6 +5,8 @@ pub(crate) enum Stage {
     Account,
     Settings,
     Window,
+    #[cfg(windows)]
+    WindowData,
 }
 
 impl Stage {
@@ -21,6 +23,10 @@ impl Stage {
             }
             Self::Window => {
                 "SwiftTunnel could not open its window. Restart your PC and try again. If it still fails, contact support@swifttunnel.net with your latest SwiftTunnel log."
+            }
+            #[cfg(windows)]
+            Self::WindowData => {
+                "Windows could not open SwiftTunnel's window data folder. Restart your PC and try again. If it still fails, contact support@swifttunnel.net with your latest SwiftTunnel log."
             }
         }
     }
@@ -66,6 +72,8 @@ mod tests {
             Ok("account") => Stage::Account,
             Ok("settings") => Stage::Settings,
             Ok("window") => Stage::Window,
+            #[cfg(windows)]
+            Ok("window-data") => Stage::WindowData,
             _ => return,
         };
         abort(stage, "fixture-only private technical detail");
@@ -73,7 +81,14 @@ mod tests {
 
     #[test]
     fn fatal_startup_exits_with_guidance_without_a_panic_or_technical_dialog_dump() {
-        for stage in ["engine", "account", "settings", "window"] {
+        for stage in [
+            "engine",
+            "account",
+            "settings",
+            "window",
+            #[cfg(windows)]
+            "window-data",
+        ] {
             let executable = std::env::current_exe().unwrap();
             let mut child = swifttunnel_core::hidden_command(executable.to_str().unwrap())
                 .args([

@@ -7,12 +7,16 @@ import type { RobloxClient, RobloxLibrarySnapshot } from "../lib/types";
 let refreshTask: Promise<void> | null = null;
 let refreshRequested = false;
 let favouriteRevision = 0;
-const favouriteRevisions = new Map<string, number>();
-function noteFavouriteRevision(key: string) {
+interface FavouriteRevision {
+  revision: number;
+  value: boolean;
+}
+const favouriteRevisions = new Map<string, FavouriteRevision>();
+function noteFavouriteRevision(key: string, value: boolean) {
   const revision = ++favouriteRevision;
   // Only an older in-flight snapshot needs protection. Completed game keys
   // must not accumulate for the rest of a long-running app session.
-  if (refreshTask) favouriteRevisions.set(key, revision);
+  if (refreshTask) favouriteRevisions.set(key, { revision, value });
 }
 interface FavouriteWrite {
   desired: boolean;
@@ -59,11 +63,14 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
                 const keys = [key, ...peers.map(e => gameEntryKey({ ...e, universe_id: null }))];
                 const write = keys.map(key => favourites.get(key)).find(Boolean);
                 if (write) return { ...entry, favourite: write.desired };
-                if (keys.some(key => (favouriteRevisions.get(key) ?? 0) > observedFavourites)) {
-                  const latest = get().library?.entries.find(e => keys.includes(gameEntryKey(e)));
-                  if (latest) return { ...entry, favourite: latest.favourite };
+                let latest: FavouriteRevision | undefined;
+                for (const alias of keys) {
+                  const change = favouriteRevisions.get(alias);
+                  if (change && change.revision > (latest?.revision ?? observedFavourites)) {
+                    latest = change;
+                  }
                 }
-                return entry;
+                return latest ? { ...entry, favourite: latest.value } : entry;
               }) },
               loading: false, error: null,
             });
@@ -86,15 +93,18 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
     const peers = get().library!.entries.filter(e => gameEntryKey(e) === groupKey);
     const keys = [groupKey, ...peers.map(e => gameEntryKey({ ...e, universe_id: null }))];
     const key = keys.find(key => favourites.has(key)) ?? groupKey;
-    const update = (value: boolean) => set(state => ({
-      library: state.library ? { ...state.library, entries: state.library.entries.map(e =>
-        gameEntryKey(e) === gameEntryKey(state.library!.entries.find(e => e.place_id === placeId && e.client === client) ?? entry)
-          ? { ...e, favourite: value } : e,
-      ) } : null,
-    }));
+    const update = (value: boolean) => set(state => {
+      const library = state.library;
+      if (!library) return state;
+      const target = library.entries.find(e => e.place_id === placeId && e.client === client) ?? entry;
+      const targetKey = gameEntryKey(target);
+      return { library: { ...library, entries: library.entries.map(e =>
+        gameEntryKey(e) === targetKey && e.favourite !== value ? { ...e, favourite: value } : e,
+      ) } };
+    });
     // Merge just the star into old reads. New session/close metadata must still
     // arrive, even when a favourite save overlaps the event-driven refresh.
-    noteFavouriteRevision(key);
+    noteFavouriteRevision(key, favourite);
     const existing = favourites.get(key);
     if (existing) {
       existing.desired = favourite;
@@ -121,9 +131,8 @@ export const useGameLibraryStore = create<GameLibraryStore>((set, get) => ({
         if (write.revision === revision) break;
       }
     })().finally(() => {
-      noteFavouriteRevision(key);
+      noteFavouriteRevision(key, write.confirmed);
       favourites.delete(key);
-      set({ loading: false });
     });
     return write.task;
   },

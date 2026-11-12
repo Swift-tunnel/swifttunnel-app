@@ -261,7 +261,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     requiresAdmin: false,
     requiresReboot: false,
     changes: [
-      'HKCU\\...\\DirectX\\UserGpuPreferences → DirectXUserGlobalSettings = "SwapEffectUpgradeEnable=1;"',
+      'HKCU\\...\\DirectX\\UserGpuPreferences → DirectXUserGlobalSettings: SwapEffectUpgradeEnable=1 (other entries kept)',
     ],
   },
   {
@@ -342,7 +342,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "core_parking_disable",
     name: "Disable Core Parking (on AC)",
     description:
-      "Keeps all CPU cores unparked while plugged in, avoiding wake-up stutter.",
+      "Keeps all CPU cores unparked while plugged in, avoiding wake-up stutter. Not available on Ryzen 9 X3D processors, which rely on parking to keep games on their cache cores.",
     tier: "Intermediate",
     category: "Performance",
     safety: "caution",
@@ -507,11 +507,15 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
   {
     id: "browser_hardware_accel_disable",
     name: "Disable Browser GPU Acceleration",
+    // Caution, so "Apply eligible tweaks" never turns it on. Software drawing
+    // moves a browser's work onto the CPU, which Roblox usually needs more
+    // than the GPU, and a machine-wide policy makes both browsers say they
+    // are managed by an organization.
     description:
-      "Stops Chrome and Edge from using the GPU, freeing graphics power for your game when a browser is open alongside it. Reverts on toggle off.",
+      "Makes Chrome and Edge draw with the CPU instead of the GPU. Only helps when your graphics card is the limit; videos and busy pages then use much more CPU, which can slow Roblox instead. While on, both browsers say they are managed by your organization. Reverts on toggle off.",
     tier: "Expert",
     category: "Performance",
-    safety: "low",
+    safety: "caution",
     requiresAdmin: true,
     requiresReboot: false,
     changes: [
@@ -665,6 +669,8 @@ export interface SpeedUpDef {
   requiresAdmin: boolean;
   requiresReboot: boolean;
   changes: string[];
+  /** "caution" keeps a change out of one-click batches. */
+  safety?: OptSafety;
 }
 
 export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
@@ -763,9 +769,12 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
   },
   {
     id: "su_disable_auto_defrag",
-    name: "Disable scheduled defragmentation",
+    name: "Disable scheduled drive optimization",
+    // On an SSD this task sends TRIM rather than defragmenting, which keeps the
+    // drive fast over time. Never part of a one-click batch.
     description:
-      "Turns off Windows' automatic disk defragmentation task, unnecessary on SSDs and avoids surprise disk churn.",
+      "Turns off Windows' automatic drive optimization. On SSDs this task trims free space, which keeps them fast over time, so only turn it off if its disk activity gets in the way of play.",
+    safety: "caution",
     category: "Startup & Shutdown",
     requiresAdmin: true,
     requiresReboot: false,
@@ -814,7 +823,7 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
     id: "su_tcp_ttl",
     name: "Optimize default TTL",
     description:
-      "Sets a standard 64-hop TTL so packets aren't dropped early or wasted, keeping more usable bandwidth.",
+      "Sets the hop limit on outgoing packets to 64 instead of Windows' 128. Common on other systems. It does not add bandwidth or lower ping.",
     category: "Network",
     requiresAdmin: true,
     requiresReboot: false,
@@ -837,7 +846,7 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
     id: "su_tcp_window_scaling",
     name: "Enable TCP window scaling",
     description:
-      "Turns on TCP window scaling and timestamps for higher throughput on fast or high-latency connections.",
+      "Turns on TCP window scaling so downloads can use fast or high-latency connections fully. Windows usually has it on already.",
     category: "Network",
     requiresAdmin: true,
     requiresReboot: false,
@@ -872,7 +881,7 @@ export const SPEEDUP_OPTIMIZATIONS: SpeedUpDef[] = [
     id: "su_edge_personalization",
     name: "Disable Edge web tracking",
     description:
-      "Turns off Microsoft Edge's personalized web/ad experience so it stops collecting browsing data in the background.",
+      "Turns off Microsoft Edge's personalized web and ad experience so it stops collecting browsing data for it. While on, Edge says it is managed by your organization.",
     category: "Network",
     requiresAdmin: true,
     requiresReboot: false,

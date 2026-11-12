@@ -381,6 +381,8 @@ pub struct State {
     pub login: Login,
     /// Whether Lite has its own uninstaller, or arrived with the full app.
     pub standalone: bool,
+    /// Windows has no record of this copy, so Lite removes its own files.
+    pub unregistered: bool,
     /// What the last uninstall attempt had to say, if anything.
     pub uninstall_note: Option<String>,
     pub driver: Driver,

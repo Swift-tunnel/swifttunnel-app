@@ -812,6 +812,17 @@ impl SystemOptimizer {
         }
     }
 
+    /// `Balanced` is the default and what the config holds whenever the user has
+    /// not picked a plan, so it means "keep the user's own plan" rather than
+    /// "switch to Windows Balanced". `restore()` runs before every apply and
+    /// already puts the user's original plan back. Activating Balanced here
+    /// used to move players off High Performance, Ultimate or an OEM gaming
+    /// plan on any Apply, even one that only changed a network toggle, which
+    /// allows core parking and slower clock ramp-up and lowers Roblox FPS.
+    fn power_plan_switch_requested(plan: PowerPlan) -> bool {
+        !matches!(plan, PowerPlan::Balanced)
+    }
+
     fn fallback_power_plan_config(config: &SystemOptimizationConfig) -> PowerPlan {
         Self::active_power_plan_guid()
             .as_deref()
@@ -1064,7 +1075,9 @@ impl SystemOptimizer {
             );
         }
 
-        if let Err(e) = self.set_power_plan(&config.power_plan) {
+        if Self::power_plan_switch_requested(config.power_plan)
+            && let Err(e) = self.set_power_plan(&config.power_plan)
+        {
             Self::record_failure(
                 &mut applied_config,
                 &mut warnings,
@@ -1716,6 +1729,21 @@ pub fn cleanup_for_uninstall() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn default_balanced_plan_keeps_the_users_own_power_plan() {
+        use crate::structs::PowerPlan;
+        assert!(!super::SystemOptimizer::power_plan_switch_requested(
+            PowerPlan::Balanced
+        ));
+        for plan in [
+            PowerPlan::HighPerformance,
+            PowerPlan::Ultimate,
+            PowerPlan::SwiftTunnel,
+        ] {
+            assert!(super::SystemOptimizer::power_plan_switch_requested(plan));
+        }
+    }
+
     use super::*;
 
     #[cfg(windows)]

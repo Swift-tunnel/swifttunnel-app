@@ -1117,6 +1117,7 @@ async fn authenticate_switch_target(
     relay: &super::udp_relay::UdpRelay,
     server_region: &str,
     target_addr: SocketAddr,
+    player_usage: &Arc<super::player_usage::PlayerUsage>,
 ) -> SwitchAuthOutcome {
     let access_token = {
         let auth = auth_manager.lock().await;
@@ -1128,7 +1129,7 @@ async fn authenticate_switch_target(
         }
     };
 
-    let auth_client = AuthClient::new();
+    let auth_client = AuthClient::new().with_relay_usage(Arc::clone(player_usage));
     let session_id_hex = relay.session_id_hex();
     let ticket = match auth_client
         .get_relay_ticket(&access_token, server_region, &session_id_hex)
@@ -1257,6 +1258,11 @@ impl ConnectionState {
 
 /// VPN Connection manager
 pub struct VpnConnection {
+    /// The signed-in account when the current session began, until that
+    /// session's end-of-session report has been handed off.
+    session_account_id: Option<String>,
+    player_usage: Arc<super::player_usage::PlayerUsage>,
+    player_usage_observer: Option<super::player_usage::Observer>,
     /// State is published through a `tokio::sync::watch` channel so every
     /// transition — including in-place mutations made from background tasks
     /// (relay health, auto-routing, process monitor) — automatically fans out
@@ -1266,7 +1272,7 @@ pub struct VpnConnection {
     state: Arc<watch::Sender<ConnectionState>>,
     split_tunnel: Option<Arc<Mutex<SplitTunnelDriver>>>,
     config: Option<VpnConfig>,
-    process_monitor_stop: Arc<AtomicBool>,
+    process_monitor_handle: Option<tokio::task::JoinHandle<()>>,
     /// ETW process watcher for instant game detection
     etw_watcher: Option<ProcessWatcher>,
     /// Auto-router for automatic relay switching based on game server region
@@ -1300,9 +1306,12 @@ impl VpnConnection {
         let (state_tx, _) = watch::channel(ConnectionState::Disconnected);
         Self {
             state: Arc::new(state_tx),
+            session_account_id: None,
+            player_usage: Arc::new(super::player_usage::PlayerUsage::default()),
+            player_usage_observer: None,
             split_tunnel: None,
             config: None,
-            process_monitor_stop: Arc::new(AtomicBool::new(false)),
+            process_monitor_handle: None,
             etw_watcher: None,
             auto_router: None,
             auto_lookup_handle: None,
@@ -1425,6 +1434,17 @@ impl VpnConnection {
         self.country_ban_bypass_failure.take()
     }
 
+    /// The relay supplied Roblox's addresses after the public lookup failed.
+    ///
+    /// The public lookup counts any answered host as a repair, and the relay
+    /// has just provided the same pins from outside the block. The earlier
+    /// failure no longer describes this session, so it must not reach the
+    /// player as "bypass could not be set up" on a connection that works.
+    /// Returns whether there was a failure to withdraw.
+    fn withdraw_bypass_failure_after_relay_lookup(&mut self) -> bool {
+        self.country_ban_bypass_failure.take().is_some()
+    }
+
     async fn set_state(&self, state: ConnectionState) {
         super::quota_notice::set_active(matches!(state, ConnectionState::Connected { .. }));
         log::info!("Connection state: {:?}", state);
@@ -1503,6 +1523,7 @@ impl VpnConnection {
             }
             matches!(*state, ConnectionState::Error(_))
         };
+        let mut support = crate::support_log::Operation::start("tunnel_connect", "prepare");
 
         // A new connection attempt owns a fresh cleanup lifecycle. Any
         // terminal request left by the previous lease task is reconciled by
@@ -1518,8 +1539,24 @@ impl VpnConnection {
         if prior_was_error {
             self.cleanup().await;
         }
+        self.player_usage = Arc::new(super::player_usage::PlayerUsage::default());
+        // The account this session belongs to. Its end-of-session report may
+        // only ever be sent with this account's token.
+        self.session_account_id = match self.auth_manager.as_ref() {
+            Some(auth_manager) => auth_manager.lock().await.current_user_id(),
+            None => None,
+        };
 
-        log::info!("Starting VPN connection to region: {}", region);
+        log::info!(
+            "Starting VPN connection to region: {}; country_ban={} api_tunnel={} udp_tunnel={} auto_route={} custom_relay={} adapter_override={}",
+            region,
+            enable_country_ban,
+            enable_api_tunneling,
+            enable_udp_tunneling,
+            auto_routing_enabled,
+            custom_relay_server.is_some(),
+            binding_preference.is_some(),
+        );
         log::info!("Apps to tunnel: {:?}", tunnel_apps);
         // Support breadcrumb: internet-cafe diskless PCs behave differently
         // (RAM cleaning is disabled there; system disk rides the LAN).
@@ -1530,17 +1567,9 @@ impl VpnConnection {
         self.goodbye_dpi_guard = None;
         self.country_ban_bypass_failure = None;
 
-        log::info!("========================================");
-        log::info!("V3 MODE: Lightweight UDP Relay");
-        log::info!("========================================");
-        log::info!("  - No Wintun adapter");
-        log::info!("  - No WireGuard encryption");
-        log::info!("  - No route configuration");
-        log::info!("  - Direct UDP relay to game servers");
-        log::info!("========================================");
-
         // Step 1: Resolve initial relay endpoint from available servers
         super::quota_notice::clear_reading();
+        support.stage("relay_selection");
         self.set_state(ConnectionState::FetchingConfig).await;
         let relay_candidates =
             ordered_relay_candidates_for_region(region, &available_servers).await;
@@ -1559,6 +1588,7 @@ impl VpnConnection {
                     "Selected region '{}' is unavailable in server list",
                     region
                 ));
+                support.fail("region_unavailable");
                 self.set_state(ConnectionState::Error(super::user_friendly_error(&error)))
                     .await;
                 return Err(error);
@@ -1626,6 +1656,7 @@ impl VpnConnection {
         }
 
         if enable_api_tunneling && !tunnel_apps.is_empty() {
+            support.stage("bootstrap_dns");
             match crate::roblox_proxy::hosts::apply_bootstrap_overrides(enable_country_ban).await {
                 Ok(()) => {
                     self.bootstrap_dns_repair_applied = true;
@@ -1653,6 +1684,7 @@ impl VpnConnection {
         crate::roblox_proxy::hosts::set_dpi_evasion_confirmed(false);
 
         if enable_country_ban {
+            support.stage("bypass_helper");
             // GoodbyeDPI decides how much the relay has to carry.
             //
             // When it confirms a working mode, Roblox web and asset traffic goes
@@ -1695,6 +1727,7 @@ impl VpnConnection {
         {
             match self
                 .setup_split_tunnel(
+                    &mut support,
                     access_token,
                     &config,
                     tunnel_apps.clone(),
@@ -1717,6 +1750,7 @@ impl VpnConnection {
                     (processes, true, auth_mode)
                 }
                 Err(e) => {
+                    support.fail(e.support_code());
                     log::error!("V3 split tunnel setup FAILED: {}", e);
                     self.cleanup().await;
                     self.set_state(ConnectionState::Error(super::user_friendly_error(&e)))
@@ -1741,6 +1775,7 @@ impl VpnConnection {
                 .as_ref()
                 .and_then(|st| st.try_lock().ok().and_then(|d| d.get_relay_context()))
         {
+            support.stage("relay_dns");
             let resolved = relay
                 .resolve_roblox_hosts(
                     crate::roblox_proxy::hosts::ROBLOX_BOOTSTRAP_DOMAINS,
@@ -1754,9 +1789,16 @@ impl VpnConnection {
             } else {
                 let count = resolved.len();
                 match crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved).await {
-                    Ok(()) => log::info!(
-                        "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay)"
-                    ),
+                    Ok(()) => {
+                        log::info!(
+                            "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay)"
+                        );
+                        if self.withdraw_bypass_failure_after_relay_lookup() {
+                            log::info!(
+                                "Country ban bypass recovered: the relay lookup replaced the failed public lookup"
+                            );
+                        }
+                    }
                     Err(e) => {
                         log::warn!("Relay-resolved Roblox pins could not be applied: {e}")
                     }
@@ -1780,7 +1822,16 @@ impl VpnConnection {
         })
         .await;
 
+        self.player_usage_observer = super::player_usage::Observer::start(
+            Arc::clone(&self.player_usage),
+            Arc::clone(&self.state),
+        );
         log::info!("V3 connected successfully (no encryption, lowest latency)");
+        support.complete(if split_tunnel_active {
+            "connected"
+        } else {
+            "connected_without_split_tunnel"
+        });
         Ok(())
     }
 
@@ -1795,6 +1846,7 @@ impl VpnConnection {
     #[allow(clippy::too_many_arguments)]
     async fn setup_split_tunnel(
         &mut self,
+        support: &mut crate::support_log::Operation,
         access_token: &str,
         config: &VpnConfig,
         tunnel_apps: Vec<String>,
@@ -1808,6 +1860,7 @@ impl VpnConnection {
         enable_api_tunneling: bool,
         enable_udp_tunneling: bool,
     ) -> VpnResult<(Vec<String>, String, String, SocketAddr)> {
+        support.stage("driver_open");
         log::info!("Setting up V3 split tunnel (no Wintun)...");
 
         // Check if driver is available
@@ -1918,6 +1971,7 @@ impl VpnConnection {
             }
         };
 
+        support.stage("relay_socket");
         log::info!("V3: Creating UDP relay to {}", relay_addr);
 
         let relay_path_context = super::udp_relay::RelayPathContext {
@@ -1940,6 +1994,7 @@ impl VpnConnection {
                 }
             };
 
+        support.stage("relay_auth");
         let mut relay_auth_mode = if custom_relay_server.is_some() {
             "custom_legacy".to_string()
         } else {
@@ -1950,15 +2005,16 @@ impl VpnConnection {
         if custom_relay_server.is_some() {
             log::warn!("V3: Custom relay enabled, skipping authenticated relay ticket bootstrap");
         } else {
-            let auth_client = AuthClient::new();
+            let auth_client = AuthClient::new().with_relay_usage(Arc::clone(&self.player_usage));
             let session_id_hex = relay.session_id_hex();
+            self.player_usage.bind(session_id_hex.clone());
             let mut candidates = relay_candidates.clone();
             if candidates.is_empty() {
                 candidates.push((config.region.clone(), relay_addr, None));
             }
 
             let mut authenticated = false;
-            let mut saw_timeout = false;
+            let mut timed_out_candidates = Vec::new();
             let mut attempt_results: Vec<RelayCandidateAttempt> = Vec::new();
 
             for (idx, (candidate_region, candidate_addr, _)) in candidates.iter().enumerate() {
@@ -2043,6 +2099,15 @@ impl VpnConnection {
                             queue_full_mode: candidate_queue_full_mode,
                         });
                         authenticated = true;
+                        // Only remember timeouts once another relay in the same
+                        // location proves this connection can reach a relay.
+                        // A local outage must not penalize every candidate.
+                        let family = region_family(candidate_region);
+                        for &timed_out in &timed_out_candidates {
+                            if region_family(timed_out) == family {
+                                crate::vpn::servers::avoid_relay_for_a_while(timed_out);
+                            }
+                        }
                         if idx > 0 {
                             log::info!(
                                 "V3: Relay auth failover selected '{}' after {} attempt(s)",
@@ -2076,7 +2141,7 @@ impl VpnConnection {
                         });
                     }
                     Ok(None) => {
-                        saw_timeout = true;
+                        timed_out_candidates.push(candidate_region.as_str());
                         log_sampled_connect_event(
                             &HANDSHAKE_TIMEOUT_EVENTS,
                             CONNECT_FAIL_HANDSHAKE_TIMEOUT,
@@ -2126,7 +2191,7 @@ impl VpnConnection {
                         session_id_hex
                     ),
                 );
-                if saw_timeout {
+                if !timed_out_candidates.is_empty() {
                     log::warn!(
                         "V3: Falling back to legacy relay mode after authentication timeouts"
                     );
@@ -2270,6 +2335,7 @@ impl VpnConnection {
             let router_for_lookup = Arc::clone(&auto_router);
             let state_for_lookup = Arc::clone(&self.state);
             let auth_manager_for_lookup = self.auth_manager.clone();
+            let player_usage_for_lookup = Arc::clone(&self.player_usage);
             let lookup_handle = tokio::spawn(async move {
                 use crate::geolocation::GameServerRegionLookup;
 
@@ -2468,6 +2534,7 @@ impl VpnConnection {
                                             &relay_for_lookup,
                                             &selected_region,
                                             selected_addr,
+                                            &player_usage_for_lookup,
                                         )
                                         .await
                                     }
@@ -2487,6 +2554,7 @@ impl VpnConnection {
                                             &relay_for_lookup,
                                             &selected_region,
                                             selected_addr,
+                                            &player_usage_for_lookup,
                                         )
                                         .await;
                                     }
@@ -2708,6 +2776,7 @@ impl VpnConnection {
             log::info!("V3: UDP gameplay tunneling disabled for TCP-only country-ban bypass");
         }
 
+        support.stage("driver_configure");
         blocking_driver_step(|| driver.configure(split_config)).map_err(|e| {
             let _ = driver.close();
             VpnError::SplitTunnelSetupFailed(format!("Failed to configure V3 split tunnel: {}", e))
@@ -2810,25 +2879,21 @@ impl VpnConnection {
         }
 
         // Start process monitor (event-driven ETW + periodic refresh)
-        self.process_monitor_stop.store(false, Ordering::SeqCst);
-        let stop_flag = Arc::clone(&self.process_monitor_stop);
         let state_handle = Arc::clone(&self.state);
         let auto_router_for_monitor = self.auto_router.clone();
         let process_performance_for_monitor = self.process_performance_manager.clone();
         let relay_health_monitor = relay_for_health;
         let workers_panic_cause_monitor = workers_panic_cause_for_monitor;
 
-        tokio::spawn(async move {
+        self.process_monitor_handle = Some(tokio::spawn(async move {
             log::info!("V3: Process monitor started");
             // Match previous behavior: first periodic refresh occurs after the interval.
             let first_tick =
                 tokio::time::Instant::now() + Duration::from_millis(REFRESH_INTERVAL_MS);
             let mut refresh_tick =
                 tokio::time::interval_at(first_tick, Duration::from_millis(REFRESH_INTERVAL_MS));
-            let mut stop_tick = tokio::time::interval(Duration::from_millis(100));
             // Rebinding or resuming the PC must not replay old scans in a burst.
             refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            stop_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut etw_rx = etw_tokio_rx;
 
             // Adapter-reset watchdog. Armed for the first
@@ -2847,9 +2912,6 @@ impl VpnConnection {
             let mut relay_dead_since: Option<Instant> = None;
 
             loop {
-                if stop_flag.load(Ordering::SeqCst) {
-                    break;
-                }
                 tokio::select! {
                     // ETW event-driven path
                     event = async {
@@ -2968,6 +3030,9 @@ impl VpnConnection {
                             None => {
                                 // ETW channel closed (watcher stopped or failed). Fall back to polling only.
                                 etw_rx = None;
+                                // This task is aborted before the watcher is
+                                // stopped, so reaching here means the watcher
+                                // was lost while the session was running.
                                 log::warn!("V3: ETW process watcher channel closed (falling back to polling)");
                             }
                         }
@@ -3047,7 +3112,7 @@ impl VpnConnection {
                                         // health monitor beating us to the transition)
                                         // owns teardown. Disarm so the next tick doesn't
                                         // re-enter Abort with the same prior counter and
-                                        // spam log::error every 500ms until stop_flag.
+                                          // spam log::error on every refresh.
                                         watchdog_armed = false;
                                         watchdog_offline_ticks = 0;
                                     }
@@ -3207,9 +3272,20 @@ impl VpnConnection {
                                 } => {
                                     let transitioned = state_handle.send_if_modified(|state| {
                                         if matches!(*state, ConnectionState::Connected { .. }) {
+                                            // `cause` is SwiftTunnel's conclusion. The
+                                            // other fields are what it measured, so staff
+                                            // can tell a relay fault from a local outage.
                                             log::error!(
-                                                "V3: Relay health is '{}' - transitioning Connected -> Error",
-                                                health.as_str()
+                                                "[support] event=tunnel_stopped cause={} relay_health={} grace_elapsed={} local_connectivity={} connected_secs={} observed=relay_health,local_connectivity inferred=cause",
+                                                cleanup_reason,
+                                                health.as_str(),
+                                                relay_dead_grace_elapsed,
+                                                match local_connectivity {
+                                                    LocalConnectivity::Reachable => "reachable",
+                                                    LocalConnectivity::Offline => "offline",
+                                                    LocalConnectivity::Unknown => "unknown",
+                                                },
+                                                connect_started_at.elapsed().as_secs(),
                                             );
                                             *state = ConnectionState::Error(error_message.clone());
                                             true
@@ -3276,14 +3352,11 @@ impl VpnConnection {
                             }
                         }
                     }
-
-                    // Wake periodically to check stop_flag promptly without spawning tasks.
-                    _ = stop_tick.tick() => {}
                 }
             }
 
             log::info!("V3: Process monitor stopped");
-        });
+        }));
 
         if custom_relay_server.is_none() {
             let mut quota_state = self.state.subscribe();
@@ -3327,10 +3400,11 @@ impl VpnConnection {
                 let state_for_refresh = Arc::clone(&self.state);
                 let terminal_cleanup_requested = Arc::clone(&self.terminal_cleanup_requested);
                 let refresh_state = self.state.subscribe();
+                let player_usage_for_refresh = Arc::clone(&self.player_usage);
 
                 self.relay_lease_refresh_handle = Some(tokio::spawn(
                     run_relay_renewal_until_terminal(refresh_state, async move {
-                        let client = AuthClient::new();
+                        let client = AuthClient::new().with_relay_usage(player_usage_for_refresh);
                         let mut delay = RELAY_LEASE_REFRESH_INTERVAL;
                         let mut last_attempt = tokio::time::Instant::now() - Duration::from_secs(5);
                         loop {
@@ -3450,69 +3524,79 @@ impl VpnConnection {
     /// preserving the Error state already published to the UI.
     pub async fn cleanup_after_terminal_error(&mut self) {
         self.cleanup().await;
-        self.release_free_tier_quota().await;
+        self.spawn_session_report();
     }
 
     pub async fn disconnect(&mut self) -> VpnResult<()> {
+        let support = crate::support_log::Operation::start("tunnel_disconnect", "cleanup");
         log::info!("Disconnecting VPN");
         crate::vpn::bypass_diag::end_session();
         self.set_state(ConnectionState::Disconnecting).await;
         self.cleanup().await;
-        self.release_free_tier_quota().await;
         self.set_state(ConnectionState::Disconnected).await;
         log::info!("VPN disconnected");
+        support.complete("disconnected");
+        // After the tunnel is down, not before. The report can need a token
+        // refresh and a web round trip, which held real disconnects in
+        // "Disconnecting" for up to 3.5 seconds. It logs as its own operation.
+        self.spawn_session_report();
         Ok(())
     }
 
-    /// Tell the API the session is over so the free-tier counter is settled
-    /// against time actually spent connected.
+    /// Send this session's end-of-session report without holding up the caller.
     ///
-    /// The server can otherwise only settle a session when the next ticket is
-    /// requested, and at that point a 30-second session looks identical to a
-    /// full ticket window: it sees a long gap and charges the whole TTL. A few
-    /// short sessions would eat a large slice of the daily allowance for time
-    /// the user never had.
+    /// The report is an acknowledgement that carries the session's Roblox
+    /// usage. The server keeps an issued ticket's reservation until it expires,
+    /// so the report never changes anyone's remaining time.
     ///
-    /// Best effort on purpose. This runs on the way out, so a failure is logged
-    /// and swallowed — the cost is the old over-charge, never a disconnect that
-    /// appears to fail. A hard kill skips it entirely and falls back to the
-    /// same old behaviour.
-    async fn release_free_tier_quota(&self) {
-        let Some(auth_manager) = self.auth_manager.as_ref() else {
+    /// Ownership, because the task outlives this call:
+    /// - It belongs to the session that just ended: it holds that session's
+    ///   usage (a new connection starts a new one) and the account recorded
+    ///   when the session began.
+    /// - It asks for a token only while that same account is signed in. After
+    ///   a sign-out, or a sign-in as someone else, it sends nothing.
+    /// - It is bounded: one overall time limit, and a small cap on how many
+    ///   can be outstanding. Exit paths wait briefly, then abort the rest, with
+    ///   [`finish_pending_session_reports`].
+    fn spawn_session_report(&mut self) {
+        // Taken, so one session reports once however it is torn down.
+        let Some(account_id) = self.session_account_id.take() else {
             return;
         };
-
-        let token = {
-            let auth = auth_manager.lock().await;
-            auth.get_access_token().await.ok()
-        };
-        let Some(token) = token else {
+        let Some(auth_manager) = self.auth_manager.clone() else {
             return;
         };
-
-        match crate::auth::http_client::AuthClient::new()
-            .release_relay_quota(&token)
+        let usage = Arc::clone(&self.player_usage);
+        track_session_report(tokio::spawn(async move {
+            let mut support = crate::support_log::Operation::start("session_report", "token");
+            match tokio::time::timeout(
+                SESSION_REPORT_TIME_LIMIT,
+                send_session_report(&auth_manager, &account_id, usage, &mut support),
+            )
             .await
-        {
-            Ok(()) => {
-                // The budget the UI is showing is now stale in the user's
-                // favour; the next ticket refreshes it.
-                log::debug!("Free-tier session released");
+            {
+                Ok(Ok(())) => support.succeed("acknowledged"),
+                Ok(Err(outcome)) => support.fail(outcome),
+                Err(_) => support.fail("timed_out"),
             }
-            Err(e) => {
-                log::warn!("Free-tier release failed (usage may be over-counted): {e}");
-            }
-        }
+        }));
     }
 
     async fn cleanup(&mut self) {
+        self.player_usage_observer.take();
         super::quota_notice::set_active(false);
         if let Some(handle) = self.quota_monitor_handle.take() {
             handle.abort();
             let _ = handle.await;
         }
-        // Stop process monitor
-        self.process_monitor_stop.store(true, Ordering::SeqCst);
+        // Wait for any current native work to finish before removing the WFP
+        // holds or closing the driver. A new connection owns a new task.
+        if let Some(handle) = self.process_monitor_handle.take() {
+            handle.abort();
+            if handle.await.is_err_and(|error| error.is_cancelled()) {
+                log::info!("V3: Process monitor stopped");
+            }
+        }
 
         if let Some(handle) = self.relay_lease_refresh_handle.take() {
             handle.abort();
@@ -3735,7 +3819,6 @@ impl Default for VpnConnection {
 impl Drop for VpnConnection {
     fn drop(&mut self) {
         super::quota_notice::set_active(false);
-        self.process_monitor_stop.store(true, Ordering::SeqCst);
         if let Some(router) = self.auto_router.take() {
             router.reset();
         }
@@ -3743,6 +3826,7 @@ impl Drop for VpnConnection {
         // workers also retain session state/relay handles and must not survive
         // destruction of their owning connection when the runtime stays up.
         for handle in [
+            self.process_monitor_handle.take(),
             self.auto_lookup_handle.take(),
             self.route_telemetry_handle.take(),
             self.quota_monitor_handle.take(),
@@ -3789,9 +3873,188 @@ impl Drop for VpnConnection {
     }
 }
 
+/// One report may take this long in total, token refresh included.
+const SESSION_REPORT_TIME_LIMIT: Duration = Duration::from_secs(15);
+/// Reconnecting in a loop while offline must not pile reports up. When a new
+/// one would exceed this, the oldest is aborted.
+const MAX_PENDING_SESSION_REPORTS: usize = 4;
+
+/// Reports that may still be running, oldest first.
+static PENDING_SESSION_REPORTS: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn pending_session_reports() -> std::sync::MutexGuard<'static, Vec<tokio::task::JoinHandle<()>>> {
+    // A panic elsewhere while holding this cannot corrupt a list of handles.
+    PENDING_SESSION_REPORTS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Keep `report` reachable until it ends, so it can be waited for or aborted.
+fn track_session_report(report: tokio::task::JoinHandle<()>) {
+    let mut pending = pending_session_reports();
+    pending.retain(|report| !report.is_finished());
+    while pending.len() >= MAX_PENDING_SESSION_REPORTS {
+        pending.remove(0).abort();
+    }
+    pending.push(report);
+}
+
+/// Wait, at most `limit` in total, for outstanding session reports, then abort
+/// whatever is left.
+///
+/// Disconnect no longer waits for its report, so a client that is about to
+/// exit calls this. Nothing is left running behind a process that is going.
+pub async fn finish_pending_session_reports(limit: Duration) {
+    let pending = std::mem::take(&mut *pending_session_reports());
+    let deadline = tokio::time::Instant::now() + limit;
+    for report in pending {
+        let abort = report.abort_handle();
+        if tokio::time::timeout_at(deadline, report).await.is_err() {
+            abort.abort();
+            log::warn!("A session report was still running at exit and was stopped");
+        }
+    }
+}
+
+/// The body of one session report. `Err` carries the support-log outcome.
+async fn send_session_report(
+    auth_manager: &tokio::sync::Mutex<crate::auth::AuthManager>,
+    account_id: &str,
+    usage: Arc<super::player_usage::PlayerUsage>,
+    support: &mut crate::support_log::Operation,
+) -> Result<(), &'static str> {
+    let token = {
+        let auth = auth_manager.lock().await;
+        auth.get_access_token_for(account_id).await
+    };
+    let Ok(token) = token else {
+        // Signed out, signed in as someone else, or the refresh failed. The
+        // report belongs to the old session and is not sent as anyone else.
+        return Err("account_unavailable");
+    };
+    support.stage("send");
+    crate::auth::http_client::AuthClient::new()
+        .with_relay_usage(usage)
+        .release_relay_quota(&token)
+        .await
+        .map_err(|error| {
+            // Remaining time is unaffected: the server keeps a ticket's
+            // reservation until it expires whether or not this arrives.
+            log::warn!("Session end report was not delivered: {error}");
+            "send_failed"
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The registry is process-wide, so its tests take turns.
+    static REPORT_REGISTRY_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn outstanding_session_reports_are_bounded_and_none_is_left_detached() {
+        let _turn = REPORT_REGISTRY_TEST.lock().await;
+        finish_pending_session_reports(Duration::ZERO).await;
+
+        struct Ended(Arc<AtomicBool>);
+        impl Drop for Ended {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let mut ended = Vec::new();
+        for _ in 0..MAX_PENDING_SESSION_REPORTS + 3 {
+            let flag = Arc::new(AtomicBool::new(false));
+            let guard = Ended(Arc::clone(&flag));
+            ended.push(flag);
+            track_session_report(tokio::spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            }));
+        }
+        assert_eq!(pending_session_reports().len(), MAX_PENDING_SESSION_REPORTS);
+        // The three oldest gave way; they were aborted, not left running.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let stopped = |range: std::ops::Range<usize>| {
+            ended[range]
+                .iter()
+                .filter(|flag| flag.load(Ordering::SeqCst))
+                .count()
+        };
+        assert_eq!(stopped(0..3), 3);
+        assert_eq!(stopped(3..ended.len()), 0);
+
+        // Exit: a hung report cannot hold the process, and none survives it.
+        let started = Instant::now();
+        finish_pending_session_reports(Duration::from_millis(100)).await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(stopped(0..ended.len()), ended.len());
+        assert!(pending_session_reports().is_empty());
+    }
+
+    #[tokio::test]
+    async fn exit_waits_for_a_report_that_is_about_to_finish_and_forgets_finished_ones() {
+        let _turn = REPORT_REGISTRY_TEST.lock().await;
+        finish_pending_session_reports(Duration::ZERO).await;
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&finished);
+        track_session_report(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            done.store(true, Ordering::SeqCst);
+        }));
+        finish_pending_session_reports(Duration::from_secs(5)).await;
+        assert!(finished.load(Ordering::SeqCst));
+
+        // Finished reports do not count against the cap.
+        for _ in 0..MAX_PENDING_SESSION_REPORTS * 3 {
+            track_session_report(tokio::spawn(async {}));
+            tokio::task::yield_now().await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        track_session_report(tokio::spawn(async {}));
+        assert_eq!(pending_session_reports().len(), 1);
+        finish_pending_session_reports(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn a_session_reports_once_and_only_when_it_belongs_to_an_account() {
+        let _turn = REPORT_REGISTRY_TEST.lock().await;
+        finish_pending_session_reports(Duration::ZERO).await;
+
+        // No account was recorded (never connected): nothing is sent.
+        let mut connection = VpnConnection::new();
+        connection.spawn_session_report();
+        assert!(pending_session_reports().is_empty());
+
+        // An account without an attached sign-in manager cannot report either,
+        // and the account is consumed so a second teardown cannot repeat it.
+        connection.session_account_id = Some("fixture-user".into());
+        connection.spawn_session_report();
+        assert!(connection.session_account_id.is_none());
+        assert!(pending_session_reports().is_empty());
+    }
+
+    #[test]
+    fn a_relay_lookup_withdraws_the_public_lookup_failure() {
+        let mut connection = VpnConnection::new();
+        // Nothing failed: nothing to withdraw, and nothing to warn about.
+        assert!(!connection.withdraw_bypass_failure_after_relay_lookup());
+        assert_eq!(connection.take_country_ban_bypass_failure(), None);
+
+        // The public lookup failed, then the relay supplied the addresses.
+        connection.country_ban_bypass_failure = Some("Roblox DNS repair failed: fixture".into());
+        assert!(connection.withdraw_bypass_failure_after_relay_lookup());
+        // The connect command reads this to decide whether to warn the player.
+        assert_eq!(connection.take_country_ban_bypass_failure(), None);
+
+        // Without a relay lookup the failure still reaches the player.
+        connection.country_ban_bypass_failure = Some("Roblox DNS repair failed: fixture".into());
+        assert!(connection.take_country_ban_bypass_failure().is_some());
+    }
 
     #[tokio::test]
     async fn dropping_a_connection_cancels_all_owned_session_tasks() {
@@ -3805,6 +4068,7 @@ mod tests {
         let mut finished = Vec::new();
         let mut rescue = Vec::new();
         for slot in [
+            &mut connection.process_monitor_handle,
             &mut connection.auto_lookup_handle,
             &mut connection.route_telemetry_handle,
             &mut connection.quota_monitor_handle,
@@ -3835,7 +4099,7 @@ mod tests {
             task.abort();
         }
         tokio::task::yield_now().await;
-        assert_eq!(cancelled, [true; 4]);
+        assert_eq!(cancelled, [true; 5]);
     }
 
     #[test]
@@ -4376,7 +4640,7 @@ mod tests {
             ranked("atlantis-02", "10.9.0.2", Some(80)),
         ]);
         let alone = ranked_regions(vec![ranked("atlantis-01", "10.9.0.1", Some(10))]);
-        crate::vpn::servers::clear_avoided_relays_for_test();
+        crate::vpn::servers::forget_avoided_relay_for_test("atlantis-01");
 
         // Much slower, but it answers: that beats a relay that just stopped.
         assert_eq!(order.first().map(String::as_str), Some("atlantis-02"));

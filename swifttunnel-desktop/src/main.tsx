@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { installWebviewLockdown, shouldLockDown } from "./lib/webviewLockdown";
+import { reportUiFailure } from "./lib/uiFailureLog";
 import "./styles/globals.css";
 
 // Right-click and F12 otherwise expose the page context menu and developer
@@ -48,6 +49,7 @@ async function mountWindow() {
 
 void mountWindow().catch(error => {
   console.error("SwiftTunnel window could not load", error);
+  reportUiFailure(null, error);
   if (isStatsOverlay) {
     void getCurrentWindow().hide().catch(() => {});
   } else {

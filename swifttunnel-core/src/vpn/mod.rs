@@ -28,6 +28,7 @@ pub mod game_destination;
 pub mod ipv6_recovery;
 pub mod local_connectivity;
 pub mod parallel_interceptor;
+pub(crate) mod player_usage;
 pub mod process_cache;
 pub mod process_performance;
 pub mod process_tracker;
@@ -134,6 +135,26 @@ pub enum VpnError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl VpnError {
+    pub(crate) fn support_code(&self) -> &'static str {
+        match self {
+            Self::ConfigFetch(_) => "config_unavailable",
+            Self::SplitTunnel(_) | Self::SplitTunnelSetupFailed(_) => "split_tunnel_failed",
+            Self::SplitTunnelNotAvailable => "driver_unavailable",
+            Self::DriverNotOpen | Self::DriverNotInitialized => "driver_not_ready",
+            Self::Connection(_) => "connection_failed",
+            Self::Network(_) => "network_failed",
+            Self::Route(_) => "route_failed",
+            Self::InvalidConfig(_) => "invalid_config",
+            Self::NotAuthenticated | Self::SessionExpired => "sign_in_required",
+            Self::UserBanned(_) => "account_blocked",
+            Self::FreeTierLimitReached(_) => "allowance_exhausted",
+            Self::UpdateRequired(_) => "update_required",
+            Self::Io(_) => "io_failed",
+        }
+    }
 }
 
 pub type VpnResult<T> = Result<T, VpnError>;

@@ -67,6 +67,7 @@ describe("installAnimationIdle", () => {
     const listeners = new Map<string, EventListener>();
     const root = fakeRoot();
     let focused = hasFocus;
+    let hidden = false;
 
     const target = {
       addEventListener: vi.fn((t: string, fn: EventListener) => {
@@ -77,6 +78,7 @@ describe("installAnimationIdle", () => {
 
     const doc = {
       hasFocus: () => focused,
+      get hidden() { return hidden; },
       addEventListener: vi.fn((t: string, fn: EventListener) => {
         listeners.set(t, fn);
       }),
@@ -96,6 +98,9 @@ describe("installAnimationIdle", () => {
       listeners,
       setFocus(v: boolean) {
         focused = v;
+      },
+      setHidden(v: boolean) {
+        hidden = v;
       },
     };
   }
@@ -121,12 +126,15 @@ describe("installAnimationIdle", () => {
   });
 
   it("also reacts to the document being hidden", () => {
-    const h = harness(true);
+    const h = harness(true, false);
 
-    h.setFocus(false);
+    h.setHidden(true);
     h.listeners.get("visibilitychange")!({} as Event);
 
     expect(h.root.has(IDLE_CLASS)).toBe(true);
+    h.setHidden(false);
+    h.listeners.get("visibilitychange")!({} as Event);
+    expect(h.root.has(IDLE_CLASS)).toBe(false);
   });
 
   it("leaves motion alone when the setting is off", () => {

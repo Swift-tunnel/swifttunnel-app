@@ -13,6 +13,7 @@ type UpdaterStatus =
   | "up_to_date"
   | "update_available"
   | "installing"
+  | "installed"
   | "error";
 
 interface PendingUpdate {
@@ -66,6 +67,7 @@ interface UpdaterStore {
   showWhatsNew: boolean;
   progressPercent: number;
   lastChecked: number | null;
+  installMessage: string | null;
   error: string | null;
 
   checkForUpdates: (manual?: boolean, autoInstall?: boolean) => Promise<void>;
@@ -84,10 +86,11 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
   showWhatsNew: false,
   progressPercent: 0,
   lastChecked: null,
+  installMessage: null,
   error: null,
 
   checkForUpdates: async (manual = false, autoInstall = false) => {
-    if (get().status === "installing") return;
+    if (get().status === "installing" || get().status === "installed") return;
     const generation = ++updaterGeneration;
     const channel = useSettingsStore.getState().settings.update_channel;
     if (pendingUpdate && pendingUpdate.channel !== channel) {
@@ -132,7 +135,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
           lastChecked: checkedAt,
         }));
         if (manual) {
-          await notify("SwiftTunnel", "You are on the latest version.");
+          void notify("SwiftTunnel", "You are on the latest version.");
         }
         return;
       }
@@ -160,7 +163,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       });
 
       if (autoInstall) {
-        await notify(
+        void notify(
           "SwiftTunnel Update",
           `Updating to v${update.available_version}, restarting...`,
         );
@@ -170,7 +173,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       }
 
       if (manual) {
-        await notify(
+        void notify(
           "Update Available",
           `Version ${update.available_version} is ready.`,
         );
@@ -213,21 +216,20 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
       const result = await updaterInstallChannel(channel, version);
 
       pendingUpdate = null;
+      const installMessage = result.reboot_required
+        ? "Update installed. Restart Windows to finish applying it."
+        : "Update installed. Reopen SwiftTunnel if it does not restart.";
       set({
-        status: "up_to_date",
+        status: "installed",
         availableVersion: null,
         releaseTag: null,
         releaseNotes: null,
         showWhatsNew: false,
         progressPercent: 100,
+        installMessage,
       });
 
-      await notify(
-        "SwiftTunnel Update",
-        result.reboot_required
-          ? "Update installed. Restart Windows to finish applying it."
-          : "Update installed. Reopen SwiftTunnel if it does not restart.",
-      );
+      void notify("SwiftTunnel Update", installMessage);
     } catch (e) {
       set({
         status: "error",

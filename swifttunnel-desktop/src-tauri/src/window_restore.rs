@@ -1,4 +1,4 @@
-use tauri::WebviewWindow;
+use tauri::{Emitter, WebviewWindow};
 
 trait WindowOps {
     fn unminimize(&self) -> Result<(), String>;
@@ -28,6 +28,8 @@ fn restore_window<W: WindowOps>(window: &W) {
 
 pub fn restore_main_window(window: &WebviewWindow) {
     restore_window(window);
+    // Windows can show the window without granting foreground focus.
+    let _ = window.emit("main-window-restored", ());
 }
 
 #[cfg(test)]

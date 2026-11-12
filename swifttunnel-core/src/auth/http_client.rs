@@ -212,6 +212,7 @@ pub struct AuthClient {
     client: OnceLock<Result<Client, String>>,
     direct_client: OnceLock<Result<Client, String>>,
     device_hwid: OnceLock<Option<String>>,
+    relay_usage: Option<std::sync::Arc<crate::vpn::player_usage::PlayerUsage>>,
 }
 
 fn build_http_client(use_system_proxy: bool) -> Result<Client, String> {
@@ -260,6 +261,7 @@ impl AuthClient {
             client: OnceLock::from(Err("fixture transport unavailable".into())),
             direct_client: OnceLock::from(Err("fixture transport unavailable".into())),
             device_hwid: OnceLock::from(None),
+            relay_usage: None,
         }
     }
 
@@ -272,6 +274,7 @@ impl AuthClient {
             client: OnceLock::new(),
             direct_client: OnceLock::new(),
             device_hwid: OnceLock::new(),
+            relay_usage: None,
         }
     }
 
@@ -295,6 +298,26 @@ impl AuthClient {
         // until it learns to read this, and older clients keep working after.
         match super::device_identity::device_fingerprint() {
             Some(fingerprint) => request.header("X-SwiftTunnel-Device", fingerprint),
+            None => request,
+        }
+    }
+
+    pub(crate) fn with_relay_usage(
+        mut self,
+        usage: std::sync::Arc<crate::vpn::player_usage::PlayerUsage>,
+    ) -> Self {
+        self.relay_usage = Some(usage);
+        self
+    }
+
+    fn add_relay_usage_header(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self
+            .relay_usage
+            .as_ref()
+            .and_then(|usage| usage.report())
+            .and_then(|report| serde_json::to_string(&report).ok())
+        {
+            Some(report) => request.header("X-SwiftTunnel-Roblox-Usage", report),
             None => request,
         }
     }
@@ -658,7 +681,7 @@ impl AuthClient {
         let response = self
             .send_with_network_fallback("relay release", |client, base| {
                 let url = format!("{base}{path}");
-                self.add_common_headers(client.post(&url))
+                self.add_relay_usage_header(self.add_common_headers(client.post(&url)))
                     .header("Authorization", format!("Bearer {}", access_token))
                     .header("X-SwiftTunnel-Relay-Lease", "1")
                     .header("Content-Type", "application/json")
@@ -705,7 +728,7 @@ impl AuthClient {
         let response = self
             .send_with_network_fallback("relay ticket", |client, base| {
                 let url = format!("{base}{path}");
-                self.add_common_headers(client.post(&url))
+                self.add_relay_usage_header(self.add_common_headers(client.post(&url)))
                     .header("Authorization", format!("Bearer {}", access_token))
                     .header("Content-Type", "application/json")
                     .json(&json!({
@@ -755,6 +778,9 @@ impl AuthClient {
         }
 
         let data: RelayTicketResponse = read_auth_json(response, "relay ticket").await?;
+        if let Some(usage) = &self.relay_usage {
+            usage.set_enabled(data.player_usage_enabled);
+        }
 
         info!(
             "Received relay ticket (auth_required: {}, key_id: {}, preflight_mode: {:?}, queue_full_mode: {:?})",
@@ -1179,6 +1205,7 @@ mod client_initialization_tests {
     #[tokio::test]
     async fn unavailable_clients_report_failure_without_starting_a_request() {
         let client = AuthClient {
+            relay_usage: None,
             client: OnceLock::from(failed_client()),
             direct_client: OnceLock::from(failed_client()),
             device_hwid: OnceLock::from(None),
@@ -1213,6 +1240,7 @@ mod client_initialization_tests {
                 .unwrap()
         };
         let client = AuthClient {
+            relay_usage: None,
             client: OnceLock::from(if primary_failed {
                 failed_client()
             } else {
@@ -1342,6 +1370,48 @@ mod api_host_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn player_usage_header_requires_explicit_enable_and_contains_only_counts() {
+        let usage = std::sync::Arc::new(crate::vpn::player_usage::PlayerUsage::default());
+        usage.bind("0123456789abcdef".into());
+        let client = AuthClient::new().with_relay_usage(usage.clone());
+        let request = client
+            .add_relay_usage_header(Client::new().post("http://127.0.0.1/"))
+            .build()
+            .unwrap();
+        assert!(
+            request
+                .headers()
+                .get("X-SwiftTunnel-Roblox-Usage")
+                .is_none()
+        );
+        usage.set_enabled(true);
+        let request = client
+            .add_relay_usage_header(Client::new().post("http://127.0.0.1/"))
+            .build()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(
+            request.headers()["X-SwiftTunnel-Roblox-Usage"]
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({"schema":1,"session_id":"0123456789abcdef","peak_players":null,"samples":0,"failures":0})
+        );
+        usage.set_enabled(false);
+        assert!(
+            client
+                .add_relay_usage_header(Client::new().post("http://127.0.0.1/"))
+                .build()
+                .unwrap()
+                .headers()
+                .get("X-SwiftTunnel-Roblox-Usage")
+                .is_none()
+        );
+    }
 
     /// The Cloudflare Error 1000 page that `auth.swifttunnel.net` served when
     /// its DNS record was proxied onto a Cloudflare-owned origin. Pasting this

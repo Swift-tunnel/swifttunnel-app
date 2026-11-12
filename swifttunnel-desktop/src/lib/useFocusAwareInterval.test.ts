@@ -14,6 +14,7 @@ vi.mock("../stores/settingsStore", () => ({
   }),
 }));
 import { pollPeriodMs, useFocusAwareInterval } from "./useFocusAwareInterval";
+import { refreshMainWindowVisibility, setNativeWindowHidden } from "./mainWindowVisibility";
 
 const ACTIVE = 2_000;
 const IDLE = 15_000;
@@ -57,6 +58,7 @@ describe("pollPeriodMs", () => {
 
 describe("focus-aware polling lifecycle", () => {
   let hasFocus: boolean;
+  let hidden: boolean;
   let events: EventTarget;
   let stop: (() => void) | undefined;
 
@@ -65,8 +67,14 @@ describe("focus-aware polling lifecycle", () => {
     h.effects.length = 0;
     h.idleWhenUnfocused = true;
     hasFocus = false;
+    hidden = false;
     events = new EventTarget();
-    vi.stubGlobal("document", { hasFocus: () => hasFocus });
+    vi.stubGlobal("document", {
+      hasFocus: () => hasFocus,
+      get hidden() { return hidden; },
+      addEventListener: events.addEventListener.bind(events),
+      removeEventListener: events.removeEventListener.bind(events),
+    });
     vi.stubGlobal("window", {
       setTimeout: (callback: () => void, delay: number) => setTimeout(callback, delay),
       clearTimeout: (id: number) => clearTimeout(id),
@@ -78,6 +86,7 @@ describe("focus-aware polling lifecycle", () => {
   afterEach(() => {
     stop?.();
     stop = undefined;
+    setNativeWindowHidden(false);
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -117,6 +126,44 @@ describe("focus-aware polling lifecycle", () => {
     const poll = start();
     vi.advanceTimersByTime(60_000);
     expect(poll).toHaveBeenCalledTimes(60);
+  });
+
+  it("stops hidden display polling even with idle mode disabled", () => {
+    h.idleWhenUnfocused = false;
+    const poll = start();
+    hidden = true;
+    events.dispatchEvent(new Event("visibilitychange"));
+    events.dispatchEvent(new Event("focus"));
+    vi.advanceTimersByTime(60_000);
+    expect(poll).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    hidden = false;
+    events.dispatchEvent(new Event("visibilitychange"));
+    expect(poll).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(1000);
+    expect(poll).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the native minimized state when WebView2 still reports visible", async () => {
+    const poll = start();
+    await refreshMainWindowVisibility({
+      isVisible: async () => true,
+      isMinimized: async () => true,
+    }, () => false);
+    vi.advanceTimersByTime(60_000);
+    expect(poll).not.toHaveBeenCalled();
+
+    // A visibility query started before restore must not suspend the window again.
+    const outdated = refreshMainWindowVisibility({
+      isVisible: async () => false,
+      isMinimized: async () => false,
+    }, () => false);
+    setNativeWindowHidden(false);
+    await outdated;
+    expect(poll).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(15_000);
+    expect(poll).toHaveBeenCalledTimes(2);
   });
 
   it("retires both the timer and focus listener on unmount", () => {

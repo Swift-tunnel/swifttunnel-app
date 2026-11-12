@@ -243,6 +243,29 @@ impl RebindState {
     }
 }
 
+/// Minimum gap between PowerShell default-route lookups; see
+/// `get_default_route_info_powershell`.
+const POWERSHELL_ROUTE_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
+
+fn powershell_route_fallback_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| {
+        now.saturating_duration_since(last) >= POWERSHELL_ROUTE_FALLBACK_INTERVAL
+    })
+}
+
+/// How often a connected session re-probes the default route.
+///
+/// The connection monitor asks every 500ms. Each probe enumerates every
+/// adapter with `GetAdaptersAddresses` several times (interface state twice,
+/// the point-to-point check, the network signature), which is a heavy query
+/// into the network stack, and it ran for the whole session just to notice a
+/// rare Ethernet/Wi-Fi switch. Two seconds still catches that switch quickly.
+const ROUTE_CHANGE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+fn route_change_check_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= ROUTE_CHANGE_CHECK_INTERVAL)
+}
+
 /// Sleep for `total`, waking at most every 50ms to check `stop_flag`. Returns
 /// `true` if the caller should exit because `stop_flag` is set. Used during
 /// the reader rebind backoff so disconnect stays responsive.
@@ -1170,6 +1193,8 @@ pub struct ParallelInterceptor {
     queue_full_events: Arc<AtomicU64>,
     /// Last time we attempted to rebind adapters due to default-route changes.
     last_rebind_at: Option<Instant>,
+    /// Last default-route probe, see `ROUTE_CHANGE_CHECK_INTERVAL`.
+    last_route_check_at: Option<Instant>,
 }
 
 impl ParallelInterceptor {
@@ -1246,6 +1271,7 @@ impl ParallelInterceptor {
             udp_tunneling_enabled: Arc::new(AtomicBool::new(true)),
             queue_full_events: Arc::new(AtomicU64::new(0)),
             last_rebind_at: None,
+            last_route_check_at: None,
         }
     }
 
@@ -1646,6 +1672,26 @@ impl ParallelInterceptor {
     }
 
     fn get_default_route_info_powershell() -> Option<DefaultRouteInfo> {
+        // The last resort when the native lookups find no default route, which
+        // is exactly what happens for the whole of an outage (cable out, Wi-Fi
+        // dropped mid-match). The connected session re-probes every couple of
+        // seconds, so without a limit this started a PowerShell process each
+        // time, under the driver lock, for as long as the network was down.
+        static LAST: parking_lot::Mutex<Option<(Instant, Option<DefaultRouteInfo>)>> =
+            parking_lot::Mutex::new(None);
+        let mut last = LAST.lock();
+        let now = Instant::now();
+        if let Some((at, cached)) = *last
+            && !powershell_route_fallback_due(Some(at), now)
+        {
+            return cached;
+        }
+        let info = Self::get_default_route_info_powershell_uncached();
+        *last = Some((now, info));
+        info
+    }
+
+    fn get_default_route_info_powershell_uncached() -> Option<DefaultRouteInfo> {
         let script = r#"
             $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
                 Sort-Object @{Expression='RouteMetric';Descending=$false}, @{Expression='InterfaceMetric';Descending=$false} |
@@ -2842,7 +2888,20 @@ impl ParallelInterceptor {
             }
         };
 
-        let default_route_binding_error = if let Err(err) = validate_binding() {
+        // The driver only reports adapters its filter is attached to. When the
+        // default-route adapter is already in that list there is nothing left
+        // to ensure, and asking PowerShell to confirm it cost a measured 2.3
+        // seconds of a 5.2 second connect to print "already enabled".
+        let binding_already_live = default_route_if_index
+            .and_then(Self::get_interface_guid_ascii_lowercase_from_if_index)
+            .is_some_and(|guid| Self::driver_lists_adapter(&guid));
+
+        let default_route_binding_error = if binding_already_live {
+            log::info!(
+                "WinpkFilter binding is live on the default-route adapter (reported by the driver); skipping the PowerShell check"
+            );
+            None
+        } else if let Err(err) = validate_binding() {
             log::warn!(
                 "WinpkFilter binding check on default-route adapter failed before enumeration: {}",
                 err
@@ -3895,6 +3954,31 @@ impl ParallelInterceptor {
         })
     }
 
+    /// Whether the driver itself reports this adapter.
+    ///
+    /// It can only report an adapter the filter is attached to and enabled on,
+    /// so this answers the binding question in milliseconds without starting
+    /// PowerShell. Any failure answers "not known" and the caller falls back to
+    /// the full check, which can also repair the binding.
+    fn driver_lists_adapter(guid_lc: &str) -> bool {
+        let Ok(driver) = ndisapi::Ndisapi::new("NDISRD") else {
+            return false;
+        };
+        let Ok(adapters) = driver.get_tcpip_bound_adapters_info() else {
+            return false;
+        };
+        Self::adapter_names_include_guid(adapters.iter().map(|adapter| adapter.get_name()), guid_lc)
+    }
+
+    fn adapter_names_include_guid<'a>(
+        mut names: impl Iterator<Item = &'a str>,
+        guid_lc: &str,
+    ) -> bool {
+        !guid_lc.is_empty()
+            && names
+                .any(|name| Self::extract_guid_ascii_lowercase(name).as_deref() == Some(guid_lc))
+    }
+
     fn winpkfilter_binding_missing_message(adapter_label: &str) -> String {
         format!(
             "winpkfilter_binding_missing: nt_ndisrd is not bound to adapter '{}'. SwiftTunnel will repair the binding automatically, then try again.",
@@ -4073,6 +4157,17 @@ impl ParallelInterceptor {
     }
 
     fn ensure_winpkfilter_binding(&self) -> VpnResult<()> {
+        // The driver enumerated this adapter during selection, and it only
+        // lists adapters its filter is attached to and enabled on. Running
+        // PowerShell again cost about a second of every connect to confirm
+        // that. Its "missing" and timeout answers were already ignored below
+        // for a listed adapter, so the run could only ever agree.
+        if self.selected_adapter_seen_by_ndisrd {
+            log::info!(
+                "WinpkFilter binding confirmed by the driver's adapter list; skipping the PowerShell check"
+            );
+            return Ok(());
+        }
         match Self::ensure_winpkfilter_binding_for_adapter(
             self.physical_adapter_if_index,
             self.physical_adapter_friendly_name
@@ -4337,8 +4432,13 @@ impl ParallelInterceptor {
                 "Steered IPv6 default route off on if_index {if_index}: apps fall back to IPv4 instantly"
             );
         } else {
-            log::warn!(
-                "netsh delete ::/0 route (if {if_index}) failed: {}",
+            // Most networks here have no IPv6 default route, and then there is
+            // nothing to delete: netsh fails and explains on stdout, so this
+            // used to be a warning with an empty reason on every connect. It is
+            // the normal case, and the step is best effort either way.
+            log::info!(
+                "No IPv6 default route removed on if_index {if_index} (usually because there is none): {} {}",
+                delete_route.stdout.trim(),
                 delete_route.stderr.trim()
             );
         }
@@ -4997,6 +5097,10 @@ impl ParallelInterceptor {
         {
             return Ok(false);
         }
+        if !route_change_check_due(self.last_route_check_at, now) {
+            return Ok(false);
+        }
+        self.last_route_check_at = Some(now);
 
         let prev_default_if_index = self.default_route_if_index;
         let prev_default_next_hop = self.default_route_next_hop;
@@ -5657,6 +5761,7 @@ fn run_packet_reader(
     let mut snapshot_version = snapshot.version;
     let mut inline_cache: InlineCache = ahash::AHashMap::with_capacity(1024);
     let mut cloud_routes = super::cloud_game_routes::CloudGameRoutes::new(&snapshot);
+    let mut roblox_auth_trace = super::bypass_diag::RobloxAuthTrace::default();
     // A short, bounded wait for the existing background owner-table reader.
     // No IP Helper calls or sleeps are added to the packet path.
     const MAX_CLOUD_PENDING: usize = 64;
@@ -5834,6 +5939,9 @@ fn run_packet_reader(
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
     let mut passthrough_to_adapter: EthMRequest<BATCH_SIZE>;
     let mut passthrough_to_mstcp: EthMRequest<BATCH_SIZE>;
+    // Set when the previous read filled the whole batch: the driver queue may
+    // still hold packets, so read again without waiting on the event.
+    let mut drain_more = false;
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
@@ -5891,7 +5999,25 @@ fn run_packet_reader(
         // Using 100ms timeout allows responsive stop_flag checking while
         // avoiding 1000Hz polling that wastes CPU when idle
         // (When packets arrive, event signals immediately - no added latency)
-        let wait_result = unsafe { WaitForSingleObject(b.event, 100) };
+        //
+        // Packets held for an owner lookup are replayed on the next pass, so
+        // wake sooner while any are waiting instead of after the full 100ms.
+        let wait_result = if drain_more {
+            WAIT_OBJECT_0
+        } else {
+            let timeout_ms = reader_wait_timeout_ms(!cloud_pending.is_empty());
+            unsafe { WaitForSingleObject(b.event, timeout_ms) }
+        };
+        let draining = std::mem::take(&mut drain_more);
+        if wait_result == WAIT_OBJECT_0 {
+            // Reset before reading, not after the batch. The event is
+            // manual-reset: clearing it after processing would also clear a
+            // signal for packets that arrived mid-batch, leaving them queued
+            // until the next arrival or the 100ms timeout.
+            unsafe {
+                let _ = ResetEvent(b.event);
+            }
+        }
         if wait_result == WAIT_TIMEOUT {
             // A timeout is the normal idle path. Do not call read_packets()
             // with an empty queue: WinpkFilter can report ERROR_INVALID_PARAMETER
@@ -5972,6 +6098,9 @@ fn run_packet_reader(
                 }
                 n
             }
+            // A follow-up read after a full batch can find the queue empty,
+            // which WinpkFilter reports as an error. That is not a dead handle.
+            Err(_) if draining => 0,
             Err(e) => {
                 match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
                     RebindDecision::Stop => break,
@@ -6015,10 +6144,8 @@ fn run_packet_reader(
             }
         };
 
+        drain_more = packets_read == BATCH_SIZE;
         if packets_read == 0 && cloud_pending.is_empty() {
-            unsafe {
-                let _ = ResetEvent(b.event);
-            }
             continue;
         }
 
@@ -6141,6 +6268,18 @@ fn run_packet_reader(
 
                     if auto_action == AutoRoutingPacketAction::Hold {
                         continue;
+                    }
+
+                    if let Some(ip) = cloud_ip
+                        && ip.get(9) == Some(&6) // TCP
+                        && roblox_auth_trace.has_room()
+                        && super::bypass_diag::is_enabled()
+                    {
+                        record_roblox_auth_route(
+                            &mut roblox_auth_trace,
+                            ip,
+                            should_tunnel && !auto_routing_bypass,
+                        );
                     }
 
                     if !should_tunnel || auto_routing_bypass {
@@ -6302,10 +6441,6 @@ fn run_packet_reader(
                 .driver
                 .send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp);
         }
-
-        unsafe {
-            let _ = ResetEvent(b.event);
-        }
     }
 
     // Cleanup is handled by `impl Drop for ReaderBindings` when `bindings`
@@ -6314,6 +6449,15 @@ fn run_packet_reader(
     log::info!("Packet reader stopped");
     Ok(())
 }
+
+/// Packet-event wait for the reader. Idle waits stay long so a quiet adapter
+/// costs nothing; held cloud-game packets need a quick replay pass.
+fn reader_wait_timeout_ms(has_held_packets: bool) -> u32 {
+    if has_held_packets { 10 } else { 100 }
+}
+
+/// Longest a packet worker sleeps before rechecking its stop flag.
+const WORKER_IDLE_WAKE: Duration = Duration::from_millis(150);
 
 /// Worker thread - processes packets and routes to VPN or passthrough
 #[allow(clippy::too_many_arguments)]
@@ -6371,31 +6515,19 @@ fn run_packet_worker(
     let mut relay_success = 0u64;
     let mut relay_fail = 0u64;
 
-    // Adaptive timeout: short when active, longer when idle to save CPU
-    // This is the key optimization - avoid 1000Hz polling when no packets
-    let mut consecutive_timeouts = 0u32;
-
     loop {
         if stop_flag.load(Ordering::Acquire) {
             break;
         }
 
-        // Adaptive timeout based on recent activity:
-        // - 5ms when recently active (gaming latency acceptable)
-        // - 150ms after 10 consecutive timeouts (idle, save CPU)
-        // The reader thread has the event-driven wakeup, workers just need
-        // to process what the reader dispatches to them
-        let timeout_ms = if consecutive_timeouts > 10 { 150 } else { 5 };
-
-        let work = match receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
-            Ok(w) => {
-                consecutive_timeouts = 0; // Reset on successful receive
-                w
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
-                continue;
-            }
+        // `recv_timeout` returns as soon as the reader dispatches work, so the
+        // timeout adds no latency; it only bounds how long a stop request
+        // waits. This used to drop to 5ms for ten timeouts after every packet,
+        // which made a worker fed one packet per game tick wake ~200 times a
+        // second in between for nothing.
+        let work = match receiver.recv_timeout(WORKER_IDLE_WAKE) {
+            Ok(w) => w,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
@@ -6897,7 +7029,7 @@ fn run_cache_refresher(
     api_tunneling_enabled: Arc<AtomicBool>,
     mut initial_refresh_done: Option<crossbeam_channel::Sender<()>>,
 ) {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     use windows::Win32::NetworkManagement::IpHelper::*;
 
     log::info!(
@@ -7093,14 +7225,18 @@ fn run_cache_refresher(
             last_full_process_scan = Some(Instant::now());
 
             // Full process scan - expensive, so it runs on a wall-clock interval.
-            // `UpdateKind::Always` so sysinfo overwrites the cached exe name
-            // when a PID has been reused by a different process since the last
-            // refresh (C7); `OnlyIfNotSet` would leave the stale tunnel-app
-            // name in place and let that app's traffic route incorrectly.
+            //
+            // Only `name()` is read below, and sysinfo takes that from the
+            // system process list it fetches anyway. PID reuse is handled by
+            // sysinfo itself: an entry whose start time no longer matches is
+            // rebuilt from scratch, name included. Asking for `exe` (this used
+            // `with_exe(UpdateKind::Always)`) never refreshed the name; it only
+            // added a cross-process `GetModuleFileNameExW` for every process on
+            // the machine every 5 seconds while the player was in a game.
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+                ProcessRefreshKind::new(),
             );
 
             for pid in connections.values() {
@@ -7780,6 +7916,7 @@ enum InlineCacheEntry {
 }
 
 type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), InlineCacheEntry>;
+const MAX_INLINE_CACHE_ENTRIES: usize = 10_000;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
 fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache, api_tunneling: bool) {
@@ -7925,6 +8062,37 @@ fn tcp_payload(data: &[u8], ip_start: usize, transport_start: usize) -> Option<&
         return None;
     }
     data.get(payload_start..ip_end)
+}
+
+#[inline]
+fn record_roblox_auth_route(
+    trace: &mut super::bypass_diag::RobloxAuthTrace,
+    ip: &[u8],
+    relay_selected: bool,
+) {
+    // IPv4 HTTPS only. Later fragments do not contain a TCP header.
+    let Some(header) = ip.get(..20) else {
+        return;
+    };
+    if u16::from_be_bytes([header[6], header[7]]) & 0x1FFF != 0 {
+        return;
+    }
+    let ihl = usize::from(header[0] & 0x0F) * 4;
+    if ihl < 20 {
+        return;
+    }
+    let Some([src_high, src_low, 0x01, 0xBB]) = ip.get(ihl..ihl + 4) else {
+        return;
+    };
+    if let Some(payload) = tcp_payload(ip, 0, ihl) {
+        let dst = Ipv4Addr::new(header[16], header[17], header[18], header[19]);
+        trace.record_client_hello(
+            payload,
+            dst,
+            u16::from_be_bytes([*src_high, *src_low]),
+            relay_selected,
+        );
+    }
 }
 
 /// Direction of a packet for tunnel-process flow accounting.
@@ -8405,11 +8573,19 @@ where
             && matches!(dst_port, 80 | 443)
             && country_ban_relays_web
             && !dst_is_direct_tcp;
-        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit {
-            tcp_owner_lookup(src_ip, src_port)
-        } else {
-            None
-        };
+        // The owner lookup reads the whole TCP table (and may open the owning
+        // process) on the reader thread, stalling every queued packet. Only do
+        // it when the owner can change the decision: a Route Assist control
+        // host, or Full Country Ban web traffic. Elsewhere the SYN stays
+        // direct whoever owns it.
+        let owner_can_change_decision =
+            is_route_assist_http_dst || is_full_country_ban_owner_missing_http_dst;
+        let tcp_api_bootstrap_owner =
+            if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && owner_can_change_decision {
+                tcp_owner_lookup(src_ip, src_port)
+            } else {
+                None
+            };
         let (tcp_api_bootstrap_owned_by_tunnel, tcp_api_bootstrap_owned_by_browser) =
             if is_tcp_api_bootstrap_syn && snapshot_tunnel_hit {
                 (true, false)
@@ -8446,13 +8622,18 @@ where
         let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
             && !dst_is_direct_tcp
             && !tcp_api_bootstrap_known_unrelated
-            && tcp_api_bootstrap_destination_allowed;
+            && tcp_api_bootstrap_destination_allowed
+            // A relayed SYN needs recorded ownership for every later packet.
+            // Keep a new flow direct from its first packet if the bounded
+            // ownership cache cannot admit it. Reused ports were cleared above.
+            && inline_cache.len() < MAX_INLINE_CACHE_ENTRIES;
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
         } else {
             (is_full_country_ban_effective_http_dst || is_route_assist_http_dst)
                 && is_tcp_initial_syn
                 && !tcp_api_bootstrap_known_unrelated
+                && inline_cache.len() < MAX_INLINE_CACHE_ENTRIES
         };
         // Record what this destination was decided to be, relayed or not.
         //
@@ -8541,7 +8722,7 @@ where
             // the SYN is tunneled but the following ACK/request can bypass
             // before the Windows owner table publishes the source port.
             if (protocol == Protocol::Udp || protocol == Protocol::Tcp)
-                && inline_cache.len() < 10000
+                && inline_cache.len() < MAX_INLINE_CACHE_ENTRIES
             {
                 inline_cache.insert(cache_key, InlineCacheEntry::Active);
             }
@@ -8566,7 +8747,11 @@ where
         }
     };
 
-    if is_tunnel_app && result && !dst_is_direct_tcp && inline_cache.len() < 10000 {
+    if is_tunnel_app
+        && result
+        && !dst_is_direct_tcp
+        && inline_cache.len() < MAX_INLINE_CACHE_ENTRIES
+    {
         inline_cache.insert(cache_key, InlineCacheEntry::Active);
     }
 
@@ -9590,6 +9775,12 @@ fn should_log_no_inbound_warning(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn reader_wakes_quickly_only_while_cloud_packets_are_held() {
+        assert_eq!(super::reader_wait_timeout_ms(false), 100);
+        assert!(super::reader_wait_timeout_ms(true) <= 10);
+    }
+
+    #[test]
     fn binding_preflight_timeout_cannot_request_adapter_choice_or_recommend_a_down_adapter() {
         use super::{
             BindingCandidateInfo, BindingPreflightInfo, VpnError, validated_binding_preflight,
@@ -9962,13 +10153,23 @@ mod tests {
             "sleeping charged {idle_cost} units of CPU, so this is measuring wall clock"
         );
 
+        // Spin until the work itself has been charged, not for a fixed wall
+        // time. On a loaded machine this thread can be off the CPU for most of
+        // a 120ms window, and Windows only updates the figure every clock tick
+        // (about 15ms), so a fixed window sometimes charged nothing and the
+        // test failed without anything being wrong. The wall limit only stops
+        // a broken clock from hanging the suite.
         let busy_before = thread_cpu_time_100ns().unwrap();
-        let spin_until = std::time::Instant::now() + std::time::Duration::from_millis(120);
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut sink = 0u64;
-        while std::time::Instant::now() < spin_until {
-            sink = sink.wrapping_add(1);
+        while thread_cpu_time_100ns().unwrap() - busy_before <= idle_cost.max(300_000)
+            && std::time::Instant::now() < give_up
+        {
+            for _ in 0..10_000 {
+                sink = sink.wrapping_add(1);
+            }
+            std::hint::black_box(sink);
         }
-        std::hint::black_box(sink);
         let busy_cost = thread_cpu_time_100ns().unwrap() - busy_before;
 
         assert!(
@@ -10710,6 +10911,27 @@ mod tests {
             ParallelInterceptor::select_best_physical_candidate(&candidates, Some(77), false)
                 .expect("expected a best candidate");
         assert_eq!(selected.friendly_name, "NordVPN Tunnel");
+    }
+
+    #[test]
+    fn driver_adapter_list_answers_the_binding_question_by_guid() {
+        let names = [
+            r"\DEVICE\{F3676A4E-A75E-4F44-878A-0A5DE51078BC}",
+            r"\DEVICE\{4C54BC71-312B-48F7-A0DF-D3EEEAAB3D7B}",
+        ];
+        let listed = |guid: &str| {
+            ParallelInterceptor::adapter_names_include_guid(names.iter().copied(), guid)
+        };
+        // The driver reports upper case; the route lookup yields lower case.
+        assert!(listed("4c54bc71-312b-48f7-a0df-d3eeeaab3d7b"));
+        // An adapter the filter is not attached to is simply absent, and an
+        // unknown GUID must never be read as "bound".
+        assert!(!listed("00000000-0000-0000-0000-000000000000"));
+        assert!(!listed(""));
+        assert!(!ParallelInterceptor::adapter_names_include_guid(
+            std::iter::empty(),
+            "4c54bc71-312b-48f7-a0df-d3eeeaab3d7b"
+        ));
     }
 
     #[test]
@@ -14051,6 +14273,44 @@ mod tests {
     }
 
     #[test]
+    fn test_route_assist_skips_owner_lookup_for_unrelated_https_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let web_ip = Ipv4Addr::new(142, 250, 80, 46);
+        let src_port = 40003;
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["robloxplayerbeta.exe".to_string()].into_iter().collect(),
+            tunnel_pids: [1234].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            created_at: std::time::Instant::now(),
+        };
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, web_ip, src_port, 443, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+        let lookups = std::cell::Cell::new(0u32);
+
+        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |_, _| {
+                lookups.set(lookups.get() + 1);
+                Some(1234)
+            },
+        ));
+        assert_eq!(
+            lookups.get(),
+            0,
+            "an unrelated HTTPS SYN must not read the TCP owner table on the reader"
+        );
+    }
+
+    #[test]
     fn test_route_assist_keeps_unpinned_asset_syn_direct() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
@@ -14898,6 +15158,49 @@ mod tests {
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
+    #[test]
+    fn full_inline_cache_does_not_relay_only_a_new_tcp_syn() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(128, 116, 50, 3);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst]);
+        let snapshot =
+            ProcessSnapshot::empty(["robloxplayerbeta.exe".to_string()].into_iter().collect());
+        let mut cache: InlineCache = (1..=MAX_INLINE_CACHE_ENTRIES)
+            .map(|port| ((src, port as u16, Protocol::Tcp), InlineCacheEntry::FinSeen))
+            .collect();
+        let syn = build_ipv4_tcp_frame_with_flags(src, dst, 40019, 443, 0x02);
+        let ack = build_ipv4_tcp_frame_with_flags(src, dst, 40019, 443, 0x10);
+        for frame in [&syn, &ack] {
+            assert!(
+                !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                    frame,
+                    &snapshot,
+                    &mut cache,
+                    true,
+                    |_, _| Some(1234),
+                    |_| Some("RobloxPlayerBeta.exe".to_string()),
+                )
+            );
+        }
+        assert_eq!(cache.len(), MAX_INLINE_CACHE_ENTRIES);
+        // An existing half-closed flow retains ownership; a snapshot refresh
+        // cannot expire it just because its local FIN was sent a minute ago.
+        prune_inline_cache_on_snapshot_refresh(&mut cache, true);
+        let live_ack = build_ipv4_tcp_frame_with_flags(src, dst, 5000, 443, 0x10);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &live_ack,
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| None,
+                |_| None,
+            )
+        );
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
     #[test]
     fn test_tcp_api_tunneling_captured_roblox_syn_allows_follow_on_packet() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
@@ -16399,5 +16702,34 @@ mod tests {
             !interruptible_sleep(Duration::from_millis(0), &stop_false),
             "total=0 with stop_flag=false should return false"
         );
+    }
+
+    #[test]
+    fn default_route_is_probed_at_most_every_two_seconds() {
+        let start = Instant::now();
+        assert!(route_change_check_due(None, start));
+        assert!(!route_change_check_due(Some(start), start));
+        assert!(!route_change_check_due(
+            Some(start),
+            start + Duration::from_millis(1500)
+        ));
+        assert!(route_change_check_due(
+            Some(start),
+            start + Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn powershell_route_fallback_runs_at_most_every_thirty_seconds() {
+        let start = Instant::now();
+        assert!(powershell_route_fallback_due(None, start));
+        assert!(!powershell_route_fallback_due(
+            Some(start),
+            start + Duration::from_secs(29)
+        ));
+        assert!(powershell_route_fallback_due(
+            Some(start),
+            start + Duration::from_secs(30)
+        ));
     }
 }

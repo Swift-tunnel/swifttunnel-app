@@ -1,6 +1,7 @@
 import { openSystemLink as systemOpenUrl } from "../../lib/openSystemLink";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { useAuthStore } from "../../stores/authStore";
+import { useBoostStore } from "../../stores/boostStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useUpdaterStore } from "../../stores/updaterStore";
 import { useVpnStore } from "../../stores/vpnStore";
@@ -45,6 +46,7 @@ export function SettingsTab() {
   const updaterProgress = useUpdaterStore((s) => s.progressPercent);
   const updaterLastChecked = useUpdaterStore((s) => s.lastChecked);
   const updaterError = useUpdaterStore((s) => s.error);
+  const updaterInstallMessage = useUpdaterStore((s) => s.installMessage);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const installUpdate = useUpdaterStore((s) => s.installUpdate);
 
@@ -57,6 +59,8 @@ export function SettingsTab() {
   const [isUninstalling, setIsUninstalling] = useState(false);
   const [uninstallError, setUninstallError] = useState<string | null>(null);
   const [confirmUninstallOpen, setConfirmUninstallOpen] = useState(false);
+  // Cleanup cannot restore Roblox's settings while the player is open.
+  const robloxRunning = useBoostStore((s) => s.robloxRunning);
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const routeSourceLabel = (() => {
@@ -118,6 +122,8 @@ export function SettingsTab() {
         return `v${updaterVersion} ready`;
       case "up_to_date":
         return "Up to date";
+      case "installed":
+        return "Update installed";
       case "error":
         return "Update error";
       default:
@@ -392,7 +398,7 @@ export function SettingsTab() {
           <Segmented
             options={["Stable", "Live"] as UpdateChannel[]}
             value={settings.update_channel}
-            disabled={updaterStatus === "installing"}
+            disabled={updaterStatus === "installing" || updaterStatus === "installed"}
             onChange={(ch) => {
               if (ch === settings.update_channel) return;
               set({ update_channel: ch });
@@ -454,6 +460,7 @@ export function SettingsTab() {
                 status={updaterStatus}
                 version={updaterVersion}
                 error={updaterError}
+                installMessage={updaterInstallMessage}
               />
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -466,7 +473,7 @@ export function SettingsTab() {
                   Update now
                 </Button>
               )}
-              {updaterStatus === "error" ? (
+              {updaterStatus === "installed" ? null : updaterStatus === "error" ? (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -646,6 +653,13 @@ export function SettingsTab() {
             optimizer, and Roblox configuration cleanup. This cannot be undone
             from inside the app.
           </p>
+          {robloxRunning && (
+            <p role="alert" className="text-[12px] leading-relaxed text-status-warning">
+              Roblox is open. Close it first. While it is open, SwiftTunnel
+              cannot undo its changes to your Roblox settings, and they will
+              stay after the uninstall.
+            </p>
+          )}
           <div className="flex justify-end gap-2">
             <Button
               variant="secondary"
@@ -674,7 +688,7 @@ export function SettingsTab() {
               disabled={isUninstalling}
               loading={isUninstalling}
             >
-              Uninstall
+              {robloxRunning ? "Uninstall anyway" : "Uninstall"}
             </Button>
           </div>
         </div>
@@ -812,15 +826,17 @@ function UpdaterStatusLine({
   status,
   version,
   error,
+  installMessage,
 }: {
   status: string;
   version: string | null;
   error: string | null;
+  installMessage: string | null;
 }) {
   const color =
     status === "checking" || status === "installing"
       ? "var(--color-accent-primary)"
-      : status === "up_to_date"
+      : status === "up_to_date" || status === "installed"
         ? "var(--color-text-secondary)"
         : status === "update_available"
           ? "var(--color-accent-primary)"
@@ -834,18 +850,20 @@ function UpdaterStatusLine({
         ? "You're up to date"
         : status === "update_available"
           ? "Update available"
-          : status === "installing"
-            ? `Installing v${version}…`
-            : status === "error"
-              ? error || "Update check failed"
-              : "Not checked yet";
+          : status === "installed"
+            ? installMessage ?? "Update installed"
+            : status === "installing"
+              ? `Installing v${version}…`
+              : status === "error"
+                ? error || "Update check failed"
+                : "Not checked yet";
 
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       {(status === "checking" || status === "installing") && (
         <Spinner size={12} color={color} thickness={2} />
       )}
-      {status === "up_to_date" && (
+      {(status === "up_to_date" || status === "installed") && (
         <Icon
           name="check"
           size={12}
@@ -864,7 +882,7 @@ function UpdaterStatusLine({
         />
       )}
       <span
-        className="truncate text-[11.5px] font-medium"
+        className={`text-[11.5px] font-medium ${status === "installed" ? "" : "truncate"}`}
         style={{ color }}
         title={status === "error" && error ? error : undefined}
       >

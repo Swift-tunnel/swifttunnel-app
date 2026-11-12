@@ -15,7 +15,6 @@ import { reportError } from "../../lib/errors";
 import {
   clampOverlayPosition,
   overlayAnchor,
-  overlayHeartbeatExpired,
   validOverlayMonitor,
   type OverlayMonitor,
 } from "./overlayGeometry";
@@ -23,6 +22,7 @@ import {
 const IDLE_POLL_MS = 350;
 const HIDDEN_POLL_MS = 1000;
 const DRAG_POLL_MS = 16; // smooth window-follow while dragging
+const HEARTBEAT_TIMEOUT_MS = 4500;
 // Slack (CSS px) around the bar so it's easy to land the cursor on it to grab.
 const GRAB_PAD = 8;
 /** CSS px from the monitor edge for the 3x3 anchor presets. */
@@ -47,7 +47,6 @@ export function OverlayStatsBar() {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const barRef = useRef<HTMLDivElement | null>(null);
   const monitorRef = useRef<OverlayMonitor | null>(null);
-  const lastRenderRef = useRef<number | null>(null);
   // Window geometry in physical px, tracked from our own setPosition/setSize
   // calls (nothing else moves this window).
   const winPosRef = useRef({ x: 0, y: 0 });
@@ -59,6 +58,7 @@ export function OverlayStatsBar() {
   const interactiveWantedRef = useRef(false);
   const interactiveTaskRef = useRef<Promise<void> | null>(null);
   const interactingRef = useRef(false);
+  const interactionEpochRef = useRef(0);
   const shownRef = useRef(false);
   const visibilityTaskRef = useRef<Promise<void> | null>(null);
   // Cursor offset from the window's top-left (physical px) while dragging.
@@ -87,6 +87,15 @@ export function OverlayStatsBar() {
     return interactiveTaskRef.current;
   }, []);
 
+  const releaseInteraction = useCallback(() => {
+    interactionEpochRef.current++;
+    dragRef.current = null;
+    prevDownRef.current = true;
+    interactingRef.current = false;
+    setActive(false);
+    return setInteractive(false);
+  }, [setInteractive]);
+
   // Re-evaluate after interaction ends too: disabling emits only one payload.
   // Serialize show/hide so a delayed show cannot complete after a newer hide.
   const syncVisibility = useCallback((): Promise<void> => {
@@ -98,16 +107,22 @@ export function OverlayStatsBar() {
           interactingRef.current,
         );
         if (!wantShown) {
-          dragRef.current = null;
-          interactingRef.current = false;
-          setActive(false);
-          await setInteractive(false);
+          // Hiding the window must not wait for a cursor-mode change.
+          void releaseInteraction();
         }
         if (wantShown === shownRef.current) return;
         try {
           const win = getCurrentWindow();
-          if (wantShown) await win.show();
-          else await win.hide();
+          if (wantShown) {
+            // A previous drag may still be giving up mouse input. Keep the
+            // hidden window click-through before making it visible again.
+            await setInteractive(false);
+            if (!overlayShouldShow(payloadRef.current, interactingRef.current)) continue;
+            if (interactiveRef.current !== false) return;
+            await win.show();
+          } else {
+            await win.hide();
+          }
           shownRef.current = wantShown;
         } catch {
           return; // Keep the last confirmed state; the next tick retries.
@@ -118,7 +133,7 @@ export function OverlayStatsBar() {
       visibilityTaskRef.current = null;
     });
     return visibilityTaskRef.current;
-  }, [setInteractive]);
+  }, [releaseInteraction, setInteractive]);
 
   const moveWindow = useCallback((x: number, y: number) => {
     moveWantedRef.current = { x: Math.round(x), y: Math.round(y) };
@@ -236,18 +251,8 @@ export function OverlayStatsBar() {
 
     const tick = async () => {
       if (disposed) return;
+      const interactionEpoch = interactionEpochRef.current;
       try {
-        if (
-          overlayHeartbeatExpired(lastRenderRef.current, performance.now()) &&
-          payloadRef.current
-        ) {
-          payloadRef.current = {
-            ...payloadRef.current,
-            enabled: false,
-            forceHide: true,
-          };
-          await syncVisibility();
-        }
         const m = monitorRef.current;
         if (shownRef.current) measureWindow();
         let over = false;
@@ -258,7 +263,7 @@ export function OverlayStatsBar() {
           (shownRef.current || dragRef.current)
         ) {
           const c = await boostCursorPos();
-          if (disposed) return;
+          if (disposed || interactionEpoch !== interactionEpochRef.current) return;
           if (!overlayMayInteract(payloadRef.current)) {
             await syncVisibility();
           } else if (dragRef.current) {
@@ -316,23 +321,21 @@ export function OverlayStatsBar() {
         await setInteractive(interacting);
         await syncVisibility();
       } catch {
+        if (disposed || interactionEpoch !== interactionEpochRef.current) return;
         // Cursor access may disappear on another input desktop. Release the
         // grab without moving or persisting a made-up position, and require a
         // fresh press when cursor reads recover.
-        dragRef.current = null;
-        prevDownRef.current = true;
-        interactingRef.current = false;
-        if (!disposed) setActive(false);
-        await setInteractive(false);
+        await releaseInteraction();
         await syncVisibility();
-      }
-      if (!disposed) {
-        const delay = dragRef.current
-          ? DRAG_POLL_MS
-          : shownRef.current
-            ? IDLE_POLL_MS
-            : HIDDEN_POLL_MS;
-        timer = window.setTimeout(() => void tick(), delay);
+      } finally {
+        if (!disposed) {
+          const delay = dragRef.current
+            ? DRAG_POLL_MS
+            : shownRef.current
+              ? IDLE_POLL_MS
+              : HIDDEN_POLL_MS;
+          timer = window.setTimeout(() => void tick(), delay);
+        }
       }
     };
 
@@ -343,7 +346,7 @@ export function OverlayStatsBar() {
       dragRef.current = null;
       void setInteractive(false);
     };
-  }, [setInteractive, moveWindow, syncVisibility, measureWindow]);
+  }, [setInteractive, moveWindow, syncVisibility, measureWindow, releaseInteraction]);
 
   // Render snapshots from the main window. The bar stays MOUNTED regardless of
   // payload.enabled (visibility is window show/hide only), unmounting it
@@ -351,10 +354,23 @@ export function OverlayStatsBar() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let disposed = false;
+    let heartbeatTimer: number | undefined;
     void listen<OverlayRenderPayload>(OVERLAY_RENDER_EVENT, async (event) => {
       if (disposed) return;
       const p = event.payload;
-      lastRenderRef.current = performance.now();
+      window.clearTimeout(heartbeatTimer);
+      if (!overlayMayInteract(p) && overlayMayInteract(payloadRef.current)) {
+        void releaseInteraction();
+      }
+      if (overlayShouldShow(p, true)) {
+        // Cursor IPC can stall during a drag. Expire the overlay on its own
+        // deadline even if the cursor loop cannot advance.
+        heartbeatTimer = window.setTimeout(() => {
+          payloadRef.current = { ...p, enabled: false, forceHide: true };
+          void releaseInteraction();
+          void syncVisibility();
+        }, HEARTBEAT_TIMEOUT_MS);
+      }
       if (validOverlayMonitor(p.monitor) && !dragRef.current) {
         if (
           monitorRef.current &&
@@ -381,22 +397,20 @@ export function OverlayStatsBar() {
     });
     return () => {
       disposed = true;
+      window.clearTimeout(heartbeatTimer);
       unlisten?.();
     };
-  }, [syncVisibility, applyConfiguredPosition]);
+  }, [syncVisibility, applyConfiguredPosition, releaseInteraction]);
 
   // Escape: best-effort safety hatch, cancel a drag and force click-through.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      dragRef.current = null;
-      interactingRef.current = false;
-      setActive(false);
-      void setInteractive(false);
+      void releaseInteraction();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [setInteractive]);
+  }, [releaseInteraction]);
 
   return (
     <div ref={wrapRef} style={{ display: "inline-block", padding: 8 }}>

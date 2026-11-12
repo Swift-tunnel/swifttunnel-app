@@ -9,8 +9,19 @@ it("never includes caution changes in a tier or whole-page enable batch", () => 
   }
   expect(bulkEnableTargets(OPTIMIZATIONS)).toEqual(OPTIMIZATIONS.filter((item) => item.safety !== "caution"));
   expect(bulkEnableTargets([{ id: "danger", name: "Danger", safety: "caution" }])).toEqual([]);
+  // Software drawing in browsers moves work onto the CPU Roblox needs, and
+  // sets a machine-wide policy. Never part of a one-click batch.
+  expect(bulkEnableTargets(OPTIMIZATIONS).map((item) => item.id)).not.toContain(
+    "browser_hardware_accel_disable",
+  );
 });
 
 it("preserves the order of eligible speed-up changes", () => {
-  expect(bulkEnableTargets(SPEEDUP_OPTIMIZATIONS)).toEqual(SPEEDUP_OPTIMIZATIONS);
+  expect(bulkEnableTargets(SPEEDUP_OPTIMIZATIONS)).toEqual(
+    SPEEDUP_OPTIMIZATIONS.filter((item) => item.safety !== "caution"),
+  );
+  // On SSDs the scheduled task sends TRIM; switching it off is a choice.
+  expect(bulkEnableTargets(SPEEDUP_OPTIMIZATIONS).map((item) => item.id)).not.toContain(
+    "su_disable_auto_defrag",
+  );
 });
