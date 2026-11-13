@@ -1313,8 +1313,9 @@ pub struct VpnConnection {
     auth_manager: Option<Arc<tokio::sync::Mutex<crate::auth::AuthManager>>>,
     /// Per-process game performance tuning manager (Windows-only behavior).
     process_performance_manager: Option<Arc<Mutex<GameProcessPerformanceManager>>>,
-    /// Tracks whether this connection wrote the temporary Roblox bootstrap hosts repair.
-    bootstrap_dns_repair_applied: bool,
+    /// Owns cleanup from the first DNS attempt, including an unsuccessful
+    /// public lookup that entered country-ban routing or later relay fallback.
+    bootstrap_dns_cleanup_required: bool,
     /// Scoped GoodbyeDPI helper for Bypass country bans Roblox traffic.
     goodbye_dpi_guard: Option<crate::roblox_proxy::goodbyedpi::GoodbyeDpiGuard>,
     country_ban_bypass_failure: Option<String>,
@@ -1341,7 +1342,7 @@ impl VpnConnection {
             terminal_cleanup_requested: Arc::new(AtomicBool::new(false)),
             auth_manager: None,
             process_performance_manager: None,
-            bootstrap_dns_repair_applied: false,
+            bootstrap_dns_cleanup_required: false,
             goodbye_dpi_guard: None,
             country_ban_bypass_failure: None,
         }
@@ -1451,6 +1452,17 @@ impl VpnConnection {
 
     pub fn take_country_ban_bypass_failure(&mut self) -> Option<String> {
         self.country_ban_bypass_failure.take()
+    }
+
+    async fn with_bootstrap_dns_cleanup<T>(
+        &mut self,
+        operation: impl std::future::Future<Output = T>,
+    ) -> T {
+        // State can change before a DNS/write attempt returns successfully.
+        // Cancellation or an error must still leave teardown responsible for
+        // both in-memory routing state and any temporary hosts entries.
+        self.bootstrap_dns_cleanup_required = true;
+        operation.await
     }
 
     /// The relay supplied Roblox's addresses after the public lookup failed.
@@ -1676,9 +1688,13 @@ impl VpnConnection {
 
         if enable_api_tunneling && !tunnel_apps.is_empty() {
             support.stage("bootstrap_dns");
-            match crate::roblox_proxy::hosts::apply_bootstrap_overrides(enable_country_ban).await {
+            match self
+                .with_bootstrap_dns_cleanup(crate::roblox_proxy::hosts::apply_bootstrap_overrides(
+                    enable_country_ban,
+                ))
+                .await
+            {
                 Ok(()) => {
-                    self.bootstrap_dns_repair_applied = true;
                     log::info!("V3: Applied Roblox bootstrap DNS repair for API tunneling");
                 }
                 Err(e) => {
@@ -1807,7 +1823,12 @@ impl VpnConnection {
                 );
             } else {
                 let count = resolved.len();
-                match crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved).await {
+                match self
+                    .with_bootstrap_dns_cleanup(
+                        crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved),
+                    )
+                    .await
+                {
                     Ok(()) => {
                         log::info!(
                             "Applied relay-resolved pins for {count} Roblox host(s) (DNS via relay)"
@@ -3662,10 +3683,10 @@ impl VpnConnection {
             guard.stop();
         }
 
-        if self.bootstrap_dns_repair_applied {
+        if self.bootstrap_dns_cleanup_required {
             match crate::roblox_proxy::hosts::remove_overrides_async().await {
                 Ok(()) => {
-                    self.bootstrap_dns_repair_applied = false;
+                    self.bootstrap_dns_cleanup_required = false;
                 }
                 Err(e) => {
                     log::warn!("Failed to remove Roblox bootstrap DNS repair: {e}");
@@ -3911,7 +3932,7 @@ impl Drop for VpnConnection {
             guard.stop();
         }
 
-        if self.bootstrap_dns_repair_applied
+        if self.bootstrap_dns_cleanup_required
             && let Err(e) = crate::roblox_proxy::hosts::remove_overrides()
         {
             log::warn!("Failed to remove Roblox bootstrap DNS repair during drop: {e}");
@@ -3995,6 +4016,54 @@ async fn send_session_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // These tests exercise DNS cleanup ownership without ever applying pins.
+    // Disarm the real hosts cleanup even when an assertion unwinds the test.
+    struct DnsAttemptFixture(VpnConnection);
+    impl Drop for DnsAttemptFixture {
+        fn drop(&mut self) {
+            self.0.bootstrap_dns_cleanup_required = false;
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_public_dns_and_successful_relay_fallback_both_require_cleanup() {
+        let mut fixture = DnsAttemptFixture(VpnConnection::new());
+        let result = fixture
+            .0
+            .with_bootstrap_dns_cleanup(async { Err::<(), _>("public DNS unavailable") })
+            .await;
+        assert!(result.is_err());
+        assert!(fixture.0.bootstrap_dns_cleanup_required);
+        let result = fixture
+            .0
+            .with_bootstrap_dns_cleanup(async { Ok::<_, &str>(()) })
+            .await;
+        assert!(result.is_ok());
+        assert!(fixture.0.bootstrap_dns_cleanup_required);
+
+        // The relay fallback must also be safe when used independently.
+        let mut fallback = DnsAttemptFixture(VpnConnection::new());
+        fallback.0.with_bootstrap_dns_cleanup(async {}).await;
+        assert!(fallback.0.bootstrap_dns_cleanup_required);
+    }
+
+    #[tokio::test]
+    async fn cancelling_dns_preparation_keeps_cleanup_armed() {
+        let mut fixture = DnsAttemptFixture(VpnConnection::new());
+        let mut preparation = Box::pin(
+            fixture
+                .0
+                .with_bootstrap_dns_cleanup(std::future::pending::<()>()),
+        );
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(preparation.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(preparation);
+        assert!(fixture.0.bootstrap_dns_cleanup_required);
+    }
 
     #[tokio::test]
     async fn relay_session_cannot_take_the_next_signed_in_accounts_token() {
