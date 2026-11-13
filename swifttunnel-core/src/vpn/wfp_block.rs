@@ -180,6 +180,9 @@ fn cleanup_stale_result() -> Result<usize, String> {
             }
         }
 
+        // A deletion call can fail while others succeed. Counted deletions
+        // alone cannot prove that Roblox is no longer blocked.
+        let remaining = collect_filters_in_swifttunnel_sublayer(engine_handle).map(|ids| ids.len());
         let close_result = FwpmEngineClose0(engine_handle);
         if close_result != 0 {
             log::warn!(
@@ -188,8 +191,64 @@ fn cleanup_stale_result() -> Result<usize, String> {
             );
         }
 
-        deleted
+        verified_stale_cleanup_result(deleted, remaining, close_result)
     }
+}
+
+fn verified_stale_cleanup_result(
+    deleted: Result<usize, String>,
+    remaining: Result<usize, String>,
+    close_result: u32,
+) -> Result<usize, String> {
+    let deleted = deleted?;
+    let remaining = remaining?;
+    if remaining != 0 {
+        return Err(format!(
+            "{remaining} SwiftTunnel network block filter(s) could not be cleared"
+        ));
+    }
+    if close_result != 0 {
+        return Err(format!(
+            "Could not close the network filter cleanup session: 0x{close_result:08x}"
+        ));
+    }
+    Ok(deleted)
+}
+
+fn run_block_cleanup(
+    current: impl FnOnce() -> Result<(), String>,
+    stale: impl FnOnce() -> Result<usize, String>,
+) -> Result<usize, String> {
+    // Always attempt both sessions; one failed cleanup must not hide or
+    // prevent recovery of the other set of filters.
+    let current = current();
+    let stale = stale();
+    match (current, stale) {
+        (Ok(()), result) => result,
+        (Err(current), Err(stale)) => Err(format!("{current}; {stale}")),
+        (Err(error), _) => Err(error),
+    }
+}
+
+/// Verified cleanup for an explicit Repair action. Ordinary shutdown retains
+/// its existing best-effort interface, including ownership for later retry.
+pub fn cleanup_for_repair() -> Result<usize, String> {
+    crate::utils::blocking_step(|| {
+        run_block_cleanup(
+            || {
+                cleanup_inner();
+                let state = WFP_STATE
+                    .lock()
+                    .map_err(|error| format!("Could not check network block cleanup: {error}"))?;
+                if state.is_some() {
+                    Err("SwiftTunnel's temporary network-block session could not be closed".into())
+                } else {
+                    Ok(())
+                }
+            },
+            cleanup_stale_result,
+        )
+    })
 }
 
 /// Stateless cleanup for filters left by older non-dynamic WFP sessions.
@@ -618,6 +677,37 @@ pub fn is_initialized() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_stale_filter_removal_cannot_report_verified_cleanup() {
+        assert!(verified_stale_cleanup_result(Ok(2), Ok(1), 0).is_err());
+        assert!(
+            verified_stale_cleanup_result(Ok(2), Err("verification failed".into()), 0).is_err()
+        );
+        assert!(verified_stale_cleanup_result(Ok(2), Ok(0), 5).is_err());
+        assert!(verified_stale_cleanup_result(Err("enumeration failed".into()), Ok(0), 0).is_err());
+        assert_eq!(verified_stale_cleanup_result(Ok(2), Ok(0), 0), Ok(2));
+        assert_eq!(verified_stale_cleanup_result(Ok(0), Ok(0), 0), Ok(0));
+    }
+
+    #[test]
+    fn block_repair_attempts_both_cleanups_and_preserves_each_failure() {
+        let stale_attempted = std::cell::Cell::new(false);
+        let error = run_block_cleanup(
+            || Err("live session could not close".into()),
+            || {
+                stale_attempted.set(true);
+                Err("legacy filters remain".into())
+            },
+        )
+        .unwrap_err();
+        assert!(stale_attempted.get());
+        assert!(error.contains("live session could not close"));
+        assert!(error.contains("legacy filters remain"));
+        assert!(run_block_cleanup(|| Err("live failure".into()), || Ok(2)).is_err());
+        assert!(run_block_cleanup(|| Ok(()), || Err("legacy failure".into())).is_err());
+        assert_eq!(run_block_cleanup(|| Ok(()), || Ok(2)), Ok(2));
+    }
 
     #[test]
     fn batch_release_uses_session_cleanup_only_after_a_failed_removal() {

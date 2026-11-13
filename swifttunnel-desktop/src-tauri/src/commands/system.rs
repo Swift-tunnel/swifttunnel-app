@@ -3425,15 +3425,18 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
         ),
     });
 
-    // Step 5: WFP process-block filters (best-effort, no structured result).
-    swifttunnel_core::vpn::wfp_block::cleanup_stale();
-    swifttunnel_core::vpn::wfp_block::cleanup();
-    steps.push(network_repair_step(
-        "wfp",
-        "Windows Filtering Platform blocks",
-        "healthy",
-        "Stale SwiftTunnel WFP filters cleaned (best-effort).",
-    ));
+    // Step 5: verify that our temporary and legacy process blocks are gone.
+    steps.push(match swifttunnel_core::vpn::wfp_block::cleanup_for_repair() {
+        Ok(removed) => network_repair_step(
+            "wfp", "Windows Filtering Platform blocks",
+            if removed > 0 { "fixed" } else { "healthy" },
+            "SwiftTunnel's temporary network blocks were checked and cleared.",
+        ),
+        Err(error) => network_repair_step(
+            "wfp", "Windows Filtering Platform blocks", "failed",
+            format!("Could not clear SwiftTunnel's temporary network blocks. Close SwiftTunnel completely, reopen it, then retry. {error}"),
+        ),
+    });
 
     // Step 6: hosts file. Clean out anything of ours left behind, then make
     // sure the file is even there. A missing hosts file is what turned country
