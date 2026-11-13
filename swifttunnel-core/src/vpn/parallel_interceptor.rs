@@ -7906,16 +7906,23 @@ fn auto_routing_packet_action(
     AutoRoutingPacketAction::Pass
 }
 
-/// Per-worker inline cache for connection lookups
-/// This amortizes the expensive GetExtendedTcpTable syscall across multiple packets
-/// from the same connection. First packet: ~500μs, subsequent packets: <1μs
+/// Per-reader cache of UDP ownership hints and captured TCP connections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InlineCacheEntry {
     Active,
     FinSeen,
 }
 
-type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), InlineCacheEntry>;
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum InlineCacheKey {
+    // UDP entries cache process ownership, not a destination's routing choice.
+    Udp(Ipv4Addr, u16),
+    // TCP entries record a captured SYN. A local port alone cannot identify
+    // the connection: Windows can reuse it with different remote endpoints.
+    Tcp(Ipv4Addr, u16, Ipv4Addr, u16),
+}
+
+type InlineCache = ahash::AHashMap<InlineCacheKey, InlineCacheEntry>;
 const MAX_INLINE_CACHE_ENTRIES: usize = 10_000;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
@@ -7929,7 +7936,7 @@ fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache, api_tu
     // Route Assist TCP flows must survive owner-table refreshes after their SYN
     // was MSS-clamped and relayed. RST packets evict TCP entries immediately;
     // FIN must stay cached so the final teardown ACK still uses the relay.
-    inline_cache.retain(|(_, _, protocol), _| *protocol == Protocol::Tcp);
+    inline_cache.retain(|key, _| matches!(key, InlineCacheKey::Tcp(..)));
 }
 
 fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool {
@@ -8391,7 +8398,10 @@ where
     };
     let is_tcp_initial_syn =
         tcp_flags.is_some_and(|flags| (flags & 0x02) != 0 && (flags & 0x10) == 0);
-    let cache_key = (src_ip, src_port, protocol);
+    let cache_key = match protocol {
+        Protocol::Udp => InlineCacheKey::Udp(src_ip, src_port),
+        Protocol::Tcp => InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+    };
 
     let is_full_country_ban_routing =
         crate::roblox_proxy::hosts::is_country_ban_bypass_routing_active();
@@ -8454,7 +8464,8 @@ where
     // mutually exclusive with SNAPSHOT_HITS.
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
-    // Cache ONLY stores TRUE results (v0.9.25) - finding key means it's a tunnel app
+    // UDP entries identify tunnel ownership; TCP entries identify one captured
+    // connection, including its remote address and port.
     if inline_cache.contains_key(&cache_key) {
         let recycled_tcp_syn = protocol == Protocol::Tcp && is_tcp_initial_syn;
         if recycled_tcp_syn {
@@ -8713,8 +8724,8 @@ where
                 }
             }
 
-            // Cache speculative hit so subsequent packets from this source port
-            // use the fast inline cache path. Critical for V3 mode where
+            // Cache speculative hits so later packets from this UDP endpoint
+            // or exact TCP connection use the fast inline cache path. Critical for V3 mode where
             // inline_connection_lookup is disabled (stability fix v1.0.8).
             // Without this, every V3 packet re-does the speculative IP range check.
             //
@@ -12380,8 +12391,10 @@ mod tests {
                 // Only port 55000 belongs to an established relayed flow. The
                 // other flow goes direct. Tail payload must never be treated
                 // as a new TCP header, even when it resembles that port.
-                let mut cache =
-                    HashMap::from([((src, 55000, Protocol::Tcp), InlineCacheEntry::Active)]);
+                let mut cache = HashMap::from([(
+                    InlineCacheKey::Tcp(src, 55000, dst, 443),
+                    InlineCacheEntry::Active,
+                )]);
                 let mut first =
                     build_ipv4_tcp_frame_with_payload(src, dst, first_port, 443, &[0; 4]);
                 first[18..20].copy_from_slice(&id.to_be_bytes());
@@ -12897,7 +12910,7 @@ mod tests {
             &mut inline_cache,
             false,
         ));
-        assert!(inline_cache.contains_key(&(packet_ip, src_port, Protocol::Udp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Udp(packet_ip, src_port)));
     }
 
     #[test]
@@ -12934,7 +12947,7 @@ mod tests {
             &mut inline_cache,
             false,
         ));
-        assert!(!inline_cache.contains_key(&(packet_ip, src_port, Protocol::Udp)));
+        assert!(!inline_cache.contains_key(&InlineCacheKey::Udp(packet_ip, src_port)));
     }
 
     #[test]
@@ -13110,7 +13123,10 @@ mod tests {
 
         let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Udp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Udp(src_ip, src_port),
+            InlineCacheEntry::Active,
+        );
 
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
@@ -13124,13 +13140,21 @@ mod tests {
     fn test_snapshot_refresh_keeps_tcp_inline_entries_and_clears_udp_when_api_tunneling() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, 40000, Protocol::Tcp), InlineCacheEntry::Active);
-        inline_cache.insert((src_ip, 40001, Protocol::Udp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, 40000, Ipv4Addr::LOCALHOST, 443),
+            InlineCacheEntry::Active,
+        );
+        inline_cache.insert(InlineCacheKey::Udp(src_ip, 40001), InlineCacheEntry::Active);
 
         prune_inline_cache_on_snapshot_refresh(&mut inline_cache, true);
 
-        assert!(inline_cache.contains_key(&(src_ip, 40000, Protocol::Tcp)));
-        assert!(!inline_cache.contains_key(&(src_ip, 40001, Protocol::Udp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            40000,
+            Ipv4Addr::LOCALHOST,
+            443
+        )));
+        assert!(!inline_cache.contains_key(&InlineCacheKey::Udp(src_ip, 40001)));
 
         prune_inline_cache_on_snapshot_refresh(&mut inline_cache, false);
         assert!(inline_cache.is_empty());
@@ -13151,7 +13175,10 @@ mod tests {
         let second_fin_frame =
             build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+            InlineCacheEntry::Active,
+        );
         crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -13161,7 +13188,7 @@ mod tests {
             true,
         ));
         assert_eq!(
-            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
+            inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
             Some(&InlineCacheEntry::FinSeen)
         );
 
@@ -13172,7 +13199,7 @@ mod tests {
             true,
         ));
         assert_eq!(
-            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
+            inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
             Some(&InlineCacheEntry::FinSeen)
         );
 
@@ -13183,7 +13210,7 @@ mod tests {
             true,
         ));
         assert_eq!(
-            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
+            inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
             Some(&InlineCacheEntry::FinSeen)
         );
 
@@ -13193,7 +13220,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -13210,7 +13239,10 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let rst_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x14);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+            InlineCacheEntry::Active,
+        );
         crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -13219,7 +13251,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -13233,7 +13267,10 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::FinSeen);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+            InlineCacheEntry::FinSeen,
+        );
 
         assert!(!should_route_to_vpn_with_inline_cache(
             &syn_frame,
@@ -13241,7 +13278,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
     }
 
     #[test]
@@ -13253,7 +13292,10 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+            InlineCacheEntry::Active,
+        );
 
         assert!(!should_route_to_vpn_with_inline_cache(
             &syn_frame,
@@ -13261,7 +13303,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
     }
 
     #[test]
@@ -13286,7 +13330,10 @@ mod tests {
 
         let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Udp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Udp(src_ip, src_port),
+            InlineCacheEntry::Active,
+        );
 
         assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
@@ -13326,7 +13373,7 @@ mod tests {
             false,
         ));
         assert!(
-            inline_cache.contains_key(&(src_ip, src_port, Protocol::Udp)),
+            inline_cache.contains_key(&InlineCacheKey::Udp(src_ip, src_port)),
             "Speculative tunnel should seed the inline cache"
         );
     }
@@ -13949,7 +13996,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14132,7 +14181,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
     }
 
     #[test]
@@ -14180,7 +14231,9 @@ mod tests {
                 }
             },
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14226,7 +14279,9 @@ mod tests {
             true,
             |_ip, _port| panic!("snapshot-owned SYN should not call tcp_owner_lookup"),
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14391,7 +14446,9 @@ mod tests {
                 }
             },
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14547,7 +14604,12 @@ mod tests {
             ),
             "Full Country Ban must relay Roblox website traffic even before hosts pins are published"
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_web_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14591,7 +14653,12 @@ mod tests {
             ),
             "Full Country Ban must handle first browser SYNs before Windows publishes the owner"
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_web_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14634,7 +14701,9 @@ mod tests {
             ),
             "Full Country Ban must relay first HTTPS SYNs when Windows has not published the owner yet"
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14788,7 +14857,9 @@ mod tests {
             true,
             |_ip, _port| None,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14864,7 +14935,9 @@ mod tests {
             true,
             |_ip, _port| None,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14920,7 +14993,9 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -15046,7 +15121,12 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_api_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -15153,7 +15233,12 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_api_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -15168,7 +15253,12 @@ mod tests {
         let snapshot =
             ProcessSnapshot::empty(["robloxplayerbeta.exe".to_string()].into_iter().collect());
         let mut cache: InlineCache = (1..=MAX_INLINE_CACHE_ENTRIES)
-            .map(|port| ((src, port as u16, Protocol::Tcp), InlineCacheEntry::FinSeen))
+            .map(|port| {
+                (
+                    InlineCacheKey::Tcp(src, port as u16, dst, 443),
+                    InlineCacheEntry::FinSeen,
+                )
+            })
             .collect();
         let syn = build_ipv4_tcp_frame_with_flags(src, dst, 40019, 443, 0x02);
         let ack = build_ipv4_tcp_frame_with_flags(src, dst, 40019, 443, 0x10);
@@ -15255,7 +15345,12 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_api_ip,
+            dst_port
+        )));
         assert!(
             should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &follow_on_frame,
@@ -15323,7 +15418,12 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            bootstrap_cdn_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -15503,9 +15603,91 @@ mod tests {
             ),
             "Full Country Ban must relay Roblox TCP even when the IP was direct-only in Route Assist"
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            direct_only_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn tcp_relay_capture_does_not_move_another_connection_with_the_same_local_port() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(65, 9, 168, 101);
+        let other_dst = Ipv4Addr::new(65, 9, 168, 102);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst, other_dst]);
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot.tunnel_pids.insert(1234);
+        let mut cache = InlineCache::new();
+        let initial = build_ipv4_tcp_frame_with_flags(src, dst, 41000, 443, 0x02);
+        let ack = build_ipv4_tcp_frame_with_flags(src, dst, 41000, 443, 0x10);
+        // Windows may reuse a local endpoint for a different remote endpoint.
+        // This connection was already direct when capture started; its SYN
+        // was never relayed, so its ACK must not borrow another flow's capture.
+        let other_acks = [
+            build_ipv4_tcp_frame_with_flags(src, other_dst, 41000, 443, 0x10),
+            build_ipv4_tcp_frame_with_flags(src, dst, 41000, 80, 0x10),
+        ];
+        let mut route = |packet: &[u8]| {
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                packet,
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into()),
+            )
+        };
+        assert!(route(&initial));
+        let other_stayed_direct = other_acks.iter().all(|packet| !route(packet));
+        let stayed_on_relay = route(&ack);
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        assert!(
+            other_stayed_direct,
+            "an existing direct TCP connection borrowed another destination's relay capture"
+        );
+        assert!(
+            stayed_on_relay,
+            "the captured connection lost its relay route"
+        );
+    }
+
+    #[test]
+    fn closing_one_captured_tcp_peer_does_not_remove_another_peers_route() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(65, 9, 168, 101);
+        let other_dst = Ipv4Addr::new(65, 9, 168, 102);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst, other_dst]);
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot.tunnel_pids.insert(1234);
+        let mut cache = InlineCache::new();
+        let mut route = |remote, flags| {
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &build_ipv4_tcp_frame_with_flags(src, remote, 41000, 443, flags),
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into()),
+            )
+        };
+        let first_started = route(dst, 0x02);
+        let second_started = route(other_dst, 0x02);
+        let first_closed = route(dst, 0x14);
+        let second_kept_route = route(other_dst, 0x10);
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        assert!(first_started && second_started && first_closed);
+        assert!(
+            second_kept_route,
+            "closing one TCP peer removed another peer's capture"
+        );
     }
 
     #[test]
