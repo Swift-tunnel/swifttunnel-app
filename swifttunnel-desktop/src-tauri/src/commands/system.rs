@@ -2370,6 +2370,52 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn inconclusive_driver_check_cannot_authorize_removing_recovery_data() {
+        let failed = swifttunnel_core::vpn::StaleCleanupReport {
+            driver_open_error: Some("fixture device-open failure".into()),
+            ..Default::default()
+        };
+        for evidence in [Err("fixture discovery timeout".into()), Ok(true)] {
+            let (step, may_clear) = adapter_mode_repair_step(&failed, &evidence);
+            assert_eq!(step.status, "failed");
+            assert!(!may_clear);
+        }
+        let (step, may_clear) = adapter_mode_repair_step(&failed, &Ok(false));
+        assert_eq!(step.status, "healthy");
+        assert!(may_clear);
+        let verified = swifttunnel_core::vpn::StaleCleanupReport::default();
+        assert!(adapter_mode_repair_step(&verified, &Err("metadata unavailable".into())).1);
+    }
+
+    #[test]
+    fn hosts_repair_reports_cleanup_failure_even_when_the_file_exists() {
+        let checked = std::cell::Cell::new(false);
+        let step = hosts_repair_step(
+            || Err("fixture malformed marker".into()),
+            || {
+                checked.set(true);
+                Ok(false)
+            },
+        );
+        assert!(checked.get());
+        assert_eq!(step.status, "failed");
+        assert!(step.detail.contains("fixture malformed marker"));
+        let both_failed = hosts_repair_step(
+            || Err("cleanup denied".into()),
+            || Err("creation denied".into()),
+        );
+        assert_eq!(both_failed.status, "failed");
+        assert!(both_failed.detail.contains("cleanup denied"));
+        assert!(both_failed.detail.contains("creation denied"));
+        assert_eq!(hosts_repair_step(|| Ok(()), || Ok(true)).status, "fixed");
+        assert_eq!(hosts_repair_step(|| Ok(()), || Ok(false)).status, "healthy");
+        assert_eq!(
+            hosts_repair_step(|| Ok(()), || Err("fixture access failure".into())).status,
+            "failed"
+        );
+    }
+
+    #[test]
     fn network_repair_refuses_active_and_transitional_sessions() {
         use swifttunnel_core::vpn::ConnectionState;
         assert!(ensure_network_repair_is_idle(&ConnectionState::Disconnected).is_ok());
@@ -3107,37 +3153,21 @@ pub async fn system_repair_network(
 }
 
 #[cfg(windows)]
-fn run_network_repair_steps() -> NetworkRepairResponse {
-    use swifttunnel_core::vpn::tunnel_mode_recovery;
-    use swifttunnel_core::vpn::{SplitTunnelDriver, ipv6_recovery, tso_recovery};
-
-    let _guard = match DRIVER_OPERATION_LOCK.lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            return NetworkRepairResponse {
-                supported: true,
-                is_admin: swifttunnel_core::is_administrator(),
-                overall: "failed".to_string(),
-                steps: vec![network_repair_step(
-                    "lock",
-                    "Driver operation lock",
-                    "failed",
-                    "Another driver operation crashed while holding the lock. Restart SwiftTunnel and run recovery again.",
-                )],
-            };
-        }
-    };
-
-    let is_admin = swifttunnel_core::is_administrator();
-    log::info!("Running network repair (internet recovery)");
-    let mut steps: Vec<NetworkRepairStep> = Vec::new();
-
-    // Step 1: adapter tunnel modes — the total-blackout leftover.
-    let marker = tunnel_mode_recovery::read_tunnel_mode_marker();
-    let driver_installed = SplitTunnelDriver::driver_install_evidence();
-    let report = SplitTunnelDriver::cleanup_stale_state_checked();
-    let adapter_step = if let Some(open_error) = &report.driver_open_error {
-        if driver_installed {
+fn adapter_mode_repair_step(
+    report: &swifttunnel_core::vpn::StaleCleanupReport,
+    evidence: &Result<bool, String>,
+) -> (NetworkRepairStep, bool) {
+    let step = if let Some(open_error) = &report.driver_open_error {
+        if let Err(error) = evidence {
+            network_repair_step(
+                "adapter_modes",
+                "Adapter packet filter modes",
+                "failed",
+                format!(
+                    "Could not verify the split tunnel driver or reset the adapter. Run driver repair, then retry. Driver check: {error}; adapter check: {open_error}"
+                ),
+            )
+        } else if matches!(evidence, Ok(true)) {
             network_repair_step(
                 "adapter_modes",
                 "Adapter packet filter modes",
@@ -3188,8 +3218,90 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
             ),
         )
     };
-    let adapter_modes_clean =
-        report.fully_clean() || (report.driver_open_error.is_some() && !driver_installed);
+    let clean = report.fully_clean()
+        || (report.driver_open_error.is_some() && matches!(evidence, Ok(false)));
+    (step, clean)
+}
+
+#[cfg(windows)]
+fn hosts_repair_step(
+    cleanup: impl FnOnce() -> Result<(), String>,
+    ensure_exists: impl FnOnce() -> Result<bool, String>,
+) -> NetworkRepairStep {
+    // Keep creation/access checking independent, but never discard an error
+    // removing our entries just because the file itself is present.
+    let cleanup = cleanup();
+    let present = ensure_exists();
+    match (cleanup, present) {
+        (Err(cleanup), Err(present)) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "failed",
+            format!(
+                "Could not clean SwiftTunnel's Roblox entries or check the Windows hosts file. Cleanup: {cleanup}; file check: {present}"
+            ),
+        ),
+        (Err(error), _) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "failed",
+            format!(
+                "Could not remove SwiftTunnel's Roblox entries from the Windows hosts file: {error}"
+            ),
+        ),
+        (_, Err(error)) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "failed",
+            format!("Could not access or recreate the Windows hosts file: {error}"),
+        ),
+        (Ok(()), Ok(true)) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "fixed",
+            "The missing Windows hosts file was recreated.",
+        ),
+        (Ok(()), Ok(false)) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "healthy",
+            "Hosts file present; SwiftTunnel's Roblox entries cleaned.",
+        ),
+    }
+}
+
+#[cfg(windows)]
+fn run_network_repair_steps() -> NetworkRepairResponse {
+    use swifttunnel_core::vpn::tunnel_mode_recovery;
+    use swifttunnel_core::vpn::{SplitTunnelDriver, ipv6_recovery, tso_recovery};
+
+    let _guard = match DRIVER_OPERATION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return NetworkRepairResponse {
+                supported: true,
+                is_admin: swifttunnel_core::is_administrator(),
+                overall: "failed".to_string(),
+                steps: vec![network_repair_step(
+                    "lock",
+                    "Driver operation lock",
+                    "failed",
+                    "Another driver operation crashed while holding the lock. Restart SwiftTunnel and run recovery again.",
+                )],
+            };
+        }
+    };
+
+    let is_admin = swifttunnel_core::is_administrator();
+    log::info!("Running network repair (internet recovery)");
+    let mut steps: Vec<NetworkRepairStep> = Vec::new();
+
+    // Step 1: adapter tunnel modes — the total-blackout leftover.
+    let marker = tunnel_mode_recovery::read_tunnel_mode_marker();
+    let driver_evidence = SplitTunnelDriver::driver_install_evidence_checked();
+    let driver_known_absent = matches!(&driver_evidence, Ok(false));
+    let report = SplitTunnelDriver::cleanup_stale_state_checked();
+    let (adapter_step, adapter_modes_clean) = adapter_mode_repair_step(&report, &driver_evidence);
     steps.push(adapter_step);
 
     // Step 2: crash marker bookkeeping (must follow the verified reset).
@@ -3269,7 +3381,7 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
                 "No IPv6 block marker; verified no SwiftTunnel IPv6 filters remain.",
             ),
             Err(e) => {
-                if driver_installed {
+                if !driver_known_absent {
                     network_repair_step(
                         "ipv6",
                         "IPv6 connectivity",
@@ -3327,27 +3439,10 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
     // sure the file is even there. A missing hosts file is what turned country
     // ban bypass into "unavailable on this network" with no way for anyone to
     // work out why, since Windows never complains about its absence.
-    swifttunnel_core::roblox_proxy::hosts::recover_stale();
-    steps.push(match swifttunnel_core::roblox_proxy::hosts::ensure_exists() {
-        Ok(true) => network_repair_step(
-            "hosts",
-            "Hosts file",
-            "fixed",
-            "The Windows hosts file was missing and has been recreated. Something removed it, usually antivirus or a PC cleanup tool.",
-        ),
-        Ok(false) => network_repair_step(
-            "hosts",
-            "Hosts file",
-            "healthy",
-            "Hosts file present; stale SwiftTunnel entries cleaned.",
-        ),
-        Err(e) => network_repair_step(
-            "hosts",
-            "Hosts file",
-            "failed",
-            format!("The Windows hosts file is missing and could not be recreated: {e}"),
-        ),
-    });
+    steps.push(hosts_repair_step(
+        swifttunnel_core::roblox_proxy::hosts::remove_overrides,
+        swifttunnel_core::roblox_proxy::hosts::ensure_exists,
+    ));
 
     // Step 7: DNS cache, so fixed connectivity takes effect immediately.
     steps.push(

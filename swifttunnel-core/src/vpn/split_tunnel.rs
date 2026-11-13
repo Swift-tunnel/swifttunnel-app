@@ -487,7 +487,9 @@ impl SplitTunnelDriver {
         Self::driver_install_evidence_checked().unwrap_or(false)
     }
 
-    pub(crate) fn driver_install_evidence_checked() -> Result<bool, String> {
+    /// Installation evidence for callers that must distinguish absence from
+    /// a failed Windows service or driver-store query.
+    pub fn driver_install_evidence_checked() -> Result<bool, String> {
         if Self::get_driver_path().is_some() {
             return Ok(true);
         }
