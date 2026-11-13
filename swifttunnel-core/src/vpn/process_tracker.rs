@@ -24,6 +24,7 @@ pub struct ConnectionKey {
     pub local_ip: Ipv4Addr,
     pub local_port: u16,
     pub protocol: Protocol,
+    pub remote: Option<(Ipv4Addr, u16)>,
 }
 
 impl ConnectionKey {
@@ -32,6 +33,18 @@ impl ConnectionKey {
             local_ip,
             local_port,
             protocol,
+            remote: None,
+        }
+    }
+
+    /// A TCP owner belongs to one full connection, not to every connection
+    /// sharing this local endpoint. UDP remains keyed by its local socket.
+    pub fn tcp(local_ip: Ipv4Addr, local_port: u16, remote_ip: Ipv4Addr, remote_port: u16) -> Self {
+        Self {
+            local_ip,
+            local_port,
+            protocol: Protocol::Tcp,
+            remote: Some((remote_ip, remote_port)),
         }
     }
 }

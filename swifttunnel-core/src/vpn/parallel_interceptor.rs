@@ -6972,8 +6972,43 @@ fn bounded_ip_helper_entries(
     (advertised_entries as usize).min(max_entries)
 }
 
+fn record_tcp_connection_owner(
+    connections: &mut ahash::AHashMap<ConnectionKey, u32>,
+    local_ip: Ipv4Addr,
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+    pid: u32,
+) {
+    connections.insert(
+        ConnectionKey::tcp(local_ip, local_port, remote_ip, remote_port),
+        pid,
+    );
+}
+
 #[cfg(target_os = "windows")]
-fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
+fn tcp_row_owner_for_flow(
+    entry: &windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID,
+    local_ip: Ipv4Addr,
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+) -> Option<u32> {
+    (entry.dwOwningPid != 0
+        && Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes()) == local_ip
+        && u16::from_be(entry.dwLocalPort as u16) == local_port
+        && Ipv4Addr::from(entry.dwRemoteAddr.to_ne_bytes()) == remote_ip
+        && u16::from_be(entry.dwRemotePort as u16) == remote_port)
+        .then_some(entry.dwOwningPid)
+}
+
+#[cfg(target_os = "windows")]
+fn lookup_tcp_owner_pid(
+    local_ip: Ipv4Addr,
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+) -> Option<u32> {
     use windows::Win32::NetworkManagement::IpHelper::*;
 
     unsafe {
@@ -7017,10 +7052,10 @@ fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
             let entry = std::ptr::read_unaligned(
                 entry_base.add(i * entry_size) as *const MIB_TCPROW_OWNER_PID
             );
-            let entry_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
-            let entry_port = u16::from_be(entry.dwLocalPort as u16);
-            if entry_ip == local_ip && entry_port == local_port {
-                return Some(entry.dwOwningPid);
+            if let Some(pid) =
+                tcp_row_owner_for_flow(&entry, local_ip, local_port, remote_ip, remote_port)
+            {
+                return Some(pid);
             }
         }
     }
@@ -7029,8 +7064,30 @@ fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn lookup_tcp_owner_pid(_local_ip: Ipv4Addr, _local_port: u16) -> Option<u32> {
+fn lookup_tcp_owner_pid(
+    _local_ip: Ipv4Addr,
+    _local_port: u16,
+    _remote_ip: Ipv4Addr,
+    _remote_port: u16,
+) -> Option<u32> {
     None
+}
+
+fn tcp_packet_remote_endpoint(data: &[u8]) -> Option<(Ipv4Addr, u16)> {
+    let ip_start = parse_ipv4_header_offset(data)?;
+    if *data.get(ip_start + 9)? != 6 {
+        return None;
+    }
+    let ihl = ((*data.get(ip_start)? & 0xf) as usize) * 4;
+    if ihl < 20 {
+        return None;
+    }
+    let remote_ip =
+        Ipv4Addr::from(<[u8; 4]>::try_from(data.get(ip_start + 16..ip_start + 20)?).ok()?);
+    let remote_port = u16::from_be_bytes(
+        <[u8; 2]>::try_from(data.get(ip_start + ihl + 2..ip_start + ihl + 4)?).ok()?,
+    );
+    Some((remote_ip, remote_port))
 }
 
 #[cfg(target_os = "windows")]
@@ -7221,8 +7278,14 @@ fn run_cache_refresher(
                             );
                             let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
                             let local_port = u16::from_be(entry.dwLocalPort as u16);
-                            let key = ConnectionKey::new(local_ip, local_port, Protocol::Tcp);
-                            connections.insert(key, entry.dwOwningPid);
+                            record_tcp_connection_owner(
+                                &mut connections,
+                                local_ip,
+                                local_port,
+                                Ipv4Addr::from(entry.dwRemoteAddr.to_ne_bytes()),
+                                u16::from_be(entry.dwRemotePort as u16),
+                                entry.dwOwningPid,
+                            );
                         }
                     }
                 }
@@ -8287,7 +8350,12 @@ fn should_route_to_vpn_with_routing_flags(
         inline_cache,
         api_tunneling,
         udp_tunneling,
-        lookup_tcp_owner_pid,
+        |local_ip, local_port| {
+            // Parse the remote endpoint only when the slow owner lookup is
+            // needed. Established flows keep their existing O(1) cache path.
+            let (remote_ip, remote_port) = tcp_packet_remote_endpoint(data)?;
+            lookup_tcp_owner_pid(local_ip, local_port, remote_ip, remote_port)
+        },
     )
 }
 
@@ -8506,7 +8574,8 @@ where
     //
     // IMPORTANT: This is process-based only. Destination-based speculative tunneling
     // is handled below so we can seed the inline cache for game-server hits.
-    let snapshot_tunnel_hit = snapshot.should_tunnel(src_ip, src_port, protocol);
+    let snapshot_tunnel_hit =
+        snapshot.should_tunnel_flow(src_ip, src_port, protocol, dst_ip, dst_port);
     if snapshot_tunnel_hit && !(protocol == Protocol::Tcp && api_tunneling) {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         let result = if protocol == Protocol::Udp {
@@ -9856,6 +9925,107 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_tcp_port_does_not_inherit_the_last_programs_identity() {
+        let local_ip = std::net::Ipv4Addr::new(10, 0, 0, 20);
+        let game = std::net::Ipv4Addr::new(128, 116, 47, 3);
+        let other = std::net::Ipv4Addr::new(1, 1, 1, 1);
+        let mut rows = [(game, 443, 111), (other, 443, 222), (game, 80, 333)];
+        for _ in 0..2 {
+            let mut connections = ahash::AHashMap::new();
+            for (remote, port, pid) in rows {
+                super::record_tcp_connection_owner(
+                    &mut connections,
+                    local_ip,
+                    55000,
+                    remote,
+                    port,
+                    pid,
+                );
+            }
+            let mut snapshot = super::ProcessSnapshot::empty(ahash::AHashSet::new());
+            snapshot.connections = connections;
+            snapshot.tunnel_pids.insert(111);
+            assert_eq!(snapshot.connections.len(), 3);
+            assert!(snapshot.should_tunnel_flow(local_ip, 55000, super::Protocol::Tcp, game, 443));
+            assert!(!snapshot.should_tunnel_flow(
+                local_ip,
+                55000,
+                super::Protocol::Tcp,
+                other,
+                443
+            ));
+            assert!(!snapshot.should_tunnel_flow(local_ip, 55000, super::Protocol::Tcp, game, 80));
+            // A new connection absent from this snapshot must not inherit
+            // the known Roblox owner's local port while refresh is pending.
+            assert!(!snapshot.should_tunnel_flow(
+                local_ip,
+                55000,
+                super::Protocol::Tcp,
+                game,
+                8080
+            ));
+            rows.reverse();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_tcp_owner_lookup_matches_both_endpoints_not_table_order() {
+        use windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID;
+        let local = std::net::Ipv4Addr::new(10, 0, 0, 20);
+        let remote = std::net::Ipv4Addr::new(128, 116, 47, 3);
+        let row = MIB_TCPROW_OWNER_PID {
+            dwLocalAddr: u32::from_ne_bytes(local.octets()),
+            dwLocalPort: 55000u16.to_be() as u32,
+            dwRemoteAddr: u32::from_ne_bytes(remote.octets()),
+            dwRemotePort: 443u16.to_be() as u32,
+            dwOwningPid: 111,
+            ..Default::default()
+        };
+        let mut rows = vec![
+            MIB_TCPROW_OWNER_PID {
+                dwRemoteAddr: u32::from_ne_bytes([1, 1, 1, 1]),
+                dwOwningPid: 222,
+                ..row
+            },
+            MIB_TCPROW_OWNER_PID {
+                dwRemotePort: 80u16.to_be() as u32,
+                dwOwningPid: 333,
+                ..row
+            },
+            MIB_TCPROW_OWNER_PID {
+                dwLocalPort: 55001u16.to_be() as u32,
+                dwOwningPid: 444,
+                ..row
+            },
+            MIB_TCPROW_OWNER_PID {
+                dwLocalAddr: u32::from_ne_bytes([10, 0, 0, 21]),
+                dwOwningPid: 555,
+                ..row
+            },
+            MIB_TCPROW_OWNER_PID {
+                dwOwningPid: 0,
+                ..row
+            },
+            row,
+        ];
+        for _ in 0..2 {
+            let matches: Vec<_> = rows
+                .iter()
+                .filter_map(|entry| super::tcp_row_owner_for_flow(entry, local, 55000, remote, 443))
+                .collect();
+            assert_eq!(matches, vec![111]);
+            rows.reverse();
+        }
+        let packet = build_ipv4_frame(6, local, remote, 55000, 443);
+        assert_eq!(
+            super::tcp_packet_remote_endpoint(&packet),
+            Some((remote, 443))
+        );
+        assert!(super::tcp_packet_remote_endpoint(&packet[..packet.len().min(36)]).is_none());
+    }
+
     #[test]
     fn packet_worker_failures_reach_the_connection_monitor() {
         use super::{AtomicBool, AtomicU8, Ordering, WorkerPanicCause, supervise_network_worker};
@@ -13272,7 +13442,7 @@ mod tests {
         let pid = 1234;
 
         let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+        connections.insert(ConnectionKey::tcp(src_ip, src_port, dst_ip, dst_port), pid);
 
         let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
@@ -14141,7 +14311,7 @@ mod tests {
         let pid = 1234;
 
         let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+        connections.insert(ConnectionKey::tcp(src_ip, src_port, dst_ip, dst_port), pid);
 
         let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
@@ -14219,7 +14389,10 @@ mod tests {
         let pid = 1234;
 
         let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+        connections.insert(
+            ConnectionKey::tcp(src_ip, src_port, unpinned_cdn_ip, dst_port),
+            pid,
+        );
 
         let snapshot = ProcessSnapshot {
             connections,
@@ -14266,7 +14439,10 @@ mod tests {
         crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([asset_ip]);
 
         let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+        connections.insert(
+            ConnectionKey::tcp(src_ip, src_port, asset_ip, dst_port),
+            pid,
+        );
 
         let snapshot = ProcessSnapshot {
             connections,
@@ -14304,7 +14480,7 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
-        connections.insert(ConnectionKey::new(src_ip, src_port + 1, Protocol::Tcp), pid);
+        connections.insert(ConnectionKey::tcp(src_ip, src_port + 1, dns_ip, 53), pid);
 
         let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
         let snapshot = ProcessSnapshot {
@@ -14453,7 +14629,7 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(
-            ConnectionKey::new(src_ip, src_port, Protocol::Tcp),
+            ConnectionKey::tcp(src_ip, src_port, dst_ip, dst_port),
             tunnel_pid,
         );
         let snapshot = ProcessSnapshot {

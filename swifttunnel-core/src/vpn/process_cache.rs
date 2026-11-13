@@ -298,6 +298,28 @@ impl ProcessSnapshot {
         self.is_tunnel_connection(local_ip, local_port, protocol)
     }
 
+    #[inline(always)]
+    pub fn should_tunnel_flow(
+        &self,
+        local_ip: Ipv4Addr,
+        local_port: u16,
+        protocol: Protocol,
+        remote_ip: Ipv4Addr,
+        remote_port: u16,
+    ) -> bool {
+        if protocol != Protocol::Tcp {
+            return self.is_tunnel_connection(local_ip, local_port, protocol);
+        }
+        self.connections
+            .get(&ConnectionKey::tcp(
+                local_ip,
+                local_port,
+                remote_ip,
+                remote_port,
+            ))
+            .is_some_and(|pid| self.is_tunnel_pid(*pid))
+    }
+
     /// UDP fallback check for tunnel ownership by source port.
     ///
     /// This is a miss-path helper used when exact `(ip, port, protocol)` cache lookup
@@ -335,7 +357,8 @@ impl ProcessSnapshot {
         api_tunneling: bool,
     ) -> bool {
         // First check: Is this from a tunnel app?
-        let is_tunnel_app = self.is_tunnel_connection(local_ip, local_port, protocol);
+        let is_tunnel_app =
+            self.should_tunnel_flow(local_ip, local_port, protocol, dst_ip, dst_port);
 
         // If we KNOW it's a tunnel app, tunnel gameplay/session UDP only.
         // Roblox can fetch assets over HTTP/3 (UDP/443); relaying that in
@@ -1534,7 +1557,12 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(
-            ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Tcp),
+            ConnectionKey::tcp(
+                Ipv4Addr::new(192, 168, 1, 100),
+                50000,
+                Ipv4Addr::new(128, 116, 50, 100),
+                443,
+            ),
             1234,
         );
 
