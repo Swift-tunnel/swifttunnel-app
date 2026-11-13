@@ -1114,16 +1114,21 @@ enum SwitchAuthOutcome {
 /// the session on its current, already-authenticated relay.
 async fn authenticate_switch_target(
     auth_manager: &tokio::sync::Mutex<crate::auth::AuthManager>,
+    account_id: Option<&str>,
     relay: &super::udp_relay::UdpRelay,
     server_region: &str,
     target_addr: SocketAddr,
     player_usage: &Arc<super::player_usage::PlayerUsage>,
 ) -> SwitchAuthOutcome {
     let access_token = {
-        let auth = auth_manager.lock().await;
-        match auth.get_access_token().await {
+        match relay_session_access_token(auth_manager, account_id).await {
             Ok(token) => token,
             Err(e) => {
+                if terminal_relay_lease_error_message(&e).is_some() {
+                    return SwitchAuthOutcome::Rejected(
+                        "The tunnel's account is no longer signed in.".into(),
+                    );
+                }
                 return SwitchAuthOutcome::Retryable(format!("access token unavailable: {}", e));
             }
         }
@@ -1178,6 +1183,20 @@ async fn authenticate_switch_target(
         Ok(None) => SwitchAuthOutcome::Retryable("auth ack timeout".to_string()),
         Err(e) => SwitchAuthOutcome::Retryable(format!("auth hello send failed: {}", e)),
     }
+}
+
+// The session id, quota readings and usage belong to one account. A sign-out
+// followed by a different sign-in must not renew that session with a new payer.
+async fn relay_session_access_token(
+    auth_manager: &tokio::sync::Mutex<crate::auth::AuthManager>,
+    account_id: Option<&str>,
+) -> Result<String, AuthError> {
+    let account_id = account_id.ok_or(AuthError::NotAuthenticated)?;
+    auth_manager
+        .lock()
+        .await
+        .get_access_token_for(account_id)
+        .await
 }
 
 /// Keep renewal work owned by the connection whose tickets it renews.
@@ -2022,10 +2041,20 @@ impl VpnConnection {
                     relay.switch_relay(*candidate_addr);
                 }
 
-                let ticket = match auth_client
-                    .get_relay_ticket(access_token, candidate_region, &session_id_hex)
-                    .await
-                {
+                let ticket_result = async {
+                    let token = match self.auth_manager.as_ref() {
+                        Some(auth) => {
+                            relay_session_access_token(auth, self.session_account_id.as_deref())
+                                .await?
+                        }
+                        None => access_token.to_owned(),
+                    };
+                    auth_client
+                        .get_relay_ticket(&token, candidate_region, &session_id_hex)
+                        .await
+                }
+                .await;
+                let ticket = match ticket_result {
                     Ok(ticket) => {
                         record_free_tier_quota(&ticket);
                         notify_if_relay_crowded(candidate_region, &ticket);
@@ -2335,6 +2364,7 @@ impl VpnConnection {
             let router_for_lookup = Arc::clone(&auto_router);
             let state_for_lookup = Arc::clone(&self.state);
             let auth_manager_for_lookup = self.auth_manager.clone();
+            let account_for_lookup = self.session_account_id.clone();
             let player_usage_for_lookup = Arc::clone(&self.player_usage);
             let lookup_handle = tokio::spawn(async move {
                 use crate::geolocation::GameServerRegionLookup;
@@ -2374,7 +2404,12 @@ impl VpnConnection {
                                 // deadline. Slow refreshes cannot extend every join.
                                 tokio::time::timeout(Duration::from_millis(1500), async {
                                     let auth = auth_manager_for_lookup.as_ref()?;
-                                    let token = auth.lock().await.get_access_token().await.ok()?;
+                                    let token = relay_session_access_token(
+                                        auth,
+                                        account_for_lookup.as_deref(),
+                                    )
+                                    .await
+                                    .ok()?;
                                     Some(if super::route_measurements::can_measure(ip) {
                                         super::route_measurements::measure(ip, &token).await
                                     } else {
@@ -2531,6 +2566,7 @@ impl VpnConnection {
                                     Some(auth_manager) => {
                                         authenticate_switch_target(
                                             auth_manager,
+                                            account_for_lookup.as_deref(),
                                             &relay_for_lookup,
                                             &selected_region,
                                             selected_addr,
@@ -2551,6 +2587,7 @@ impl VpnConnection {
                                     if let Some(auth_manager) = auth_manager_for_lookup.as_ref() {
                                         auth_result = authenticate_switch_target(
                                             auth_manager,
+                                            account_for_lookup.as_deref(),
                                             &relay_for_lookup,
                                             &selected_region,
                                             selected_addr,
@@ -2686,6 +2723,7 @@ impl VpnConnection {
             self.auto_lookup_handle = Some(lookup_handle);
             let router = Arc::clone(&auto_router);
             let auth = self.auth_manager.clone();
+            let account_for_telemetry = self.session_account_id.clone();
             self.route_telemetry_handle = Some(tokio::spawn(async move {
                 let mut timer = tokio::time::interval(Duration::from_secs(15));
                 timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2728,7 +2766,10 @@ impl VpnConnection {
                     }
                     let result = tokio::time::timeout(Duration::from_secs(2), async {
                         let auth = auth.as_ref()?;
-                        let token = auth.lock().await.get_access_token().await.ok()?;
+                        let token =
+                            relay_session_access_token(auth, account_for_telemetry.as_deref())
+                                .await
+                                .ok()?;
                         Some(if super::route_measurements::can_measure(ip) {
                             super::route_measurements::measure(ip, &token).await
                         } else {
@@ -3400,6 +3441,7 @@ impl VpnConnection {
                 let state_for_refresh = Arc::clone(&self.state);
                 let terminal_cleanup_requested = Arc::clone(&self.terminal_cleanup_requested);
                 let refresh_state = self.state.subscribe();
+                let account_for_refresh = self.session_account_id.clone();
                 let player_usage_for_refresh = Arc::clone(&self.player_usage);
 
                 self.relay_lease_refresh_handle = Some(tokio::spawn(
@@ -3420,8 +3462,12 @@ impl VpnConnection {
                                 .unwrap_or_else(|| (fallback_region.clone(), fallback_addr));
 
                             let access_token = {
-                                let manager = auth_manager.lock().await;
-                                match manager.get_access_token().await {
+                                match relay_session_access_token(
+                                    &auth_manager,
+                                    account_for_refresh.as_deref(),
+                                )
+                                .await
+                                {
                                     Ok(token) => token,
                                     Err(error) => {
                                         if let Some(message) =
@@ -3949,6 +3995,44 @@ async fn send_session_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn relay_session_cannot_take_the_next_signed_in_accounts_token() {
+        let owner = tokio::sync::Mutex::new(crate::auth::AuthManager::signed_in_for_test(
+            "original-account",
+            "original-token",
+        ));
+        assert_eq!(
+            relay_session_access_token(&owner, Some("original-account"))
+                .await
+                .unwrap(),
+            "original-token"
+        );
+        let next = tokio::sync::Mutex::new(crate::auth::AuthManager::signed_in_for_test(
+            "next-account",
+            "next-token",
+        ));
+        // This is the previous renewal code's call: it returns the next
+        // account's token even though the relay session belongs to the first.
+        assert_eq!(
+            next.lock().await.get_access_token().await.unwrap(),
+            "next-token"
+        );
+        for account in [Some("original-account"), None] {
+            let error = relay_session_access_token(&next, account)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AuthError::NotAuthenticated));
+            assert!(terminal_relay_lease_error_message(&error).is_some());
+        }
+        // A fresh connection owned by the new account is still permitted.
+        assert_eq!(
+            relay_session_access_token(&next, Some("next-account"))
+                .await
+                .unwrap(),
+            "next-token"
+        );
+    }
 
     /// The registry is process-wide, so its tests take turns.
     static REPORT_REGISTRY_TEST: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

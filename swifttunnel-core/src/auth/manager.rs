@@ -128,6 +128,33 @@ fn persist_new_session(
 }
 
 impl AuthManager {
+    #[cfg(test)]
+    pub(crate) fn signed_in_for_test(user_id: &str, token: &str) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(AuthState::LoggedIn(AuthSession {
+                access_token: token.into(),
+                refresh_token: "fixture-refresh".into(),
+                expires_at: Utc::now() + Duration::hours(1),
+                user: UserInfo {
+                    id: user_id.into(),
+                    email: "fixture@example.invalid".into(),
+                    is_tester: false,
+                    is_banned: false,
+                    banned_reason: None,
+                    banned_at: None,
+                },
+            }))),
+            storage: SecureStorage::with_test_directory(std::env::temp_dir().join(format!(
+                "swifttunnel-session-auth-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ))),
+            client: AuthClient::unavailable_for_test(),
+            oauth_server: Arc::new(Mutex::new(None)),
+            refresh_backoff: Arc::new(Mutex::new(RefreshBackoff::default())),
+        }
+    }
+
     /// Create a new AuthManager
     pub fn new() -> Result<Self, AuthError> {
         info!("========================================");
