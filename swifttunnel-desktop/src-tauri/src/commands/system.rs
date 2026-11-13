@@ -18,6 +18,38 @@ use tauri::Manager;
 #[cfg(windows)]
 static DRIVER_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 
+struct NetworkRepairLease {
+    _operation: super::network_operation::Permit,
+    _connection: tokio::sync::OwnedMutexGuard<swifttunnel_core::vpn::VpnConnection>,
+}
+
+fn ensure_network_repair_is_idle(
+    state: &swifttunnel_core::vpn::ConnectionState,
+) -> Result<(), String> {
+    use swifttunnel_core::vpn::ConnectionState;
+    if matches!(
+        state,
+        ConnectionState::Disconnected | ConnectionState::Error(_)
+    ) {
+        Ok(())
+    } else {
+        Err("Disconnect SwiftTunnel before repairing the driver or network.".into())
+    }
+}
+
+fn reserve_network_repair(state: &AppState) -> Result<NetworkRepairLease, String> {
+    let operation = super::network_operation::begin()?;
+    let connection = state.vpn_connection.clone().try_lock_owned().map_err(|_| {
+        "SwiftTunnel is still finishing a network operation. Wait a moment, then try again."
+            .to_string()
+    })?;
+    ensure_network_repair_is_idle(&state.vpn_state_handle.borrow())?;
+    Ok(NetworkRepairLease {
+        _operation: operation,
+        _connection: connection,
+    })
+}
+
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
@@ -1568,10 +1600,14 @@ fn repair_windows_firewall_sync() -> Result<WindowsFirewallRepairResponse, Strin
 }
 
 #[tauri::command]
-pub async fn system_repair_windows_firewall() -> Result<WindowsFirewallRepairResponse, String> {
+pub async fn system_repair_windows_firewall(
+    state: State<'_, AppState>,
+) -> Result<WindowsFirewallRepairResponse, String> {
     #[cfg(windows)]
     {
-        tauri::async_runtime::spawn_blocking(|| {
+        let repair = reserve_network_repair(&state)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _repair = repair;
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -1583,6 +1619,7 @@ pub async fn system_repair_windows_firewall() -> Result<WindowsFirewallRepairRes
 
     #[cfg(not(windows))]
     {
+        let _ = state;
         Ok(WindowsFirewallRepairResponse::unsupported())
     }
 }
@@ -1803,10 +1840,12 @@ pub async fn system_check_driver() -> Result<DriverCheckResponse, String> {
 #[tauri::command]
 pub async fn system_install_driver(
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
     force: Option<bool>,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
+        let repair = reserve_network_repair(&state)?;
         let force = force.unwrap_or(false);
         let resource_dir = app.path().resource_dir().ok();
         let exe_dir = std::env::current_exe()
@@ -1814,6 +1853,7 @@ pub async fn system_install_driver(
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
         tauri::async_runtime::spawn_blocking(move || {
+            let _repair = repair;
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -1831,7 +1871,7 @@ pub async fn system_install_driver(
 
     #[cfg(not(windows))]
     {
-        let _ = (app, force);
+        let _ = (app, state, force);
         Err("Driver installation is only supported on Windows".to_string())
     }
 }
@@ -1906,6 +1946,7 @@ pub async fn system_reinstall_driver(
 ) -> Result<DriverCheckResponse, String> {
     #[cfg(windows)]
     {
+        let repair = reserve_network_repair(&state)?;
         let resource_dir = app.path().resource_dir().ok();
         let exe_dir = std::env::current_exe()
             .ok()
@@ -1919,6 +1960,7 @@ pub async fn system_reinstall_driver(
         let support = DriverSupportLog::start("driver_reinstall");
         let steps = support.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
+            let _repair = repair;
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -2006,6 +2048,7 @@ pub async fn system_repair_driver(
 ) -> Result<DriverCheckResponse, String> {
     #[cfg(windows)]
     {
+        let repair = reserve_network_repair(&state)?;
         let resource_dir = app.path().resource_dir().ok();
         let exe_dir = std::env::current_exe()
             .ok()
@@ -2019,6 +2062,7 @@ pub async fn system_repair_driver(
         let support = DriverSupportLog::start("driver_repair");
         let steps = support.clone();
         let result = tauri::async_runtime::spawn_blocking(move || {
+            let _repair = repair;
             use swifttunnel_core::vpn::DriverRecommendedAction;
 
             let _guard = DRIVER_OPERATION_LOCK
@@ -2324,6 +2368,37 @@ SERVICE_NAME: MpsSvc
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn network_repair_refuses_active_and_transitional_sessions() {
+        use swifttunnel_core::vpn::ConnectionState;
+        assert!(ensure_network_repair_is_idle(&ConnectionState::Disconnected).is_ok());
+        assert!(
+            ensure_network_repair_is_idle(&ConnectionState::Error("fixture failure".into()))
+                .is_ok()
+        );
+        for state in [
+            ConnectionState::FetchingConfig,
+            ConnectionState::ConfiguringSplitTunnel,
+            ConnectionState::Disconnecting,
+            ConnectionState::Connected {
+                since: std::time::Instant::now(),
+                server_region: "fixture".into(),
+                server_endpoint: "127.0.0.1:51820".into(),
+                assigned_ip: String::new(),
+                relay_auth_mode: "ticket".into(),
+                split_tunnel_active: true,
+                tunneled_processes: vec![],
+                relay_status: None,
+            },
+        ] {
+            assert!(
+                ensure_network_repair_is_idle(&state)
+                    .unwrap_err()
+                    .contains("Disconnect")
+            );
+        }
+    }
 
     fn ready_health() -> swifttunnel_core::vpn::SplitTunnelDriverHealth {
         swifttunnel_core::vpn::SplitTunnelDriverHealth {
@@ -2910,8 +2985,14 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn system_cleanup() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn system_cleanup(state: State<'_, AppState>) -> Result<(), String> {
+    let repair = reserve_network_repair(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _repair = repair;
+        #[cfg(windows)]
+        let _guard = DRIVER_OPERATION_LOCK
+            .lock()
+            .map_err(|_| "Driver operation lock is poisoned".to_string())?;
         swifttunnel_core::network_booster::cleanup_all_system_state().map_err(|e| e.to_string())
     })
     .await
@@ -2922,8 +3003,14 @@ pub async fn system_cleanup() -> Result<(), String> {
 /// state such as the driver package, startup registration, optimizer settings,
 /// hosts entries, or Roblox settings.
 #[tauri::command]
-pub async fn system_cleanup_tunnel_state() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn system_cleanup_tunnel_state(state: State<'_, AppState>) -> Result<(), String> {
+    let repair = reserve_network_repair(&state)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _repair = repair;
+        #[cfg(windows)]
+        let _guard = DRIVER_OPERATION_LOCK
+            .lock()
+            .map_err(|_| "Driver operation lock is poisoned".to_string())?;
         log::info!("Running tunnel-state cleanup");
         swifttunnel_core::vpn::recover_tso_on_startup();
         swifttunnel_core::vpn::recover_ipv6_on_startup();
@@ -2998,19 +3085,13 @@ pub async fn system_repair_network(
         // Refuse while a session is active: the repair resets adapter modes
         // and removes our static filters, which would sever a live tunnel
         // mid-session and then report success.
-        let _vpn_guard = state.vpn_connection.lock().await;
-        let conn_state = state.vpn_state_handle.borrow().clone();
-        if !matches!(
-            conn_state,
-            swifttunnel_core::vpn::ConnectionState::Disconnected
-                | swifttunnel_core::vpn::ConnectionState::Error(_)
-        ) {
-            return Err("Disconnect SwiftTunnel before running internet recovery.".to_string());
-        }
-
-        tauri::async_runtime::spawn_blocking(run_network_repair_steps)
-            .await
-            .map_err(|e| format!("Network repair task failed: {}", e))
+        let repair = reserve_network_repair(&state)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _repair = repair;
+            run_network_repair_steps()
+        })
+        .await
+        .map_err(|e| format!("Network repair task failed: {}", e))
     }
 
     #[cfg(not(windows))]
@@ -3343,19 +3424,9 @@ pub async fn system_reset_driver(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let _vpn_guard = state.vpn_connection.lock().await;
-        let conn_state = state.vpn_state_handle.borrow().clone();
-        if !matches!(
-            conn_state,
-            swifttunnel_core::vpn::ConnectionState::Disconnected
-                | swifttunnel_core::vpn::ConnectionState::Error(_)
-        ) {
-            return Err(
-                "Disconnect SwiftTunnel before resetting the split tunnel driver.".to_string(),
-            );
-        }
-
-        tauri::async_runtime::spawn_blocking(|| {
+        let repair = reserve_network_repair(&state)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _repair = repair;
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -3403,6 +3474,7 @@ pub async fn system_uninstall(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
+        let operation = super::network_operation::begin()?;
         // Resolve the product before disconnecting or cleaning up. The native
         // API includes visible per-user installations and selects Desktop's
         // upgrade family, not the first display-name match in HKLM.
@@ -3487,7 +3559,12 @@ pub async fn system_uninstall(
         // WinpkFilter bindings/hosts/WFP state can otherwise survive uninstall
         // and make the PC look like it only has internet when SwiftTunnel is
         // reinstalled.
-        if let Err(e) = tauri::async_runtime::spawn_blocking(|| {
+        let cleanup_operation = operation.clone();
+        if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
+            let _operation = cleanup_operation;
+            let _guard = DRIVER_OPERATION_LOCK
+                .lock()
+                .map_err(|_| "Driver operation lock is poisoned".to_string())?;
             swifttunnel_core::network_booster::cleanup_all_system_state().map_err(|e| e.to_string())
         })
         .await
@@ -3513,7 +3590,9 @@ pub async fn system_uninstall(
                 log::warn!(
                     "Uninstall: Windows has no registration for this installation; removing its files directly"
                 );
+                let finish_operation = operation.clone();
                 tauri::async_runtime::spawn_blocking(move || {
+                    let _operation = finish_operation;
                     swifttunnel_core::direct_uninstall::finish(plan)
                 })
                 .await

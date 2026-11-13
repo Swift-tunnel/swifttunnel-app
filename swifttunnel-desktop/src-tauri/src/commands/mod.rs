@@ -5,6 +5,7 @@ pub mod i18n;
 pub mod launcher;
 pub mod network;
 mod network_control;
+mod network_operation;
 pub mod optimization;
 pub mod optimizer;
 pub mod overlay;

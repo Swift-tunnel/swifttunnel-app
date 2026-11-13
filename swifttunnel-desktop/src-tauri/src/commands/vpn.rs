@@ -538,6 +538,7 @@ pub async fn vpn_connect(
     game_presets: Vec<String>,
     game_region: Option<bool>,
 ) -> Result<(), String> {
+    let _operation = super::network_operation::begin()?;
     // Startup crash-recovery (stale adapter/tunnel-mode reset) runs in the
     // background so launch is instant - but a tunnel must never start while
     // adapters are mid-reset. Normally done long before anyone can click
