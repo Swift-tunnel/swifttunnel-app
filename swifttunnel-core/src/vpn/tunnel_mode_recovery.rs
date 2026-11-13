@@ -48,26 +48,27 @@ fn get_marker_path() -> Option<PathBuf> {
 /// Write the tunnel-mode marker. Called before the packet reader can put the
 /// adapter into tunnel mode, so a crash at any later point leaves the marker
 /// behind for startup recovery.
-pub fn write_tunnel_mode_marker(adapter_name: &str) {
-    let Some(marker_path) = get_marker_path() else {
-        return;
-    };
+pub fn write_tunnel_mode_marker(adapter_name: &str) -> std::io::Result<()> {
+    let marker_path = get_marker_path().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Windows local app-data folder is unavailable",
+        )
+    })?;
     if let Some(parent) = marker_path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
     }
 
     let marker = TunnelModeMarker {
         adapter_name: adapter_name.trim().to_string(),
     };
-    let payload = serde_json::to_vec(&marker).unwrap_or_else(|_| adapter_name.as_bytes().to_vec());
-    if let Err(e) = crate::atomic_file::replace(&marker_path, &payload) {
-        log::warn!("Failed to write tunnel-mode marker: {}", e);
-    } else {
-        log::debug!(
-            "Tunnel-mode marker written for adapter: {}",
-            marker.adapter_name
-        );
-    }
+    let payload = serde_json::to_vec(&marker).map_err(std::io::Error::other)?;
+    crate::atomic_file::replace(&marker_path, &payload)?;
+    log::debug!(
+        "Tunnel-mode marker written for adapter: {}",
+        marker.adapter_name
+    );
+    Ok(())
 }
 
 /// Delete the tunnel-mode marker. Only call after a verified adapter-mode
@@ -302,6 +303,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn marker_creation_failure_is_reported_and_can_be_retried() {
+        let path = get_marker_path().unwrap();
+        // A directory at the marker's filename prevents replacing it, without
+        // changing any user permissions or touching real recovery files.
+        fs::create_dir(&path).unwrap();
+        assert!(write_tunnel_mode_marker("Ethernet").is_err());
+        assert!(path.is_dir());
+        fs::remove_dir(&path).unwrap();
+        write_tunnel_mode_marker("Ethernet").unwrap();
+        assert_eq!(read_tunnel_mode_marker().unwrap().adapter_name, "Ethernet");
+    }
+
+    #[test]
     fn oversized_record_still_triggers_recovery_without_loading_it() {
         let path = get_marker_path().unwrap();
         let file = fs::File::create(&path).unwrap();
@@ -315,7 +329,7 @@ mod tests {
     #[test]
     fn failed_marker_replacement_preserves_previous_recovery_data() {
         use std::os::windows::fs::OpenOptionsExt;
-        write_tunnel_mode_marker("Original adapter");
+        write_tunnel_mode_marker("Original adapter").unwrap();
         let path = get_marker_path().unwrap();
         let before = fs::read(&path).unwrap();
         let locked = fs::OpenOptions::new()
@@ -323,10 +337,10 @@ mod tests {
             .share_mode(3)
             .open(&path)
             .unwrap();
-        write_tunnel_mode_marker("Replacement adapter");
+        assert!(write_tunnel_mode_marker("Replacement adapter").is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
         drop(locked);
-        write_tunnel_mode_marker("Replacement adapter");
+        write_tunnel_mode_marker("Replacement adapter").unwrap();
         assert_eq!(
             read_tunnel_mode_marker().unwrap().adapter_name,
             "Replacement adapter"
@@ -335,7 +349,7 @@ mod tests {
 
     #[test]
     fn test_marker_roundtrip() {
-        write_tunnel_mode_marker(r"\DEVICE\{TEST-GUID}");
+        write_tunnel_mode_marker(r"\DEVICE\{TEST-GUID}").unwrap();
         let read_back = read_tunnel_mode_marker();
         assert_eq!(
             read_back.map(|m| m.adapter_name),

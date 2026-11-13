@@ -12,6 +12,9 @@ use super::VpnError;
 /// what went wrong and how to fix it.
 pub fn user_friendly_error(error: &VpnError) -> String {
     match error {
+        VpnError::RecoveryRecordUnavailable => {
+            "SwiftTunnel couldn't save its network recovery file, so it didn't start the tunnel. Check free disk space and access to your Windows user folder, then try again. If it still fails, send support your log.".to_string()
+        }
         VpnError::NetworkWorkersStopping => {
             "SwiftTunnel's previous connection is still stopping. Wait a moment and try again. If it stays stuck, close SwiftTunnel completely and reopen it.".to_string()
         }
@@ -273,6 +276,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::DriverNotOpen => "Driver not open",
         VpnError::DriverNotInitialized => "Driver not initialized",
         VpnError::NetworkWorkersStopping => "Previous connection still stopping",
+        VpnError::RecoveryRecordUnavailable => "Recovery file unavailable",
         VpnError::Route(_) => "Route setup failed",
         VpnError::Connection(_) => "Connection failed",
         VpnError::Network(_) => "Network error",

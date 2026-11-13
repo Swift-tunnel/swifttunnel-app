@@ -2848,7 +2848,8 @@ impl VpnConnection {
         blocking_driver_step(|| driver.configure(split_config)).map_err(|e| {
             let _ = driver.close();
             match e {
-                VpnError::NetworkWorkersStopping => VpnError::NetworkWorkersStopping,
+                error
+                @ (VpnError::NetworkWorkersStopping | VpnError::RecoveryRecordUnavailable) => error,
                 other => VpnError::SplitTunnelSetupFailed(format!(
                     "Failed to configure V3 split tunnel: {}",
                     other,

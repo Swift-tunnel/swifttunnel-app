@@ -97,6 +97,9 @@ pub enum VpnError {
     #[error("Previous network workers have not finished stopping")]
     NetworkWorkersStopping,
 
+    #[error("Could not save the network recovery record")]
+    RecoveryRecordUnavailable,
+
     #[error("Connection error: {0}")]
     Connection(String),
 
@@ -148,6 +151,7 @@ impl VpnError {
             Self::SplitTunnelNotAvailable => "driver_unavailable",
             Self::DriverNotOpen | Self::DriverNotInitialized => "driver_not_ready",
             Self::NetworkWorkersStopping => "network_workers_stopping",
+            Self::RecoveryRecordUnavailable => "recovery_record_unavailable",
             Self::Connection(_) => "connection_failed",
             Self::Network(_) => "network_failed",
             Self::Route(_) => "route_failed",

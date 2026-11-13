@@ -4580,6 +4580,19 @@ impl ParallelInterceptor {
         // adapter rebinds that restart this same interceptor instance.
         prepare_worker_start(&self.stop_flag)?;
 
+        let physical_name =
+            Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
+                VpnError::SplitTunnel("Physical adapter name not set".to_string())
+            })?);
+        // Persist recovery before binding, IPv6 changes or worker creation.
+        // A failed write must never leave capture running without its record.
+        super::tunnel_mode_recovery::write_tunnel_mode_marker(physical_name.as_ref()).map_err(
+            |error| {
+                log::error!("Could not save tunnel-mode recovery record before capture: {error}");
+                VpnError::RecoveryRecordUnavailable
+            },
+        )?;
+
         let leaked = LEAKED_THREADS.load(Ordering::Relaxed);
         if leaked > 0 {
             log::warn!(
@@ -4882,18 +4895,6 @@ impl ParallelInterceptor {
         let reader_queue_full_events = Arc::clone(&self.queue_full_events);
         let reader_refresh_now = Arc::clone(&self.refresh_now_flag);
         let reader_refresh_condvar = Arc::clone(&self.refresh_condvar);
-        let physical_name =
-            Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
-                VpnError::SplitTunnel("Physical adapter name not set".to_string())
-            })?);
-
-        // Written BEFORE the reader thread can enter tunnel mode, deleted in
-        // stop() only after a verified all-adapter mode reset. If the process
-        // dies anywhere in between (force-kill, crash, OS shutdown), the
-        // marker survives and startup recovery resets the stale tunnel mode
-        // that would otherwise blackhole all traffic on the adapter.
-        super::tunnel_mode_recovery::write_tunnel_mode_marker(physical_name.as_ref());
-
         let reader_panic_cause_flag = Arc::clone(&self.workers_panic_cause);
         self.reader_handle = Some(thread::spawn(move || {
             // Wrap in catch_unwind so we can distinguish graceful shutdown
