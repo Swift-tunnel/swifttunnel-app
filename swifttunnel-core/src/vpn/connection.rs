@@ -1570,6 +1570,12 @@ impl VpnConnection {
         if prior_was_error {
             self.cleanup().await;
         }
+        if let Err(error) = super::parallel_interceptor::ensure_interceptor_shutdown_complete() {
+            support.fail(error.support_code());
+            self.set_state(ConnectionState::Error(super::user_friendly_error(&error)))
+                .await;
+            return Err(error);
+        }
         self.player_usage = Arc::new(super::player_usage::PlayerUsage::default());
         // The account this session belongs to. Its end-of-session report may
         // only ever be sent with this account's token.
@@ -2841,7 +2847,13 @@ impl VpnConnection {
         support.stage("driver_configure");
         blocking_driver_step(|| driver.configure(split_config)).map_err(|e| {
             let _ = driver.close();
-            VpnError::SplitTunnelSetupFailed(format!("Failed to configure V3 split tunnel: {}", e))
+            match e {
+                VpnError::NetworkWorkersStopping => VpnError::NetworkWorkersStopping,
+                other => VpnError::SplitTunnelSetupFailed(format!(
+                    "Failed to configure V3 split tunnel: {}",
+                    other,
+                )),
+            }
         })?;
 
         let process_performance_policy =

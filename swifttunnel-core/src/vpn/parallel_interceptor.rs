@@ -959,10 +959,12 @@ impl ThroughputStats {
 /// Timeout for thread join operations during stop()
 const THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Process-lifetime counter of threads that we forgot rather than joining.
-/// `start()` warns when this is non-zero so the testbench harness can fail
-/// builds that are leaking interceptor workers.
+/// Historical shutdown timeouts, retained for testbench/diagnostic compatibility.
 static LEAKED_THREADS: AtomicU64 = AtomicU64::new(0);
+// Keep timed-out handles until their real exit. Reusing an interceptor's stop
+// flag while an old reader/refresher/worker survives can revive the old session.
+static STOPPING_THREADS: parking_lot::Mutex<Vec<JoinHandle<()>>> =
+    parking_lot::Mutex::new(Vec::new());
 static READER_DIRECT_RELAY_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_BYPASS: AtomicU64 = AtomicU64::new(0);
@@ -994,8 +996,7 @@ fn log_tunnel_forwarding_drop_sampled(reason: &str, observed_len: usize, require
 
 const V3_NO_INBOUND_WARNING_SECS: u64 = 10;
 
-/// Number of worker threads we had to detach via `mem::forget` because they
-/// did not stop within `THREAD_JOIN_TIMEOUT`.
+/// Number of workers whose joins exceeded THREAD_JOIN_TIMEOUT in this process.
 pub fn leaked_thread_count() -> u64 {
     LEAKED_THREADS.load(Ordering::Relaxed)
 }
@@ -1007,9 +1008,8 @@ pub fn leaked_thread_count() -> u64 {
 /// - If timeout is reached, log a warning and return false (thread still running)
 /// - This prevents stop() from hanging indefinitely if a thread is stuck
 ///
-/// STABILITY FIX: On timeout, we explicitly forget the JoinHandle to detach the thread.
-/// This is safer than letting the handle drop (which would call join and block forever).
-/// The detached thread will be cleaned up when the process exits.
+/// On timeout, retain the handle without waiting further. Replacement capture
+/// remains blocked until that worker's actual exit can be joined.
 fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
     let start = Instant::now();
     let poll_interval = Duration::from_millis(100);
@@ -1033,18 +1033,53 @@ fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
     // Timeout reached - thread is stuck
     let leaked = LEAKED_THREADS.fetch_add(1, Ordering::Relaxed) + 1;
     log::error!(
-        "STABILITY: {} thread did not stop within {:?} - detaching thread to prevent hang (total leaked: {})",
+        "STABILITY: {} thread did not stop within {:?} - tracking its exit before allowing another capture (total shutdown timeouts: {})",
         name,
         THREAD_JOIN_TIMEOUT,
         leaked
     );
 
-    // CRITICAL: Forget the handle to detach the thread instead of blocking on drop
-    // This prevents the app from hanging during shutdown, at the cost of leaking the thread.
-    // The thread will be forcibly terminated when the process exits.
-    std::mem::forget(handle);
+    STOPPING_THREADS.lock().push(handle);
 
     false
+}
+
+pub(crate) fn ensure_interceptor_shutdown_complete() -> VpnResult<()> {
+    let mut stopping = STOPPING_THREADS.lock();
+    for index in (0..stopping.len()).rev() {
+        if stopping[index].is_finished() {
+            let handle = stopping.swap_remove(index);
+            if handle.join().is_err() {
+                log::warn!("A previously stalled network worker exited with a panic");
+            } else {
+                log::info!("A previously stalled network worker finished stopping");
+            }
+        }
+    }
+    if !stopping.is_empty() {
+        log::warn!(
+            "{} previous network worker(s) are still stopping",
+            stopping.len()
+        );
+        return Err(VpnError::NetworkWorkersStopping);
+    }
+    Ok(())
+}
+
+fn prepare_worker_start(stop_flag: &AtomicBool) -> VpnResult<()> {
+    ensure_interceptor_shutdown_complete()?;
+    stop_flag.store(false, Ordering::Release);
+    Ok(())
+}
+
+fn finish_tunnel_mode_cleanup(modes_clean: bool, clear_marker: impl FnOnce()) -> bool {
+    // A still-running reader can finish a delayed driver call after the mode
+    // snapshot. That snapshot alone is not proof that recovery is unnecessary.
+    if !modes_clean || ensure_interceptor_shutdown_complete().is_err() {
+        return false;
+    }
+    clear_marker();
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -4541,10 +4576,14 @@ impl ParallelInterceptor {
             .physical_adapter_idx
             .ok_or_else(|| VpnError::SplitTunnel("Physical adapter not configured".to_string()))?;
 
+        // Check before any binding/IPv6 changes or stop-flag reset, including
+        // adapter rebinds that restart this same interceptor instance.
+        prepare_worker_start(&self.stop_flag)?;
+
         let leaked = LEAKED_THREADS.load(Ordering::Relaxed);
         if leaked > 0 {
             log::warn!(
-                "Starting parallel interceptor with {} leaked worker thread(s) from a previous session — investigate before shipping",
+                "Previous network shutdowns exceeded their deadline {} time(s); all tracked workers have now exited",
                 leaked
             );
         }
@@ -4615,7 +4654,6 @@ impl ParallelInterceptor {
             }
         }
 
-        self.stop_flag.store(false, Ordering::Release);
         // Reset the panic cause alongside stop_flag. `workers_panic_cause` is
         // written by the reader/inbound-receiver threads on panic or budget
         // exhaustion, and is never cleared on its own. Without this reset, a
@@ -5060,11 +5098,12 @@ impl ParallelInterceptor {
         // start() is deleted only when every adapter mode reads back as
         // default; otherwise it persists so startup recovery retries.
         let report = super::split_tunnel::SplitTunnelDriver::cleanup_stale_state_checked();
-        if report.fully_clean() {
-            super::tunnel_mode_recovery::delete_tunnel_mode_marker();
-        } else {
+        if !finish_tunnel_mode_cleanup(
+            report.fully_clean(),
+            super::tunnel_mode_recovery::delete_tunnel_mode_marker,
+        ) {
             log::error!(
-                "Adapter mode reset could not be verified on stop (open error: {:?}, errors: {:?}); \
+                "Adapter reset or worker exit could not be verified on stop (open error: {:?}, errors: {:?}); \
                  keeping tunnel-mode marker for startup recovery",
                 report.driver_open_error,
                 report.errors
@@ -5248,11 +5287,15 @@ impl ParallelInterceptor {
         }
 
         if let Err(e) = self.start() {
-            // Restart after a route change failed to re-acquire the adapter —
-            // driver-handle-loss class.
+            // Preserve a real reader-handle loss, but do not label a stalled
+            // refresher/worker as a missing or broken driver.
             record_worker_panic_cause(
                 &self.workers_panic_cause,
-                WorkerPanicCause::ReaderHandleLost,
+                if matches!(e, VpnError::NetworkWorkersStopping) {
+                    WorkerPanicCause::InternalThreadFailed
+                } else {
+                    WorkerPanicCause::ReaderHandleLost
+                },
             );
             return Err(e);
         }
@@ -9785,6 +9828,83 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn restart_cannot_revive_a_worker_that_has_not_finished_stopping() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::{Duration, Instant};
+        let stop = Arc::new(AtomicBool::new(true));
+        let previous_stop = stop.clone();
+        let (ready, started) = mpsc::channel();
+        let (release, stalled) = mpsc::channel();
+        let (observed, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            let _ = stalled.recv();
+            observed
+                .send(previous_stop.load(Ordering::Acquire))
+                .unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(!super::join_with_timeout(worker, "Stalled-fixture"));
+        let (release_second, stalled_second) = mpsc::channel();
+        let (observed_second, second_result) = mpsc::channel();
+        let second_stop = stop.clone();
+        // Represent another timed-out worker without spending a second
+        // three-second join budget in this regression.
+        super::STOPPING_THREADS
+            .lock()
+            .push(std::thread::spawn(move || {
+                let _ = stalled_second.recv();
+                let _ = observed_second.send(second_stop.load(Ordering::Acquire));
+            }));
+        let restart = super::prepare_worker_start(&stop);
+        let still_stopping = stop.load(Ordering::Acquire);
+        let marker_cleared = std::cell::Cell::new(false);
+        assert!(!super::finish_tunnel_mode_cleanup(true, || marker_cleared.set(true)));
+        assert!(
+            !marker_cleared.get(),
+            "a mode snapshot erased recovery while a worker could still change it"
+        );
+        release.send(()).unwrap();
+        let old_worker_saw_stop = result.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(
+            restart.is_err(),
+            "a replacement was admitted while its predecessor was still running"
+        );
+        assert!(
+            still_stopping && old_worker_saw_stop,
+            "restart revived the old session's worker"
+        );
+        assert!(
+            super::prepare_worker_start(&stop).is_err(),
+            "one finished worker hid another still stopping"
+        );
+        release_second.send(()).unwrap();
+        assert!(second_result.recv_timeout(Duration::from_secs(3)).unwrap());
+        // Once its real exit is observed, retry must work without requiring
+        // an app restart or keeping a permanent leaked-thread lockout.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if super::prepare_worker_start(&stop).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "finished worker stranded future connections"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!stop.load(Ordering::Acquire));
+        assert!(!super::finish_tunnel_mode_cleanup(false, || marker_cleared.set(true)));
+        assert!(!marker_cleared.get());
+        assert!(super::finish_tunnel_mode_cleanup(true, || marker_cleared.set(true)));
+        assert!(marker_cleared.get());
+    }
+
     #[test]
     fn reader_wakes_quickly_only_while_cloud_packets_are_held() {
         assert_eq!(super::reader_wait_timeout_ms(false), 100);

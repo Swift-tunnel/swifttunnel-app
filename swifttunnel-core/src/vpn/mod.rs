@@ -94,6 +94,9 @@ pub enum VpnError {
     #[error("Split tunnel driver not initialized - call initialize() first")]
     DriverNotInitialized,
 
+    #[error("Previous network workers have not finished stopping")]
+    NetworkWorkersStopping,
+
     #[error("Connection error: {0}")]
     Connection(String),
 
@@ -144,6 +147,7 @@ impl VpnError {
             Self::SplitTunnel(_) | Self::SplitTunnelSetupFailed(_) => "split_tunnel_failed",
             Self::SplitTunnelNotAvailable => "driver_unavailable",
             Self::DriverNotOpen | Self::DriverNotInitialized => "driver_not_ready",
+            Self::NetworkWorkersStopping => "network_workers_stopping",
             Self::Connection(_) => "connection_failed",
             Self::Network(_) => "network_failed",
             Self::Route(_) => "route_failed",

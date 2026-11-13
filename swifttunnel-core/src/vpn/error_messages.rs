@@ -12,6 +12,9 @@ use super::VpnError;
 /// what went wrong and how to fix it.
 pub fn user_friendly_error(error: &VpnError) -> String {
     match error {
+        VpnError::NetworkWorkersStopping => {
+            "SwiftTunnel's previous connection is still stopping. Wait a moment and try again. If it stays stuck, close SwiftTunnel completely and reopen it.".to_string()
+        }
         // Split tunnel driver issues
         VpnError::SplitTunnelNotAvailable => {
             "SwiftTunnel could not start its Windows Packet Filter driver.\n\nSwiftTunnel will try to repair this automatically. If this message returns, restart Windows once and contact support with your log file.".to_string()
@@ -269,6 +272,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::SplitTunnelSetupFailed(_) => "Split tunnel failed",
         VpnError::DriverNotOpen => "Driver not open",
         VpnError::DriverNotInitialized => "Driver not initialized",
+        VpnError::NetworkWorkersStopping => "Previous connection still stopping",
         VpnError::Route(_) => "Route setup failed",
         VpnError::Connection(_) => "Connection failed",
         VpnError::Network(_) => "Network error",
@@ -287,6 +291,18 @@ pub fn short_error(error: &VpnError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_worker_shutdown_does_not_request_driver_reinstallation() {
+        let message = user_friendly_error(&VpnError::NetworkWorkersStopping);
+        assert!(message.contains("still stopping"));
+        assert!(message.contains("Wait a moment"));
+        assert!(!message.to_lowercase().contains("driver"));
+        assert_eq!(
+            VpnError::NetworkWorkersStopping.support_code(),
+            "network_workers_stopping"
+        );
+    }
 
     #[test]
     fn socket_permission_errors_do_not_suggest_driver_repair_or_signing_out() {
