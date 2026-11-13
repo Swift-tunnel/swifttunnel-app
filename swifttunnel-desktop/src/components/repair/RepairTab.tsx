@@ -440,7 +440,7 @@ export function RepairTab() {
             )}
             <details className="mt-3 text-[12px]">
               <summary className="cursor-pointer select-none text-text-muted">Technical details</summary>
-              {lastRun.interrupted && <p className="mt-2 break-words text-[11px] text-status-error">{lastRun.interrupted}</p>}
+              {lastRun.interrupted && <p data-no-translate className="mt-2 break-words text-[11px] text-status-error">{lastRun.interrupted}</p>}
               <div className="mt-2 overflow-hidden rounded-[10px] border border-[color:var(--color-border-subtle)] divide-y divide-[color:var(--color-border-subtle)]">
                 {lastRun.items.map((item) => (
                   <div key={item.id} className="flex items-start gap-3 px-3.5 py-2.5">
@@ -452,7 +452,7 @@ export function RepairTab() {
                           {item.entries.map((entry, index) => (
                             <div key={index} className="break-words">
                               <dt className="inline font-medium">{entry.label}: </dt>
-                              <dd className="inline">{entry.value}</dd>
+                              <dd data-no-translate className="inline">{entry.value}</dd>
                             </div>
                           ))}
                         </dl>
@@ -550,6 +550,7 @@ export function RepairTab() {
                     >
                       <span className="shrink-0 text-text-dimmed">{entry.label}</span>
                       <span
+                        data-no-translate
                         className={`truncate text-right ${entry.mono ? "font-mono" : ""}`}
                         style={{
                           color:

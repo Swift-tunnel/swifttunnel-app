@@ -130,7 +130,9 @@ function persistCache(lang: string) {
 // SwiftTunnel brand name, version tags (v2.5.22), and bare URLs/handles.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VERSION_RE = /^v?\d+(\.\d+)+$/i;
-const URL_RE = /^(https?:\/\/|www\.)\S+$/i;
+// Errors can embed redirect URLs with signed query strings. Keep the entire
+// message local, not just text nodes consisting of a URL on its own.
+const URL_RE = /(?:https?:\/\/|www\.)\S+/i;
 // Status/error messages may include the player's account or Windows username.
 // These are local data, even when embedded in otherwise translatable copy.
 const LOCAL_PATH_RE = /(?:\b[a-z]:[\\/]|\\\\[^\\\s]+\\)/i;
