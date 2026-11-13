@@ -1215,6 +1215,13 @@ fn clear_bootstrap_ip_sets() {
         Ok(mut direct_only) => direct_only.clear(),
         Err(e) => warn!("Failed to clear direct-only Roblox bootstrap IPs: {e}"),
     }
+    // A future relay fallback merges this snapshot into its fresh answers.
+    // Keeping it after teardown can reintroduce an earlier session's pins
+    // when the new public lookup fails.
+    match last_applied_overrides().write() {
+        Ok(mut last) => last.clear(),
+        Err(e) => warn!("Failed to clear the previous Roblox hosts snapshot: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -1390,6 +1397,28 @@ fn flush_dns_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ended_dns_session_cannot_supply_stale_pins_to_the_next_relay_fallback() {
+        let _lock = BOOTSTRAP_IP_TEST_LOCK.lock().unwrap();
+        clear_bootstrap_ip_sets();
+        *last_applied_overrides().write().unwrap() = vec![HostOverride {
+            ip: Ipv4Addr::new(128, 116, 47, 3),
+            domain: "games.roblox.com".into(),
+        }];
+        enter_country_ban_routing();
+        set_dpi_evasion_confirmed(true);
+        clear_bootstrap_ip_sets();
+        let cached = last_applied_overrides().read().unwrap().len();
+        // Clear fixture data even on the old implementation's failing run.
+        last_applied_overrides().write().unwrap().clear();
+        assert!(!is_country_ban_bypass_routing_active());
+        assert!(!is_dpi_evasion_confirmed());
+        assert_eq!(
+            cached, 0,
+            "the next relay DNS merge can resurrect the previous session's pins"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn cancelled_hosts_write_keeps_connection_ownership_through_state_publication() {
