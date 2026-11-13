@@ -36,6 +36,34 @@ const DRIVER_MSI_TIMEOUT: Duration = Duration::from_secs(600);
 const SERVICE_NAME: &str = "NDISRD";
 const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
 
+fn driver_service_presence_error(error: windows::core::Error) -> Result<bool, String> {
+    use windows::Win32::Foundation::{
+        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
+    };
+    if error.code() == ERROR_SERVICE_DOES_NOT_EXIST.to_hresult() {
+        Ok(false)
+    } else if error.code() == ERROR_SERVICE_MARKED_FOR_DELETE.to_hresult() {
+        // Pending deletion is positive installation evidence, not absence.
+        Ok(true)
+    } else {
+        Err(format!(
+            "Could not check the NDISRD driver service: {error}"
+        ))
+    }
+}
+
+fn combine_driver_install_checks(
+    service: Result<bool, String>,
+    driver_store: Result<bool, String>,
+) -> Result<bool, String> {
+    match (service, driver_store) {
+        (Ok(true), _) | (_, Ok(true)) => Ok(true),
+        (Ok(false), Ok(false)) => Ok(false),
+        (Err(service), Err(store)) => Err(format!("{service}; {store}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
 fn driver_service_open_failure(error: windows::core::Error) -> Result<(), String> {
     use windows::Win32::Foundation::{
         ERROR_ACCESS_DENIED, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
@@ -426,14 +454,13 @@ impl SplitTunnelDriver {
         ParallelInterceptor::check_driver_available()
     }
 
-    fn driver_service_exists() -> bool {
+    fn driver_service_exists_checked() -> Result<bool, String> {
         use windows::Win32::System::Services::*;
         use windows::core::PCWSTR;
 
         unsafe {
-            let Ok(scm) = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) else {
-                return false;
-            };
+            let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
+                .map_err(|error| format!("Could not check Windows driver services: {error}"))?;
 
             let service_name_wide: Vec<u16> = SERVICE_NAME
                 .encode_utf16()
@@ -444,24 +471,33 @@ impl SplitTunnelDriver {
                 PCWSTR(service_name_wide.as_ptr()),
                 SERVICE_QUERY_STATUS,
             );
-            let exists = service.is_ok();
-            if let Ok(service) = service {
-                let _ = CloseServiceHandle(service);
-            }
+            let exists = match service {
+                Ok(service) => {
+                    let _ = CloseServiceHandle(service);
+                    Ok(true)
+                }
+                Err(error) => driver_service_presence_error(error),
+            };
             let _ = CloseServiceHandle(scm);
             exists
         }
     }
 
     pub fn driver_install_evidence() -> bool {
-        if Self::get_driver_path().is_some() || Self::driver_service_exists() {
-            return true;
-        }
+        Self::driver_install_evidence_checked().unwrap_or(false)
+    }
 
-        matches!(
-            super::winpkfilter::find_installed_driver_published_name(),
-            Ok(Some(_))
-        )
+    pub(crate) fn driver_install_evidence_checked() -> Result<bool, String> {
+        if Self::get_driver_path().is_some() {
+            return Ok(true);
+        }
+        let service = Self::driver_service_exists_checked();
+        if service == Ok(true) {
+            return Ok(true);
+        }
+        let driver_store = super::winpkfilter::find_installed_driver_published_name()
+            .map(|package| package.is_some());
+        combine_driver_install_checks(service, driver_store)
     }
 
     /// Strong health check for the split tunnel driver.
@@ -2248,6 +2284,51 @@ impl Drop for SplitTunnelDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_evidence_keeps_probe_failures_distinct_from_absence() {
+        assert_eq!(
+            combine_driver_install_checks(Ok(false), Ok(false)),
+            Ok(false)
+        );
+        assert_eq!(
+            combine_driver_install_checks(Ok(true), Err("store unavailable".into())),
+            Ok(true)
+        );
+        assert_eq!(
+            combine_driver_install_checks(Err("service access denied".into()), Ok(true)),
+            Ok(true)
+        );
+        for (service, store) in [
+            (Ok(false), Err("store timed out".into())),
+            (Err("service access denied".into()), Ok(false)),
+            (
+                Err("service unavailable".into()),
+                Err("store timed out".into()),
+            ),
+        ] {
+            assert!(combine_driver_install_checks(service, store).is_err());
+        }
+    }
+
+    #[test]
+    fn service_access_denial_is_unknown_and_pending_deletion_is_present() {
+        use windows::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
+        };
+        let error = |code: windows::Win32::Foundation::WIN32_ERROR| {
+            windows::core::Error::from(code.to_hresult())
+        };
+        assert_eq!(
+            driver_service_presence_error(error(ERROR_SERVICE_DOES_NOT_EXIST)),
+            Ok(false)
+        );
+        assert_eq!(
+            driver_service_presence_error(error(ERROR_SERVICE_MARKED_FOR_DELETE)),
+            Ok(true)
+        );
+        assert!(driver_service_presence_error(error(ERROR_ACCESS_DENIED)).is_err());
+    }
 
     #[test]
     fn only_hidden_bound_adapters_skip_the_startup_cleanup() {

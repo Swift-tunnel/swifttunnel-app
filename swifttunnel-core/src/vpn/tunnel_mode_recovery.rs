@@ -121,8 +121,8 @@ pub enum TunnelModeRecoveryPlan {
     /// not loaded, so tunnel mode cannot be active. The marker is stale —
     /// clear it without attempting any repair.
     ClearStaleMarker,
-    /// No marker: single best-effort sweep, matching the historical behavior
-    /// and covering sessions from builds that predate the marker.
+    /// No marker or unknown installation evidence: one native sweep without
+    /// unbinding escalation. Preserve any marker so a later launch can retry.
     BestEffortSweep,
 }
 
@@ -134,6 +134,26 @@ pub fn plan_tunnel_mode_recovery(
         (true, true) => TunnelModeRecoveryPlan::RepairWithRetries,
         (true, false) => TunnelModeRecoveryPlan::ClearStaleMarker,
         (false, _) => TunnelModeRecoveryPlan::BestEffortSweep,
+    }
+}
+
+fn plan_with_checked_install(
+    marker_present: bool,
+    inspect: impl FnOnce() -> Result<bool, String>,
+) -> TunnelModeRecoveryPlan {
+    if !marker_present {
+        // Installation metadata cannot change the no-marker plan. Avoid its
+        // service/driver-store discovery entirely on ordinary startup.
+        return TunnelModeRecoveryPlan::BestEffortSweep;
+    }
+    match inspect() {
+        Ok(installed) => plan_tunnel_mode_recovery(true, installed),
+        Err(error) => {
+            log::warn!(
+                "Driver installation could not be verified; keeping the tunnel recovery record: {error}"
+            );
+            TunnelModeRecoveryPlan::BestEffortSweep
+        }
     }
 }
 
@@ -179,7 +199,8 @@ where
             RecoveryOutcome {
                 attempts: 1,
                 cleaned,
-                // No marker exists in this plan; nothing to delete either way.
+                // Unknown installation evidence may have selected this plan
+                // with a marker present. It must stay available for retry.
                 delete_marker: false,
             }
         }
@@ -212,8 +233,10 @@ pub fn recover_tunnel_mode_on_startup() {
     use super::split_tunnel::SplitTunnelDriver;
 
     let marker = read_tunnel_mode_marker();
-    let driver_installed = SplitTunnelDriver::driver_install_evidence();
-    let plan = plan_tunnel_mode_recovery(marker.is_some(), driver_installed);
+    let plan = plan_with_checked_install(
+        marker.is_some(),
+        SplitTunnelDriver::driver_install_evidence_checked,
+    );
 
     if let Some(marker) = &marker {
         log::warn!(
@@ -287,9 +310,8 @@ pub fn recover_tunnel_mode_on_startup() {
             );
         }
         TunnelModeRecoveryPlan::BestEffortSweep => {
-            // No marker: keep the historical quiet behavior (fresh installs
-            // legitimately have no driver yet). Details were already logged by
-            // cleanup_stale_state_checked.
+            // No escalation without reliable install evidence. Native reset
+            // diagnostics were already logged by cleanup_stale_state_checked.
         }
     }
 
@@ -301,6 +323,41 @@ pub fn recover_tunnel_mode_on_startup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_startup_does_not_query_unused_installation_metadata() {
+        assert_eq!(
+            plan_with_checked_install(false, || panic!("no marker needs no installation query")),
+            TunnelModeRecoveryPlan::BestEffortSweep
+        );
+    }
+
+    #[test]
+    fn failed_installation_checks_preserve_recovery_without_unbinding_escalation() {
+        let plan = plan_with_checked_install(true, || Err("fixture driver-store timeout".into()));
+        assert_eq!(plan, TunnelModeRecoveryPlan::BestEffortSweep);
+        for clean in [false, true] {
+            let mut attempts = 0;
+            let result = execute_recovery_plan(
+                plan,
+                || {
+                    attempts += 1;
+                    clean
+                },
+                |_| panic!("unknown install evidence must not escalate"),
+            );
+            assert_eq!(attempts, 1);
+            assert!(!result.delete_marker);
+        }
+        assert_eq!(
+            plan_with_checked_install(true, || Ok(false)),
+            TunnelModeRecoveryPlan::ClearStaleMarker
+        );
+        assert_eq!(
+            plan_with_checked_install(true, || Ok(true)),
+            TunnelModeRecoveryPlan::RepairWithRetries
+        );
+    }
 
     #[test]
     fn marker_creation_failure_is_reported_and_can_be_retried() {
