@@ -109,10 +109,9 @@ const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
 ///   route-change restart failed, or the reader thread had to be abandoned on
 ///   a join timeout). This is the driver-handle-loss class; the UI should
 ///   offer the reinstall-driver CTA.
-/// - `InternalThreadFailed` — the packet reader thread or the V3 inbound
-///   receiver thread panicked, or the inbound receiver returned a fatal error.
-///   The driver is fine; this is an internal bug, so the UI should offer a
-///   plain reconnect rather than a misleading "reinstall driver" prompt.
+/// - `InternalThreadFailed`: a reader, packet worker or inbound receiver
+///   failed unexpectedly. This alone does not prove the driver is missing;
+///   the UI should offer a reconnect rather than an automatic reinstall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerPanicCause {
     ReaderHandleLost,
@@ -141,6 +140,25 @@ impl WorkerPanicCause {
 /// must not clobber the specific cause the failing thread already reported.
 fn record_worker_panic_cause(flag: &AtomicU8, cause: WorkerPanicCause) {
     let _ = flag.compare_exchange(0, cause.as_u8(), Ordering::AcqRel, Ordering::Acquire);
+}
+
+fn supervise_network_worker(
+    name: &str,
+    stop_flag: &AtomicBool,
+    failure_flag: &AtomicU8,
+    run: impl FnOnce() -> Result<(), String>,
+) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+    match outcome {
+        Ok(Ok(())) if stop_flag.load(Ordering::Acquire) => return,
+        Ok(Ok(())) => log::error!("{name} exited without a stop request"),
+        Ok(Err(error)) => log::error!("{name} failed: {error}"),
+        Err(_) => log::error!("{name} panicked; networking recovery is required"),
+    }
+    // A live reader can otherwise keep feeding a dead worker's queue while
+    // the UI still reports Connected. Use the same recovery as reader/inbound
+    // failures, and preserve any more-specific cause already recorded.
+    record_worker_panic_cause(failure_flag, WorkerPanicCause::InternalThreadFailed);
 }
 
 /// TCP owner-table refresh cadence while API tunneling is active and a tunnel
@@ -4689,15 +4707,25 @@ impl ParallelInterceptor {
         let refresh_now = Arc::clone(&self.refresh_now_flag);
         let refresh_condvar = Arc::clone(&self.refresh_condvar);
         let refresher_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
+        let refresher_failure = Arc::clone(&self.workers_panic_cause);
         let (initial_refresh_tx, initial_refresh_rx) = crossbeam_channel::bounded::<()>(1);
         self.refresher_handle = Some(thread::spawn(move || {
-            run_cache_refresher(
-                refresher_cache,
-                refresher_stop,
-                refresh_now,
-                refresh_condvar,
-                refresher_api_tunneling,
-                Some(initial_refresh_tx),
+            let supervised_stop = Arc::clone(&refresher_stop);
+            supervise_network_worker(
+                "Process cache refresher",
+                &supervised_stop,
+                &refresher_failure,
+                move || {
+                    run_cache_refresher(
+                        refresher_cache,
+                        refresher_stop,
+                        refresh_now,
+                        refresh_condvar,
+                        refresher_api_tunneling,
+                        Some(initial_refresh_tx),
+                    );
+                    Ok(())
+                },
             );
         }));
 
@@ -4722,21 +4750,28 @@ impl ParallelInterceptor {
             let detected_game_servers = Arc::clone(&self.detected_game_servers);
             let auto_router = self.auto_router.clone();
             let queue_overflow_mode = Arc::clone(&self.queue_overflow_mode);
+            let failure_flag = Arc::clone(&self.workers_panic_cause);
 
             let handle = thread::spawn(move || {
-                // Set CPU affinity for this worker
-                set_thread_affinity(worker_id);
-
-                run_packet_worker(
-                    worker_id,
-                    receiver,
-                    stats,
-                    throughput,
-                    stop_flag,
-                    relay_ctx,
-                    detected_game_servers,
-                    auto_router,
-                    queue_overflow_mode,
+                let supervised_stop = Arc::clone(&stop_flag);
+                supervise_network_worker(
+                    &format!("Packet worker {worker_id}"),
+                    &supervised_stop,
+                    &failure_flag,
+                    move || {
+                        set_thread_affinity(worker_id);
+                        run_packet_worker(
+                            worker_id,
+                            receiver,
+                            stats,
+                            throughput,
+                            stop_flag,
+                            relay_ctx,
+                            detected_game_servers,
+                            auto_router,
+                            queue_overflow_mode,
+                        )
+                    },
                 );
             });
 
@@ -6515,7 +6550,7 @@ fn run_packet_worker(
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
-) {
+) -> Result<(), String> {
     log::info!("Worker {} started", worker_id);
 
     // Diagnostic logging
@@ -6529,22 +6564,13 @@ fn run_packet_worker(
     let mut cpu_at_last_sample = thread_cpu_time_100ns().unwrap_or(0);
 
     // Open driver for this worker (each worker needs own handle for sending bypass packets)
-    let driver = match ndisapi::Ndisapi::new("NDISRD") {
-        Ok(d) => d,
-        Err(e) => {
-            log::error!("Worker {} failed to open driver: {}", worker_id, e);
-            return;
-        }
-    };
+    let driver = ndisapi::Ndisapi::new("NDISRD")
+        .map_err(|error| format!("Could not open the packet worker's driver handle: {error}"))?;
 
     // Get adapters to find physical adapter handle
-    let adapters = match driver.get_tcpip_bound_adapters_info() {
-        Ok(a) => a,
-        Err(e) => {
-            log::error!("Worker {} failed to get adapters: {}", worker_id, e);
-            return;
-        }
-    };
+    let adapters = driver
+        .get_tcpip_bound_adapters_info()
+        .map_err(|error| format!("Could not read the packet worker's adapters: {error}"))?;
 
     if relay_ctx.is_some() {
         log::info!("Worker {}: V3 relay context AVAILABLE", worker_id);
@@ -6838,6 +6864,7 @@ fn run_packet_worker(
         stats.packets_bypassed.load(Ordering::Relaxed),
         stats.bytes_bypassed.load(Ordering::Relaxed)
     );
+    Ok(())
 }
 
 /// Send a bypass packet to the physical adapter
@@ -9829,6 +9856,58 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packet_worker_failures_reach_the_connection_monitor() {
+        use super::{AtomicBool, AtomicU8, Ordering, WorkerPanicCause, supervise_network_worker};
+        for outcome in 0..3 {
+            let failed = Arc::new(AtomicU8::new(0));
+            let reported = failed.clone();
+            // Exercise the actual thread wrapper, without opening the network
+            // driver: startup error, panic and an unexpected normal exit.
+            std::thread::spawn(move || {
+                supervise_network_worker(
+                    "Packet worker fixture",
+                    &AtomicBool::new(false),
+                    &reported,
+                    || match outcome {
+                        0 => Err("fixture driver handle unavailable".into()),
+                        1 => panic!("fixture worker panic"),
+                        _ => Ok(()),
+                    },
+                );
+            })
+            .join()
+            .unwrap();
+            assert_eq!(
+                WorkerPanicCause::from_u8(failed.load(Ordering::Acquire)),
+                Some(WorkerPanicCause::InternalThreadFailed)
+            );
+        }
+    }
+
+    #[test]
+    fn requested_worker_stop_is_clean_and_prior_failure_is_preserved() {
+        use super::{AtomicBool, AtomicU8, Ordering, WorkerPanicCause, supervise_network_worker};
+        let stop = AtomicBool::new(false);
+        let failure = AtomicU8::new(0);
+        supervise_network_worker("Packet worker fixture", &stop, &failure, || {
+            stop.store(true, Ordering::Release);
+            Ok(())
+        });
+        assert_eq!(failure.load(Ordering::Acquire), 0);
+        failure.store(
+            WorkerPanicCause::ReaderHandleLost.as_u8(),
+            Ordering::Release,
+        );
+        supervise_network_worker("Refresher fixture", &stop, &failure, || {
+            Err("secondary failure".into())
+        });
+        assert_eq!(
+            WorkerPanicCause::from_u8(failure.load(Ordering::Acquire)),
+            Some(WorkerPanicCause::ReaderHandleLost)
+        );
+    }
+
     #[test]
     fn restart_cannot_revive_a_worker_that_has_not_finished_stopping() {
         use std::sync::{
