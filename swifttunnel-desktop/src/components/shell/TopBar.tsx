@@ -162,6 +162,8 @@ export function TopBar() {
 
         {isConnected && ping !== null && (
           <div
+            title="Ping to the SwiftTunnel relay"
+            aria-label={`Relay ping: ${ping} ms`}
             className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
             style={{
               backgroundColor: "var(--color-bg-base)",

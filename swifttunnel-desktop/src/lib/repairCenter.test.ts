@@ -178,6 +178,36 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
 }
 
 describe("repair center logic", () => {
+  it("identifies a blocked relay-list request without blaming latency or changing Windows", async () => {
+    const detail = "tcp connect error: forbidden by its access permissions. (os error 10013)";
+    const deps = makeDeps({ serverRefresh: vi.fn().mockRejectedValue(new Error(detail)) });
+    const report = await runRepairIssue("relay", deps, { settings: DEFAULT_SETTINGS });
+    expect(report.status).toBe("failed");
+    expect(report.summary).toBe("Couldn't download the relay list.");
+    expect(report.nextStep).toContain("other VPN");
+    expect(report.entries).toContainEqual({ label: "Error", value: detail, tone: "bad" });
+    expect(deps.serverGetLatencies).not.toHaveBeenCalled();
+    expect(deps.systemReinstallDriver).not.toHaveBeenCalled();
+    expect(deps.systemRepairWindowsFirewall).not.toHaveBeenCalled();
+    expect(report.changed).toBe(false);
+  });
+
+  it("keeps other relay-list failures distinct from socket denial", async () => {
+    const deps = makeDeps({ serverRefresh: vi.fn().mockRejectedValue(new Error("HTTP 503")) });
+    const report = await runRepairIssue("relay", deps, { settings: DEFAULT_SETTINGS });
+    expect(report.status).toBe("failed");
+    expect(report.summary).toBe("Couldn't download the relay list.");
+    expect(report.nextStep).not.toContain("other VPN");
+    expect(report.entries[0].value).toBe("HTTP 503");
+  });
+
+  it("does not call a missing ping a disconnected tunnel", async () => {
+    const report = await runRepairIssue("relay", makeDeps(), { settings: DEFAULT_SETTINGS });
+    expect(report.entries).toContainEqual({
+      label: "Current relay ping", value: "unavailable", mono: true,
+    });
+  });
+
   it("reports a failed Roblox reset instead of claiming it was fixed", async () => {
     const deps = makeDeps({
       boostResetRobloxSettings: vi.fn().mockRejectedValue(new Error("Could not restore settings backup")),

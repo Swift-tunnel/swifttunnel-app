@@ -81,7 +81,9 @@ pub fn user_friendly_error(error: &VpnError) -> String {
         // Network issues
         VpnError::Network(msg) => {
             let lower = msg.to_lowercase();
-            if lower.contains("timeout") || lower.contains("timed out") {
+            if socket_access_denied(&lower) {
+                socket_access_guidance()
+            } else if lower.contains("timeout") || lower.contains("timed out") {
                 "Connection timed out.\n\nPlease check your internet connection and try again.".to_string()
             } else if lower.contains("dns") || lower.contains("resolve") {
                 "DNS lookup failed.\n\nPlease check your internet connection.".to_string()
@@ -92,7 +94,9 @@ pub fn user_friendly_error(error: &VpnError) -> String {
 
         // Config issues
         VpnError::ConfigFetch(msg) => {
-            if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("unauthorized") {
+            if socket_access_denied(&msg.to_ascii_lowercase()) {
+                socket_access_guidance()
+            } else if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("unauthorized") {
                 "Session expired.\n\nPlease sign out and sign in again.".to_string()
             } else if msg.contains("404") || msg.contains("Not Found") {
                 "Server not found.\n\nThe selected region may be temporarily unavailable.".to_string()
@@ -142,6 +146,14 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             "SwiftTunnel hit a system error.\n\nPlease try again. If it keeps happening, open the Repair tab and run a repair.".to_string()
         }
     }
+}
+
+fn socket_access_denied(lower: &str) -> bool {
+    lower.contains("os error 10013)") || lower.contains("wsaeacces")
+}
+
+fn socket_access_guidance() -> String {
+    "Windows blocked SwiftTunnel from opening a network connection.\n\nClose any other VPN and try again. If it still fails, check whether your firewall or security software is blocking SwiftTunnel, then send support your log.".to_string()
 }
 
 /// Guidance after an explicit driver reinstall. Both clients can use this
@@ -275,6 +287,24 @@ pub fn short_error(error: &VpnError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_permission_errors_do_not_suggest_driver_repair_or_signing_out() {
+        let diagnostic = "https://example.test/401: tcp connect error: An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)";
+        for error in [
+            VpnError::Network(diagnostic.into()),
+            VpnError::ConfigFetch(diagnostic.into()),
+            VpnError::Network("WSAEACCES".into()),
+        ] {
+            let message = user_friendly_error(&error);
+            assert!(message.contains("Windows blocked"));
+            assert!(message.contains("other VPN"));
+            assert!(!message.contains("repair"));
+            assert!(!message.contains("sign out"));
+        }
+        assert!(!socket_access_denied("os error 100130)"));
+        assert!(!socket_access_denied("http 403 forbidden"));
+    }
 
     #[test]
     fn reboot_guidance_uses_installation_markers_instead_of_reboot_history() {

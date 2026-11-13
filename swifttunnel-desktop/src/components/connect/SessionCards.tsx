@@ -149,11 +149,14 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
           {paused ? "Start Roblox to collect ping statistics." : "Ping stats show up here after the first few readings."}
         </p>
       ) : (
-        <div className={`mt-auto grid grid-cols-4 gap-3 border-t pt-4 ${paused ? "opacity-50" : ""}`} aria-label={paused ? "Paused ping statistics" : "Session ping statistics"} style={{ borderColor: "var(--color-border-subtle)" }}>
-          <Stat label="Lowest ping" value={stats.lowest} unit="ms" />
-          <Stat label="Average ping" value={avg} unit="ms" />
-          <Stat label="Jitter" value={jit ?? "Measuring"} unit={jit !== null ? "ms" : undefined} />
-          <Stat label="Readings" value={stats.samples} />
+        <div className={`mt-auto border-t pt-4 ${paused ? "opacity-50" : ""}`} aria-label={paused ? "Paused relay ping statistics" : "Relay ping statistics"} style={{ borderColor: "var(--color-border-subtle)" }}>
+          <p className="mb-3 text-[12px] text-text-muted">Relay ping</p>
+          <div className="grid grid-cols-4 gap-3">
+            <Stat label="Lowest" value={stats.lowest} unit="ms" />
+            <Stat label="Average" value={avg} unit="ms" />
+            <Stat label="Jitter" value={jit ?? "Measuring"} unit={jit !== null ? "ms" : undefined} />
+            <Stat label="Readings" value={stats.samples} />
+          </div>
         </div>
       )}
     </div>

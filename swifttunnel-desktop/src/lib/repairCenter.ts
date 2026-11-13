@@ -1009,7 +1009,18 @@ async function repairStartupRegistration(
 }
 
 async function checkRelay(deps: RepairCenterDeps): Promise<RepairReport> {
-  await deps.serverRefresh();
+  try {
+    await deps.serverRefresh();
+  } catch (error) {
+    const detail = formatErrorMessage(error);
+    const socketDenied = /os error 10013\)|wsaeacces/i.test(detail);
+    return {
+      ...errorReport(deps, "Couldn't download the relay list.", detail),
+      nextStep: socketDenied
+        ? "Close any other VPN and retry. If it still fails, check whether your firewall or security software is blocking SwiftTunnel, then send support this result and your log."
+        : "Check your internet connection and retry. If it still fails, send support this result and your log.",
+    };
+  }
   const [latencies, ping] = await Promise.all([
     deps.serverGetLatencies(),
     deps.vpnGetPing().catch(() => null),
@@ -1031,8 +1042,8 @@ async function checkRelay(deps: RepairCenterDeps): Promise<RepairReport> {
     ranAt: deps.now(),
     entries: [
       {
-        label: "Current ping",
-        value: ping === null ? "not connected" : `${ping} ms`,
+        label: "Current relay ping",
+        value: ping === null ? "unavailable" : `${ping} ms`,
         mono: true,
       },
       ...best.map((entry) => ({
