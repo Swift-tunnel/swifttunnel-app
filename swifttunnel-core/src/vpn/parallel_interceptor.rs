@@ -6243,7 +6243,7 @@ fn run_packet_reader(
         let new_snapshot = process_cache.get_snapshot();
         if new_snapshot.version != snapshot_version {
             snapshot_version = new_snapshot.version;
-            prune_inline_cache_on_snapshot_refresh(&mut inline_cache, api_tunneling);
+            prune_inline_cache_on_snapshot_refresh(&mut inline_cache);
         }
         snapshot = new_snapshot;
 
@@ -8115,11 +8115,9 @@ type InlineCache = ahash::AHashMap<InlineCacheKey, InlineCacheEntry>;
 const MAX_INLINE_CACHE_ENTRIES: usize = 10_000;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
-fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache, api_tunneling: bool) {
-    if !api_tunneling {
-        inline_cache.clear();
-        return;
-    }
+fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache) {
+    // API opt-out changes new-flow admission, not the source of established
+    // connections. Retain those captures until teardown or a recycled SYN.
 
     // UDP ownership entries must track the newest process snapshot, but captured
     // Route Assist TCP flows must survive owner-table refreshes after their SYN
@@ -8631,7 +8629,7 @@ where
     // is handled below so we can seed the inline cache for game-server hits.
     let snapshot_tunnel_hit =
         snapshot.should_tunnel_flow(src_ip, src_port, protocol, dst_ip, dst_port);
-    if snapshot_tunnel_hit && !(protocol == Protocol::Tcp && api_tunneling) {
+    if snapshot_tunnel_hit && protocol != Protocol::Tcp {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         let result = if protocol == Protocol::Udp {
             should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
@@ -8674,12 +8672,6 @@ where
                 let flags = tcp_flags.unwrap_or(0);
                 if (flags & 0x04) != 0 {
                     true
-                } else if *entry == InlineCacheEntry::FinSeen {
-                    // Bare ACKs after a local FIN can still acknowledge
-                    // in-flight server data in a half-closed connection.
-                    // Keep routing until RST, a second FIN, or a future SYN
-                    // reclassifies a recycled port.
-                    (flags & 0x01) != 0
                 } else if (flags & 0x01) != 0 {
                     *entry = InlineCacheEntry::FinSeen;
                     false
@@ -8689,8 +8681,11 @@ where
             } else {
                 false
             };
-            let result = if protocol == Protocol::Tcp && api_tunneling {
-                !dst_is_direct_tcp && (country_ban_relays_web || is_route_assist_control_tcp_dst)
+            let result = if protocol == Protocol::Tcp {
+                // A captured SYN commits this full tuple to the relay. DNS,
+                // SNI and DPI hints, or API opt-out, can only affect new flows.
+                // Re-evaluating them here changes the source mid-connection.
+                true
             } else if protocol == Protocol::Udp {
                 should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
             } else {
@@ -8700,7 +8695,7 @@ where
             if result && protocol == Protocol::Tcp && api_tunneling && dst_port == 443 {
                 maybe_learn_direct_only_destination(data, ip_start, transport_start, dst_ip);
             }
-            if evict_after_route || (protocol == Protocol::Tcp && api_tunneling && !result) {
+            if evict_after_route {
                 inline_cache.remove(&cache_key);
             }
             if more_fragments {
@@ -13698,7 +13693,7 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_refresh_keeps_tcp_inline_entries_and_clears_udp_when_api_tunneling() {
+    fn test_snapshot_refresh_keeps_captured_tcp_and_clears_udp_ownership() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert(
@@ -13707,7 +13702,7 @@ mod tests {
         );
         inline_cache.insert(InlineCacheKey::Udp(src_ip, 40001), InlineCacheEntry::Active);
 
-        prune_inline_cache_on_snapshot_refresh(&mut inline_cache, true);
+        prune_inline_cache_on_snapshot_refresh(&mut inline_cache);
 
         assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
             src_ip,
@@ -13717,8 +13712,84 @@ mod tests {
         )));
         assert!(!inline_cache.contains_key(&InlineCacheKey::Udp(src_ip, 40001)));
 
-        prune_inline_cache_on_snapshot_refresh(&mut inline_cache, false);
-        assert!(inline_cache.is_empty());
+        prune_inline_cache_on_snapshot_refresh(&mut inline_cache);
+        assert_eq!(inline_cache.len(), 1);
+    }
+
+    #[test]
+    fn captured_tcp_path_survives_destination_hints_dpi_confirmation_and_api_opt_out() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        use crate::roblox_proxy::hosts;
+        hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(128, 116, 50, 100);
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot.tunnel_pids.insert(1234);
+        snapshot
+            .connections
+            .insert(ConnectionKey::tcp(src, 40000, dst, 443), 1234);
+        let syn = build_ipv4_tcp_frame_with_flags(src, dst, 40000, 443, 0x02);
+        let ack = build_ipv4_tcp_frame_with_flags(src, dst, 40000, 443, 0x10);
+        let next_syn = build_ipv4_tcp_frame_with_flags(src, dst, 40001, 443, 0x02);
+        let mut outcomes = Vec::new();
+        for change in 0..4 {
+            hosts::clear_active_bootstrap_ips_for_test();
+            hosts::set_active_bootstrap_ips_for_test([dst]);
+            let mut cache = InlineCache::new();
+            assert!(
+                should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                    &syn,
+                    &snapshot,
+                    &mut cache,
+                    true,
+                    |_, _| Some(1234),
+                    |_| Some("RobloxPlayerBeta.exe".into())
+                )
+            );
+            let api = change != 3;
+            match change {
+                0 => {
+                    hosts::clear_active_bootstrap_ips_for_test();
+                }
+                1 => {
+                    hosts::clear_active_bootstrap_ips_for_test();
+                    assert!(hosts::learn_direct_only_bootstrap_ip(
+                        "clientsettingscdn.roblox.com",
+                        dst
+                    ));
+                }
+                2 => {
+                    hosts::clear_active_bootstrap_ips_for_test();
+                    hosts::set_country_ban_bypass_routing_for_test(true);
+                    hosts::set_dpi_evasion_confirmed(true);
+                }
+                _ => {}
+            }
+            prune_inline_cache_on_snapshot_refresh(&mut cache);
+            let kept = should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &ack,
+                &snapshot,
+                &mut cache,
+                api,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into()),
+            );
+            let fresh = should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &next_syn,
+                &snapshot,
+                &mut cache,
+                api,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into()),
+            );
+            outcomes.push((kept, fresh));
+        }
+        hosts::clear_active_bootstrap_ips_for_test();
+        assert_eq!(
+            outcomes,
+            vec![(true, false); 4],
+            "existing flows keep their relay; policy changes apply to new SYNs"
+        );
     }
 
     #[test]
@@ -13781,9 +13852,17 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(
-            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        assert_eq!(
+            inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
+            Some(&InlineCacheEntry::FinSeen),
+            "a retransmitted FIN must not discard the captured path"
         );
+        assert!(should_route_to_vpn_with_inline_cache(
+            &ack_frame,
+            &snapshot,
+            &mut inline_cache,
+            true
+        ));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -15970,7 +16049,7 @@ mod tests {
         assert_eq!(cache.len(), MAX_INLINE_CACHE_ENTRIES);
         // An existing half-closed flow retains ownership; a snapshot refresh
         // cannot expire it just because its local FIN was sent a minute ago.
-        prune_inline_cache_on_snapshot_refresh(&mut cache, true);
+        prune_inline_cache_on_snapshot_refresh(&mut cache);
         let live_ack = build_ipv4_tcp_frame_with_flags(src, dst, 5000, 443, 0x10);
         assert!(
             should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
