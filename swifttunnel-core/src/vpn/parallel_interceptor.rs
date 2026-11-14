@@ -7080,6 +7080,103 @@ fn bounded_ip_helper_entries(
     (advertised_entries as usize).min(max_entries)
 }
 
+/// Read a complete native owner table. A socket can appear between the size
+/// probe and the read, so retry resize responses instead of publishing an empty
+/// protocol table. Callers keep the previous snapshot on any unresolved error.
+fn read_owner_rows<T: Copy>(
+    mut query: impl FnMut(Option<*mut std::ffi::c_void>, &mut u32) -> u32,
+    mut row: impl FnMut(T),
+) -> Result<(), u32> {
+    use windows::Win32::Foundation::{
+        ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_NOT_ENOUGH_MEMORY,
+    };
+    const MAX_OWNER_TABLE_BYTES: usize = 64 * 1024 * 1024;
+    let mut size = 0;
+    let status = query(None, &mut size);
+    if status != 0 && status != ERROR_INSUFFICIENT_BUFFER.0 {
+        return Err(status);
+    }
+    for _ in 0..3 {
+        let capacity = size as usize;
+        if capacity < 4 || std::mem::size_of::<T>() == 0 {
+            return Err(ERROR_INVALID_DATA.0);
+        }
+        if capacity > MAX_OWNER_TABLE_BYTES {
+            return Err(ERROR_NOT_ENOUGH_MEMORY.0);
+        }
+        // IP Helper tables have a DWORD count followed by DWORD-aligned rows.
+        let mut buffer = Vec::<u32>::new();
+        let words = capacity.div_ceil(4);
+        buffer
+            .try_reserve_exact(words)
+            .map_err(|_| ERROR_NOT_ENOUGH_MEMORY.0)?;
+        buffer.resize(words, 0);
+        let status = query(Some(buffer.as_mut_ptr().cast()), &mut size);
+        if status == ERROR_INSUFFICIENT_BUFFER.0 {
+            continue;
+        }
+        if status != 0 {
+            return Err(status);
+        }
+        if size < 4 || size as usize > capacity {
+            return Err(ERROR_INVALID_DATA.0);
+        }
+        let count = buffer[0] as usize;
+        if count != bounded_ip_helper_entries(size as usize, buffer[0], std::mem::size_of::<T>()) {
+            return Err(ERROR_INVALID_DATA.0);
+        }
+        let entries = unsafe { buffer.as_ptr().cast::<u8>().add(4) };
+        for index in 0..count {
+            row(unsafe {
+                entries
+                    .add(index * std::mem::size_of::<T>())
+                    .cast::<T>()
+                    .read_unaligned()
+            });
+        }
+        return Ok(());
+    }
+    Err(ERROR_INSUFFICIENT_BUFFER.0)
+}
+
+fn read_connection_owners() -> Result<ahash::AHashMap<ConnectionKey, u32>, (&'static str, u32)> {
+    use windows::Win32::NetworkManagement::IpHelper::*;
+    let mut connections = ahash::AHashMap::with_capacity(2048);
+    read_owner_rows(
+        |buffer, size| unsafe {
+            GetExtendedTcpTable(buffer, size, false, 2, TCP_TABLE_OWNER_PID_ALL, 0)
+        },
+        |entry: MIB_TCPROW_OWNER_PID| {
+            record_tcp_connection_owner(
+                &mut connections,
+                Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes()),
+                u16::from_be(entry.dwLocalPort as u16),
+                Ipv4Addr::from(entry.dwRemoteAddr.to_ne_bytes()),
+                u16::from_be(entry.dwRemotePort as u16),
+                entry.dwOwningPid,
+            );
+        },
+    )
+    .map_err(|code| ("TCP", code))?;
+    read_owner_rows(
+        |buffer, size| unsafe {
+            GetExtendedUdpTable(buffer, size, false, 2, UDP_TABLE_OWNER_PID, 0)
+        },
+        |entry: MIB_UDPROW_OWNER_PID| {
+            connections.insert(
+                ConnectionKey::new(
+                    Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes()),
+                    u16::from_be(entry.dwLocalPort as u16),
+                    Protocol::Udp,
+                ),
+                entry.dwOwningPid,
+            );
+        },
+    )
+    .map_err(|code| ("UDP", code))?;
+    Ok(connections)
+}
+
 fn record_tcp_connection_owner(
     connections: &mut ahash::AHashMap<ConnectionKey, u32>,
     local_ip: Ipv4Addr,
@@ -7266,7 +7363,6 @@ fn run_cache_refresher(
     mut initial_refresh_done: Option<crossbeam_channel::Sender<()>>,
 ) {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
-    use windows::Win32::NetworkManagement::IpHelper::*;
 
     log::info!(
         "Cache refresher started (event-driven, 2s fallback, {}ms API TCP fast path)",
@@ -7288,6 +7384,7 @@ fn run_cache_refresher(
     let mut system = System::new();
     let mut refresh_count = 0u64;
     let mut first_run = true;
+    let mut owner_read_failures = 0u64;
     let mut last_full_process_scan: Option<Instant> = None;
 
     loop {
@@ -7345,105 +7442,25 @@ fn run_cache_refresher(
             }
         }
 
-        let mut connections: ahash::AHashMap<ConnectionKey, u32> =
-            ahash::AHashMap::with_capacity(2048);
+        let connections = match read_connection_owners() {
+            Ok(connections) => connections,
+            Err((protocol, code)) => {
+                owner_read_failures = owner_read_failures.saturating_add(1);
+                if super::relay_support::log_counter_example(owner_read_failures) {
+                    log::warn!(
+                        "Connection owner refresh failed: protocol={protocol} os_code={code} consecutive_failures={owner_read_failures}; preserving the previous complete snapshot"
+                    );
+                }
+                continue;
+            }
+        };
+        if owner_read_failures != 0 {
+            log::info!(
+                "Connection owner refresh recovered after {owner_read_failures} failed round(s)"
+            );
+            owner_read_failures = 0;
+        }
         let mut pid_names: ahash::AHashMap<u32, String> = ahash::AHashMap::with_capacity(512);
-
-        // Get TCP table
-        unsafe {
-            let mut size: u32 = 0;
-            let _ = GetExtendedTcpTable(
-                None,
-                &mut size,
-                false,
-                2,
-                TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
-                0,
-            );
-
-            if size > 0 {
-                let mut buffer = vec![0u8; size as usize];
-                if GetExtendedTcpTable(
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut size,
-                    false,
-                    2,
-                    TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
-                    0,
-                ) == 0
-                {
-                    let header_size = std::mem::size_of::<u32>(); // dwNumEntries
-                    if buffer.len() >= header_size {
-                        let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
-                        let entry_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-                        let safe_entries =
-                            bounded_ip_helper_entries(buffer.len(), num_entries, entry_size);
-                        let entry_base = buffer.as_ptr().add(header_size);
-
-                        for i in 0..safe_entries {
-                            let entry = std::ptr::read_unaligned(
-                                entry_base.add(i * entry_size) as *const MIB_TCPROW_OWNER_PID
-                            );
-                            let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
-                            let local_port = u16::from_be(entry.dwLocalPort as u16);
-                            record_tcp_connection_owner(
-                                &mut connections,
-                                local_ip,
-                                local_port,
-                                Ipv4Addr::from(entry.dwRemoteAddr.to_ne_bytes()),
-                                u16::from_be(entry.dwRemotePort as u16),
-                                entry.dwOwningPid,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Get UDP table
-        unsafe {
-            let mut size: u32 = 0;
-            let _ = GetExtendedUdpTable(
-                None,
-                &mut size,
-                false,
-                2,
-                UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
-                0,
-            );
-
-            if size > 0 {
-                let mut buffer = vec![0u8; size as usize];
-                if GetExtendedUdpTable(
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut size,
-                    false,
-                    2,
-                    UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
-                    0,
-                ) == 0
-                {
-                    let header_size = std::mem::size_of::<u32>(); // dwNumEntries
-                    if buffer.len() >= header_size {
-                        let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
-                        let entry_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
-                        let safe_entries =
-                            bounded_ip_helper_entries(buffer.len(), num_entries, entry_size);
-                        let entry_base = buffer.as_ptr().add(header_size);
-
-                        for i in 0..safe_entries {
-                            let entry = std::ptr::read_unaligned(
-                                entry_base.add(i * entry_size) as *const MIB_UDPROW_OWNER_PID
-                            );
-                            let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
-                            let local_port = u16::from_be(entry.dwLocalPort as u16);
-                            let key = ConnectionKey::new(local_ip, local_port, Protocol::Udp);
-                            connections.insert(key, entry.dwOwningPid);
-                        }
-                    }
-                }
-            }
-        }
 
         // OPTIMIZATION: Keep full process scans time-based so the API TCP fast
         // cadence does not turn them into once-per-second whole-system scans.
@@ -11106,6 +11123,131 @@ mod tests {
         frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
 
         frame
+    }
+
+    #[test]
+    fn owner_table_growth_is_retried_before_delivering_any_rows() {
+        let mut calls = 0;
+        let mut rows = Vec::new();
+        read_owner_rows(
+            |buffer, size| {
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert!(buffer.is_none());
+                        *size = 8;
+                        122
+                    }
+                    2 => {
+                        assert!(buffer.is_some());
+                        *size = 12;
+                        122
+                    }
+                    3 => {
+                        let buffer = buffer.unwrap().cast::<u32>();
+                        unsafe {
+                            buffer.write(2);
+                            buffer.add(1).write(17);
+                            buffer.add(2).write(42);
+                        }
+                        *size = 12;
+                        0
+                    }
+                    _ => panic!("retry budget exceeded"),
+                }
+            },
+            |row: u32| rows.push(row),
+        )
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(rows, [17, 42]);
+    }
+
+    #[test]
+    fn incomplete_owner_tables_never_publish_partial_or_empty_results() {
+        for failure in [5u32, 122, 13, 14, 15] {
+            let mut calls = 0;
+            let mut delivered = 0;
+            let result = read_owner_rows(
+                |buffer, size| {
+                    calls += 1;
+                    if buffer.is_none() {
+                        *size = 8;
+                        return 122;
+                    }
+                    if failure == 5 {
+                        return 5;
+                    }
+                    if failure == 122 {
+                        *size += 4;
+                        return 122;
+                    }
+                    unsafe {
+                        let buffer = buffer.unwrap().cast::<u32>();
+                        // Two advertised rows cannot fit into the eight-byte reply.
+                        buffer.write(if failure == 13 { 2 } else { 0 });
+                        buffer.add(1).write(17);
+                    }
+                    *size = if failure == 14 {
+                        3
+                    } else if failure == 15 {
+                        12
+                    } else {
+                        8
+                    };
+                    0
+                },
+                |_row: u32| delivered += 1,
+            );
+            assert_eq!(
+                result,
+                Err(if failure == 5 || failure == 122 {
+                    failure
+                } else {
+                    13
+                })
+            );
+            assert_eq!(
+                delivered, 0,
+                "a failed refresh must not supply a replacement snapshot"
+            );
+            assert_eq!(calls, if failure == 122 { 4 } else { 2 });
+        }
+        let mut calls = 0;
+        assert_eq!(
+            read_owner_rows(
+                |_, size| {
+                    calls += 1;
+                    *size = u32::MAX;
+                    122
+                },
+                |_: u32| panic!("no allocation or rows permitted")
+            ),
+            Err(8)
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_successful_empty_owner_table_is_distinct_from_a_failed_read() {
+        let mut calls = 0;
+        let mut delivered = 0;
+        let result = read_owner_rows(
+            |buffer, size| {
+                calls += 1;
+                *size = 4;
+                if let Some(buffer) = buffer {
+                    unsafe { buffer.cast::<u32>().write(0) };
+                    0
+                } else {
+                    122
+                }
+            },
+            |_: u32| delivered += 1,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls, 2);
+        assert_eq!(delivered, 0);
     }
 
     #[test]
