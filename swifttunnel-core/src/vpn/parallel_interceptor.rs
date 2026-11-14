@@ -8014,6 +8014,20 @@ fn queue_overflow_action(mode: QueueOverflowMode, data: &[u8]) -> QueueFullActio
             if super::cloud_game_routes::is_cloud_game_ip(dst) {
                 return QueueFullAction::Drop;
             }
+            let transport = ip_start + usize::from(data[ip_start] & 0x0f) * 4;
+            let Some(port) = data.get(transport + 2..transport + 4) else {
+                return QueueFullAction::Drop;
+            };
+            let port = u16::from_be_bytes([port[0], port[1]]);
+            // These are already captured packets, not a new eligibility rule.
+            // Sending a game's first handshake direct under pressure and its
+            // next packet via the relay commits two different source addresses.
+            // Keep gameplay/STUN/voice on the captured path so it can retry.
+            if super::process_cache::is_likely_gameplay_udp(dst, port, Protocol::Udp)
+                || (!matches!(port, 53 | 443) && super::game_destination::contains(dst))
+            {
+                return QueueFullAction::Drop;
+            }
             QueueFullAction::Bypass
         }
     }
@@ -13192,7 +13206,7 @@ mod tests {
                 ReaderTunnelAction::Consumed,
             ),
             (
-                build_ipv4_frame(17, local, regular, 55000, 55001),
+                build_ipv4_frame(17, local, Ipv4Addr::new(203, 0, 113, 10), 55000, 123),
                 QueueOverflowMode::Bypass,
                 ReaderTunnelAction::BypassPhysical,
             ),
@@ -13219,6 +13233,24 @@ mod tests {
             );
         }
         assert_eq!(relay.stats().0, 0);
+    }
+
+    #[test]
+    fn captured_game_udp_never_bypasses_on_queue_pressure() {
+        let local = Ipv4Addr::new(192, 168, 1, 200);
+        for (remote, port) in [
+            (Ipv4Addr::new(128, 116, 47, 33), 55001),
+            (Ipv4Addr::new(34, 18, 186, 248), 12345),
+            (Ipv4Addr::new(203, 0, 113, 10), 55001),
+            (Ipv4Addr::new(203, 0, 113, 10), 3478),
+        ] {
+            let packet = build_ipv4_frame(17, local, remote, 55000, port);
+            assert_eq!(
+                queue_overflow_action(QueueOverflowMode::Bypass, &packet),
+                QueueFullAction::Drop,
+                "captured gameplay cannot start direct or change source at {remote}:{port}"
+            );
+        }
     }
 
     #[test]
@@ -13255,13 +13287,13 @@ mod tests {
     }
 
     #[test]
-    fn test_queue_overflow_action_bypass_keeps_non_fragment_packets() {
+    fn queue_overflow_bypass_keeps_eligible_non_game_udp() {
         let frame = build_ipv4_frame(
             17,
             Ipv4Addr::new(192, 168, 1, 200),
-            Ipv4Addr::new(128, 116, 10, 10),
+            Ipv4Addr::new(203, 0, 113, 10),
             53010,
-            54010,
+            123,
         );
 
         assert!(!is_ipv4_fragment(&frame));
