@@ -4807,12 +4807,16 @@ impl ParallelInterceptor {
                 .clone()
                 .or_else(|| self.physical_adapter_kind.clone())
                 .unwrap_or_else(|| "unknown adapter".to_string());
-            // Ask the adapter, do not trust our own flag. We no longer switch
+            // Read the selected adapter by GUID, not a friendly-name wildcard.
+            // Do not trust our own flag. We no longer switch
             // offload off on connect, so the flag is always false and would
             // have hidden the case that matters: a machine an older build left
             // with it disabled, whose marker has since been lost, doing packet
             // segmentation in software permanently.
-            let offload_adapter = self.physical_adapter_friendly_name.clone();
+            let offload_adapter = self
+                .physical_adapter_name
+                .as_deref()
+                .and_then(Self::extract_guid_ascii_lowercase);
 
             self.monitor_handle = Some(thread::spawn(move || {
                 const EVERY: Duration = Duration::from_secs(60);
@@ -4823,8 +4827,7 @@ impl ParallelInterceptor {
                 let mut last_system = system_cpu_time_100ns();
                 let mut last_at = Instant::now();
 
-                // Once, at the top. The query spawns PowerShell and the answer
-                // does not change under us during a session.
+                // Read the configured LSO values once, without launching PowerShell.
                 let offload_off = offload_adapter
                     .as_deref()
                     .and_then(super::tso_recovery::large_send_offload_is_disabled)

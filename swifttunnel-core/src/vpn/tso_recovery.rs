@@ -80,133 +80,221 @@ fn get_marker_path() -> Option<PathBuf> {
     Some(crate::test_support::recovery_directory().join(TSO_MARKER_FILE))
 }
 
-/// Total timeout for the diagnostic adapter offload probe.
-///
-/// Read IPv4 and IPv6 in one process with one two-second deadline.
-/// The shared runner bounds process time, output capture and inherited pipes.
-const ADAPTER_QUERY_TIMEOUT_SECS: u64 = 2;
-
-fn offload_query_script(adapter_name: &str) -> String {
-    format!(
-        r#"
-        $adapter = '{}'
-        Get-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4','*LsoV2IPv6' -ErrorAction SilentlyContinue |
-            ForEach-Object {{
-                $value = $_.RegistryValue
-                if ($value -is [Array]) {{ $value = $value[0] }}
-                if ($null -ne $value) {{ Write-Output "$($_.RegistryKeyword)=$value" }}
-            }}
-        "#,
-        adapter_name.replace('\'', "''"),
-    )
+/// Read the selected adapter's configured LSO values without starting WMI or
+/// PowerShell. These are diagnostics only, never used to change an adapter.
+/// Missing, unsupported, ambiguous or unreadable configuration stays unknown.
+#[cfg(windows)]
+pub fn large_send_offload_is_disabled(adapter_guid: &str) -> Option<bool> {
+    use winreg::{
+        RegKey,
+        enums::{HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_WOW64_64KEY},
+    };
+    let target = parse_adapter_guid(adapter_guid)?;
+    let class = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(
+            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}",
+            KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY,
+        )
+        .ok()?;
+    offload_disabled_in_class(&class, target)
 }
 
-fn offload_disabled_from_output(output: &str) -> Option<bool> {
-    let mut known = false;
-    for line in output.lines() {
-        let Some((keyword, value)) = line.trim().split_once('=') else {
+#[cfg(not(windows))]
+pub fn large_send_offload_is_disabled(_adapter_guid: &str) -> Option<bool> {
+    None
+}
+
+#[cfg(windows)]
+fn parse_adapter_guid(value: &str) -> Option<windows::core::GUID> {
+    windows::core::GUID::try_from(value.trim_matches(['{', '}'])).ok()
+}
+
+#[cfg(windows)]
+fn offload_disabled_in_class(class: &winreg::RegKey, target: windows::core::GUID) -> Option<bool> {
+    use winreg::enums::{KEY_QUERY_VALUE, KEY_WOW64_64KEY};
+    let mut selected = None;
+    for (index, name) in class.enum_keys().enumerate() {
+        if index >= 1024 {
+            return None;
+        }
+        let name = name.ok()?;
+        // Device instance keys are numeric. Do not open unrelated class
+        // metadata such as Properties, which can require extra privileges.
+        if name.len() != 4 || !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(adapter) = class.open_subkey_with_flags(&name, KEY_QUERY_VALUE | KEY_WOW64_64KEY)
+        else {
             continue;
         };
-        if !matches!(keyword, "*LsoV2IPv4" | "*LsoV2IPv6") {
-            continue;
-        }
-        match value.parse::<u32>() {
-            Ok(0) => return Some(true),
-            Ok(1) => known = true,
-            _ => {}
+        let guid = crate::registry_value::read::<String>(&adapter, "NetCfgInstanceId")
+            .ok()
+            .flatten()
+            .and_then(|s| parse_adapter_guid(&s));
+        if guid == Some(target) && selected.replace(adapter).is_some() {
+            return None;
         }
     }
-    known.then_some(false)
+    let adapter = selected?;
+    let values = ["*LsoV2IPv4", "*LsoV2IPv6"].map(|keyword| read_offload_value(&adapter, keyword));
+    if values.contains(&Some(0)) {
+        Some(true)
+    } else if values.contains(&Some(1)) {
+        Some(false)
+    } else {
+        None
+    }
 }
 
-/// Whether this adapter currently has large-send offload switched off.
-///
-/// `None` when the adapter cannot be queried or does not expose the setting.
-///
-/// Reported rather than acted on. Recovery here is entirely marker driven, so
-/// an adapter that an older build left with offload disabled stays that way
-/// forever once the marker is gone, which happens when the user clears
-/// %APPDATA%, reinstalls, or an uninstall tidies it away. The machine then does
-/// packet segmentation in software permanently, with SwiftTunnel not even
-/// running, and the only symptom is that everything feels slightly worse than
-/// it used to. Putting the real state in the log is how that becomes visible
-/// instead of a guess.
-///
-/// Restoring it automatically is deliberately not done here: a user may have
-/// turned offload off themselves, and silently changing a network adapter
-/// setting we did not set is worse than reporting it.
-pub fn large_send_offload_is_disabled(adapter_name: &str) -> Option<bool> {
-    query_offload_disabled_with(adapter_name, |script| {
+#[cfg(windows)]
+fn read_offload_value(adapter: &winreg::RegKey, keyword: &str) -> Option<u32> {
+    use winreg::{enums::RegType, types::FromRegValue};
+    let raw = crate::registry_value::read_raw(adapter, keyword).ok()??;
+    let value = match raw.vtype {
+        RegType::REG_SZ => String::from_reg_value(&raw).ok()?.trim().parse().ok()?,
+        RegType::REG_DWORD => u32::from_reg_value(&raw).ok()?,
+        _ => return None,
+    };
+    (value <= 1).then_some(value)
+}
+
+#[cfg(all(test, windows))]
+mod offload_query_tests {
+    use super::*;
+    use winreg::{
+        RegKey, RegValue,
+        enums::{HKEY_CURRENT_USER, RegType},
+    };
+    struct Fixture {
+        path: String,
+        class: RegKey,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let path = format!(
+                r"Software\SwiftTunnel-Offload-{:032x}",
+                rand::random::<u128>()
+            );
+            let (class, _) = RegKey::predef(HKEY_CURRENT_USER)
+                .create_subkey(&path)
+                .unwrap();
+            Self { path, class }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(&self.path);
+        }
+    }
+    const TARGET: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
+    #[test]
+    fn native_offload_reads_only_the_exact_adapter_and_keeps_unknown_values_unknown() {
+        let fixture = Fixture::new();
+        let target = parse_adapter_guid(TARGET).unwrap();
+        let query = || offload_disabled_in_class(&fixture.class, target);
+        let (other, _) = fixture.class.create_subkey("0000").unwrap();
+        other
+            .set_value("NetCfgInstanceId", &"8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c")
+            .unwrap();
+        other.set_value("*LsoV2IPv4", &"0").unwrap();
+        assert_eq!(query(), None);
+        let (selected, _) = fixture.class.create_subkey("0001").unwrap();
+        selected
+            .set_value(
+                "NetCfgInstanceId",
+                &format!("{{{}}}", TARGET.to_uppercase()),
+            )
+            .unwrap();
+        assert_eq!(query(), None);
+        selected.set_value("*LsoV2IPv4", &"1").unwrap();
+        assert_eq!(query(), Some(false));
+        selected.set_value("*LsoV2IPv6", &0u32).unwrap();
+        assert_eq!(query(), Some(true));
+        selected.set_value("*LsoV2IPv6", &7u32).unwrap();
+        assert_eq!(query(), Some(false));
+        selected.set_value("*LsoV2IPv4", &"invalid").unwrap();
+        assert_eq!(query(), None);
+        selected
+            .set_raw_value(
+                "*LsoV2IPv4",
+                &RegValue {
+                    vtype: RegType::REG_BINARY,
+                    bytes: vec![0],
+                },
+            )
+            .unwrap();
+        assert_eq!(query(), None);
+        selected
+            .set_raw_value(
+                "*LsoV2IPv4",
+                &RegValue {
+                    vtype: RegType::REG_SZ,
+                    bytes: vec![0; crate::registry_value::MAX_VALUE_BYTES + 2],
+                },
+            )
+            .unwrap();
+        assert_eq!(query(), None);
+        assert!(parse_adapter_guid("not-an-adapter-guid").is_none());
+    }
+    #[test]
+    fn duplicate_adapter_ids_are_not_an_authoritative_offload_reading() {
+        let fixture = Fixture::new();
+        for name in ["0000", "0001"] {
+            let (key, _) = fixture.class.create_subkey(name).unwrap();
+            key.set_value("NetCfgInstanceId", &TARGET).unwrap();
+            key.set_value("*LsoV2IPv4", &"0").unwrap();
+        }
+        assert_eq!(
+            offload_disabled_in_class(&fixture.class, parse_adapter_guid(TARGET).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    #[ignore = "read-only comparison against this machine's physical adapter settings"]
+    fn compare_native_offload_with_local_netadapter_cmdlet() {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            guid: String,
+            values: Vec<String>,
+        }
+        let script = r#"
+            $ErrorActionPreference='Stop'
+            $rows = @(Get-NetAdapter -Physical -ErrorAction Stop | ForEach-Object {
+                $device = $_
+                $values = @(Get-NetAdapterAdvancedProperty -Name ([Management.Automation.WildcardPattern]::Escape($device.Name)) -RegistryKeyword '*LsoV2IPv4','*LsoV2IPv6' -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.RegistryValue } | ForEach-Object { [string]$_ })
+                [pscustomobject]@{guid=[string]$device.InterfaceGuid;values=$values}
+            })
+            ConvertTo-Json -InputObject $rows -Compress -Depth 4
+        "#;
         let output = crate::run_hidden_command_with_timeout(
             "powershell",
             &["-NoProfile", "-NonInteractive", "-Command", script],
-            std::time::Duration::from_secs(ADAPTER_QUERY_TIMEOUT_SECS),
-        );
-        output.success.then_some(output.stdout)
-    })
-}
-
-fn query_offload_disabled_with(
-    adapter_name: &str,
-    query: impl FnOnce(&str) -> Option<String>,
-) -> Option<bool> {
-    offload_disabled_from_output(&query(&offload_query_script(adapter_name))?)
-}
-
-#[cfg(test)]
-mod offload_query_tests {
-    use super::*;
-
-    #[test]
-    fn both_families_share_one_query_and_a_single_failure_stays_unknown() {
-        let mut calls = 0;
-        assert_eq!(
-            query_offload_disabled_with("User's Ethernet", |script| {
-                calls += 1;
-                assert!(script.contains("$adapter = 'User''s Ethernet'"));
-                assert_eq!(script.matches("Get-NetAdapterAdvancedProperty").count(), 1);
-                assert!(script.contains("'*LsoV2IPv4','*LsoV2IPv6'"));
-                Some("*LsoV2IPv4=1\r\n*LsoV2IPv6=0\r\n".into())
-            }),
-            Some(true)
-        );
-        assert_eq!(calls, 1);
-        assert_eq!(query_offload_disabled_with("Ethernet", |_| None), None);
-    }
-
-    #[test]
-    fn offload_results_distinguish_unsupported_from_enabled_and_disabled() {
-        for text in ["", "unrelated=0", "*LsoV2IPv4=invalid", "*LsoV2IPv6=7"] {
-            assert_eq!(offload_disabled_from_output(text), None);
-        }
-        assert_eq!(offload_disabled_from_output("*LsoV2IPv4=1\n"), Some(false));
-        assert_eq!(offload_disabled_from_output("*LsoV2IPv6=0\n"), Some(true));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn combined_query_handles_powershell_registry_arrays_without_touching_an_adapter() {
-        let script = format!(
-            r#"
-            function Get-NetAdapterAdvancedProperty {{
-                param([string]$Name, [string[]]$RegistryKeyword, $ErrorAction)
-                if ($Name -ne "User's Ethernet" -or $RegistryKeyword.Count -ne 2) {{
-                    throw 'unexpected query arguments'
-                }}
-                [pscustomobject]@{{ RegistryKeyword = '*LsoV2IPv4'; RegistryValue = @('1') }}
-                [pscustomobject]@{{ RegistryKeyword = '*LsoV2IPv6'; RegistryValue = @('0') }}
-            }}
-            {}
-        "#,
-            offload_query_script("User's Ethernet")
-        );
-        let output = crate::run_hidden_command_with_timeout(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", &script],
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(15),
         );
         assert!(output.success, "{}", output.stderr);
-        assert_eq!(offload_disabled_from_output(&output.stdout), Some(true));
+        let rows: Vec<Row> = serde_json::from_str(output.stdout.trim()).unwrap();
+        let mut known = 0;
+        for row in &rows {
+            let expected = if row.values.iter().any(|value| value == "0") {
+                Some(true)
+            } else if row.values.iter().any(|value| value == "1") {
+                Some(false)
+            } else {
+                None
+            };
+            assert_eq!(large_send_offload_is_disabled(&row.guid), expected);
+            known += usize::from(expected.is_some());
+        }
+        assert!(
+            known > 0,
+            "this comparison needs at least one supported physical adapter"
+        );
+        eprintln!(
+            "Read-only offload comparison: {} adapter(s) matched, {known} with known LSO configuration",
+            rows.len()
+        );
     }
 }
 
