@@ -1012,7 +1012,7 @@ fn log_tunnel_forwarding_drop_sampled(reason: &str, observed_len: usize, require
     }
 }
 
-fn sample_relay_forward_failure(total: &mut u64) -> bool {
+fn sample_forward_failure(total: &mut u64) -> bool {
     *total = total.saturating_add(1);
     *total <= 5 || total.is_power_of_two()
 }
@@ -6592,6 +6592,7 @@ fn run_packet_worker(
     // Health-window counters reset regularly. Logging needs a separate total
     // or a persistent failure keeps re-enabling its first-packet messages.
     let mut relay_failure_events = 0u64;
+    let mut bypass_failure_events = 0u64;
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
@@ -6786,8 +6787,7 @@ fn run_packet_worker(
                         }
                         Ok(super::udp_relay::RelaySendOutcome::Backpressure) => {
                             relay_fail += 1;
-                            let log_failure =
-                                sample_relay_forward_failure(&mut relay_failure_events);
+                            let log_failure = sample_forward_failure(&mut relay_failure_events);
                             let mode = if super::cloud_game_routes::is_cloud_game_ip(dst_ip) {
                                 QueueOverflowMode::Drop
                             } else {
@@ -6798,7 +6798,12 @@ fn run_packet_worker(
                             if queue_overflow_action(mode, work.data.as_slice())
                                 == QueueFullAction::Bypass
                             {
-                                send_bypass_packet(&driver, &adapters, &work);
+                                send_bypass_packet(
+                                    &driver,
+                                    &adapters,
+                                    &work,
+                                    &mut bypass_failure_events,
+                                )?;
                             } else if log_failure {
                                 log::warn!(
                                     "Worker {}: V3 relay sender backpressure, dropping tunnel packet ({} total)",
@@ -6809,7 +6814,7 @@ fn run_packet_worker(
                         }
                         Ok(super::udp_relay::RelaySendOutcome::Oversize) => {
                             relay_fail += 1;
-                            if sample_relay_forward_failure(&mut relay_failure_events) {
+                            if sample_forward_failure(&mut relay_failure_events) {
                                 log::warn!(
                                     "Worker {}: V3 relay packet oversized, dropping tunnel packet ({} total)",
                                     worker_id,
@@ -6819,7 +6824,7 @@ fn run_packet_worker(
                         }
                         Err(e) => {
                             relay_fail += 1;
-                            if sample_relay_forward_failure(&mut relay_failure_events) {
+                            if sample_forward_failure(&mut relay_failure_events) {
                                 log::warn!(
                                     "Worker {}: V3 relay forward failed ({} total): {}",
                                     worker_id,
@@ -6851,18 +6856,16 @@ fn run_packet_worker(
                                 work.data.as_slice(),
                             ) == QueueFullAction::Bypass)
                     {
-                        send_bypass_packet(&driver, &adapters, &work);
+                        send_bypass_packet(&driver, &adapters, &work, &mut bypass_failure_events)?;
                     }
                 }
             } else {
-                stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
-                stats
-                    .bytes_bypassed
-                    .fetch_add(packet_len, Ordering::Relaxed);
-
-                // CRITICAL FIX: Forward bypass packets to adapter
-                // Previously this was missing, causing all non-tunnel traffic to be dropped!
-                send_bypass_packet(&driver, &adapters, &work);
+                if send_bypass_packet(&driver, &adapters, &work, &mut bypass_failure_events)? {
+                    stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .bytes_bypassed
+                        .fetch_add(packet_len, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -6884,36 +6887,34 @@ fn send_bypass_packet(
     driver: &ndisapi::Ndisapi,
     adapters: &[ndisapi::NetworkAdapterInfo],
     work: &PacketWork,
-) {
+    failures: &mut u64,
+) -> Result<bool, String> {
     use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
     // Find adapter by internal name (GUID) - this is consistent across driver instances
-    let adapter = match adapters
-        .iter()
-        .find(|a| a.get_name() == work.physical_adapter_name.as_str())
-    {
-        Some(a) => a,
-        None => {
-            log::warn!(
-                "send_bypass_packet: adapter '{}' not found in worker's adapter list ({} adapters)",
-                work.physical_adapter_name,
-                adapters.len()
-            );
-            return;
-        }
-    };
+    // A worker cannot use the reader's driver handle, or keep silently dropping
+    // traffic for an adapter absent from its own snapshot. Supervision reports
+    // this error to the connection monitor so it can tear down failed capture.
+    let index = worker_adapter_index(
+        adapters.iter().map(|adapter| adapter.get_name()),
+        &work.physical_adapter_name,
+    )?;
+    let adapter = &adapters[index];
 
     let adapter_handle = adapter.get_handle();
 
     // Safety check: Don't process oversized packets that would overflow IntermediateBuffer.
     let mut buffer = IntermediateBuffer::default();
     if work.data.len() > buffer.buffer.0.len() {
-        log::warn!(
-            "send_bypass_packet: packet too large ({} > {} bytes), dropping",
-            work.data.len(),
-            buffer.buffer.0.len()
-        );
-        return;
+        if sample_forward_failure(failures) {
+            log::warn!(
+                "send_bypass_packet: packet too large ({} > {} bytes), dropping ({} total failures)",
+                work.data.len(),
+                buffer.buffer.0.len(),
+                failures
+            );
+        }
+        return Ok(false);
     }
 
     // Create IntermediateBuffer with packet data
@@ -6924,11 +6925,35 @@ fn send_bypass_packet(
 
     // Send to adapter (bypasses VPN, goes directly to physical network)
     let mut to_adapter: EthMRequest<1> = EthMRequest::new(adapter_handle);
-    if to_adapter.push(&buffer).is_ok()
-        && let Err(e) = driver.send_packets_to_adapter::<1>(&to_adapter)
-    {
-        log::warn!("send_bypass_packet: send failed: {:?}", e);
+    if to_adapter.push(&buffer).is_err() {
+        if sample_forward_failure(failures) {
+            log::warn!(
+                "send_bypass_packet: could not prepare the packet ({} total failures)",
+                failures
+            );
+        }
+        return Ok(false);
     }
+    if let Err(e) = driver.send_packets_to_adapter::<1>(&to_adapter) {
+        if sample_forward_failure(failures) {
+            log::warn!(
+                "send_bypass_packet: send failed ({} total failures): {:?}",
+                failures,
+                e
+            );
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn worker_adapter_index<'a>(
+    mut adapters: impl Iterator<Item = &'a str>,
+    target: &str,
+) -> Result<usize, String> {
+    adapters.position(|name| name == target).ok_or_else(|| {
+        format!("The packet worker cannot access the selected network adapter ({target}). Reconnect SwiftTunnel to refresh its adapter handles.")
+    })
 }
 
 /// Collect TCP source ports owned by tunnel processes for API tunneling.
@@ -9953,13 +9978,41 @@ fn should_log_no_inbound_warning(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn missing_worker_adapter_reports_failure_instead_of_silently_dropping_each_packet() {
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+        let names = ["old-adapter", "selected-adapter"];
+        assert_eq!(
+            super::worker_adapter_index(names.into_iter(), "selected-adapter"),
+            Ok(1)
+        );
+        assert!(super::worker_adapter_index(names.into_iter(), "adapter").is_err());
+        assert!(super::worker_adapter_index(std::iter::empty(), "selected-adapter").is_err());
+        let stop = AtomicBool::new(false);
+        let cause = AtomicU8::new(0);
+        let processed = std::cell::Cell::new(false);
+        super::supervise_network_worker("owned adapter fixture", &stop, &cause, || {
+            super::worker_adapter_index(["old-adapter"].into_iter(), "new-adapter")?;
+            processed.set(true);
+            Ok(())
+        });
+        assert!(
+            !processed.get(),
+            "missing adapter traffic must not be processed"
+        );
+        assert_eq!(
+            super::WorkerPanicCause::from_u8(cause.load(Ordering::Acquire)),
+            Some(super::WorkerPanicCause::InternalThreadFailed)
+        );
+    }
+
+    #[test]
     fn repeated_health_windows_cannot_reenable_unbounded_relay_failure_logs() {
         let mut lifetime_failures = 0;
         let mut health_window_failures = 0;
         let mut warnings = 0;
         for _ in 0..1_000_000 {
             health_window_failures += 1;
-            warnings += usize::from(super::sample_relay_forward_failure(&mut lifetime_failures));
+            warnings += usize::from(super::sample_forward_failure(&mut lifetime_failures));
             if health_window_failures == 100 {
                 health_window_failures = 0;
             }
