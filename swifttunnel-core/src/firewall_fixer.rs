@@ -45,7 +45,10 @@ trait RuleCleanup {
 }
 
 fn cleanup_with_rules(rules: &mut impl RuleCleanup) -> Result<()> {
-    let targets = cleanup_targets();
+    cleanup_named_rules(rules, &cleanup_targets())
+}
+
+fn cleanup_named_rules(rules: &mut impl RuleCleanup, targets: &[(String, &str)]) -> Result<()> {
     // Complete discovery before making changes. Access/provider failures must
     // not look like absence, or become a successful cleanup result.
     let present = targets
@@ -68,7 +71,7 @@ fn cleanup_with_rules(rules: &mut impl RuleCleanup) -> Result<()> {
     // A reported deletion success is not enough. Check every reserved name
     // again, including duplicates or a policy that Windows would not remove.
     let mut verified = true;
-    for (name, _) in &targets {
+    for (name, _) in targets {
         match rules.present(name) {
             Ok(false) => {}
             Ok(true) => {
@@ -88,9 +91,29 @@ fn cleanup_with_rules(rules: &mut impl RuleCleanup) -> Result<()> {
         Ok(())
     } else {
         anyhow::bail!(
-            "Roblox firewall cleanup did not finish: {}",
+            "SwiftTunnel firewall cleanup did not finish: {}",
             errors.join("; ")
         )
+    }
+}
+
+/// The legacy IPv6 block belongs to SwiftTunnel. Query its reserved name
+/// natively before and after bounded deletion; localized tool errors cannot
+/// prove absence. Keep deletion scoped to the original outbound direction.
+pub(crate) fn remove_legacy_ipv6_block_rule() -> Result<()> {
+    #[cfg(windows)]
+    {
+        cleanup_named_rules(
+            &mut rules::WindowsRules::open()?,
+            &[(
+                crate::vpn::ipv6_recovery::IPV6_BLOCK_RULE_NAME.into(),
+                "out",
+            )],
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        anyhow::bail!("Windows firewall cleanup is unavailable on this platform")
     }
 }
 
@@ -318,6 +341,35 @@ mod tests {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn legacy_ipv6_cleanup_requires_verified_absence_and_keeps_its_exact_scope() {
+        let name = crate::vpn::ipv6_recovery::IPV6_BLOCK_RULE_NAME.to_string();
+        let unrelated = format!("{name}-Other");
+        let target = [(name.clone(), "out")];
+        let mut rules = FixtureRules {
+            present: [name.clone(), unrelated.clone()].into(),
+            ..Default::default()
+        };
+        cleanup_named_rules(&mut rules, &target).unwrap();
+        assert_eq!(rules.removed, [(name.clone(), "out".into())]);
+        assert!(rules.present.contains(&unrelated));
+        let mut unverified = FixtureRules {
+            present: [name.clone()].into(),
+            fail_query: Some(2), // Deletion succeeds, but the read-back fails.
+            ..Default::default()
+        };
+        assert!(cleanup_named_rules(&mut unverified, &target).is_err());
+        let mut absent = FixtureRules::default();
+        cleanup_named_rules(&mut absent, &target).unwrap();
+        assert!(absent.removed.is_empty());
+        let mut unknown = FixtureRules {
+            fail_query: Some(1),
+            ..Default::default()
+        };
+        assert!(cleanup_named_rules(&mut unknown, &target).is_err());
+        assert!(unknown.removed.is_empty());
     }
 
     #[test]

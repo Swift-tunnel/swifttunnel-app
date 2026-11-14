@@ -270,28 +270,11 @@ impl Ipv6Marker {
 
     fn restore_command(&self) -> String {
         match self.method {
-            DisableMethod::FirewallRule => format!(
-                r#"
-        $name = "{}"
-        $deleteOutput = & netsh.exe advfirewall firewall delete rule name="$name" 2>&1
-        $deleteExit = $LASTEXITCODE
-        $showOutput = & netsh.exe advfirewall firewall show rule name="$name" 2>&1
-        $showExit = $LASTEXITCODE
-        $deleteText = ($deleteOutput | Out-String).Trim()
-        $showText = ($showOutput | Out-String).Trim()
-
-        if ($showExit -eq 0) {{
-            Write-Error ('IPv6 block firewall rule still exists after delete attempt. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText)
-            exit 1
-        }}
-
-        if ($deleteExit -ne 0 -and $showText -notmatch 'No rules match') {{
-            Write-Error ('Could not verify IPv6 block firewall rule removal. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText + '. Show output: ' + $showText)
-            exit 1
-        }}
-        "#,
-                IPV6_BLOCK_RULE_NAME
-            ),
+            // These records use native recovery before the binding script is
+            // built. Refuse accidental fallback rather than running a second,
+            // text-based implementation with different success semantics.
+            DisableMethod::FirewallRule =>
+                "throw 'Use native firewall recovery for this record'".to_string(),
             DisableMethod::WinpkFilterStaticFilter => {
                 "Write-Host 'WinpkFilter IPv6 filters are restored natively'".to_string()
             }
@@ -662,58 +645,18 @@ fn build_restore_script(marker: &Ipv6Marker) -> String {
 }
 
 fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
-    let name_arg = format!("name={IPV6_BLOCK_RULE_NAME}");
-
-    let delete_output = crate::run_hidden_command_with_timeout(
-        "netsh",
-        &[
-            "advfirewall",
-            "firewall",
-            "delete",
-            "rule",
-            name_arg.as_str(),
-        ],
-        RECOVERY_COMMAND_TIMEOUT,
-    );
-    if delete_output.timed_out {
-        log::error!("netsh did not respond while restoring the IPv6 firewall rule");
-        return false;
+    match crate::firewall_fixer::remove_legacy_ipv6_block_rule() {
+        Ok(()) => {
+            log::info!("IPv6 firewall block absence verified for adapter: {adapter_name}");
+            true
+        }
+        Err(error) => {
+            log::warn!(
+                "IPv6 firewall recovery could not be verified for adapter {adapter_name}: {error}"
+            );
+            false
+        }
     }
-
-    let show_output = crate::run_hidden_command_with_timeout(
-        "netsh",
-        &["advfirewall", "firewall", "show", "rule", name_arg.as_str()],
-        RECOVERY_COMMAND_TIMEOUT,
-    );
-    if show_output.timed_out {
-        log::error!("netsh did not respond while verifying the IPv6 firewall restore");
-        return false;
-    }
-
-    if show_output.success {
-        log::warn!(
-            "IPv6 block firewall rule still exists after delete attempt for adapter {}",
-            adapter_name
-        );
-        return false;
-    }
-
-    let show_text = format!("{}{}", show_output.stdout, show_output.stderr);
-
-    if !delete_output.success && !show_text.contains("No rules match") {
-        log::warn!(
-            "Could not verify IPv6 block firewall rule removal for adapter {}: {}",
-            adapter_name,
-            show_text.trim()
-        );
-        return false;
-    }
-
-    log::info!(
-        "IPv6 firewall block rule removed successfully for adapter: {}",
-        adapter_name
-    );
-    true
 }
 
 /// Read the driver's current static filter table as owned entries.
@@ -1271,13 +1214,11 @@ mod tests {
     }
 
     #[test]
-    fn test_firewall_rule_restore_command_references_block_rule_name() {
+    fn firewall_records_refuse_the_legacy_text_based_script_path() {
         let marker = Ipv6Marker::for_firewall_rule("Ethernet".to_string());
         let cmd = marker.restore_command();
-        assert!(cmd.contains(IPV6_BLOCK_RULE_NAME), "{}", cmd);
-        assert!(cmd.contains("netsh.exe advfirewall firewall delete rule"));
-        assert!(cmd.contains("netsh.exe advfirewall firewall show rule"));
-        assert!(cmd.contains("exit 1"));
+        assert!(cmd.contains("throw"));
+        assert!(!cmd.contains("netsh"));
     }
 
     fn dest_subnet(filter: &StaticFilter) -> ([u8; 16], [u8; 16]) {
