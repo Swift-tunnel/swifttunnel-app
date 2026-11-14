@@ -2062,8 +2062,8 @@ impl ParallelInterceptor {
                         }
                     }
 
-                    // No known-UP default route; return the first unknown, else lowest metric.
-                    return first_unknown.or_else(|| defaults.first().copied());
+                    // A stale route through a known-down interface is not a usable fallback.
+                    return first_unknown;
                 }
 
                 if rc == ERROR_INSUFFICIENT_BUFFER.0 {
@@ -2168,6 +2168,7 @@ impl ParallelInterceptor {
         }
 
         Self::get_default_route_info_powershell()
+            .filter(|info| Self::is_interface_oper_up(info.if_index) != Some(false))
             .map(|info| (info, DefaultRouteSource::PowerShellFallback, None))
     }
 
@@ -2672,12 +2673,9 @@ impl ParallelInterceptor {
             return None;
         }
 
-        let any_up = candidates
-            .iter()
-            .any(|candidate| candidate.is_up == Some(true));
         let mut matches: Vec<&PhysicalCandidate> = candidates
             .iter()
-            .filter(|candidate| !any_up || candidate.is_up != Some(false))
+            .filter(|candidate| candidate.is_up != Some(false))
             .filter(|candidate| {
                 Self::normalize_binding_match_value(&candidate.friendly_name)
                     .is_some_and(|value| owner_labels.contains(&value))
@@ -2773,10 +2771,9 @@ impl ParallelInterceptor {
             return None;
         }
 
-        // Prefer UP adapters when we can determine oper status. This avoids binding
-        // to disconnected Ethernet on laptops (common cause of "connected but 0 packets").
-        let any_up = candidates.iter().any(|c| c.is_up == Some(true));
-        let is_allowed = |c: &&PhysicalCandidate| !any_up || c.is_up != Some(false);
+        // A known-down adapter cannot carry traffic, even when every candidate
+        // is down. Unknown status remains eligible for WAN/driver compatibility.
+        let is_allowed = |c: &&PhysicalCandidate| c.is_up != Some(false);
 
         // If this looks like a normal gateway-backed default route, we should bind ONLY to the
         // physical adapter that matches the default-route IfIndex. Falling back to a non-default
@@ -2831,8 +2828,7 @@ impl ParallelInterceptor {
             return None;
         }
 
-        let any_up = candidates.iter().any(|c| c.is_up == Some(true));
-        let is_allowed = |c: &&PhysicalCandidate| !any_up || c.is_up != Some(false);
+        let is_allowed = |c: &&PhysicalCandidate| c.is_up != Some(false);
 
         candidates
             .iter()
@@ -2857,6 +2853,7 @@ impl ParallelInterceptor {
         if let Some(preference) = binding_preference {
             let preferred = candidates
                 .iter()
+                .filter(|candidate| candidate.is_up != Some(false))
                 .filter(|c| {
                     Self::extract_guid_ascii_lowercase(&c.internal_name).as_deref()
                         == Some(preference.guid.as_str())
@@ -12259,37 +12256,100 @@ mod tests {
     }
 
     #[test]
-    fn test_select_best_physical_candidate_keeps_down_when_no_up_known() {
-        let candidates = vec![
-            PhysicalCandidate {
-                idx: 0,
-                guid: "eth-guid".to_string(),
-                friendly_name: "Ethernet".to_string(),
-                description: "Ethernet".to_string(),
-                kind: "ethernet".to_string(),
-                internal_name: "eth".to_string(),
-                if_index: Some(20),
-                score: 9000,
-                is_up: Some(false),
-            },
-            PhysicalCandidate {
-                idx: 1,
-                guid: "wifi-guid".to_string(),
-                friendly_name: "Wi-Fi".to_string(),
-                description: "Wi-Fi".to_string(),
-                kind: "wifi".to_string(),
-                internal_name: "wifi".to_string(),
-                if_index: Some(11),
-                score: 1,
-                is_up: Some(false),
-            },
-        ];
-
-        let selected =
-            ParallelInterceptor::select_best_physical_candidate(&candidates, None, false)
-                .expect("should select a candidate");
-
-        assert_eq!(selected.friendly_name, "Ethernet");
+    fn known_down_adapters_cannot_be_selected_by_any_binding_fallback() {
+        let mut candidate = PhysicalCandidate {
+            idx: 0,
+            guid: "eth-guid".into(),
+            friendly_name: "Ethernet".into(),
+            description: "Ethernet".into(),
+            kind: "ethernet".into(),
+            internal_name: "\\DEVICE\\{01234567-89ab-cdef-0123-456789abcdef}".into(),
+            if_index: Some(20),
+            score: 9000,
+            is_up: Some(false),
+        };
+        let owner = Some((
+            "Ethernet".into(),
+            "Ethernet".into(),
+            "ethernet".into(),
+            false,
+        ));
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate(
+                std::slice::from_ref(&candidate),
+                None,
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate(
+                std::slice::from_ref(&candidate),
+                Some(20),
+                true
+            )
+            .is_none()
+        );
+        assert!(
+            ParallelInterceptor::select_route_owner_named_candidate(
+                std::slice::from_ref(&candidate),
+                owner.as_ref()
+            )
+            .is_none()
+        );
+        let preference = AdapterBindingPreference {
+            guid: "01234567-89ab-cdef-0123-456789abcdef".into(),
+            source: BindingPreferenceSource::RememberedAuto,
+            network_signature: None,
+        };
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate_with_preference(
+                std::slice::from_ref(&candidate),
+                Some(20),
+                true,
+                Some(&preference)
+            )
+            .0
+            .is_none()
+        );
+        candidate.friendly_name = "WAN Miniport (IP)".into();
+        candidate.description = "WAN Miniport (IP)".into();
+        candidate.kind = "ppp".into();
+        assert!(
+            ParallelInterceptor::select_point_to_point_wan_candidate(std::slice::from_ref(
+                &candidate
+            ))
+            .is_none()
+        );
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate_with_wan_fallback(
+                std::slice::from_ref(&candidate),
+                Some(99),
+                true
+            )
+            .0
+            .is_none()
+        );
+        candidate.is_up = None;
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate(
+                std::slice::from_ref(&candidate),
+                Some(20),
+                true
+            )
+            .is_some(),
+            "unknown status must remain usable for devices Windows cannot query"
+        );
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate_with_preference(
+                std::slice::from_ref(&candidate),
+                Some(20),
+                true,
+                Some(&preference)
+            )
+            .0
+            .is_some()
+        );
     }
 
     #[test]
