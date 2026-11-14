@@ -3742,16 +3742,18 @@ impl ParallelInterceptor {
                 }}
             }}
 
-            function Resolve-WinpkFilterCandidates {{
+            function Resolve-WinpkFilterCandidates([bool]$IncludeLegacyMetadata) {{
                 $candidates = [System.Collections.Generic.List[object]]::new()
 
-                if ($null -ne $adapterIfIndex) {{
-                    Add-BindingCandidate $candidates 'InterfaceIndex' ([string]$adapterIfIndex) $adapterLabel
-                }}
-
-                if (-not [string]::IsNullOrWhiteSpace($adapterHint)) {{
-                    Add-BindingCandidate $candidates 'Name' $adapterHint $adapterHint
-                    Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint $adapterHint
+                if (-not $IncludeLegacyMetadata) {{
+                    if ($null -ne $adapterIfIndex) {{
+                        Add-BindingCandidate $candidates 'InterfaceIndex' ([string]$adapterIfIndex) $adapterLabel
+                    }}
+                    if (-not [string]::IsNullOrWhiteSpace($adapterHint)) {{
+                        Add-BindingCandidate $candidates 'Name' $adapterHint $adapterHint
+                        Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint $adapterHint
+                    }}
+                    return $candidates
                 }}
 
                 $legacyAdapter = Get-LegacyAdapterMetadata
@@ -3772,47 +3774,34 @@ impl ParallelInterceptor {
             }}
 
             function Get-WinpkFilterBinding([object]$Candidate) {{
-                if ($Candidate.Selector -eq 'InterfaceIndex') {{
-                    return Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value) -ErrorAction SilentlyContinue |
-                        Get-NetAdapterBinding -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
-                }}
-
-                if ($Candidate.Selector -eq 'Name') {{
-                    return Get-NetAdapterBinding -Name $Candidate.Value -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
-                }}
-
-                if ($Candidate.Selector -eq 'InterfaceDescription') {{
-                    return Get-NetAdapterBinding -InterfaceDescription $Candidate.Value -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
-                }}
-
-                return $null
-            }}
-
-            function Enable-WinpkFilterBinding([object]$Candidate) {{
-                if ($Candidate.Selector -eq 'InterfaceIndex') {{
-                    $adapter = Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value) -ErrorAction Stop |
+                $selector = $Candidate.Selector
+                $value = $Candidate.Value
+                if ($selector -eq 'InterfaceIndex') {{
+                    $adapter = Get-NetAdapter -InterfaceIndex ([int]$value) -ErrorAction Stop |
                         Select-Object -First 1
                     if (-not $adapter) {{
-                        throw ('Could not resolve adapter by interface index: ' + $Candidate.Value)
+                        throw ('Could not resolve adapter by interface index: ' + $value)
                     }}
-                    Enable-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
-                    return
+                    $selector = 'Name'
+                    $value = [string]$adapter.Name
                 }}
-
-                if ($Candidate.Selector -eq 'Name') {{
-                    Enable-NetAdapterBinding -Name $Candidate.Value -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
-                    return
+                if ($selector -ne 'Name' -and $selector -ne 'InterfaceDescription') {{
+                    throw ('Unsupported WinpkFilter binding selector: ' + $selector)
                 }}
-
-                if ($Candidate.Selector -eq 'InterfaceDescription') {{
-                    Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
-                    return
+                # Query successfully, then compare literal identities. Name and
+                # description parameters can interpret user aliases as patterns.
+                $matchingBindings = @(Get-NetAdapterBinding -AllBindings -ErrorAction Stop |
+                    Where-Object {{
+                        $_.ComponentID -eq 'nt_ndisrd' -and (
+                            ($selector -eq 'Name' -and $_.Name -eq $value) -or
+                            ($selector -eq 'InterfaceDescription' -and $_.InterfaceDescription -eq $value)
+                        )
+                    }})
+                if ($matchingBindings.Count -gt 1) {{
+                    throw ('More than one adapter matches WinpkFilter selector ' + $selector + ': ' + $value)
                 }}
-
-                throw ('Unsupported WinpkFilter binding selector: ' + $Candidate.Selector)
+                if ($matchingBindings.Count -eq 1) {{ return $matchingBindings[0] }}
+                return $null
             }}
 
             function Start-NDISRDService {{
@@ -3837,19 +3826,20 @@ impl ParallelInterceptor {
             }}
 
             try {{
-                $candidates = Resolve-WinpkFilterCandidates
-                if ($candidates.Count -eq 0) {{
-                    throw ('Could not resolve any adapter identifiers for WinpkFilter validation. ifIndex=' + $adapterIfIndex + ', hint=' + $adapterLabel)
-                }}
-
                 $bindingCandidate = $null
                 $binding = $null
-                foreach ($candidate in $candidates) {{
-                    $binding = Get-WinpkFilterBinding $candidate
-                    if ($binding) {{
-                        $bindingCandidate = $candidate
-                        break
+                # Legacy WMI metadata is a fallback, not a prerequisite for a
+                # successful interface-index or alias lookup.
+                foreach ($includeLegacy in @($false, $true)) {{
+                    $candidates = Resolve-WinpkFilterCandidates $includeLegacy
+                    foreach ($candidate in $candidates) {{
+                        $binding = Get-WinpkFilterBinding $candidate
+                        if ($binding) {{
+                            $bindingCandidate = $candidate
+                            break
+                        }}
                     }}
+                    if ($bindingCandidate) {{ break }}
                 }}
 
                 if (-not $bindingCandidate) {{
@@ -3860,14 +3850,14 @@ impl ParallelInterceptor {
                 $adapterDescription = if ($binding.InterfaceDescription) {{ [string]$binding.InterfaceDescription }} else {{ '' }}
                 Write-Output ('Using adapter ''' + $adapterName + ''' via ' + $bindingCandidate.Selector + ' (ifIndex=' + $adapterIfIndex + ', description=' + $adapterDescription + ') for WinpkFilter validation')
 
-                Start-NDISRDService
+                if ($repairBinding) {{ Start-NDISRDService }}
 
                 if (-not $binding.Enabled) {{
                     if (-not $repairBinding) {{
                         throw ('winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter ''' + $adapterName + ''' (ifIndex=' + $adapterIfIndex + '). SwiftTunnel will enable it automatically, then try again.')
                     }}
                     Write-Output ('Enabling WinpkFilter binding on adapter: ' + $adapterName)
-                    Enable-WinpkFilterBinding $bindingCandidate
+                    Enable-NetAdapterBinding -InputObject $binding -Confirm:$false -ErrorAction Stop | Out-Null
                     Start-Sleep -Seconds 2
                     $binding = Get-WinpkFilterBinding $bindingCandidate
 
@@ -14163,8 +14153,134 @@ mod tests {
         assert!(
             script.contains("Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint")
         );
-        assert!(script.contains("Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value"));
+        assert!(script.contains("Enable-NetAdapterBinding -InputObject $binding"));
         assert!(script.contains("winpkfilter_binding_validation_failed"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn binding_repair_uses_exact_instances_and_readonly_checks_do_not_start_services() {
+        for (mode, index, hint, repair, success, marker) in [
+            (
+                "normal",
+                None,
+                "Ethernet [1]*",
+                true,
+                true,
+                "binding enabled on adapter",
+            ),
+            (
+                "normal",
+                Some(9),
+                "unused hint",
+                true,
+                true,
+                "binding enabled on adapter",
+            ),
+            (
+                "legacy",
+                Some(9),
+                "unused hint",
+                true,
+                true,
+                "binding enabled on adapter",
+            ),
+            (
+                "ambiguous",
+                None,
+                "Fixture NIC",
+                true,
+                false,
+                "More than one adapter matches",
+            ),
+            (
+                "provider_failed",
+                None,
+                "Ethernet [1]*",
+                true,
+                false,
+                "fixture query failed",
+            ),
+            (
+                "readonly_enabled",
+                None,
+                "Ethernet [1]*",
+                false,
+                true,
+                "binding already enabled",
+            ),
+            (
+                "readonly_disabled",
+                None,
+                "Ethernet [1]*",
+                false,
+                false,
+                "winpkfilter_binding_disabled",
+            ),
+        ] {
+            let binding_script =
+                ParallelInterceptor::build_winpkfilter_binding_script(index, Some(hint), repair)
+                    .unwrap();
+            let fixture = format!(
+                r#"
+                $PSModuleAutoLoadingPreference='None'
+                Import-Module ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+                $script:mode='{mode}'
+                $script:legacyCalls=0
+                $script:owned=[pscustomobject]@{{Name='Ethernet [1]*';InterfaceDescription='Fixture NIC';ComponentID='nt_ndisrd';Enabled=($script:mode -eq 'readonly_enabled')}}
+                $script:other=[pscustomobject]@{{Name='Ethernet 1-other';InterfaceDescription='Fixture NIC';ComponentID='nt_ndisrd';Enabled=$false}}
+                function Get-NetAdapter {{
+                    [CmdletBinding()] param([int]$InterfaceIndex)
+                    if ($InterfaceIndex -ne 9) {{ throw 'fixture wrong interface index' }}
+                    [pscustomobject]@{{Name=$(if ($script:mode -eq 'legacy') {{ 'unresolved adapter alias' }} else {{ $script:owned.Name }})}}
+                }}
+                function Get-CimInstance {{
+                    [CmdletBinding()] param([string]$ClassName, [string]$Filter)
+                    $script:legacyCalls++
+                    [pscustomobject]@{{Name='Fixture NIC';NetConnectionID=$script:owned.Name;InterfaceIndex=9}}
+                }}
+                function Get-WmiObject {{ throw 'fixture must not query the real WMI provider' }}
+                function Get-NetAdapterBinding {{
+                    [CmdletBinding()] param([switch]$AllBindings)
+                    if (-not $AllBindings) {{ throw 'fixture expected unfiltered binding query' }}
+                    if ($script:mode -eq 'provider_failed') {{ Write-Error 'fixture query failed'; return }}
+                    if ($script:other.Enabled) {{ throw 'fixture changed an unrelated adapter' }}
+                    $script:owned; $script:other
+                }}
+                function Enable-NetAdapterBinding {{
+                    [CmdletBinding()] param([object[]]$InputObject, [bool]$Confirm)
+                    if ($script:mode.StartsWith('readonly')) {{ throw 'fixture read-only mutation' }}
+                    if ($InputObject.Count -ne 1 -or -not [object]::ReferenceEquals($InputObject[0], $script:owned)) {{ throw 'fixture wrong binding instance' }}
+                    $script:owned.Enabled=$true
+                }}
+                function Get-Service {{
+                    [CmdletBinding()] param([string]$Name)
+                    if ($script:mode.StartsWith('readonly')) {{ throw 'fixture read-only service access' }}
+                    [pscustomobject]@{{Status='Running'}}
+                }}
+                function Start-Service {{ throw 'fixture must not start any real service' }}
+                function Start-Sleep {{ param([int]$Milliseconds,[int]$Seconds) }}
+                {binding_script}
+                if ($script:mode -eq 'legacy') {{
+                    if ($script:legacyCalls -ne 1) {{ throw 'fixture legacy fallback was not used once' }}
+                }} elseif ($script:legacyCalls -ne 0) {{
+                    throw 'fixture unnecessary legacy WMI lookup'
+                }}
+            "#
+            );
+            let output = ParallelInterceptor::run_powershell_with_timeout_capture(&fixture, 8);
+            assert_eq!(
+                output.success, success,
+                "{mode} / {index:?}: {} / {}",
+                output.stdout, output.stderr
+            );
+            assert!(
+                format!("{}{}", output.stdout, output.stderr).contains(marker),
+                "{mode}: {} / {}",
+                output.stdout,
+                output.stderr
+            );
+        }
     }
 
     #[test]
@@ -14180,7 +14296,7 @@ mod tests {
         assert!(script.contains(
             "Add-BindingCandidate $candidates 'InterfaceIndex' ([string]$adapterIfIndex)"
         ));
-        assert!(script.contains("Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value)"));
+        assert!(script.contains("Get-NetAdapter -InterfaceIndex ([int]$value)"));
         let interface_index_pos = script
             .find("Add-BindingCandidate $candidates 'InterfaceIndex'")
             .expect("interface-index candidate should be present");
@@ -14198,7 +14314,7 @@ mod tests {
 
         assert!(script.contains("$repairBinding = $false"));
         assert!(script.contains("winpkfilter_binding_disabled"));
-        assert!(script.contains("Enable-NetAdapterBinding -Name $adapter.Name"));
+        assert!(script.contains("Enable-NetAdapterBinding -InputObject $binding"));
         assert!(
             script.contains("if (-not $repairBinding)"),
             "read-only checks must branch before enabling nt_ndisrd"
