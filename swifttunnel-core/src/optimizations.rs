@@ -1780,29 +1780,36 @@ fn valid_scheme_guid(value: &str) -> bool {
 }
 
 #[cfg(windows)]
+fn power_setting_guids(
+    subgroup: &str,
+    setting: &str,
+) -> Option<(windows::core::GUID, windows::core::GUID)> {
+    use windows::core::GUID;
+    match (subgroup, setting) {
+        ("SUB_PROCESSOR", "CPMINCORES") => Some((
+            GUID::from_u128(0x54533251_82be_4824_96c1_47b60b740d00),
+            GUID::from_u128(0x0cc5b647_c1df_4637_891a_dec35c318583),
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
 fn read_power_ac(scheme: &str, subgroup: &str, setting: &str) -> Option<u32> {
-    let out = crate::run_hidden_command_with_timeout(
-        "powercfg",
-        &["/query", scheme, subgroup, setting],
-        std::time::Duration::from_secs(20),
-    );
-    if !out.success {
-        return None;
-    }
-    let text = out.stdout;
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Current AC Power Setting Index:") {
-            let token = rest.trim();
-            let parsed = if let Some(hex) = token.strip_prefix("0x") {
-                u32::from_str_radix(hex, 16).ok()
-            } else {
-                token.parse::<u32>().ok()
-            };
-            return parsed;
-        }
-    }
-    None
+    use windows::Win32::{Foundation::ERROR_SUCCESS, System::Power::PowerReadACValueIndex};
+    let scheme = windows::core::GUID::try_from(scheme).ok()?;
+    let (subgroup, setting) = power_setting_guids(subgroup, setting)?;
+    let mut index = 0;
+    let status = unsafe {
+        PowerReadACValueIndex(
+            None,
+            Some(&scheme),
+            Some(&subgroup),
+            Some(&setting),
+            &mut index,
+        )
+    };
+    (status == ERROR_SUCCESS).then_some(index)
 }
 
 #[cfg(windows)]
@@ -2003,6 +2010,80 @@ mod tests {
         assert_eq!(service_start_keyword(Some(2)).unwrap(), "auto");
         assert_eq!(service_start_keyword(Some(3)).unwrap(), "demand");
         assert_eq!(service_start_keyword(Some(4)).unwrap(), "disabled");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn catalog_power_backups_use_known_native_ids_and_reject_unknown_inputs() {
+        use windows::core::GUID;
+        for tweak in TWEAKS {
+            for action in tweak.actions {
+                if let Action::PowerAc {
+                    subgroup, setting, ..
+                } = action
+                {
+                    let (subgroup, setting) = power_setting_guids(subgroup, setting)
+                        .expect("every catalog power setting needs a native mapping");
+                    assert_eq!(
+                        subgroup,
+                        GUID::try_from("54533251-82be-4824-96c1-47b60b740d00").unwrap()
+                    );
+                    assert_eq!(
+                        setting,
+                        GUID::try_from("0cc5b647-c1df-4637-891a-dec35c318583").unwrap()
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            read_power_ac("invalid", "SUB_PROCESSOR", "CPMINCORES"),
+            None
+        );
+        assert_eq!(
+            read_power_ac(
+                "381b4222-f694-41f0-9685-ff5bb260df2e",
+                "unknown",
+                "CPMINCORES"
+            ),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "read-only comparison with this machine's English powercfg output"]
+    fn compare_native_power_backup_with_local_powercfg() {
+        let scheme = crate::system_optimizer::SystemOptimizer::active_power_plan_guid().unwrap();
+        let cli_started = std::time::Instant::now();
+        let output = crate::run_hidden_command_with_timeout(
+            "powercfg",
+            &["/qh", &scheme, "SUB_PROCESSOR", "CPMINCORES"],
+            std::time::Duration::from_secs(20),
+        );
+        let cli_elapsed = cli_started.elapsed();
+        assert!(output.success, "{}", output.stderr);
+        let expected = output
+            .stdout
+            .lines()
+            .find_map(|line| {
+                let value = line
+                    .trim()
+                    .strip_prefix("Current AC Power Setting Index:")?
+                    .trim();
+                u32::from_str_radix(value.strip_prefix("0x")?, 16).ok()
+            })
+            .expect("this read-only comparison requires English command output");
+        let native_started = std::time::Instant::now();
+        for _ in 0..100 {
+            assert_eq!(
+                read_power_ac(&scheme, "SUB_PROCESSOR", "CPMINCORES"),
+                Some(expected)
+            );
+        }
+        eprintln!(
+            "Read-only power backup: index={expected}, one CLI read={cli_elapsed:?}, 100 native reads={:?}",
+            native_started.elapsed()
+        );
     }
 
     #[cfg(windows)]
