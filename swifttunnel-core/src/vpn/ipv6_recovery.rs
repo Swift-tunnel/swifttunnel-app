@@ -902,24 +902,80 @@ pub fn restore_ipv6_from_marker() -> Option<bool> {
 
 /// Recover IPv6 settings on application startup
 pub fn recover_ipv6_on_startup() {
-    if let Some(marker) = read_ipv6_marker() {
-        log::warn!(
-            "IPv6 marker found - app may have crashed while IPv6 was modified. Adapter: {}",
-            marker.adapter_name()
-        );
-
-        if restore_ipv6_for_marker(&marker) {
-            delete_ipv6_marker();
-            log::info!("IPv6 recovery complete");
-        } else {
-            log::error!("IPv6 recovery failed - will retry on next launch");
-        }
+    if let Err(error) = recover_ipv6_checked() {
+        log::warn!("IPv6 recovery could not finish; its record was kept: {error}");
     }
+}
+
+/// Restore and retire the record together. Unreadable records, failed restores
+/// and failed record removal must reach explicit Repair callers as failures.
+pub fn recover_ipv6_checked() -> std::io::Result<bool> {
+    let path = get_marker_path().ok_or_else(|| {
+        std::io::Error::other("Windows could not locate the IPv6 recovery record folder")
+    })?;
+    recover_marker_at(&path, restore_ipv6_for_marker)
+}
+
+fn recover_marker_at(
+    path: &std::path::Path,
+    restore: impl FnOnce(&Ipv6Marker) -> bool,
+) -> std::io::Result<bool> {
+    if let Some(marker) = read_marker_at(path)? {
+        if !restore(&marker) {
+            return Err(std::io::Error::other(
+                "IPv6 could not be restored; its recovery record was kept",
+            ));
+        }
+        fs::remove_file(path)?;
+        log::info!("IPv6 recovery complete");
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn recovery_reports_a_record_that_cannot_be_retired() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = get_marker_path().unwrap();
+        let bytes = b"Owned test adapter\r\n";
+        fs::write(&path, bytes).unwrap();
+        // Windows denies deletion while this owned fixture omits FILE_SHARE_DELETE.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        assert!(recover_marker_at(&path, |_| true).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        drop(held);
+        assert!(recover_marker_at(&path, |_| true).unwrap());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn checked_recovery_keeps_failed_originals_and_retires_them_only_after_success() {
+        let path = get_marker_path().unwrap();
+        let bytes = b"Owned test adapter\r\n";
+        fs::write(&path, bytes).unwrap();
+        assert!(recover_marker_at(&path, |_| false).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        recover_marker_at(&path, |_| true).unwrap();
+        assert!(!path.exists());
+        recover_marker_at(&path, |_| panic!("Absent record must not restore anything")).unwrap();
+        fs::write(&path, b"{invalid").unwrap();
+        assert!(
+            recover_marker_at(&path, |_| panic!(
+                "Damaged record must not restore anything"
+            ))
+            .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"{invalid");
+    }
 
     #[test]
     fn damaged_ipv6_records_are_refused_and_preserved() {

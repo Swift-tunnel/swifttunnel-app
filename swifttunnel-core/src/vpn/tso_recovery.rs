@@ -421,17 +421,23 @@ pub fn restore_tso_from_marker() -> Option<bool> {
 
 /// Recover TSO settings on application startup
 pub fn recover_tso_on_startup() {
-    if let Some(path) = get_marker_path()
-        && let Err(e) = recover_marker_at(&path, restore_tso_for_marker)
-    {
+    if let Err(e) = recover_tso_checked() {
         log::warn!("Adapter recovery could not finish; its record was kept: {e}");
     }
+}
+
+/// Explicit repairs must be able to distinguish a failed restore from success.
+pub fn recover_tso_checked() -> std::io::Result<bool> {
+    let path = get_marker_path().ok_or_else(|| {
+        std::io::Error::other("Windows could not locate the adapter recovery record folder")
+    })?;
+    recover_marker_at(&path, restore_tso_for_marker)
 }
 
 fn recover_marker_at(
     path: &std::path::Path,
     restore: impl FnOnce(&TsoMarker) -> bool,
-) -> std::io::Result<()> {
+) -> std::io::Result<bool> {
     if let Some(marker) = read_marker_at(path)? {
         log::warn!(
             "TSO marker found - app may have crashed while TSO was disabled. Adapter: {}",
@@ -442,10 +448,13 @@ fn recover_marker_at(
             fs::remove_file(path)?;
             log::info!("TSO recovery complete");
         } else {
-            log::error!("TSO recovery failed - will retry on next launch");
+            return Err(std::io::Error::other(
+                "Adapter offload settings could not be restored; their recovery record was kept",
+            ));
         }
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Emergency TSO restore for panic handler.
@@ -469,6 +478,26 @@ pub fn emergency_tso_restore() {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn recovery_reports_a_record_that_cannot_be_retired() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = get_marker_path().unwrap();
+        let bytes = b"Owned test adapter\r\n";
+        fs::write(&path, bytes).unwrap();
+        // Windows denies deletion while this owned fixture omits FILE_SHARE_DELETE.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&path)
+            .unwrap();
+        assert!(recover_marker_at(&path, |_| true).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        drop(held);
+        assert!(recover_marker_at(&path, |_| true).unwrap());
+        assert!(!path.exists());
+    }
+
     #[test]
     fn test_marker_path() {
         let path = get_marker_path();
@@ -491,11 +520,13 @@ mod tests {
         let bytes = serde_json::to_vec(&marker).unwrap();
         fs::write(&path, &bytes).unwrap();
         assert_eq!(read_marker_at(&path).unwrap(), Some(marker.clone()));
-        recover_marker_at(&path, |actual| {
-            assert_eq!(actual, &marker);
-            false
-        })
-        .unwrap();
+        assert!(
+            recover_marker_at(&path, |actual| {
+                assert_eq!(actual, &marker);
+                false
+            })
+            .is_err()
+        );
         assert_eq!(fs::read(&path).unwrap(), bytes);
         recover_marker_at(&path, |actual| {
             assert_eq!(actual, &marker);

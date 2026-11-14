@@ -3058,21 +3058,42 @@ pub async fn system_cleanup_tunnel_state(state: State<'_, AppState>) -> Result<(
             .lock()
             .map_err(|_| "Driver operation lock is poisoned".to_string())?;
         log::info!("Running tunnel-state cleanup");
-        swifttunnel_core::vpn::recover_tso_on_startup();
-        swifttunnel_core::vpn::recover_ipv6_on_startup();
-        swifttunnel_core::vpn::wfp_block::cleanup_stale();
-        swifttunnel_core::vpn::wfp_block::cleanup();
-        swifttunnel_core::vpn::SplitTunnelDriver::cleanup_stale_state();
-        #[cfg(windows)]
-        match swifttunnel_core::vpn::SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
-            Ok(disabled) if !disabled.is_empty() => log::info!(
-                "Tunnel-state cleanup: disabled WinpkFilter binding on adapter(s): {}",
-                disabled.join(", ")
-            ),
-            Ok(_) => {}
-            Err(e) => log::warn!("Tunnel-state cleanup: WinpkFilter binding cleanup failed: {e}"),
+        let mut errors = Vec::new();
+        if let Err(error) = swifttunnel_core::vpn::tso_recovery::recover_tso_checked() {
+            errors.push(format!("Adapter offload recovery: {error}"));
         }
-        Ok::<(), String>(())
+        if let Err(error) = swifttunnel_core::vpn::ipv6_recovery::recover_ipv6_checked() {
+            errors.push(format!("IPv6 recovery: {error}"));
+        }
+        if let Err(error) = swifttunnel_core::vpn::wfp_block::cleanup_for_repair() {
+            errors.push(format!("Temporary network blocks: {error}"));
+        }
+        #[cfg(windows)]
+        {
+            use swifttunnel_core::vpn::SplitTunnelDriver;
+            let evidence = SplitTunnelDriver::driver_install_evidence_checked();
+            let report = SplitTunnelDriver::cleanup_stale_state_checked();
+            let (step, clean) = adapter_mode_repair_step(&report, &evidence);
+            if !clean {
+                errors.push(step.detail);
+            }
+            // Continue independent recovery steps even after a failure above.
+            match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+                Ok(disabled) if !disabled.is_empty() => log::info!(
+                    "Tunnel-state cleanup: disabled WinpkFilter binding on adapter(s): {}",
+                    disabled.join(", ")
+                ),
+                Ok(_) => {}
+                Err(error) => errors.push(format!("Adapter binding cleanup: {error}")),
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            let details = errors.join("; ");
+            log::warn!("Tunnel-state cleanup incomplete: {details}");
+            Err(format!("Tunnel cleanup could not finish. Run Internet recovery in Repair, then retry. {details}"))
+        }
     })
     .await
     .map_err(|e| format!("Tunnel-state cleanup task failed: {}", e))?
@@ -3357,9 +3378,8 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
     });
 
     // Step 3: IPv6 block leftovers (static filters / legacy binding / firewall rule).
-    steps.push(match ipv6_recovery::restore_ipv6_from_marker() {
-        Some(true) => {
-            ipv6_recovery::delete_ipv6_marker();
+    steps.push(match ipv6_recovery::recover_ipv6_checked() {
+        Ok(true) => {
             network_repair_step(
                 "ipv6",
                 "IPv6 connectivity",
@@ -3367,13 +3387,13 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
                 "IPv6 was still blocked from a previous session — restored.",
             )
         }
-        Some(false) => network_repair_step(
+        Err(error) => network_repair_step(
             "ipv6",
             "IPv6 connectivity",
             "failed",
-            "An IPv6 block from a previous session could not be removed; it will be retried on next launch.",
+            format!("IPv6 recovery could not finish. Its recovery record was kept for retry. {error}"),
         ),
-        None => match ipv6_recovery::remove_winpkfilter_ipv6_block_filters() {
+        Ok(false) => match ipv6_recovery::remove_winpkfilter_ipv6_block_filters() {
             Ok(()) => network_repair_step(
                 "ipv6",
                 "IPv6 connectivity",
@@ -3401,9 +3421,8 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
     });
 
     // Step 4: TSO/LSO offload leftovers from older builds.
-    steps.push(match tso_recovery::restore_tso_from_marker() {
-        Some(true) => {
-            tso_recovery::delete_tso_marker();
+    steps.push(match tso_recovery::recover_tso_checked() {
+        Ok(true) => {
             network_repair_step(
                 "tso",
                 "Adapter offload settings",
@@ -3411,13 +3430,13 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
                 "Adapter offload settings from a previous session were restored.",
             )
         }
-        Some(false) => network_repair_step(
+        Err(error) => network_repair_step(
             "tso",
             "Adapter offload settings",
             "failed",
-            "Adapter offload settings could not be restored; recovery will retry on next launch.",
+            format!("Adapter offload recovery could not finish. Its recovery record was kept for retry. {error}"),
         ),
-        None => network_repair_step(
+        Ok(false) => network_repair_step(
             "tso",
             "Adapter offload settings",
             "healthy",
