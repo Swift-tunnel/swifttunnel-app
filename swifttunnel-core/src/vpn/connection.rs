@@ -330,6 +330,10 @@ fn worker_panic_error(cause: WorkerPanicCause) -> (String, &'static str) {
                 .to_string(),
             "workers_panicked_recovery",
         ),
+        WorkerPanicCause::PacketForwardingFailed => (
+            super::error_messages::PACKET_FORWARDING_GUIDANCE.to_string(),
+            "packet_forwarding_failed_recovery",
+        ),
         WorkerPanicCause::InternalThreadFailed => (
             "SwiftTunnel stopped the session because an internal networking thread failed \
              unexpectedly. Please reconnect."
@@ -5264,6 +5268,7 @@ mod tests {
         for cause in [
             WorkerPanicCause::ReaderHandleLost,
             WorkerPanicCause::InternalThreadFailed,
+            WorkerPanicCause::PacketForwardingFailed,
         ] {
             assert_eq!(WorkerPanicCause::from_u8(cause.as_u8()), Some(cause));
         }
@@ -5278,6 +5283,15 @@ mod tests {
     /// which matches the realistic scenario the watchdog is designed for.
     const TEST_RELAY_NOT_HEALTHY: super::super::udp_relay::RelayHealthState =
         super::super::udp_relay::RelayHealthState::NoTrafficYet;
+
+    #[test]
+    fn packet_forwarding_failure_has_recovery_guidance_without_a_missing_driver_claim() {
+        let (message, reason) = worker_panic_error(WorkerPanicCause::PacketForwardingFailed);
+        assert_eq!(reason, "packet_forwarding_failed_recovery");
+        assert!(message.contains("Reconnect") && message.contains("Internet recovery"));
+        assert!(!message.to_lowercase().contains("driver not available"));
+        assert!(!message.contains("0x") && !message.contains("owned native error"));
+    }
 
     #[test]
     fn test_watchdog_continues_on_first_offline_tick() {

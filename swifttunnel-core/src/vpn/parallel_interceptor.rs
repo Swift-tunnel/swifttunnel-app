@@ -101,7 +101,7 @@ const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
 /// of collapsing distinct failures into one string.
 ///
 /// Stored in an `AtomicU8` (`workers_panic_cause`); a value of `0` means the
-/// threads are still running. The two variants map to the two things the user
+/// threads are still running. The variants distinguish failures so the user
 /// can actually do about it:
 ///
 /// - `ReaderHandleLost` — the packet reader could not acquire or hold its NDIS
@@ -116,6 +116,7 @@ const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
 pub enum WorkerPanicCause {
     ReaderHandleLost,
     InternalThreadFailed,
+    PacketForwardingFailed,
 }
 
 impl WorkerPanicCause {
@@ -123,6 +124,7 @@ impl WorkerPanicCause {
         match self {
             WorkerPanicCause::ReaderHandleLost => 1,
             WorkerPanicCause::InternalThreadFailed => 2,
+            WorkerPanicCause::PacketForwardingFailed => 3,
         }
     }
 
@@ -130,6 +132,7 @@ impl WorkerPanicCause {
         match value {
             1 => Some(WorkerPanicCause::ReaderHandleLost),
             2 => Some(WorkerPanicCause::InternalThreadFailed),
+            3 => Some(WorkerPanicCause::PacketForwardingFailed),
             _ => None,
         }
     }
@@ -159,6 +162,55 @@ fn supervise_network_worker(
     // the UI still reports Connected. Use the same recovery as reader/inbound
     // failures, and preserve any more-specific cause already recorded.
     record_worker_panic_cause(failure_flag, WorkerPanicCause::InternalThreadFailed);
+}
+
+/// Direct traffic shares the capture queue with game traffic. Repeated failed
+/// passthrough IOCTLs must not silently blackhole the rest of the PC while the
+/// relay itself still answers. Track directions independently; a success or
+/// orderly stop must not turn a transient failure into a fatal session error.
+#[derive(Default)]
+struct PassthroughSendHealth {
+    consecutive_errors: u32,
+    total_errors: u64,
+}
+
+const PASSTHROUGH_SEND_FAILURE_LIMIT: u32 = 3;
+
+impl PassthroughSendHealth {
+    fn forward<E: std::fmt::Display>(
+        &mut self,
+        direction: &'static str,
+        packets: u32,
+        stopping: bool,
+        send: impl FnOnce() -> Result<(), E>,
+    ) -> VpnResult<()> {
+        if packets == 0 {
+            return Ok(());
+        }
+        match send() {
+            Ok(()) => self.consecutive_errors = 0,
+            // Still drain an already captured batch during orderly shutdown,
+            // without turning a racing driver close into a new session error.
+            Err(_) if stopping => {}
+            Err(error) => {
+                self.consecutive_errors = self.consecutive_errors.saturating_add(1);
+                if sample_forward_failure(&mut self.total_errors) {
+                    log::warn!(
+                        "Packet passthrough failed: direction={direction} packets={packets} streak={} total_errors={} error={error}",
+                        self.consecutive_errors,
+                        self.total_errors
+                    );
+                }
+                if self.consecutive_errors >= PASSTHROUGH_SEND_FAILURE_LIMIT {
+                    return Err(VpnError::PacketForwardingFailed(format!(
+                        "{direction}: {} consecutive failed sends; {error}",
+                        self.consecutive_errors
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// TCP owner-table refresh cadence while API tunneling is active and a tunnel
@@ -4965,7 +5017,11 @@ impl ParallelInterceptor {
                     log::error!("Packet reader error: {}", e);
                     record_worker_panic_cause(
                         &reader_panic_cause_flag,
-                        WorkerPanicCause::ReaderHandleLost,
+                        if matches!(e, VpnError::PacketForwardingFailed(_)) {
+                            WorkerPanicCause::PacketForwardingFailed
+                        } else {
+                            WorkerPanicCause::ReaderHandleLost
+                        },
                     );
                 }
                 Err(panic_payload) => {
@@ -5846,6 +5902,8 @@ fn run_packet_reader(
     let mut snapshot_version = snapshot.version;
     let mut inline_cache: InlineCache = ahash::AHashMap::with_capacity(1024);
     let mut cloud_routes = super::cloud_game_routes::CloudGameRoutes::new(&snapshot);
+    let mut adapter_sends = PassthroughSendHealth::default();
+    let mut mstcp_sends = PassthroughSendHealth::default();
     let mut roblox_auth_trace = super::bypass_diag::RobloxAuthTrace::default();
     // A short, bounded wait for the existing background owner-table reader.
     // No IP Helper calls or sleeps are added to the packet path.
@@ -6266,9 +6324,15 @@ fn run_packet_reader(
         {
             // A replay can add one batch. Flush before borrowing another packet.
             if passthrough_to_adapter.get_packet_number() as usize == BATCH_SIZE {
-                let _ = b
-                    .driver
-                    .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
+                adapter_sends.forward(
+                    "network adapter",
+                    passthrough_to_adapter.get_packet_number(),
+                    stop_flag.load(Ordering::Acquire),
+                    || {
+                        b.driver
+                            .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter)
+                    },
+                )?;
                 passthrough_to_adapter = EthMRequest::new(b.physical_handle);
             }
             let direction_flags = packet.get_device_flags();
@@ -6515,17 +6579,24 @@ fn run_packet_reader(
         }
 
         // Send passthrough packets
-        if passthrough_to_adapter.get_packet_number() > 0 {
-            let _ = b
-                .driver
-                .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
-        }
-
-        if passthrough_to_mstcp.get_packet_number() > 0 {
-            let _ = b
-                .driver
-                .send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp);
-        }
+        adapter_sends.forward(
+            "network adapter",
+            passthrough_to_adapter.get_packet_number(),
+            stop_flag.load(Ordering::Acquire),
+            || {
+                b.driver
+                    .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter)
+            },
+        )?;
+        mstcp_sends.forward(
+            "Windows network stack",
+            passthrough_to_mstcp.get_packet_number(),
+            stop_flag.load(Ordering::Acquire),
+            || {
+                b.driver
+                    .send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp)
+            },
+        )?;
     }
 
     // Cleanup is handled by `impl Drop for ReaderBindings` when `bindings`
@@ -10047,6 +10118,64 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn passthrough_errors_are_bounded_per_direction_and_success_resets_the_streak() {
+        let mut outbound = PassthroughSendHealth::default();
+        let mut inbound = PassthroughSendHealth::default();
+        assert!(
+            outbound
+                .forward("adapter", 64, false, || Err("owned failure"))
+                .is_ok()
+        );
+        assert_eq!(outbound.consecutive_errors, 1);
+        assert!(
+            inbound
+                .forward("Windows stack", 64, false, || Ok::<(), &str>(()))
+                .is_ok()
+        );
+        assert_eq!(
+            outbound.consecutive_errors, 1,
+            "the opposite direction must not hide failure"
+        );
+        outbound
+            .forward::<&str>("adapter", 0, false, || panic!("empty batch must not send"))
+            .unwrap();
+        let drained = std::cell::Cell::new(false);
+        outbound
+            .forward("adapter", 64, true, || {
+                drained.set(true);
+                Err("owned driver-close race")
+            })
+            .unwrap();
+        assert!(
+            drained.get(),
+            "orderly shutdown still attempts to drain captured traffic"
+        );
+        assert_eq!(
+            outbound.consecutive_errors, 1,
+            "an empty batch or failed shutdown drain cannot claim recovery"
+        );
+        outbound
+            .forward("adapter", 64, false, || Ok::<(), &str>(()))
+            .unwrap();
+        assert_eq!(outbound.consecutive_errors, 0);
+        assert_eq!(outbound.total_errors, 1);
+        for _ in 1..PASSTHROUGH_SEND_FAILURE_LIMIT {
+            assert!(
+                outbound
+                    .forward("adapter", 64, false, || Err("owned failure"))
+                    .is_ok()
+            );
+        }
+        let error = outbound
+            .forward("adapter", 64, false, || Err("owned native error"))
+            .unwrap_err();
+        assert!(
+            matches!(error, VpnError::PacketForwardingFailed(ref detail) if detail.contains("adapter") && detail.contains("owned native error"))
+        );
+        assert_eq!(inbound.consecutive_errors, 0);
+    }
+
     #[test]
     fn missing_worker_adapter_reports_failure_instead_of_silently_dropping_each_packet() {
         use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};

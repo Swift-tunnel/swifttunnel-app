@@ -6,12 +6,15 @@
 
 use super::VpnError;
 
+pub(crate) const PACKET_FORWARDING_GUIDANCE: &str = "SwiftTunnel stopped because Windows could not forward network traffic. Reconnect SwiftTunnel. If it happens again, run Internet recovery in Repair.";
+
 /// Convert a VPN error into a user-friendly message
 ///
 /// Returns a clear, actionable message that helps users understand
 /// what went wrong and how to fix it.
 pub fn user_friendly_error(error: &VpnError) -> String {
     match error {
+        VpnError::PacketForwardingFailed(_) => PACKET_FORWARDING_GUIDANCE.to_string(),
         VpnError::RecoveryRecordUnavailable => {
             "SwiftTunnel couldn't save its network recovery file, so it didn't start the tunnel. Check free disk space and access to your Windows user folder, then try again. If it still fails, send support your log.".to_string()
         }
@@ -277,6 +280,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::DriverNotInitialized => "Driver not initialized",
         VpnError::NetworkWorkersStopping => "Previous connection still stopping",
         VpnError::RecoveryRecordUnavailable => "Recovery file unavailable",
+        VpnError::PacketForwardingFailed(_) => "Network forwarding stopped",
         VpnError::Route(_) => "Route setup failed",
         VpnError::Connection(_) => "Connection failed",
         VpnError::Network(_) => "Network error",
@@ -294,6 +298,17 @@ pub fn short_error(error: &VpnError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forwarding_error_hides_native_detail_and_preserves_a_specific_support_code() {
+        let error = super::VpnError::PacketForwardingFailed("owned native error 0x80070006".into());
+        assert_eq!(
+            super::user_friendly_error(&error),
+            super::PACKET_FORWARDING_GUIDANCE
+        );
+        assert_eq!(super::short_error(&error), "Network forwarding stopped");
+        assert_eq!(error.support_code(), "packet_forwarding_failed");
+    }
+
     use super::*;
 
     #[test]
