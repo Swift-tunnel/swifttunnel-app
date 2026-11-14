@@ -8659,8 +8659,53 @@ where
     //
     // IMPORTANT: This is process-based only. Destination-based speculative tunneling
     // is handled below so we can seed the inline cache for game-server hits.
-    let snapshot_tunnel_hit =
-        snapshot.should_tunnel_flow(src_ip, src_port, protocol, dst_ip, dst_port);
+    let (snapshot_tunnel_hit, known_other_udp) = if protocol == Protocol::Udp {
+        // Resolve ownership once. A shared port on another interface must not
+        // override this packet's exact owner, or its wildcard-bound owner.
+        let owner = snapshot
+            .connections
+            .get(&ConnectionKey::new(src_ip, src_port, Protocol::Udp))
+            .or_else(|| {
+                snapshot.connections.get(&ConnectionKey::new(
+                    Ipv4Addr::UNSPECIFIED,
+                    src_port,
+                    Protocol::Udp,
+                ))
+            })
+            .copied();
+        let in_scope = owner.is_some_and(|pid| snapshot.is_tunnel_pid_public(pid));
+        let known_other =
+            !in_scope && owner.is_some_and(|pid| snapshot.pid_names.contains_key(&pid));
+        let country_ban_browser = known_other
+            && country_ban_relays_web
+            && dst_port == 443
+            && (super::process_cache::is_game_server(dst_ip, dst_port, protocol, false)
+                || crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip))
+            && owner
+                .and_then(|pid| snapshot.pid_names.get(&pid))
+                .is_some_and(|name| process_name_in_browser_http_scope(name));
+        (in_scope, known_other && !country_ban_browser)
+    } else {
+        (
+            snapshot.should_tunnel_flow(src_ip, src_port, protocol, dst_ip, dst_port),
+            false,
+        )
+    };
+    if known_other_udp {
+        // Invalidate old positive ownership and remember a direct decision for
+        // all fragments. Unknown owners still reach the existing startup fallback.
+        inline_cache.remove(&cache_key);
+        if more_fragments {
+            FRAGMENT_DECISIONS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.len() >= 4096 {
+                    cache.clear();
+                }
+                cache.insert(fragment_key, false);
+            });
+        }
+        return false;
+    }
     if snapshot_tunnel_hit && protocol != Protocol::Tcp {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         let result = if protocol == Protocol::Udp {
@@ -8850,6 +8895,12 @@ where
             && inline_cache.len() < MAX_INLINE_CACHE_ENTRIES;
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
+                && should_relay_udp_for_mode(
+                    dst_ip,
+                    dst_port,
+                    protocol,
+                    is_full_country_ban_routing,
+                )
         } else {
             (is_full_country_ban_effective_http_dst || is_route_assist_http_dst)
                 && is_tcp_initial_syn
@@ -13233,6 +13284,100 @@ mod tests {
             );
         }
         assert_eq!(relay.stats().0, 0);
+    }
+
+    #[test]
+    fn udp_https_speculation_respects_normal_mode_and_country_ban_browser_signin() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        use crate::roblox_proxy::hosts;
+        hosts::clear_active_bootstrap_ips_for_test();
+        let local = Ipv4Addr::new(192, 168, 1, 200);
+        let dst = Ipv4Addr::new(128, 116, 47, 3);
+        let quic = build_ipv4_frame(17, local, dst, 55000, 443);
+        let game = build_ipv4_frame(17, local, dst, 55000, 55001);
+        let empty = ProcessSnapshot::empty(HashSet::new());
+        let normal_unknown =
+            should_route_to_vpn_with_inline_cache(&quic, &empty, &mut InlineCache::new(), false);
+        let normal_game =
+            should_route_to_vpn_with_inline_cache(&game, &empty, &mut InlineCache::new(), false);
+        let mut browser = ProcessSnapshot::empty(HashSet::new());
+        browser
+            .connections
+            .insert(ConnectionKey::new(local, 55000, Protocol::Udp), 5678);
+        browser.pid_names.insert(5678, "chrome.exe".into());
+        let normal_browser =
+            should_route_to_vpn_with_inline_cache(&quic, &browser, &mut InlineCache::new(), false);
+        hosts::set_country_ban_bypass_routing_for_test(true);
+        let bypass_unknown =
+            should_route_to_vpn_with_inline_cache(&quic, &empty, &mut InlineCache::new(), false);
+        let bypass_browser =
+            should_route_to_vpn_with_inline_cache(&quic, &browser, &mut InlineCache::new(), false);
+        hosts::clear_active_bootstrap_ips_for_test();
+        assert!(
+            !normal_unknown,
+            "normal-mode QUIC must stay direct even before its owner appears"
+        );
+        assert!(!normal_browser);
+        assert!(
+            normal_game,
+            "gameplay's first-packet fallback remains available"
+        );
+        assert!(
+            bypass_unknown && bypass_browser,
+            "country-ban Roblox browser sign-in remains available"
+        );
+    }
+
+    #[test]
+    fn known_other_udp_owner_cannot_borrow_roblox_port_ownership() {
+        let roblox_ip = Ipv4Addr::new(10, 2, 0, 2);
+        let other_ip = Ipv4Addr::new(192, 168, 1, 200);
+        let destination = Ipv4Addr::new(128, 116, 47, 33);
+        let port = 55000;
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot
+            .connections
+            .insert(ConnectionKey::new(roblox_ip, port, Protocol::Udp), 1234);
+        snapshot.tunnel_pids.insert(1234);
+        snapshot.tunnel_udp_ports.insert(port);
+        snapshot
+            .pid_names
+            .insert(1234, "RobloxPlayerBeta.exe".into());
+        snapshot.pid_names.insert(5678, "unrelated-app.exe".into());
+        let packet = build_ipv4_frame(17, other_ip, destination, port, 55001);
+        for owner_ip in [other_ip, Ipv4Addr::UNSPECIFIED] {
+            let key = ConnectionKey::new(owner_ip, port, Protocol::Udp);
+            snapshot.connections.insert(key.clone(), 5678);
+            for warm in [false, true] {
+                let mut cache = InlineCache::new();
+                if warm {
+                    // An older positive hint cannot override a published owner.
+                    cache.insert(InlineCacheKey::Udp(other_ip, port), InlineCacheEntry::Udp);
+                }
+                let borrowed =
+                    should_route_to_vpn_with_inline_cache(&packet, &snapshot, &mut cache, false);
+                assert!(
+                    !borrowed,
+                    "known unrelated owner at {owner_ip} borrowed Roblox's port (warm={warm})"
+                );
+                assert!(cache.is_empty());
+            }
+            snapshot.connections.remove(&key);
+        }
+        // Preserve the intended address-drift fallback when ownership is unknown.
+        assert!(should_route_to_vpn_with_inline_cache(
+            &packet,
+            &snapshot,
+            &mut InlineCache::new(),
+            false
+        ));
+        let roblox = build_ipv4_frame(17, roblox_ip, destination, port, 55001);
+        assert!(should_route_to_vpn_with_inline_cache(
+            &roblox,
+            &snapshot,
+            &mut InlineCache::new(),
+            false
+        ));
     }
 
     #[test]
