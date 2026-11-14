@@ -446,15 +446,23 @@ pub fn restore() -> Result<bool, String> {
         RESTORE_ERROR.to_string()
     })?;
     validate_journal(&journal)?;
-    let path = RobloxOptimizer::game_preferences_path(journal.client)?;
-    let xml = read(&path)?;
-    let restored = restore_xml(xml.clone(), &journal.fields);
-    if restored != xml {
-        write(&path, restored.as_bytes())?;
-    }
-    restore_flags(&journal, || {
-        RobloxOptimizer::existing_client_flag_files().map_err(|e| e.to_string())
-    })?;
+    restore_settings_with(
+        || {
+            let path = RobloxOptimizer::game_preferences_path(journal.client)?;
+            let xml = read(&path)?;
+            let restored = restore_xml(xml.clone(), &journal.fields);
+            if restored != xml {
+                write(&path, restored.as_bytes())?;
+            }
+            Ok(true)
+        },
+        || {
+            restore_flags(&journal, || {
+                RobloxOptimizer::existing_client_flag_files().map_err(|e| e.to_string())
+            })
+            .map(|_| true)
+        },
+    )?;
     fs::remove_file(journal_path).map_err(|e| {
         log::warn!("Game profile restored but recovery record could not be removed: {e}");
         "Your Roblox settings were restored, but cleanup failed. Restart SwiftTunnel. If it happens again, contact support.".to_string()
@@ -472,8 +480,15 @@ fn restore_flags(
         return Ok(());
     }
     let allowed = discover()?;
+    let mut failed = false;
     for flag in &journal.flags {
-        apply_flag(flag, true, &allowed)?;
+        if let Err(error) = apply_flag(flag, true, &allowed) {
+            log::warn!(
+                "Could not restore graphics FastFlag at {}: {error}",
+                flag.path.display()
+            );
+            failed = true;
+        }
     }
     // A strap may copy its modifications into a new Roblox version during
     // launch. Restore a copy only when it was created during this profile and
@@ -494,7 +509,17 @@ fn restore_flags(
         if created.is_none_or(|at| at < journal.created_at) {
             continue;
         }
-        let bytes = read(&path)?.into_bytes();
+        let bytes = match read(&path) {
+            Ok(bytes) => bytes.into_bytes(),
+            Err(error) => {
+                log::warn!(
+                    "Could not check a copied graphics FastFlag at {}: {error}",
+                    path.display()
+                );
+                failed = true;
+                continue;
+            }
+        };
         let actual_hash = checksum(&bytes);
         if let Some(template) = journal
             .flags
@@ -507,10 +532,20 @@ fn restore_flags(
                 applied: template.applied.clone(),
                 applied_hash: template.applied_hash.clone(),
             };
-            apply_flag(&copy, true, &allowed)?;
+            if let Err(error) = apply_flag(&copy, true, &allowed) {
+                log::warn!(
+                    "Could not restore a copied graphics FastFlag at {}: {error}",
+                    path.display()
+                );
+                failed = true;
+            }
         }
     }
-    Ok(())
+    if failed {
+        Err(RESTORE_ERROR.into())
+    } else {
+        Ok(())
+    }
 }
 
 fn validate_journal(journal: &Journal) -> Result<(), String> {
@@ -568,6 +603,73 @@ fn valid_flag_value(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn legacy_recovery_restores_unlocked_originals_and_copies_after_a_failure() {
+        use std::os::windows::fs::OpenOptionsExt;
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "swift-profile-partial-{:032x}",
+            rand::random::<u128>()
+        )));
+        fs::create_dir(&dir.0).unwrap();
+        let locked_path = dir.0.join("locked.json");
+        let healthy_path = dir.0.join("healthy.json");
+        let copy_path = dir.0.join("copied.json");
+        let applied =
+            serde_json::to_vec_pretty(&serde_json::json!({QUALITY_FLAG: 5, "kept": true})).unwrap();
+        for path in [&locked_path, &healthy_path, &copy_path] {
+            fs::write(path, &applied).unwrap();
+        }
+        let journal = Journal {
+            client: RobloxClient::Standard,
+            fields: vec![],
+            created_at: 0,
+            flags: [&locked_path, &healthy_path]
+                .into_iter()
+                .map(|path| FlagOverride {
+                    path: path.clone(),
+                    before: serde_json::json!(10),
+                    applied: Some(serde_json::json!(5)),
+                    applied_hash: checksum(&applied),
+                })
+                .collect(),
+        };
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked_path)
+            .unwrap();
+        let result = restore_flags(&journal, || {
+            Ok(vec![
+                locked_path.clone(),
+                healthy_path.clone(),
+                copy_path.clone(),
+            ])
+        });
+        drop(locked);
+        assert!(result.is_err());
+        assert_eq!(fs::read(&locked_path).unwrap(), applied);
+        for path in [&healthy_path, &copy_path] {
+            let restored: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(restored[QUALITY_FLAG], 10);
+            assert_eq!(restored["kept"], true);
+        }
+        restore_flags(&journal, || {
+            Ok(vec![locked_path.clone(), healthy_path, copy_path])
+        })
+        .unwrap();
+        let restored: serde_json::Value =
+            serde_json::from_slice(&fs::read(locked_path).unwrap()).unwrap();
+        assert_eq!(restored[QUALITY_FLAG], 10);
+    }
 
     #[test]
     fn expanded_profile_output_cannot_replace_a_file_that_recovery_could_read() {
