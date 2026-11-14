@@ -169,6 +169,7 @@ struct PersistentSystemSnapshot {
 
 const SYSTEM_SNAPSHOT_FILE: &str = "system_optimizer_recovery_v2.json";
 const LEGACY_SYSTEM_SNAPSHOT_FILE: &str = "system_optimizer_snapshots.json";
+const MAX_SYSTEM_SNAPSHOT_BYTES: usize = 256 * 1024;
 
 fn system_snapshot_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("SwiftTunnel").join(SYSTEM_SNAPSHOT_FILE))
@@ -408,7 +409,7 @@ impl SystemOptimizer {
     fn read_persistent_snapshot(path: &Path) -> Result<Option<PersistentSystemSnapshot>> {
         let content = match crate::utils::read_text_file_bounded(
             path,
-            256 * 1024,
+            MAX_SYSTEM_SNAPSHOT_BYTES,
             "System optimizer recovery",
         ) {
             Ok(content) => content,
@@ -494,11 +495,16 @@ impl SystemOptimizer {
 
     fn write_persistent_snapshot(path: &Path, snapshot: &PersistentSystemSnapshot) -> Result<()> {
         use std::io::Write;
+        let bytes = serde_json::to_vec_pretty(snapshot)?;
+        if bytes.len() > MAX_SYSTEM_SNAPSHOT_BYTES {
+            return Err(anyhow::anyhow!(
+                "System recovery records are too large to save safely. Existing records were kept."
+            ));
+        }
         fs::create_dir_all(
             path.parent()
                 .ok_or_else(|| anyhow::anyhow!("Invalid system recovery path"))?,
         )?;
-        let bytes = serde_json::to_vec_pretty(snapshot)?;
         let temp = path.with_extension(format!(
             "{}.{:032x}.tmp",
             std::process::id(),
@@ -1881,6 +1887,39 @@ mod tests {
         );
         fs::remove_file(&path).unwrap();
         fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_system_backups_keep_the_previous_readable_record() {
+        let dir =
+            std::env::temp_dir().join(format!("swift-system-size-{:032x}", rand::random::<u128>()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join(SYSTEM_SNAPSHOT_FILE);
+        let before = PersistentSystemSnapshot {
+            game_bar_snapshot: Some(RegistryDwordSnapshot::Present(9)),
+            ..Default::default()
+        };
+        SystemOptimizer::write_persistent_snapshot(&path, &before).unwrap();
+        let original = fs::read(&path).unwrap();
+        let string = "\u{0001}".repeat(crate::registry_value::MAX_VALUE_BYTES / 2 - 1);
+        let oversized = PersistentSystemSnapshot {
+            mmcss_snapshot: Some(MmcssSnapshot {
+                scheduling_category: Some(string.clone()),
+                sfio_priority: Some(string.clone()),
+                background_only: Some(string),
+                ..Default::default()
+            }),
+            ..before.clone()
+        };
+        assert!(serde_json::to_vec_pretty(&oversized).unwrap().len() > MAX_SYSTEM_SNAPSHOT_BYTES);
+        assert!(SystemOptimizer::write_persistent_snapshot(&path, &oversized).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(
+            SystemOptimizer::read_persistent_snapshot(&path).unwrap(),
+            Some(before)
+        );
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

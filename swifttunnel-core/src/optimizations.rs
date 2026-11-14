@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 const SNAPSHOT_FILE: &str = "optimization_snapshots.json";
+const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hive {
@@ -1095,7 +1096,7 @@ fn load_all() -> Result<Snapshots, String> {
 }
 
 fn read_snapshots(path: &Path) -> Result<Snapshots, String> {
-    match crate::utils::read_text_file_bounded(path, 4 * 1024 * 1024, "Rollback records") {
+    match crate::utils::read_text_file_bounded(path, MAX_SNAPSHOT_BYTES, "Rollback records") {
         Ok(content) => serde_json::from_str(&content).map_err(|e| {
             format!(
                 "Cannot read rollback records: {e}. Keep the snapshot file and contact support."
@@ -1117,11 +1118,16 @@ fn save_all(map: &Snapshots) -> Result<(), String> {
 
 fn write_snapshots(path: &Path, map: &Snapshots) -> std::io::Result<()> {
     use std::io::Write;
+    let json = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
+    if json.len() > MAX_SNAPSHOT_BYTES {
+        return Err(std::io::Error::other(
+            "Rollback records are too large to save safely. Existing records were kept.",
+        ));
+    }
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("No snapshot directory"))?;
     std::fs::create_dir_all(parent)?;
-    let json = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
     let staged = parent.join(format!(".optimization-{:032x}.tmp", rand::random::<u128>()));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -2213,6 +2219,50 @@ mod tests {
         write_snapshots(&path, &Snapshots::new()).unwrap();
         assert!(read_snapshots(&path).unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_registry_backups_do_not_replace_readable_rollback_records() {
+        let dir =
+            std::env::temp_dir().join(format!("swift-opt-size-{:032x}", rand::random::<u128>()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join(SNAPSHOT_FILE);
+        let before = Snapshots::from([(
+            "old".into(),
+            TweakSnapshot::Legacy(vec![ActionSnapshot::Task { was_enabled: true }]),
+        )]);
+        write_snapshots(&path, &before).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        // Each individual value fits the registry reader's bound. Pretty JSON
+        // and escaped strings can still push the combined catalog over its cap.
+        let string = "\u{0001}".repeat(crate::registry_value::MAX_VALUE_BYTES / 2 - 1);
+        let mut oversized = before;
+        for tweak in TWEAKS {
+            let captured: Vec<_> = tweak
+                .actions
+                .iter()
+                .filter_map(|action| match action {
+                    Action::RegString { .. } | Action::RegStringEntry { .. } => {
+                        Some(ActionSnapshot::RegString {
+                            value: Some(string.clone()),
+                        })
+                    }
+                    Action::RegBinary { .. } => Some(ActionSnapshot::RegBinary {
+                        value: Some(vec![255; crate::registry_value::MAX_VALUE_BYTES]),
+                    }),
+                    _ => None,
+                })
+                .collect();
+            if !captured.is_empty() {
+                oversized.insert(tweak.id.into(), TweakSnapshot::Legacy(captured));
+            }
+        }
+        assert!(serde_json::to_vec_pretty(&oversized).unwrap().len() > MAX_SNAPSHOT_BYTES);
+        assert!(write_snapshots(&path, &oversized).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(read_snapshots(&path).unwrap()["old"].applied());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
