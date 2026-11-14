@@ -1012,6 +1012,11 @@ fn log_tunnel_forwarding_drop_sampled(reason: &str, observed_len: usize, require
     }
 }
 
+fn sample_relay_forward_failure(total: &mut u64) -> bool {
+    *total = total.saturating_add(1);
+    *total <= 5 || total.is_power_of_two()
+}
+
 const V3_NO_INBOUND_WARNING_SECS: u64 = 10;
 
 /// Number of workers whose joins exceeded THREAD_JOIN_TIMEOUT in this process.
@@ -6584,6 +6589,9 @@ fn run_packet_worker(
     // Track relay stats
     let mut relay_success = 0u64;
     let mut relay_fail = 0u64;
+    // Health-window counters reset regularly. Logging needs a separate total
+    // or a persistent failure keeps re-enabling its first-packet messages.
+    let mut relay_failure_events = 0u64;
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
@@ -6728,22 +6736,20 @@ fn run_packet_worker(
                 // borrow alive for the entire `forward_outbound` call rather
                 // than letting a raw pointer escape the `with()` closure.
                 //
-                // If relay health is Dead, skip the relay path entirely: the
-                // sender would silently drop every frame and the game would
-                // stall. Fall through to the physical-adapter bypass so
-                // traffic at least reaches the internet while the connection
-                // state machine tears the tunnel down.
+                // A dead relay is handled by the connection monitor. Only
+                // eligible UDP can use direct fallback in the meantime:
+                // captured TCP must retain its source path through teardown.
                 let relay_for_forward = relay_ctx.as_ref().filter(|r| {
                     !matches!(r.relay_health(), super::udp_relay::RelayHealthState::Dead)
                 });
                 if let Some(relay) = relay_for_forward {
                     // Log relay destination for first few packets (auto-routing debug)
-                    if relay_success + relay_fail < 10 {
+                    if diagnostic_counter <= 10 {
                         log::info!(
                             "Worker {}: Forwarding to relay {} (pkt #{}, dst={})",
                             worker_id,
                             relay.relay_addr(),
-                            relay_success + relay_fail + 1,
+                            diagnostic_counter,
                             if ip_packet.len() >= 20 {
                                 format!(
                                     "{}.{}.{}.{}",
@@ -6770,7 +6776,7 @@ fn run_packet_worker(
                     match forward_result {
                         Ok(super::udp_relay::RelaySendOutcome::Enqueued(sent)) => {
                             relay_success += 1;
-                            if relay_success <= 5 && sent > 0 {
+                            if diagnostic_counter <= 5 && sent > 0 {
                                 log::info!(
                                     "Worker {}: V3 relay forward OK - {} bytes",
                                     worker_id,
@@ -6780,6 +6786,8 @@ fn run_packet_worker(
                         }
                         Ok(super::udp_relay::RelaySendOutcome::Backpressure) => {
                             relay_fail += 1;
+                            let log_failure =
+                                sample_relay_forward_failure(&mut relay_failure_events);
                             let mode = if super::cloud_game_routes::is_cloud_game_ip(dst_ip) {
                                 QueueOverflowMode::Drop
                             } else {
@@ -6791,33 +6799,31 @@ fn run_packet_worker(
                                 == QueueFullAction::Bypass
                             {
                                 send_bypass_packet(&driver, &adapters, &work);
-                            } else if relay_fail <= 10 || relay_fail.is_multiple_of(100) {
+                            } else if log_failure {
                                 log::warn!(
                                     "Worker {}: V3 relay sender backpressure, dropping tunnel packet ({} total)",
                                     worker_id,
-                                    relay_fail
+                                    relay_failure_events
                                 );
                             }
                         }
                         Ok(super::udp_relay::RelaySendOutcome::Oversize) => {
                             relay_fail += 1;
-                            if relay_fail <= 10 || relay_fail.is_multiple_of(100) {
+                            if sample_relay_forward_failure(&mut relay_failure_events) {
                                 log::warn!(
                                     "Worker {}: V3 relay packet oversized, dropping tunnel packet ({} total)",
                                     worker_id,
-                                    relay_fail
+                                    relay_failure_events
                                 );
                             }
                         }
                         Err(e) => {
                             relay_fail += 1;
-                            // Log first 10 failures, then every 100th to avoid log spam
-                            // but keep visibility into persistent relay issues (Error 277)
-                            if relay_fail <= 10 || relay_fail.is_multiple_of(100) {
+                            if sample_relay_forward_failure(&mut relay_failure_events) {
                                 log::warn!(
                                     "Worker {}: V3 relay forward failed ({} total): {}",
                                     worker_id,
-                                    relay_fail,
+                                    relay_failure_events,
                                     e
                                 );
                             }
@@ -6835,10 +6841,16 @@ fn run_packet_worker(
                         }
                     }
                 } else {
-                    // Either no relay context, or the relay is marked Dead —
-                    // forward to the physical adapter (bypass) so the game
-                    // isn't silently drop-forwarded to nowhere.
-                    if !super::cloud_game_routes::is_cloud_game_ip(dst_ip) {
+                    // Without a relay context, legacy passthrough has never
+                    // assigned a relay source. An existing dead relay must
+                    // obey the same protocol safety as queue backpressure.
+                    if !super::cloud_game_routes::is_cloud_game_ip(dst_ip)
+                        && (relay_ctx.is_none()
+                            || queue_overflow_action(
+                                QueueOverflowMode::Bypass,
+                                work.data.as_slice(),
+                            ) == QueueFullAction::Bypass)
+                    {
                         send_bypass_packet(&driver, &adapters, &work);
                     }
                 }
@@ -7955,11 +7967,26 @@ fn queue_overflow_action(mode: QueueOverflowMode, data: &[u8]) -> QueueFullActio
     match mode {
         QueueOverflowMode::Drop => QueueFullAction::Drop,
         QueueOverflowMode::Bypass => {
-            if is_ipv4_fragment(data) {
-                QueueFullAction::Drop
-            } else {
-                QueueFullAction::Bypass
+            let Some(ip_start) = parse_ipv4_header_offset(data) else {
+                return QueueFullAction::Drop;
+            };
+            // These packets have already been assigned to the relay. Sending
+            // a TCP SYN direct then relaying its retry/ACK changes the source
+            // midway through the handshake; doing it to an active TCP flow
+            // can reset it. Let TCP retransmit on its captured path instead.
+            if data[ip_start + 9] != 17 || is_ipv4_fragment(data) {
+                return QueueFullAction::Drop;
             }
+            let dst = Ipv4Addr::new(
+                data[ip_start + 16],
+                data[ip_start + 17],
+                data[ip_start + 18],
+                data[ip_start + 19],
+            );
+            if super::cloud_game_routes::is_cloud_game_ip(dst) {
+                return QueueFullAction::Drop;
+            }
+            QueueFullAction::Bypass
         }
     }
 }
@@ -9925,6 +9952,25 @@ fn should_log_no_inbound_warning(
 #[allow(clippy::assertions_on_constants)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repeated_health_windows_cannot_reenable_unbounded_relay_failure_logs() {
+        let mut lifetime_failures = 0;
+        let mut health_window_failures = 0;
+        let mut warnings = 0;
+        for _ in 0..1_000_000 {
+            health_window_failures += 1;
+            warnings += usize::from(super::sample_relay_forward_failure(&mut lifetime_failures));
+            if health_window_failures == 100 {
+                health_window_failures = 0;
+            }
+        }
+        assert_eq!(lifetime_failures, 1_000_000);
+        assert!(
+            warnings <= 25,
+            "persistent failure generated {warnings} warning opportunities"
+        );
+    }
+
     #[test]
     fn shared_tcp_port_does_not_inherit_the_last_programs_identity() {
         let local_ip = std::net::Ipv4Addr::new(10, 0, 0, 20);
@@ -13058,6 +13104,39 @@ mod tests {
         assert!(
             worker.is_some(),
             "reader dispatch should keep routed PPPoE tail fragments on the tunnel path"
+        );
+    }
+
+    #[test]
+    fn captured_tcp_queue_pressure_never_switches_a_connection_direct() {
+        let local = Ipv4Addr::new(192, 168, 1, 200);
+        let remote = Ipv4Addr::new(128, 116, 47, 3);
+        for flags in [0x02, 0x10, 0x18, 0x11, 0x04] {
+            let packet = build_ipv4_tcp_frame_with_flags(local, remote, 55000, 443, flags);
+            assert_eq!(
+                queue_overflow_action(QueueOverflowMode::Bypass, &packet),
+                QueueFullAction::Drop,
+                "a captured TCP flow must retain its source path for flags {flags:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_drops_cloud_game_packets_and_unparseable_frames() {
+        let cloud = build_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 200),
+            Ipv4Addr::new(34, 18, 186, 248),
+            55000,
+            55001,
+        );
+        assert_eq!(
+            queue_overflow_action(QueueOverflowMode::Bypass, &cloud),
+            QueueFullAction::Drop
+        );
+        assert_eq!(
+            queue_overflow_action(QueueOverflowMode::Bypass, &[0; 10]),
+            QueueFullAction::Drop
         );
     }
 
