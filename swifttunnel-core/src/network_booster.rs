@@ -212,6 +212,22 @@ fn run_network_migration(completed: &mut bool, cleanup: impl FnOnce() -> Result<
     Ok(())
 }
 
+fn finish_network_restore(
+    mut errors: Vec<String>,
+    persist: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    // Completed restores must disappear from the record even when an
+    // independent cleanup failed, or a retry can replay those originals.
+    if let Err(error) = persist() {
+        errors.push(format!("Recovery records could not be updated: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("Network restore incomplete: {}", errors.join("; "))
+    }
+}
+
 fn network_registry_subkey(path: &str) -> Result<&str> {
     path.strip_prefix("HKLM\\")
         .filter(|key| !key.is_empty() && !key.contains('\0') && !key.ends_with('\\'))
@@ -730,6 +746,13 @@ impl NetworkBooster {
     }
 
     fn restore_nagle_algorithm(&mut self) -> Result<()> {
+        self.restore_nagle_with(Self::restore_registry_dword)
+    }
+
+    fn restore_nagle_with(
+        &mut self,
+        mut restore: impl FnMut(&str, &str, Option<u32>) -> Result<()>,
+    ) -> Result<()> {
         info!("Restoring Nagle settings to adapter snapshots");
 
         if self.nagle_registry_snapshot.is_empty() {
@@ -737,22 +760,36 @@ impl NetworkBooster {
             return Ok(());
         }
 
+        let mut errors = Vec::new();
         for (guid, snapshot) in self.nagle_registry_snapshot.clone() {
             let key_path = format!(
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
                 guid
             );
 
-            Self::restore_registry_dword(
-                &key_path,
-                REG_VALUE_TCP_ACK_FREQUENCY,
-                snapshot.tcp_ack_frequency,
-            )?;
-            Self::restore_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, snapshot.tcp_no_delay)?;
+            let mut complete = true;
+            for (name, original) in [
+                (REG_VALUE_TCP_ACK_FREQUENCY, snapshot.tcp_ack_frequency),
+                (REG_VALUE_TCP_NO_DELAY, snapshot.tcp_no_delay),
+            ] {
+                if let Err(error) = restore(&key_path, name, original) {
+                    complete = false;
+                    errors.push(format!("{guid} {name}: {error}"));
+                }
+            }
+            if complete {
+                self.nagle_registry_snapshot.remove(&guid);
+            }
         }
 
-        self.nagle_registry_snapshot.clear();
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "Could not restore all adapter settings: {}",
+                errors.join("; ")
+            )
+        }
     }
 
     /// Disable Windows network throttling for full bandwidth to games
@@ -861,14 +898,7 @@ impl NetworkBooster {
             errors.push(format!("firewall rule restore: {}", e));
         }
 
-        if !errors.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Network restore incomplete: {}",
-                errors.join("; ")
-            ));
-        }
-
-        self.persist_snapshot()
+        finish_network_restore(errors, || self.persist_snapshot())
     }
 
     /// Save pre-modification values to disk for crash/uninstall recovery.
@@ -1204,6 +1234,73 @@ mod tests {
         assert_eq!(read_network_snapshot(&path).unwrap(), snapshot);
         std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn partial_adapter_recovery_saves_only_unfinished_originals_despite_other_errors() {
+        let dir = snapshot_test_dir();
+        let path = dir.join(SNAPSHOT_FILE);
+        let working = "11111111-1111-1111-1111-111111111111";
+        let blocked = "22222222-2222-2222-2222-222222222222";
+        let mut booster = NetworkBooster::new();
+        for guid in [working, blocked] {
+            booster.nagle_registry_snapshot.insert(
+                guid.into(),
+                NagleRegistrySnapshot {
+                    tcp_ack_frequency: Some(2),
+                    tcp_no_delay: None,
+                },
+            );
+        }
+        save_network_snapshot(&path, &booster.snapshot()).unwrap();
+        let mut attempted = Vec::new();
+        let result = booster.restore_nagle_with(|key, name, _| {
+            attempted.push((key.to_owned(), name.to_owned()));
+            if key.ends_with(blocked) && name == REG_VALUE_TCP_ACK_FREQUENCY {
+                anyhow::bail!("owned adapter failure");
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempted.len(), 4);
+        assert!(!booster.nagle_registry_snapshot.contains_key(working));
+        assert!(booster.nagle_registry_snapshot.contains_key(blocked));
+        assert!(
+            finish_network_restore(vec!["owned firewall failure".into()], || {
+                save_network_snapshot(&path, &booster.snapshot())
+            })
+            .is_err()
+        );
+        let saved = read_network_snapshot(&path).unwrap();
+        assert_eq!(saved.nagle_registry_snapshot.len(), 1);
+        assert!(saved.nagle_registry_snapshot.contains_key(blocked));
+        let mut retry = NetworkBooster::new();
+        retry.merge_saved_snapshot(saved);
+        retry
+            .restore_nagle_with(|key, _, _| {
+                assert!(
+                    !key.ends_with(working),
+                    "retry must not replay already restored adapter settings"
+                );
+                Ok(())
+            })
+            .unwrap();
+        finish_network_restore(Vec::new(), || {
+            save_network_snapshot(&path, &retry.snapshot())
+        })
+        .unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn network_restore_preserves_both_operation_and_record_write_failures() {
+        let error = finish_network_restore(vec!["owned restore failure".into()], || {
+            anyhow::bail!("owned record failure")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("owned restore failure") && error.contains("owned record failure"));
     }
 
     #[test]
