@@ -548,19 +548,6 @@ impl SystemOptimizer {
         Ok(())
     }
 
-    fn parse_guid_from_output(output: &str) -> Option<String> {
-        output
-            .split(|c: char| !c.is_ascii_hexdigit() && c != '-')
-            .find(|token| token.len() == 36 && token.matches('-').count() == 4)
-            .map(|token| token.to_ascii_lowercase())
-    }
-
-    fn output_contains_guid(output: &str, guid: &str) -> bool {
-        output
-            .split(|c: char| !c.is_ascii_hexdigit() && c != '-')
-            .any(|token| token.len() == 36 && token.eq_ignore_ascii_case(guid))
-    }
-
     fn power_plan_guid(plan: &PowerPlan) -> &'static str {
         match plan {
             PowerPlan::Balanced => BALANCED_POWER_PLAN_GUID,
@@ -571,35 +558,68 @@ impl SystemOptimizer {
     }
 
     pub(crate) fn active_power_plan_guid() -> Option<String> {
-        let output = crate::utils::run_hidden_command_output_with_timeout(
-            "powercfg",
-            &["/GETACTIVESCHEME"],
-            std::time::Duration::from_secs(15),
-        )
-        .ok()?;
-
-        if !output.status.success() {
-            return None;
+        use windows::Win32::{
+            Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree},
+            System::Power::PowerGetActiveScheme,
+        };
+        let mut allocated = std::ptr::null_mut();
+        let status = unsafe { PowerGetActiveScheme(None, &mut allocated) };
+        let guid = (status == ERROR_SUCCESS && !allocated.is_null()).then(|| unsafe { *allocated });
+        // PowerGetActiveScheme allocates with LocalAlloc, not the Rust allocator.
+        if !allocated.is_null() {
+            unsafe {
+                let _ = LocalFree(Some(HLOCAL(allocated.cast())));
+            }
         }
-
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        Self::parse_guid_from_output(&output_str)
+        guid.map(|guid| format!("{guid:?}").to_ascii_lowercase())
     }
 
     fn is_power_plan_installed(guid: &str) -> Option<bool> {
-        let output = crate::utils::run_hidden_command_output_with_timeout(
-            "powercfg",
-            &["/list"],
-            std::time::Duration::from_secs(15),
-        )
-        .ok()?;
+        let guid = windows::core::GUID::try_from(guid).ok()?;
+        Self::power_scheme_present_with(guid, Self::read_power_scheme_at)
+    }
 
-        if !output.status.success() {
-            return None;
+    fn read_power_scheme_at(index: u32) -> std::io::Result<Option<windows::core::GUID>> {
+        use windows::Win32::{
+            Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS},
+            System::Power::{ACCESS_SCHEME, PowerEnumerate},
+        };
+        let mut guid = windows::core::GUID::zeroed();
+        let mut size = std::mem::size_of_val(&guid) as u32;
+        let status = unsafe {
+            PowerEnumerate(
+                None,
+                None,
+                None,
+                ACCESS_SCHEME,
+                index,
+                Some((&mut guid as *mut windows::core::GUID).cast()),
+                &mut size,
+            )
+        };
+        match status {
+            ERROR_NO_MORE_ITEMS => Ok(None),
+            ERROR_SUCCESS if size as usize == std::mem::size_of_val(&guid) => Ok(Some(guid)),
+            ERROR_SUCCESS => Err(std::io::Error::other(
+                "Windows returned an invalid power scheme identifier",
+            )),
+            _ => Err(std::io::Error::from_raw_os_error(status.0 as i32)),
         }
+    }
 
-        let output_str = String::from_utf8_lossy(&output.stdout);
-        Some(Self::output_contains_guid(&output_str, guid))
+    fn power_scheme_present_with(
+        target: windows::core::GUID,
+        mut read: impl FnMut(u32) -> std::io::Result<Option<windows::core::GUID>>,
+    ) -> Option<bool> {
+        for index in 0..128 {
+            match read(index).ok()? {
+                Some(guid) if guid == target => return Some(true),
+                None => return Some(false),
+                _ => {}
+            }
+        }
+        // A failed or incomplete enumeration is not proof that a scheme is absent.
+        None
     }
 
     fn set_active_power_plan_guid(guid: &str) -> bool {
@@ -2080,26 +2100,99 @@ mod tests {
     }
 
     #[test]
-    fn power_plan_guid_parser_matches_exact_guid_tokens() {
-        let output = format!(
-            "Power Scheme GUID: {}  (SwiftTunnel) *",
-            SWIFTTUNNEL_POWER_PLAN_GUID.to_ascii_uppercase()
+    fn native_power_scheme_detection_preserves_absence_failure_and_bounds() {
+        use windows::core::GUID;
+        let target = GUID::try_from(SWIFTTUNNEL_POWER_PLAN_GUID).unwrap();
+        let other = GUID::try_from("44444444-4444-4444-4444-444444444453").unwrap();
+        assert_eq!(
+            SystemOptimizer::power_scheme_present_with(target, |_| Ok(Some(target))),
+            Some(true)
         );
-
-        assert!(SystemOptimizer::output_contains_guid(
-            &output,
-            SWIFTTUNNEL_POWER_PLAN_GUID
-        ));
+        assert_eq!(
+            SystemOptimizer::power_scheme_present_with(target, |index| Ok(
+                (index == 0).then_some(other)
+            )),
+            Some(false)
+        );
+        assert_eq!(
+            SystemOptimizer::power_scheme_present_with(target, |_| Err(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            ))),
+            None
+        );
+        let mut reads = 0;
+        assert_eq!(
+            SystemOptimizer::power_scheme_present_with(target, |_| {
+                reads += 1;
+                Ok(Some(other))
+            }),
+            None
+        );
+        assert_eq!(reads, 128);
+        assert_eq!(SystemOptimizer::is_power_plan_installed("not a GUID"), None);
     }
 
     #[test]
-    fn power_plan_guid_parser_rejects_superficially_similar_text() {
-        let output = "Power Scheme GUID: 44444444-4444-4444-4444-444444444453 (Other)";
-
-        assert!(!SystemOptimizer::output_contains_guid(
-            output,
-            SWIFTTUNNEL_POWER_PLAN_GUID
-        ));
+    #[ignore = "read-only comparison with this machine's power-plan inventory"]
+    fn compare_native_power_reads_with_local_powercfg() {
+        let cli_start = std::time::Instant::now();
+        let active = crate::run_hidden_command_with_timeout(
+            "powercfg",
+            &["/GETACTIVESCHEME"],
+            std::time::Duration::from_secs(15),
+        );
+        let list = crate::run_hidden_command_with_timeout(
+            "powercfg",
+            &["/list"],
+            std::time::Duration::from_secs(15),
+        );
+        let cli_elapsed = cli_start.elapsed();
+        assert!(
+            active.success && list.success,
+            "{} / {}",
+            active.stderr,
+            list.stderr
+        );
+        let ids = |text: &str| {
+            text.lines()
+                .filter_map(|line| {
+                    line.split_whitespace()
+                        .find_map(|word| windows::core::GUID::try_from(word).ok())
+                })
+                .collect::<Vec<_>>()
+        };
+        let active_id = *ids(&active.stdout)
+            .first()
+            .expect("powercfg must return an active GUID");
+        let mut installed = ids(&list.stdout);
+        let mut native = Vec::new();
+        for index in 0..128 {
+            match SystemOptimizer::read_power_scheme_at(index).unwrap() {
+                Some(guid) => native.push(guid),
+                None => break,
+            }
+        }
+        installed.sort_by_key(|g| g.to_u128());
+        native.sort_by_key(|g| g.to_u128());
+        assert_eq!(native, installed);
+        let native_start = std::time::Instant::now();
+        for _ in 0..100 {
+            assert_eq!(
+                SystemOptimizer::active_power_plan_guid(),
+                Some(format!("{active_id:?}").to_ascii_lowercase())
+            );
+        }
+        for guid in &installed {
+            assert_eq!(
+                SystemOptimizer::is_power_plan_installed(&format!("{guid:?}")),
+                Some(true)
+            );
+        }
+        eprintln!(
+            "Read-only power inventory: {} installed plans matched; two CLI reads={cli_elapsed:?}, 100 active native reads plus presence checks={:?}",
+            installed.len(),
+            native_start.elapsed()
+        );
     }
 
     #[test]
