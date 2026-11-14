@@ -6298,7 +6298,7 @@ fn run_packet_reader(
         let new_snapshot = process_cache.get_snapshot();
         if new_snapshot.version != snapshot_version {
             snapshot_version = new_snapshot.version;
-            prune_inline_cache_on_snapshot_refresh(&mut inline_cache);
+            prune_inline_cache_on_snapshot_refresh(&mut inline_cache, &new_snapshot);
         }
         snapshot = new_snapshot;
 
@@ -7442,6 +7442,7 @@ fn run_cache_refresher(
             }
         }
 
+        let owner_table_started_at = Instant::now();
         let connections = match read_connection_owners() {
             Ok(connections) => connections,
             Err((protocol, code)) => {
@@ -7555,14 +7556,21 @@ fn run_cache_refresher(
         if api_tunneling_enabled.load(Ordering::Relaxed) {
             let explicit_tcp_ports =
                 collect_tunnel_tcp_ports_for_api_tunneling(&connections, &pid_names, tunnel_apps);
-            cache.update_with_recent_tcp_ports(
+            cache.update_observed_connections(
                 connections,
                 pid_names,
                 &explicit_tcp_ports,
-                Duration::from_secs(API_TUNNEL_TCP_PORT_RETENTION_SECS),
+                Some(Duration::from_secs(API_TUNNEL_TCP_PORT_RETENTION_SECS)),
+                owner_table_started_at,
             );
         } else {
-            cache.update_with_tcp_ports(connections, pid_names, &[]);
+            cache.update_observed_connections(
+                connections,
+                pid_names,
+                &[],
+                None,
+                owner_table_started_at,
+            );
         }
 
         if let Some(done) = initial_refresh_done.take() {
@@ -8195,18 +8203,57 @@ fn auto_routing_packet_action(
 }
 
 /// Per-reader cache of UDP ownership hints and captured TCP connections.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 enum InlineCacheEntry {
     Udp,
-    // The SYN's initial sequence distinguishes a retry from a newly reused
-    // four-tuple. FIN retries do not retire a capture; RST or a new SYN does.
-    Tcp(u32),
+    Tcp {
+        initial_sequence: u32,
+        captured_at: Instant,
+    },
 }
 
+// A captured TCP connection is identified by its key and initial sequence.
+// The timestamp is only evidence for safe retirement, not a new flow identity.
+impl PartialEq for InlineCacheEntry {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Udp, Self::Udp) => true,
+            (
+                Self::Tcp {
+                    initial_sequence: left,
+                    ..
+                },
+                Self::Tcp {
+                    initial_sequence: right,
+                    ..
+                },
+            ) => left == right,
+            _ => false,
+        }
+    }
+}
+impl Eq for InlineCacheEntry {}
+
 impl InlineCacheEntry {
+    fn tcp(initial_sequence: u32) -> Self {
+        Self::Tcp {
+            initial_sequence,
+            captured_at: Instant::now(),
+        }
+    }
+
+    fn initial_sequence(self) -> Option<u32> {
+        match self {
+            Self::Tcp {
+                initial_sequence, ..
+            } => Some(initial_sequence),
+            Self::Udp => None,
+        }
+    }
+
     fn new_capture(protocol: Protocol, syn_sequence: Option<u32>) -> Option<Self> {
         match protocol {
-            Protocol::Tcp => syn_sequence.map(Self::Tcp),
+            Protocol::Tcp => syn_sequence.map(Self::tcp),
             Protocol::Udp => Some(Self::Udp),
         }
     }
@@ -8225,15 +8272,33 @@ type InlineCache = ahash::AHashMap<InlineCacheKey, InlineCacheEntry>;
 const MAX_INLINE_CACHE_ENTRIES: usize = 10_000;
 type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
 
-fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache) {
-    // API opt-out changes new-flow admission, not the source of established
-    // connections. Retain those captures until teardown or a recycled SYN.
-
-    // UDP ownership entries must track the newest process snapshot, but captured
-    // Route Assist TCP flows must survive owner-table refreshes after their SYN
-    // was MSS-clamped and relayed. RST packets evict TCP entries immediately;
-    // FIN must stay cached so the final teardown ACK still uses the relay.
-    inline_cache.retain(|key, _| matches!(key, InlineCacheKey::Tcp(..)));
+fn prune_inline_cache_on_snapshot_refresh(
+    inline_cache: &mut InlineCache,
+    snapshot: &ProcessSnapshot,
+) {
+    inline_cache.retain(|key, entry| {
+        let (
+            InlineCacheKey::Tcp(local_ip, local_port, remote_ip, remote_port),
+            InlineCacheEntry::Tcp { captured_at, .. },
+        ) = (key, entry)
+        else {
+            return false; // UDP ownership must follow the latest process snapshot.
+        };
+        let Some(observed_at) = snapshot.owner_table_started_at else {
+            return true;
+        };
+        if observed_at <= *captured_at {
+            return true; // The query started before this SYN was captured.
+        }
+        // Keep every live/half-closed/TIME_WAIT socket, even if its PID is zero
+        // or no longer in tunnel scope. Only confirmed absence permits reuse.
+        snapshot.connections.contains_key(&ConnectionKey::tcp(
+            *local_ip,
+            *local_port,
+            *remote_ip,
+            *remote_port,
+        ))
+    });
 }
 
 fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool {
@@ -8824,7 +8889,7 @@ where
     if let Some(entry) = inline_cache.get(&cache_key).copied() {
         let recycled_tcp_syn = protocol == Protocol::Tcp
             && is_tcp_initial_syn
-            && Some(entry) != tcp_syn_sequence.map(InlineCacheEntry::Tcp);
+            && entry.initial_sequence() != tcp_syn_sequence;
         if recycled_tcp_syn {
             inline_cache.remove(&cache_key);
         } else {
@@ -11229,6 +11294,33 @@ mod tests {
     }
 
     #[test]
+    fn native_owner_tables_identify_owned_loopback_sockets() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let owners = read_connection_owners().expect("read-only native owner query");
+        let loopback = Ipv4Addr::LOCALHOST;
+        assert_eq!(
+            owners.get(&ConnectionKey::tcp(
+                loopback,
+                client.local_addr().unwrap().port(),
+                loopback,
+                listener.local_addr().unwrap().port()
+            )),
+            Some(&std::process::id())
+        );
+        assert_eq!(
+            owners.get(&ConnectionKey::new(
+                loopback,
+                udp.local_addr().unwrap().port(),
+                Protocol::Udp
+            )),
+            Some(&std::process::id())
+        );
+    }
+
+    #[test]
     fn a_successful_empty_owner_table_is_distinct_from_a_failed_read() {
         let mut calls = 0;
         let mut delivered = 0;
@@ -12722,6 +12814,7 @@ mod tests {
             tunnel_udp_ports: udp_ports.iter().copied().collect(),
             tunnel_tcp_ports: tcp_ports.iter().copied().collect(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         }
     }
@@ -12947,6 +13040,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12988,6 +13082,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13026,6 +13121,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13064,6 +13160,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13102,6 +13199,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13140,6 +13238,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13178,6 +13277,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13224,6 +13324,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13263,7 +13364,7 @@ mod tests {
                 // as a new TCP header, even when it resembles that port.
                 let mut cache = HashMap::from([(
                     InlineCacheKey::Tcp(src, 55000, dst, 443),
-                    InlineCacheEntry::Tcp(1),
+                    InlineCacheEntry::tcp(1),
                 )]);
                 let mut first =
                     build_ipv4_tcp_frame_with_payload(src, dst, first_port, 443, &[0; 4]);
@@ -13526,6 +13627,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13969,6 +14071,7 @@ mod tests {
             tunnel_udp_ports: [src_port].into_iter().collect(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14006,6 +14109,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14078,6 +14182,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14157,6 +14262,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14189,6 +14295,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14210,11 +14317,14 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert(
             InlineCacheKey::Tcp(src_ip, 40000, Ipv4Addr::LOCALHOST, 443),
-            InlineCacheEntry::Tcp(1),
+            InlineCacheEntry::tcp(1),
         );
         inline_cache.insert(InlineCacheKey::Udp(src_ip, 40001), InlineCacheEntry::Udp);
 
-        prune_inline_cache_on_snapshot_refresh(&mut inline_cache);
+        prune_inline_cache_on_snapshot_refresh(
+            &mut inline_cache,
+            &ProcessSnapshot::empty(Default::default()),
+        );
 
         assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
             src_ip,
@@ -14224,7 +14334,10 @@ mod tests {
         )));
         assert!(!inline_cache.contains_key(&InlineCacheKey::Udp(src_ip, 40001)));
 
-        prune_inline_cache_on_snapshot_refresh(&mut inline_cache);
+        prune_inline_cache_on_snapshot_refresh(
+            &mut inline_cache,
+            &ProcessSnapshot::empty(Default::default()),
+        );
         assert_eq!(inline_cache.len(), 1);
     }
 
@@ -14343,7 +14456,10 @@ mod tests {
                 }
                 _ => {}
             }
-            prune_inline_cache_on_snapshot_refresh(&mut cache);
+            prune_inline_cache_on_snapshot_refresh(
+                &mut cache,
+                &ProcessSnapshot::empty(Default::default()),
+            );
             let kept = should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &ack,
                 &snapshot,
@@ -14387,7 +14503,7 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert(
             InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
-            InlineCacheEntry::Tcp(1),
+            InlineCacheEntry::tcp(1),
         );
         crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
@@ -14399,7 +14515,7 @@ mod tests {
         ));
         assert_eq!(
             inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
-            Some(&InlineCacheEntry::Tcp(1))
+            Some(&InlineCacheEntry::tcp(1))
         );
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -14410,7 +14526,7 @@ mod tests {
         ));
         assert_eq!(
             inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
-            Some(&InlineCacheEntry::Tcp(1))
+            Some(&InlineCacheEntry::tcp(1))
         );
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -14421,7 +14537,7 @@ mod tests {
         ));
         assert_eq!(
             inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
-            Some(&InlineCacheEntry::Tcp(1))
+            Some(&InlineCacheEntry::tcp(1))
         );
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -14432,7 +14548,7 @@ mod tests {
         ));
         assert_eq!(
             inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
-            Some(&InlineCacheEntry::Tcp(1)),
+            Some(&InlineCacheEntry::tcp(1)),
             "a retransmitted FIN must not discard the captured path"
         );
         assert!(should_route_to_vpn_with_inline_cache(
@@ -14459,7 +14575,7 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert(
             InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
-            InlineCacheEntry::Tcp(1),
+            InlineCacheEntry::tcp(1),
         );
         crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
@@ -14487,7 +14603,7 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert(
             InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
-            InlineCacheEntry::Tcp(1),
+            InlineCacheEntry::tcp(1),
         );
 
         let fin = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
@@ -14519,7 +14635,7 @@ mod tests {
         let mut inline_cache: InlineCache = HashMap::new();
         inline_cache.insert(
             InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
-            InlineCacheEntry::Tcp(1),
+            InlineCacheEntry::tcp(1),
         );
 
         assert!(!should_route_to_vpn_with_inline_cache(
@@ -14550,6 +14666,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14582,6 +14699,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14617,6 +14735,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15303,6 +15422,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15382,6 +15502,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15432,6 +15553,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15471,6 +15593,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15513,6 +15636,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15566,6 +15690,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15620,6 +15745,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15659,6 +15785,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15696,6 +15823,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let frame = build_ipv4_tcp_frame_with_flags(src_ip, web_ip, src_port, 443, 0x02);
@@ -15737,6 +15865,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15781,6 +15910,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15832,6 +15962,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15886,6 +16017,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15928,6 +16060,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15989,6 +16122,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16038,6 +16172,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16084,6 +16219,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16140,6 +16276,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16198,6 +16335,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16238,6 +16376,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16276,6 +16415,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16319,6 +16459,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16375,6 +16516,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16443,6 +16585,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16504,6 +16647,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16558,6 +16702,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16598,6 +16743,80 @@ mod tests {
     }
 
     #[test]
+    fn completed_tcp_captures_are_retired_only_by_a_newer_complete_owner_table() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(128, 116, 50, 3);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst]);
+        let now = Instant::now();
+        let captured_at = now - Duration::from_secs(2);
+        let mut cache: InlineCache = (1..=MAX_INLINE_CACHE_ENTRIES)
+            .map(|port| {
+                (
+                    InlineCacheKey::Tcp(src, port as u16, dst, 443),
+                    InlineCacheEntry::Tcp {
+                        initial_sequence: 1,
+                        captured_at,
+                    },
+                )
+            })
+            .collect();
+        let mut snapshot =
+            ProcessSnapshot::empty(["robloxplayerbeta.exe".to_string()].into_iter().collect());
+        // An empty synthetic snapshot, metadata-only update or failed native
+        // refresh supplies no proof that the captured socket has ended.
+        prune_inline_cache_on_snapshot_refresh(&mut cache, &snapshot);
+        assert_eq!(cache.len(), MAX_INLINE_CACHE_ENTRIES);
+        snapshot.owner_table_started_at = Some(captured_at - Duration::from_millis(1));
+        prune_inline_cache_on_snapshot_refresh(&mut cache, &snapshot);
+        assert_eq!(
+            cache.len(),
+            MAX_INLINE_CACHE_ENTRIES,
+            "a late-published pre-SYN query cannot retire a new capture"
+        );
+        snapshot.owner_table_started_at = Some(now);
+        // Windows may report PID zero during TCP teardown. Presence of the
+        // socket, rather than its owner or tunnel policy, preserves its route.
+        snapshot
+            .connections
+            .insert(ConnectionKey::tcp(src, 5000, dst, 443), 0);
+        prune_inline_cache_on_snapshot_refresh(&mut cache, &snapshot);
+        assert_eq!(cache.len(), 1);
+        let ack = build_ipv4_tcp_frame_with_flags(src, dst, 5000, 443, 0x10);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &ack,
+                &snapshot,
+                &mut cache,
+                false,
+                |_, _| None,
+                |_| None
+            )
+        );
+        // Retiring closed sockets frees admission for the next real SYN,
+        // without evicting that still-present half-closed connection.
+        let syn = build_ipv4_tcp_frame_with_flags(src, dst, 40019, 443, 0x02);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &syn,
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into())
+            )
+        );
+        prune_inline_cache_on_snapshot_refresh(&mut cache, &snapshot);
+        assert_eq!(
+            cache.len(),
+            2,
+            "the query started before the new SYN and cannot expire it"
+        );
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
     fn full_inline_cache_does_not_relay_only_a_new_tcp_syn() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
@@ -16610,7 +16829,7 @@ mod tests {
             .map(|port| {
                 (
                     InlineCacheKey::Tcp(src, port as u16, dst, 443),
-                    InlineCacheEntry::Tcp(1),
+                    InlineCacheEntry::tcp(1),
                 )
             })
             .collect();
@@ -16631,7 +16850,10 @@ mod tests {
         assert_eq!(cache.len(), MAX_INLINE_CACHE_ENTRIES);
         // An existing half-closed flow retains ownership; a snapshot refresh
         // cannot expire it just because its local FIN was sent a minute ago.
-        prune_inline_cache_on_snapshot_refresh(&mut cache);
+        prune_inline_cache_on_snapshot_refresh(
+            &mut cache,
+            &ProcessSnapshot::empty(Default::default()),
+        );
         let live_ack = build_ipv4_tcp_frame_with_flags(src, dst, 5000, 443, 0x10);
         assert!(
             should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
@@ -16668,6 +16890,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16743,6 +16966,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16806,6 +17030,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16864,6 +17089,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
@@ -16927,6 +17153,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17068,6 +17295,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
@@ -17164,6 +17392,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
@@ -17247,6 +17476,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
@@ -17322,6 +17552,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17378,6 +17609,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17431,6 +17663,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17482,6 +17715,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17537,6 +17771,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17570,6 +17805,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17603,6 +17839,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17644,6 +17881,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: [src_port].into_iter().collect(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17766,6 +18004,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17814,6 +18053,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17862,6 +18102,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17902,6 +18143,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -17941,6 +18183,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 

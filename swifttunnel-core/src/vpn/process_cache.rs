@@ -220,6 +220,9 @@ pub struct ProcessSnapshot {
     pub tunnel_tcp_ports: AHashSet<u16>,
     /// Snapshot version (monotonically increasing)
     pub version: u64,
+    /// Start of a successful, complete native TCP/UDP owner-table read.
+    /// Metadata-only publications cannot prove that a TCP socket has closed.
+    pub owner_table_started_at: Option<std::time::Instant>,
     /// Timestamp when snapshot was created
     pub created_at: std::time::Instant,
 }
@@ -279,6 +282,7 @@ impl ProcessSnapshot {
             tunnel_udp_ports: AHashSet::new(),
             tunnel_tcp_ports: AHashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         }
     }
@@ -541,6 +545,7 @@ impl LockFreeProcessCache {
             tunnel_udp_ports,
             tunnel_tcp_ports,
             version,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         })
     }
@@ -737,6 +742,56 @@ impl LockFreeProcessCache {
         );
 
         self.current.store(new_snapshot);
+    }
+
+    /// Publish a complete native owner-table read with its start time. Refresh
+    /// unchanged proofs at most once per five seconds, so a long idle period can
+    /// retire closed captures without rebuilding maps at the 100ms poll rate.
+    pub(crate) fn update_observed_connections(
+        &self,
+        connections: AHashMap<ConnectionKey, u32>,
+        mut pid_names: AHashMap<u32, String>,
+        tcp_ports: &[u16],
+        retain_for: Option<Duration>,
+        observed_at: std::time::Instant,
+    ) {
+        let _snapshot_write_guard = self.snapshot_write_lock.lock();
+        self.merge_recent_immediate_processes(&mut pid_names);
+        let explicit_tunnel_tcp_ports = match retain_for {
+            Some(retain_for) => self.retain_recent_explicit_tcp_ports_locked(tcp_ports, retain_for),
+            None => self.replace_explicit_tcp_ports_locked(tcp_ports),
+        };
+        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
+        let proof_is_recent = self
+            .current
+            .load()
+            .owner_table_started_at
+            .is_some_and(|previous| {
+                observed_at.saturating_duration_since(previous) < Duration::from_secs(5)
+            });
+        if proof_is_recent
+            && self.snapshot_inputs_unchanged(
+                &connections,
+                &pid_names,
+                &explicit_tunnel_udp_ports,
+                &explicit_tunnel_tcp_ports,
+            )
+        {
+            return;
+        }
+        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut snapshot = self.snapshot_from_parts(
+            connections,
+            pid_names,
+            version,
+            explicit_tunnel_udp_ports,
+            explicit_tunnel_tcp_ports,
+        );
+        // This Arc was just allocated and has not been published yet.
+        Arc::get_mut(&mut snapshot)
+            .expect("unpublished owner snapshot")
+            .owner_table_started_at = Some(observed_at);
+        self.current.store(snapshot);
     }
 
     /// Update tunnel apps list and immediately refresh the snapshot
@@ -1002,6 +1057,44 @@ mod tests {
 
         // New snapshot has the connection
         assert!(snap2.should_tunnel(Ipv4Addr::new(192, 168, 1, 1), 8080, Protocol::Tcp));
+    }
+
+    #[test]
+    fn complete_owner_proofs_refresh_without_per_poll_republication() {
+        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".into()]);
+        let start = std::time::Instant::now();
+        cache.update_observed_connections(Default::default(), Default::default(), &[], None, start);
+        let first = cache.get_snapshot();
+        assert_eq!(first.owner_table_started_at, Some(start));
+        cache.update_observed_connections(
+            Default::default(),
+            Default::default(),
+            &[],
+            None,
+            start + Duration::from_millis(100),
+        );
+        assert!(
+            Arc::ptr_eq(&first, &cache.get_snapshot()),
+            "unchanged fast polls must not rebuild every routing cache"
+        );
+        cache.update_observed_connections(
+            Default::default(),
+            Default::default(),
+            &[],
+            None,
+            start + Duration::from_secs(5),
+        );
+        let refreshed = cache.get_snapshot();
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert_eq!(
+            refreshed.owner_table_started_at,
+            Some(start + Duration::from_secs(5))
+        );
+        cache.register_process_immediate(1234, "RobloxPlayerBeta.exe".into());
+        assert!(
+            cache.get_snapshot().owner_table_started_at.is_none(),
+            "ETW-only publications must not turn stale owner rows into new closure evidence"
+        );
     }
 
     #[test]
