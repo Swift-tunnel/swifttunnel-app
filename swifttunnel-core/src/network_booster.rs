@@ -203,15 +203,10 @@ fn optional_registry_read<T>(read: std::io::Result<T>) -> Result<Option<T>> {
     }
 }
 
-fn run_network_migration(
-    completed: &mut bool,
-    force: bool,
-    cleanup: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    if *completed && !force {
+fn run_network_migration(completed: &mut bool, cleanup: impl FnOnce() -> Result<()>) -> Result<()> {
+    if *completed {
         return Ok(());
     }
-    *completed = false;
     cleanup()?;
     *completed = true;
     Ok(())
@@ -373,7 +368,7 @@ impl NetworkBooster {
             };
         }
 
-        self.cleanup_removed_qos_policies(false);
+        self.cleanup_removed_qos_policies();
 
         let relay_qos_requested = Self::relay_qos_requested(&requested_config);
         if relay_qos_requested {
@@ -557,8 +552,8 @@ impl NetworkBooster {
         Ok(())
     }
 
-    fn cleanup_removed_qos_policies(&mut self, force: bool) {
-        let result = run_network_migration(&mut self.legacy_qos_cleanup_done, force, || {
+    fn cleanup_removed_qos_policies(&mut self) {
+        let result = run_network_migration(&mut self.legacy_qos_cleanup_done, || {
             let mut failures = Vec::new();
             for policy_name in REMOVED_QOS_POLICY_NAMES {
                 let policy_path = Self::qos_policy_path(policy_name);
@@ -853,7 +848,10 @@ impl NetworkBooster {
             errors.push(format!("network throttling registry restore: {}", e));
         }
 
-        self.cleanup_removed_qos_policies(true);
+        // These retired policy names are never created by current boosts.
+        // A completed migration needs no second PowerShell run at shutdown.
+        // Failed migrations remain incomplete and are still retried.
+        self.cleanup_removed_qos_policies();
         if let Err(e) = self.remove_relay_socket_qos_policy() {
             errors.push(format!("relay DSCP policy restore: {}", e));
         }
@@ -967,7 +965,9 @@ fn cleanup_system_state(
 
     // 2. Delete SwiftTunnel QoS policies from older releases and the current
     // relay-scoped DSCP policy.
-    booster.cleanup_removed_qos_policies(true);
+    // Snapshot recovery above may already have completed this migration.
+    // A fresh or failed recovery still performs the stateless cleanup once.
+    booster.cleanup_removed_qos_policies();
     if let Err(error) = NetworkBooster::cleanup_relay_socket_qos_policies() {
         warn!("Cleanup: relay QoS policy removal failed: {error}");
     }
@@ -1330,24 +1330,27 @@ mod tests {
     }
 
     #[test]
-    fn network_migration_skips_only_successful_automatic_repeats_and_retries_restore() {
+    fn network_migration_retries_failures_and_skips_completed_runs() {
         let mut completed = false;
         assert!(
-            run_network_migration(&mut completed, false, || anyhow::bail!("provider failed"))
-                .is_err()
+            run_network_migration(&mut completed, || anyhow::bail!("provider failed")).is_err()
         );
         assert!(!completed);
-        run_network_migration(&mut completed, false, || Ok(())).unwrap();
+        run_network_migration(&mut completed, || Ok(())).unwrap();
         assert!(completed);
-        run_network_migration(&mut completed, false, || panic!("already completed")).unwrap();
-        assert!(
-            run_network_migration(&mut completed, true, || anyhow::bail!("restore failed"))
-                .is_err()
-        );
-        assert!(!completed);
-        run_network_migration(&mut completed, false, || Ok(())).unwrap();
-        run_network_migration(&mut completed, true, || Ok(())).unwrap();
+        run_network_migration(&mut completed, || panic!("already completed")).unwrap();
         assert!(completed);
+        // Explicit stateless cleanup creates its own booster. A previous
+        // session's completed migration must not skip that fresh sweep.
+        let mut fresh = NetworkBooster::new();
+        assert!(!fresh.legacy_qos_cleanup_done);
+        let mut swept = false;
+        run_network_migration(&mut fresh.legacy_qos_cleanup_done, || {
+            swept = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(swept && fresh.legacy_qos_cleanup_done);
     }
 
     #[cfg(windows)]
