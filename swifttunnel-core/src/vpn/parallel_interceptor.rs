@@ -240,6 +240,24 @@ enum RebindDecision {
     Backoff(Duration),
 }
 
+/// A drained queue can report an error, but a definitely lost device/handle
+/// must still enter recovery. Preserve legacy handling of unspecified empty
+/// queue errors; do not assume all driver versions use the same empty code.
+fn reader_can_ignore_drain_error(draining: bool, error: &windows::core::Error) -> bool {
+    use windows::Win32::Foundation::{
+        ERROR_DEV_NOT_EXIST, ERROR_DEVICE_NOT_CONNECTED, ERROR_INVALID_HANDLE, ERROR_NO_SUCH_DEVICE,
+    };
+    draining
+        && ![
+            ERROR_INVALID_HANDLE,
+            ERROR_DEV_NOT_EXIST,
+            ERROR_DEVICE_NOT_CONNECTED,
+            ERROR_NO_SUCH_DEVICE,
+        ]
+        .into_iter()
+        .any(|code| error.code() == windows::core::HRESULT::from_win32(code.0))
+}
+
 /// Pure state machine for reader rebind budget accounting.
 ///
 /// Kept deliberately tiny: only the fields that affect the decision. The
@@ -6240,7 +6258,7 @@ fn run_packet_reader(
             }
             // A follow-up read after a full batch can find the queue empty,
             // which WinpkFilter reports as an error. That is not a dead handle.
-            Err(_) if draining => 0,
+            Err(ref error) if reader_can_ignore_drain_error(draining, error) => 0,
             Err(e) => {
                 match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
                     RebindDecision::Stop => break,
@@ -18253,6 +18271,39 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    #[test]
+    fn an_empty_drain_does_not_hide_a_lost_driver_or_adapter() {
+        use windows::Win32::Foundation::{
+            ERROR_DEV_NOT_EXIST, ERROR_DEVICE_NOT_CONNECTED, ERROR_INVALID_HANDLE,
+            ERROR_INVALID_PARAMETER, ERROR_NO_SUCH_DEVICE,
+        };
+        for code in [
+            ERROR_INVALID_HANDLE,
+            ERROR_DEV_NOT_EXIST,
+            ERROR_DEVICE_NOT_CONNECTED,
+            ERROR_NO_SUCH_DEVICE,
+        ] {
+            let error =
+                windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(code.0));
+            assert!(
+                !reader_can_ignore_drain_error(true, &error),
+                "lost device {code:?} must consume rebind budget even after a full batch"
+            );
+            assert!(!reader_can_ignore_drain_error(false, &error));
+        }
+        let empty = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(
+            ERROR_INVALID_PARAMETER.0,
+        ));
+        assert!(reader_can_ignore_drain_error(true, &empty));
+        assert!(!reader_can_ignore_drain_error(false, &empty));
+        let unspecified =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32));
+        assert!(
+            reader_can_ignore_drain_error(true, &unspecified),
+            "legacy driver empty-queue behavior must remain supported"
+        );
+    }
+
     // RebindState — the pure state machine extracted from the reader loop.
     // These tests cover the four branches the reader relies on:
     //   1. increment on error
