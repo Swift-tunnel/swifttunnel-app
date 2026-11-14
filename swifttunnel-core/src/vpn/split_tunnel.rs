@@ -1531,8 +1531,8 @@ impl SplitTunnelDriver {
         r#"
         $ErrorActionPreference = 'Stop'
         $bindings = @(
-            Get-NetAdapterBinding -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                Where-Object { $_.Enabled -eq $true } |
+            Get-NetAdapterBinding -AllBindings -ErrorAction Stop |
+                Where-Object { $_.ComponentID -eq 'nt_ndisrd' -and $_.Enabled -eq $true } |
                 Sort-Object -Property Name -Unique
         )
 
@@ -1547,34 +1547,37 @@ impl SplitTunnelDriver {
         foreach ($binding in $bindings) {
             $adapterName = [string]$binding.Name
             if ([string]::IsNullOrWhiteSpace($adapterName)) {
+                $failures.Add('An enabled WinpkFilter binding has no adapter name; it was left unchanged.')
                 continue
             }
 
             try {
-                Disable-NetAdapterBinding -Name $adapterName -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
+                Disable-NetAdapterBinding -InputObject $binding -Confirm:$false -ErrorAction Stop | Out-Null
                 Start-Sleep -Milliseconds 500
-                $verification = Get-NetAdapterBinding -Name $adapterName -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-
-                if ($verification -and $verification.Enabled) {
-                    $failures.Add($adapterName + ': binding still enabled after Disable-NetAdapterBinding')
-                    continue
-                }
-
                 $disabled.Add($adapterName)
             } catch {
                 $failures.Add($adapterName + ': ' + $_.Exception.Message)
             }
         }
 
-        if ($disabled.Count -gt 0) {
-            Write-Output ('Disabled WinpkFilter binding on adapters: ' + ($disabled -join ', '))
+        # A failed query is not evidence that a binding disappeared. Enumerate
+        # again without a name wildcard and verify each exact adapter identity.
+        $verification = @(Get-NetAdapterBinding -AllBindings -ErrorAction Stop)
+        foreach ($adapterName in $disabled) {
+            if ($verification | Where-Object { $_.Name -eq $adapterName -and $_.ComponentID -eq 'nt_ndisrd' -and $_.Enabled -eq $true }) {
+                $failures.Add($adapterName + ': binding still enabled after Disable-NetAdapterBinding')
+            }
         }
 
         if ($failures.Count -gt 0) {
             Write-Error ('Failed to disable WinpkFilter binding on adapters: ' + ($failures -join '; '))
             exit 1
         }
+
+        if ($disabled.Count -gt 0) {
+            Write-Output ('Disabled WinpkFilter binding on adapters: ' + ($disabled -join ', '))
+        }
+
         "#
     }
 
@@ -2609,6 +2612,80 @@ mod tests {
         let script = SplitTunnelDriver::build_winpkfilter_binding_cleanup_script();
         assert!(script.contains("Disable-NetAdapterBinding"));
         assert!(script.contains("nt_ndisrd"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn binding_cleanup_does_not_confuse_provider_failures_with_absence_or_use_name_wildcards() {
+        // Replace both binding cmdlets and sleep. No real adapter is queried,
+        // disabled or renamed. Exercise the actual cleanup script in PowerShell.
+        for (mode, success, marker) in [
+            ("empty", true, "No enabled WinpkFilter bindings"),
+            ("query_failed", false, "fixture initial query failed"),
+            ("verification_failed", false, "fixture verification failed"),
+            ("disable_failed", false, "fixture disable failed"),
+            ("still_enabled", false, "binding still enabled"),
+            (
+                "success",
+                true,
+                "Disabled WinpkFilter binding on adapters: Ethernet [1]*",
+            ),
+        ] {
+            let fixture = format!(
+                r#"
+                $PSModuleAutoLoadingPreference = 'None'
+                Import-Module ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+                $script:mode = '{mode}'
+                $script:queries = 0
+                $script:owned = [pscustomobject]@{{Name='Ethernet [1]*';ComponentID='nt_ndisrd';Enabled=$true}}
+                $script:foreign = [pscustomobject]@{{Name='Ethernet 1';ComponentID='ms_tcpip';Enabled=$true}}
+                function Get-NetAdapterBinding {{
+                    [CmdletBinding()] param([switch]$AllBindings)
+                    $script:queries++
+                    if (-not $AllBindings) {{ throw 'fixture expected all bindings' }}
+                    if ($script:mode -eq 'query_failed') {{ Write-Error 'fixture initial query failed'; return }}
+                    if ($script:queries -gt 1 -and $script:mode -eq 'verification_failed') {{
+                        Write-Error 'fixture verification failed'; return
+                    }}
+                    if (-not $script:foreign.Enabled) {{ throw 'fixture unrelated binding changed' }}
+                    if ($script:mode -ne 'empty') {{ $script:owned }}
+                    $script:foreign
+                }}
+                function Disable-NetAdapterBinding {{
+                    [CmdletBinding()] param([object[]]$InputObject, [bool]$Confirm)
+                    if ($InputObject.Count -ne 1 -or -not [object]::ReferenceEquals($InputObject[0], $script:owned)) {{
+                        throw 'fixture expected the exact owned binding object'
+                    }}
+                    if ($script:mode -eq 'disable_failed') {{ Write-Error 'fixture disable failed'; return }}
+                    if ($script:mode -ne 'still_enabled') {{ $script:owned.Enabled = $false }}
+                }}
+                function Start-Sleep {{ param([int]$Milliseconds) }}
+                {}
+            "#,
+                SplitTunnelDriver::build_winpkfilter_binding_cleanup_script()
+            );
+            let output = SplitTunnelDriver::collect_binding_cleanup(&fixture);
+            assert!(!output.timed_out, "{mode}");
+            assert_eq!(
+                output.success, success,
+                "{mode}: {} / {}",
+                output.stdout, output.stderr
+            );
+            assert!(
+                format!("{}{}", output.stdout, output.stderr).contains(marker),
+                "{mode}: {} / {}",
+                output.stdout,
+                output.stderr
+            );
+            if !success {
+                assert!(!output.stdout.contains("No enabled WinpkFilter bindings"));
+                assert!(
+                    !output
+                        .stdout
+                        .contains("Disabled WinpkFilter binding on adapters:")
+                );
+            }
+        }
     }
 
     #[cfg(windows)]
