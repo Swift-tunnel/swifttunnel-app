@@ -975,6 +975,9 @@ pub fn cleanup_system_state_for_msi_uninstall() -> Result<()> {
 fn cleanup_system_state(
     remove_driver: impl FnOnce() -> std::result::Result<bool, String>,
 ) -> Result<()> {
+    // Installer/CLI helpers do not acquire the UI's single-client lock. Keep
+    // them from resetting a live client's capture, routes or shared originals.
+    let _reservation = crate::single_client::reserve_cleanup().map_err(anyhow::Error::msg)?;
     if let Err(error) = crate::vpn::process_performance::recover_gpu_preferences() {
         warn!("Cleanup: runtime GPU originals remain for recovery: {error}");
     }
