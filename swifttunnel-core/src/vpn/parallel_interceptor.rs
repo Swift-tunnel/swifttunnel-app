@@ -985,7 +985,7 @@ static STOPPING_THREADS: parking_lot::Mutex<Vec<JoinHandle<()>>> =
     parking_lot::Mutex::new(Vec::new());
 static READER_DIRECT_RELAY_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
-static READER_DIRECT_RELAY_BYPASS: AtomicU64 = AtomicU64::new(0);
+static READER_DEAD_RELAY_ACTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Counter for tunneled packets that could not be forwarded intact. This can
 /// happen when the captured IPv4 payload is incomplete or larger than the
@@ -5727,14 +5727,22 @@ fn forward_tunneled_packet_from_reader(
         relay.relay_health(),
         super::udp_relay::RelayHealthState::Dead
     ) {
-        let event = READER_DIRECT_RELAY_BYPASS.fetch_add(1, Ordering::Relaxed) + 1;
+        // Health does not authorize a source-path change. TCP, cloud game
+        // traffic, fragments and Drop policy must remain captured even while
+        // the connection monitor gives the relay time to recover.
+        let action = match queue_overflow_action(queue_overflow_mode, data) {
+            QueueFullAction::Drop => ReaderTunnelAction::Consumed,
+            QueueFullAction::Bypass => ReaderTunnelAction::BypassPhysical,
+        };
+        let event = READER_DEAD_RELAY_ACTIONS.fetch_add(1, Ordering::Relaxed) + 1;
         if event <= 5 || event.is_power_of_two() {
             log::warn!(
-                "Reader direct relay: relay is dead, bypassing tunnel packet to physical adapter (event #{})",
+                "Reader direct relay: relay is dead, applying captured-packet policy {:?} (event #{})",
+                action,
                 event
             );
         }
-        return ReaderTunnelAction::BypassPhysical;
+        return action;
     }
 
     let forward_result = PACKET_BUFFER.with(|buf| {
@@ -6841,11 +6849,13 @@ fn run_packet_worker(
                 } else {
                     // Without a relay context, legacy passthrough has never
                     // assigned a relay source. An existing dead relay must
-                    // obey the same protocol safety as queue backpressure.
+                    // obey the configured policy and protocol safety used for queue pressure.
                     if !super::cloud_game_routes::is_cloud_game_ip(dst_ip)
                         && (relay_ctx.is_none()
                             || queue_overflow_action(
-                                QueueOverflowMode::Bypass,
+                                QueueOverflowMode::from_u8(
+                                    queue_overflow_mode.load(Ordering::Relaxed),
+                                ),
                                 work.data.as_slice(),
                             ) == QueueFullAction::Bypass)
                     {
@@ -13151,6 +13161,62 @@ mod tests {
             worker.is_some(),
             "reader dispatch should keep routed PPPoE tail fragments on the tunnel path"
         );
+    }
+
+    #[test]
+    fn dead_relay_reader_respects_drop_policy_and_captured_connection_safety() {
+        let relay = super::super::udp_relay::UdpRelay::new("127.0.0.1:9".parse().unwrap()).unwrap();
+        relay.relay_health_arc().store(
+            super::super::udp_relay::RelayHealthState::Dead as u8,
+            Ordering::Relaxed,
+        );
+        let local = Ipv4Addr::new(192, 168, 1, 200);
+        let regular = Ipv4Addr::new(128, 116, 47, 3);
+        let cloud = Ipv4Addr::new(34, 18, 186, 248);
+        let packets = [
+            (
+                build_ipv4_tcp_frame_with_flags(local, regular, 55000, 443, 0x10),
+                QueueOverflowMode::Bypass,
+                ReaderTunnelAction::Consumed,
+            ),
+            (
+                build_ipv4_frame(17, local, cloud, 55000, 55001),
+                QueueOverflowMode::Bypass,
+                ReaderTunnelAction::Consumed,
+            ),
+            (
+                build_ipv4_frame(17, local, regular, 55000, 55001),
+                QueueOverflowMode::Drop,
+                ReaderTunnelAction::Consumed,
+            ),
+            (
+                build_ipv4_frame(17, local, regular, 55000, 55001),
+                QueueOverflowMode::Bypass,
+                ReaderTunnelAction::BypassPhysical,
+            ),
+        ];
+        let stats = WorkerStats::default();
+        let throughput = ThroughputStats::default();
+        let detected = parking_lot::RwLock::new(std::collections::HashSet::new());
+        for (mut packet, mode, expected) in packets {
+            let total = (packet.len() - 14) as u16;
+            packet[16..18].copy_from_slice(&total.to_be_bytes());
+            assert!(forwardable_tunnel_ip_packet(&packet).is_some());
+            assert_eq!(
+                forward_tunneled_packet_from_reader(
+                    &packet,
+                    &relay,
+                    &stats,
+                    &throughput,
+                    &detected,
+                    None,
+                    mode
+                ),
+                expected,
+                "dead-relay fallback must follow the same rules as queue pressure"
+            );
+        }
+        assert_eq!(relay.stats().0, 0);
     }
 
     #[test]
