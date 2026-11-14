@@ -31,6 +31,7 @@ windows = { version = "0.62", features = [
     "Win32_Networking_WinSock",
     # Windows Filtering Platform (WFP) for split tunneling
     "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_NetworkManagement_WindowsFirewall",
     # Split tunnel driver communication
     "Win32_Storage_FileSystem",
     "Win32_System_Ioctl",
