@@ -80,41 +80,43 @@ fn get_marker_path() -> Option<PathBuf> {
     Some(crate::test_support::recovery_directory().join(TSO_MARKER_FILE))
 }
 
-/// Per-query timeout for adapter offload probes.
+/// Total timeout for the diagnostic adapter offload probe.
 ///
-/// The diagnostic queries IPv4 and IPv6, each with a two-second deadline.
+/// Read IPv4 and IPv6 in one process with one two-second deadline.
 /// The shared runner bounds process time, output capture and inherited pipes.
 const ADAPTER_QUERY_TIMEOUT_SECS: u64 = 2;
 
-fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32> {
-    use std::time::Duration;
-
-    let script = format!(
+fn offload_query_script(adapter_name: &str) -> String {
+    format!(
         r#"
         $adapter = '{}'
-        $value = Get-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '{}' -ErrorAction SilentlyContinue |
-            Select-Object -First 1 -ExpandProperty RegistryValue
-        if ($null -eq $value) {{ exit 0 }}
-        if ($value -is [Array]) {{ $value = $value[0] }}
-        Write-Output $value
+        Get-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '*LsoV2IPv4','*LsoV2IPv6' -ErrorAction SilentlyContinue |
+            ForEach-Object {{
+                $value = $_.RegistryValue
+                if ($value -is [Array]) {{ $value = $value[0] }}
+                if ($null -ne $value) {{ Write-Output "$($_.RegistryKeyword)=$value" }}
+            }}
         "#,
         adapter_name.replace('\'', "''"),
-        keyword
-    );
+    )
+}
 
-    let output = crate::run_hidden_command_with_timeout(
-        "powershell",
-        &["-NoProfile", "-NonInteractive", "-Command", &script],
-        Duration::from_secs(ADAPTER_QUERY_TIMEOUT_SECS),
-    );
-    output
-        .success
-        .then_some(output.stdout)?
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?
-        .parse()
-        .ok()
+fn offload_disabled_from_output(output: &str) -> Option<bool> {
+    let mut known = false;
+    for line in output.lines() {
+        let Some((keyword, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        if !matches!(keyword, "*LsoV2IPv4" | "*LsoV2IPv6") {
+            continue;
+        }
+        match value.parse::<u32>() {
+            Ok(0) => return Some(true),
+            Ok(1) => known = true,
+            _ => {}
+        }
+    }
+    known.then_some(false)
 }
 
 /// Whether this adapter currently has large-send offload switched off.
@@ -134,12 +136,77 @@ fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32>
 /// turned offload off themselves, and silently changing a network adapter
 /// setting we did not set is worse than reporting it.
 pub fn large_send_offload_is_disabled(adapter_name: &str) -> Option<bool> {
-    let v4 = query_adapter_offload_value(adapter_name, "*LsoV2IPv4");
-    let v6 = query_adapter_offload_value(adapter_name, "*LsoV2IPv6");
-    match (v4, v6) {
-        (None, None) => None,
-        // 0 means the offload is off. Either family being off costs CPU.
-        (a, b) => Some(a == Some(0) || b == Some(0)),
+    query_offload_disabled_with(adapter_name, |script| {
+        let output = crate::run_hidden_command_with_timeout(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", script],
+            std::time::Duration::from_secs(ADAPTER_QUERY_TIMEOUT_SECS),
+        );
+        output.success.then_some(output.stdout)
+    })
+}
+
+fn query_offload_disabled_with(
+    adapter_name: &str,
+    query: impl FnOnce(&str) -> Option<String>,
+) -> Option<bool> {
+    offload_disabled_from_output(&query(&offload_query_script(adapter_name))?)
+}
+
+#[cfg(test)]
+mod offload_query_tests {
+    use super::*;
+
+    #[test]
+    fn both_families_share_one_query_and_a_single_failure_stays_unknown() {
+        let mut calls = 0;
+        assert_eq!(
+            query_offload_disabled_with("User's Ethernet", |script| {
+                calls += 1;
+                assert!(script.contains("$adapter = 'User''s Ethernet'"));
+                assert_eq!(script.matches("Get-NetAdapterAdvancedProperty").count(), 1);
+                assert!(script.contains("'*LsoV2IPv4','*LsoV2IPv6'"));
+                Some("*LsoV2IPv4=1\r\n*LsoV2IPv6=0\r\n".into())
+            }),
+            Some(true)
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(query_offload_disabled_with("Ethernet", |_| None), None);
+    }
+
+    #[test]
+    fn offload_results_distinguish_unsupported_from_enabled_and_disabled() {
+        for text in ["", "unrelated=0", "*LsoV2IPv4=invalid", "*LsoV2IPv6=7"] {
+            assert_eq!(offload_disabled_from_output(text), None);
+        }
+        assert_eq!(offload_disabled_from_output("*LsoV2IPv4=1\n"), Some(false));
+        assert_eq!(offload_disabled_from_output("*LsoV2IPv6=0\n"), Some(true));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn combined_query_handles_powershell_registry_arrays_without_touching_an_adapter() {
+        let script = format!(
+            r#"
+            function Get-NetAdapterAdvancedProperty {{
+                param([string]$Name, [string[]]$RegistryKeyword, $ErrorAction)
+                if ($Name -ne "User's Ethernet" -or $RegistryKeyword.Count -ne 2) {{
+                    throw 'unexpected query arguments'
+                }}
+                [pscustomobject]@{{ RegistryKeyword = '*LsoV2IPv4'; RegistryValue = @('1') }}
+                [pscustomobject]@{{ RegistryKeyword = '*LsoV2IPv6'; RegistryValue = @('0') }}
+            }}
+            {}
+        "#,
+            offload_query_script("User's Ethernet")
+        );
+        let output = crate::run_hidden_command_with_timeout(
+            "powershell",
+            &["-NoProfile", "-NonInteractive", "-Command", &script],
+            std::time::Duration::from_secs(5),
+        );
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(offload_disabled_from_output(&output.stdout), Some(true));
     }
 }
 
