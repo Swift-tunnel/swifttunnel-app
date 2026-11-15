@@ -3,6 +3,7 @@
 //! provides IPv4 fallback without deleting a player's active/static routes.
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use std::{fs, path::PathBuf};
 use windows::Win32::{
     Foundation::WIN32_ERROR,
@@ -44,25 +45,72 @@ impl Original {
     }
 }
 
+trait JournalStorage {
+    fn read_text(&self) -> Result<Option<String>, String>;
+    fn write_bytes(&self, bytes: &[u8]) -> Result<(), String>;
+}
+
 #[cfg(not(test))]
-fn journal_path() -> Result<PathBuf, String> {
-    dirs::data_local_dir()
-        .map(|dir| dir.join("SwiftTunnel/ipv6_route_recovery.json"))
-        .ok_or_else(|| "Could not locate IPv6 route recovery data".into())
+fn journal_store() -> Result<swifttunnel_installer_cache::ProtectedRecoveryStore, String> {
+    swifttunnel_installer_cache::ProtectedRecoveryStore::open()
+        .map_err(|error| format!("Could not open protected IPv6 route recovery storage: {error}"))
+}
+
+#[cfg(not(test))]
+impl JournalStorage for swifttunnel_installer_cache::ProtectedRecoveryStore {
+    fn read_text(&self) -> Result<Option<String>, String> {
+        match self.read_ipv6_routes() {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("Could not read IPv6 route recovery data: {error}")),
+        }
+    }
+
+    fn write_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        self.write_ipv6_routes(bytes)
+            .map_err(|error| format!("Could not save IPv6 route recovery data: {error}"))
+    }
 }
 
 #[cfg(test)]
-fn journal_path() -> Result<PathBuf, String> {
+fn journal_store() -> Result<PathBuf, String> {
     Ok(crate::test_support::recovery_directory().join("ipv6_route_recovery.json"))
 }
 
-fn read(path: &std::path::Path) -> Result<Vec<Original>, String> {
-    crate::roblox_native_launch::safe_path(path)?;
-    let text = match crate::utils::read_text_file_bounded(path, MAX_BYTES, "IPv6 route recovery") {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("Could not read IPv6 route recovery data: {error}")),
+#[cfg(test)]
+impl JournalStorage for PathBuf {
+    fn read_text(&self) -> Result<Option<String>, String> {
+        crate::roblox_native_launch::safe_path(self)?;
+        match crate::utils::read_text_file_bounded(self, MAX_BYTES, "IPv6 route recovery") {
+            Ok(text) => Ok(Some(text)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(format!("Could not read IPv6 route recovery data: {error}")),
+        }
+    }
+
+    fn write_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        crate::roblox_native_launch::safe_path(self)?;
+        if bytes == b"[]" {
+            return match fs::remove_file(self) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.to_string()),
+            };
+        }
+        fs::create_dir_all(self.parent().ok_or("Invalid recovery directory")?)
+            .map_err(|error| error.to_string())?;
+        crate::roblox_native_launch::safe_path(self)?;
+        crate::atomic_file::replace(self, bytes).map_err(|error| error.to_string())
+    }
+}
+
+fn read(store: &dyn JournalStorage) -> Result<Vec<Original>, String> {
+    let Some(text) = store.read_text()? else {
+        return Ok(Vec::new());
     };
+    if text.len() > MAX_BYTES {
+        return Err("IPv6 route recovery data is too large".into());
+    }
     let records: Vec<Original> = serde_json::from_str(&text)
         .map_err(|_| "IPv6 route recovery data could not be read; original file kept")?;
     if records.len() > MAX_RECORDS {
@@ -80,36 +128,23 @@ fn read(path: &std::path::Path) -> Result<Vec<Original>, String> {
     Ok(records)
 }
 
-fn write(path: &std::path::Path, records: &[Original]) -> Result<(), String> {
-    crate::roblox_native_launch::safe_path(path)?;
-    if records.is_empty() {
-        return match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!(
-                "Could not retire IPv6 route recovery data: {error}"
-            )),
-        };
-    }
+fn write(store: &dyn JournalStorage, records: &[Original]) -> Result<(), String> {
     let bytes = serde_json::to_vec(records).map_err(|error| error.to_string())?;
     if bytes.len() > MAX_BYTES || records.len() > MAX_RECORDS {
         return Err("IPv6 route recovery data is too large".into());
     }
-    let parent = path
-        .parent()
-        .ok_or("Invalid IPv6 route recovery directory")?;
-    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    crate::roblox_native_launch::safe_path(path)?;
-    crate::atomic_file::replace(path, &bytes).map_err(|error| error.to_string())
+    // Production publishes even the empty journal with administrator ownership
+    // and a protected DACL. It never uses the caller's default file permissions.
+    store.write_bytes(&bytes)
 }
 
 fn record_before_change(
-    path: &std::path::Path,
+    store: &dyn JournalStorage,
     original: Original,
     change: impl FnOnce() -> Result<bool, String>,
 ) -> Result<bool, String> {
     original.validate()?;
-    let mut records = read(path)?;
+    let mut records = read(store)?;
     if records
         .iter()
         .any(|entry| entry.interface_guid == original.interface_guid)
@@ -117,7 +152,7 @@ fn record_before_change(
         return Err("This interface still has pending IPv6 route recovery".into());
     }
     records.push(original);
-    write(path, &records)?;
+    write(store, &records)?;
     // Keep the original on every failure: a native setter can fail after the
     // change took effect. Restoration checks the current setting before writing.
     let changed = change()?;
@@ -125,16 +160,16 @@ fn record_before_change(
         // The setter was never called (for example a manual route appeared).
         // Do not claim ownership of another application's new policy.
         records.pop();
-        write(path, &records)?;
+        write(store, &records)?;
     }
     Ok(changed)
 }
 
 fn recover_at(
-    path: &std::path::Path,
+    store: &dyn JournalStorage,
     mut restore: impl FnMut(&Original) -> Result<(), String>,
 ) -> Result<bool, String> {
-    let records = read(path)?;
+    let records = read(store)?;
     if records.is_empty() {
         return Ok(false);
     }
@@ -152,7 +187,7 @@ fn recover_at(
     }
     // One unavailable/unplugged interface must not hide successful recovery
     // of another, or lose its own original during a later adapter switch.
-    if let Err(write_error) = write(path, &pending) {
+    if let Err(write_error) = write(store, &pending) {
         return Err(match first_error {
             Some(restore_error) => {
                 format!("{restore_error}; could not save recovery progress: {write_error}")
@@ -277,15 +312,16 @@ fn restore_with(
 
 pub(super) fn recover() -> Result<bool, String> {
     let _guard = GATE.lock();
-    recover_at(&journal_path()?, restore_native)
+    let store = journal_store()?;
+    recover_at(&store, restore_native)
 }
 
 pub(super) fn steer(if_index: u32) -> Result<bool, String> {
     let _guard = GATE.lock();
-    let path = journal_path()?;
+    let store = journal_store()?;
     // Retry originals, but an unplugged old interface must not prevent a new
     // interface from working. Its record remains in the journal.
-    if let Err(error) = recover_at(&path, restore_native) {
+    if let Err(error) = recover_at(&store, restore_native) {
         log::warn!("Some IPv6 route recovery remains pending: {error}");
     }
     let mut row = MIB_IPINTERFACE_ROW {
@@ -306,7 +342,7 @@ pub(super) fn steer(if_index: u32) -> Result<bool, String> {
         "Identify IPv6 interface",
     )?;
     record_before_change(
-        &path,
+        &store,
         Original {
             interface_guid: format!("{guid:?}"),
             original_ignore_default_routes: row.DisableDefaultRoutes,
@@ -440,6 +476,38 @@ mod tests {
             record_before_change(&path, original(1), || panic!("must not change IPv6")).is_err()
         );
         assert_eq!(fs::read_to_string(&path).unwrap(), "damaged original");
+    }
+
+    #[test]
+    fn protected_storage_failures_never_allow_an_unrecorded_change() {
+        struct RefusingStore;
+        impl JournalStorage for RefusingStore {
+            fn read_text(&self) -> Result<Option<String>, String> {
+                Ok(None)
+            }
+            fn write_bytes(&self, _: &[u8]) -> Result<(), String> {
+                Err("protected publication refused".into())
+            }
+        }
+        let error = record_before_change(&RefusingStore, original(1), || {
+            panic!("must not mutate without a protected original")
+        })
+        .unwrap_err();
+        assert!(error.contains("protected publication refused"));
+    }
+
+    #[test]
+    fn an_empty_protected_journal_does_not_need_another_write_or_restore() {
+        struct EmptyStore;
+        impl JournalStorage for EmptyStore {
+            fn read_text(&self) -> Result<Option<String>, String> {
+                Ok(Some("[]".into()))
+            }
+            fn write_bytes(&self, _: &[u8]) -> Result<(), String> {
+                panic!("nothing to retire")
+            }
+        }
+        assert!(!recover_at(&EmptyStore, |_| panic!("no recorded interface to restore")).unwrap());
     }
 
     #[test]
