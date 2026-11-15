@@ -87,6 +87,19 @@ pub(crate) async fn drain_for_shutdown(
     (network, config)
 }
 
+/// Quitting cannot wait forever on admitted work. A native call that never
+/// returns would otherwise keep a windowless process alive, and the exit
+/// restoration after it would never run. Admission stays closed either way.
+pub(crate) async fn drain_for_shutdown_within(
+    network: &OperationGate,
+    config: &OperationGate,
+    limit: std::time::Duration,
+) -> Option<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
+    tokio::time::timeout(limit, drain_for_shutdown(network, config))
+        .await
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,6 +129,26 @@ mod tests {
         assert_eq!(gate.wait().await.unwrap_err(), AdmissionError::Closing);
         drop(restoration);
         assert_eq!(gate.try_begin().unwrap_err(), AdmissionError::Closing);
+    }
+
+    #[tokio::test]
+    async fn exit_stops_waiting_for_work_that_never_finishes_and_admits_nothing_new() {
+        let network = OperationGate::new();
+        let config = OperationGate::new();
+        let stuck = network.try_begin().unwrap();
+        assert!(
+            drain_for_shutdown_within(&network, &config, Duration::from_millis(5))
+                .await
+                .is_none()
+        );
+        assert_eq!(network.try_begin().unwrap_err(), AdmissionError::Closing);
+        assert_eq!(config.try_begin().unwrap_err(), AdmissionError::Closing);
+        drop(stuck);
+        assert!(
+            drain_for_shutdown_within(&network, &config, Duration::from_secs(3))
+                .await
+                .is_some()
+        );
     }
 
     #[tokio::test]

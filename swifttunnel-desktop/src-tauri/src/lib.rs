@@ -1134,8 +1134,10 @@ pub fn run() {
                 tauri::RunEvent::Exit => {
                     // Shutdown must be the last writer. An admitted connect,
                     // repair or boost can still own blocking Windows work even
-                    // after its frontend request/window has disappeared.
-                    let _shutdown_operations = _app.try_state::<AppState>().map(|state| {
+                    // after its frontend request/window has disappeared. The
+                    // wait is bounded: this is the event thread of a process
+                    // that no longer has a window.
+                    let _shutdown_operations = _app.try_state::<AppState>().and_then(|state| {
                         state.runtime.block_on(commands::drain_for_shutdown())
                     });
                     disconnect_vpn_on_exit(_app);

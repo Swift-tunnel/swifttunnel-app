@@ -15,10 +15,24 @@ mod update_download;
 pub mod updater;
 pub mod vpn;
 
-pub(crate) async fn drain_for_shutdown() -> (
+/// Longest that quitting waits for an admitted connect, repair or boost.
+const SHUTDOWN_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+pub(crate) async fn drain_for_shutdown() -> Option<(
     tokio::sync::OwnedSemaphorePermit,
     tokio::sync::OwnedSemaphorePermit,
-) {
-    crate::operation_gate::drain_for_shutdown(network_operation::gate(), optimizer::config_gate())
-        .await
+)> {
+    let drained = crate::operation_gate::drain_for_shutdown_within(
+        network_operation::gate(),
+        optimizer::config_gate(),
+        SHUTDOWN_DRAIN_LIMIT,
+    )
+    .await;
+    if drained.is_none() {
+        log::warn!(
+            "Exit: a connection, repair or boost was still running after {}s; restoring Windows settings without waiting further",
+            SHUTDOWN_DRAIN_LIMIT.as_secs()
+        );
+    }
+    drained
 }
