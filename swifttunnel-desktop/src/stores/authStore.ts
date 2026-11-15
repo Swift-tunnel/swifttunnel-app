@@ -166,6 +166,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   logout: async () => {
     const action = ++authActionRevision;
     ++authStateRevision;
+    set({ isLoading: true, error: null });
     try {
       await authLogout();
       if (action !== authActionRevision) return;
@@ -183,7 +184,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       });
     } catch (e) {
       if (action !== authActionRevision) return;
-      set({ error: formatAuthError(e) });
+      set({ isLoading: false, error: formatAuthError(e) });
     }
   },
 

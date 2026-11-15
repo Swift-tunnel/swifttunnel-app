@@ -1231,6 +1231,15 @@ impl Engine {
     /// The same core call the full app's auth_login makes, so the two clients
     /// cannot drift on what counts as a valid sign-in.
     fn sign_out(&self) {
+        let Some(operation) = self.shared.busy.try_enter() else {
+            self.shared.edit(|s| {
+                s.login_error = Some(
+                    "Wait for the connection or repair to finish, then sign out again.".into(),
+                );
+            });
+            self.shared.notify();
+            return;
+        };
         if self.shared.edit(|s| {
             if s.login_busy {
                 return false;
@@ -1247,11 +1256,30 @@ impl Engine {
         shared.runtime.spawn({
             let shared = shared.clone();
             async move {
+                shared.intentional_disconnect.store(true, Ordering::Relaxed);
+                let disconnected = shared.vpn.lock().await.disconnect().await;
+                if let Err(error) = disconnected {
+                    log::warn!("Could not disconnect before signing out: {error}");
+                    shared.edit(|s| {
+                        s.login_busy = false;
+                        s.login_error =
+                            Some("Could not disconnect safely. Try signing out again.".into());
+                    });
+                    shared.notify();
+                    return;
+                }
+                swifttunnel_core::vpn::connection::finish_pending_session_reports(
+                    Duration::from_secs(3),
+                )
+                .await;
                 let manager = shared.auth.clone();
                 // Credential deletion can wait for disk or the Windows vault.
                 // Keep it off the two asynchronous engine workers too.
-                let result =
-                    tokio::task::spawn_blocking(move || manager.blocking_lock().logout()).await;
+                let result = tokio::task::spawn_blocking(move || {
+                    let _operation = operation;
+                    manager.blocking_lock().logout()
+                })
+                .await;
                 let failure = match result {
                     Ok(Ok(())) => None,
                     Ok(Err(error)) => {

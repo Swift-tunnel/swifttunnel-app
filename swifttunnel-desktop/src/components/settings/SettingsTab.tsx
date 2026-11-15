@@ -36,6 +36,8 @@ export function SettingsTab() {
   const email = useAuthStore((s) => s.email);
   const isTester = useAuthStore((s) => s.isTester);
   const logout = useAuthStore((s) => s.logout);
+  const signingOut = useAuthStore((s) => s.isLoading);
+  const authError = useAuthStore((s) => s.error);
 
   const settings = useSettingsStore((s) => s.settings);
   const update = useSettingsStore((s) => s.update);
@@ -187,10 +189,13 @@ export function SettingsTab() {
             </div>
           </div>
 
-          <Button variant="destructive" size="sm" onClick={logout}>
-            Log out
+          <Button variant="destructive" size="sm" onClick={logout} disabled={signingOut}>
+            {signingOut ? "Signing out..." : "Log out"}
           </Button>
         </div>
+        {authError && (
+          <p role="alert" className="mt-3 text-sm text-status-error">{authError}</p>
+        )}
 
         {/* Stats strip */}
         <div
