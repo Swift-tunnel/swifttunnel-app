@@ -93,9 +93,10 @@ fn persist_signed_out_settings(
 ) -> Result<(), String> {
     // Keep the reconnect restriction in memory even if storage fails. The
     // credentials have already been removed, so rolling it back is unsafe.
+    // Clearing the session marker is enough: launch only reconnects when it
+    // is set as well. Auto-reconnect itself is the player's saved preference.
     let mut current = settings.lock();
     current.resume_vpn_on_startup = false;
-    current.auto_reconnect = false;
     persist(&current)
 }
 
@@ -274,7 +275,7 @@ mod tests {
             settings.lock().idle_when_unfocused
         );
         assert!(!disk.resume_vpn_on_startup);
-        assert!(!disk.auto_reconnect);
+        assert!(disk.auto_reconnect, "sign-out erased a saved preference");
     }
 
     #[test]
@@ -287,7 +288,7 @@ mod tests {
         });
         assert!(persist_signed_out_settings(&settings, |_| Err("locked file".into())).is_err());
         assert!(!settings.lock().resume_vpn_on_startup);
-        assert!(!settings.lock().auto_reconnect);
+        assert!(settings.lock().auto_reconnect);
         assert!(!settings.lock().idle_when_unfocused);
     }
 

@@ -1301,8 +1301,9 @@ impl Engine {
                     discord.clear();
                 }
                 // A successfully signed-out client must not reconnect on its own.
+                // The disconnect above was marked intentional, which already
+                // stops automatic reconnects; the saved preference is kept.
                 if let Ok(mut settings) = shared.settings.write() {
-                    settings.auto_reconnect = false;
                     settings.resume_vpn_on_startup = false;
                     drop(settings);
                     let _ = shared.settings_save_signal.try_send(());
