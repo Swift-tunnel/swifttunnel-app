@@ -853,10 +853,31 @@ pub fn recover_ipv6_on_startup() {
 /// Restore and retire the record together. Unreadable records, failed restores
 /// and failed record removal must reach explicit Repair callers as failures.
 pub fn recover_ipv6_checked() -> std::io::Result<bool> {
-    let path = get_marker_path().ok_or_else(|| {
-        std::io::Error::other("Windows could not locate the IPv6 recovery record folder")
-    })?;
-    recover_marker_at(&path, restore_ipv6_for_marker)
+    let filters = get_marker_path()
+        .ok_or_else(|| {
+            std::io::Error::other("Windows could not locate the IPv6 recovery record folder")
+        })
+        .and_then(|path| recover_marker_at(&path, restore_ipv6_for_marker));
+    // A crash can happen after either change. Both records are independent:
+    // failed filter recovery must not hide or prevent route-policy recovery.
+    #[cfg(windows)]
+    let routes = super::ipv6_route_recovery::recover().map_err(std::io::Error::other);
+    #[cfg(not(windows))]
+    let routes = Ok(false);
+    combine_recovery_results(filters, routes)
+}
+
+fn combine_recovery_results(
+    filters: std::io::Result<bool>,
+    routes: std::io::Result<bool>,
+) -> std::io::Result<bool> {
+    match (filters, routes) {
+        (Ok(filters), Ok(routes)) => Ok(filters || routes),
+        (Err(filters), Err(routes)) => Err(std::io::Error::other(format!(
+            "IPv6 filters: {filters}; IPv6 route policy: {routes}"
+        ))),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
 }
 
 fn recover_marker_at(
@@ -879,6 +900,21 @@ fn recover_marker_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_and_filter_recovery_failures_are_independent_and_never_hidden() {
+        let failure = |message| Err(std::io::Error::other(message));
+        assert!(combine_recovery_results(Ok(false), Ok(true)).unwrap());
+        assert!(combine_recovery_results(Ok(true), Ok(false)).unwrap());
+        assert!(!combine_recovery_results(Ok(false), Ok(false)).unwrap());
+        assert!(combine_recovery_results(failure("filters"), Ok(true)).is_err());
+        assert!(combine_recovery_results(Ok(true), failure("route policy")).is_err());
+        let error = combine_recovery_results(failure("filters"), failure("route policy"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("filters"));
+        assert!(error.contains("route policy"));
+    }
 
     #[cfg(windows)]
     #[test]

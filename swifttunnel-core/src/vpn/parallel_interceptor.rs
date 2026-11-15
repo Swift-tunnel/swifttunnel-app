@@ -4346,6 +4346,7 @@ impl ParallelInterceptor {
         Err("WinpkFilter IPv6 block filters are only available on Windows.".to_string())
     }
 
+    #[cfg(test)]
     fn disable_ipv6_with_filter_installer<F>(&mut self, installer: F) -> VpnResult<()>
     where
         F: Fn(&str) -> Result<(), String>,
@@ -4353,6 +4354,7 @@ impl ParallelInterceptor {
         self.disable_ipv6_with_filter_installer_and_probe(installer, has_ipv6_binding_native)
     }
 
+    #[cfg(test)]
     fn disable_ipv6_with_filter_installer_and_probe<F, P>(
         &mut self,
         installer: F,
@@ -4369,6 +4371,7 @@ impl ParallelInterceptor {
         )
     }
 
+    #[cfg(test)]
     fn disable_ipv6_with_filter_dependencies<F, P, C>(
         &mut self,
         installer: F,
@@ -4379,6 +4382,24 @@ impl ParallelInterceptor {
         F: Fn(&str) -> Result<(), String>,
         P: Fn(u32) -> Option<bool>,
         C: FnOnce() -> Result<(), String>,
+    {
+        // These fixtures inject filter operations and never change the host's
+        // route policy. Production injects the native steering function below.
+        self.disable_ipv6_with_full_dependencies(installer, ipv6_probe, cleanup, |_| {})
+    }
+
+    fn disable_ipv6_with_full_dependencies<F, P, C, S>(
+        &mut self,
+        installer: F,
+        ipv6_probe: P,
+        cleanup: C,
+        steer: S,
+    ) -> VpnResult<()>
+    where
+        F: Fn(&str) -> Result<(), String>,
+        P: Fn(u32) -> Option<bool>,
+        C: FnOnce() -> Result<(), String>,
+        S: FnOnce(u32),
     {
         let physical_name = match &self.physical_adapter_name {
             Some(name) => name.clone(),
@@ -4462,7 +4483,7 @@ impl ParallelInterceptor {
                 // the black-holed IPv6 the drop filters create (the "Connection
                 // Error / half-loaded avatars on IPv6 wifi" reports).
                 if let Some(if_index) = self.physical_adapter_if_index {
-                    Self::steer_ipv6_default_route_off(if_index);
+                    steer(if_index);
                 }
                 Ok(())
             }
@@ -4482,109 +4503,41 @@ impl ParallelInterceptor {
         }
     }
 
-    /// netsh args to toggle IPv6 router discovery on an interface. `store=active`
-    /// keeps it non-persistent so a reboot fully restores IPv6 even after a crash.
-    #[cfg(windows)]
-    fn ipv6_router_discovery_args(if_index: u32, enabled: bool) -> Vec<String> {
-        vec![
-            "interface".into(),
-            "ipv6".into(),
-            "set".into(),
-            "interface".into(),
-            format!("interface={if_index}"),
-            format!(
-                "routerdiscovery={}",
-                if enabled { "enabled" } else { "disabled" }
-            ),
-            "store=active".into(),
-        ]
-    }
-
-    /// netsh args to drop the learned IPv6 default route on an interface.
-    #[cfg(windows)]
-    fn ipv6_delete_default_route_args(if_index: u32) -> Vec<String> {
-        vec![
-            "interface".into(),
-            "ipv6".into(),
-            "delete".into(),
-            "route".into(),
-            "prefix=::/0".into(),
-            format!("interface={if_index}"),
-            // Without an explicit store, netsh also deletes saved routes.
-            // Temporary tunnel steering must never erase persistent config.
-            "store=active".into(),
-        ]
-    }
-
-    /// Steer Windows off public IPv6 on the selected adapter WITHOUT touching the
-    /// NIC binding (which bounces the link on many Realtek/Killer/Intel/USB NICs —
-    /// see the LSO/ms_tcpip6 notes below, the "kills my internet on Connect"
-    /// failure mode). Disabling router discovery and dropping the learned default
-    /// route makes apps fall back to IPv4 *instantly* instead of stalling on the
-    /// black-holed IPv6 our drop filters create — the root of the "Connection
-    /// Error / half-loaded avatars on IPv6 wifi" reports. The drop filters stay as
-    /// the leak backstop; this only changes *how fast* apps give up on IPv6.
+    /// Prefer IPv4 without deleting routes or changing router discovery.
+    /// Static/custom routes skip optional steering; leak-prevention filters
+    /// remain the separate backstop.
     #[cfg(windows)]
     fn steer_ipv6_default_route_off(if_index: u32) {
-        let discovery = crate::run_hidden_command_with_timeout(
-            "netsh",
-            &Self::ipv6_router_discovery_args(if_index, false),
-            NETSH_ROUTE_TIMEOUT,
-        );
-        if !discovery.success {
-            log::warn!(
-                "netsh routerdiscovery=disabled (if {if_index}) failed: {}",
-                discovery.stderr.trim()
-            );
-        }
-
-        let delete_route = crate::run_hidden_command_with_timeout(
-            "netsh",
-            &Self::ipv6_delete_default_route_args(if_index),
-            NETSH_ROUTE_TIMEOUT,
-        );
-        if delete_route.success {
-            log::info!(
-                "Steered IPv6 default route off on if_index {if_index}: apps fall back to IPv4 instantly"
-            );
-        } else {
-            // Most networks here have no IPv6 default route, and then there is
-            // nothing to delete: netsh fails and explains on stdout, so this
-            // used to be a warning with an empty reason on every connect. It is
-            // the normal case, and the step is best effort either way.
-            log::info!(
-                "No IPv6 default route removed on if_index {if_index} (usually because there is none): {} {}",
-                delete_route.stdout.trim(),
-                delete_route.stderr.trim()
-            );
+        match super::ipv6_route_recovery::steer(if_index) {
+            Ok(true) => log::info!(
+                "Temporarily ignoring learned IPv6 default routes on if_index {if_index}; original policy recorded"
+            ),
+            Ok(false) => log::debug!(
+                "IPv6 default-route steering unnecessary or custom policy present on if_index {if_index}"
+            ),
+            Err(error) => log::warn!(
+                "Optional IPv6 default-route steering skipped or remains pending: {error}"
+            ),
         }
     }
 
     #[cfg(not(windows))]
     fn steer_ipv6_default_route_off(_if_index: u32) {}
 
-    /// Re-enable IPv6 router discovery so the default route is re-learned via RA.
     #[cfg(windows)]
-    fn restore_ipv6_default_route(if_index: u32) -> bool {
-        let restored = crate::run_hidden_command_with_timeout(
-            "netsh",
-            &Self::ipv6_router_discovery_args(if_index, true),
-            NETSH_ROUTE_TIMEOUT,
-        );
-        if restored.success {
-            log::info!("Restored IPv6 router discovery on if_index {if_index}");
-        } else {
-            log::warn!(
-                "netsh routerdiscovery=enabled (if {if_index}) failed: {}",
-                restored.stderr.trim()
-            );
+    fn restore_ipv6_routes() -> bool {
+        match super::ipv6_route_recovery::recover() {
+            Ok(_) => true,
+            Err(error) => {
+                log::warn!("IPv6 default-route recovery remains pending: {error}");
+                false
+            }
         }
-        restored.success
     }
 
     #[cfg(not(windows))]
-    fn restore_ipv6_default_route(_if_index: u32) -> bool {
-        false
+    fn restore_ipv6_routes() -> bool {
+        true
     }
 
     /// Block public IPv6 egress while the IPv4-only tunnel is active.
@@ -4596,7 +4549,12 @@ impl ParallelInterceptor {
     /// This is a common cause of "detection works but tunneling fails" - the process is
     /// detected, but its IPv6 traffic bypasses the VPN.
     pub fn disable_ipv6(&mut self) -> VpnResult<()> {
-        self.disable_ipv6_with_filter_installer(Self::install_winpkfilter_ipv6_block_for_adapter)
+        self.disable_ipv6_with_full_dependencies(
+            Self::install_winpkfilter_ipv6_block_for_adapter,
+            has_ipv6_binding_native,
+            remove_winpkfilter_ipv6_block_filters,
+            Self::steer_ipv6_default_route_off,
+        )
     }
     /// Restore IPv6 connectivity by removing the outbound block filters.
     ///
@@ -4625,7 +4583,6 @@ impl ParallelInterceptor {
             }
         );
 
-        let if_index = self.physical_adapter_if_index;
         let restored = finish_recorded_ipv6_restore(
             &mut self.ipv6_was_disabled,
             || {
@@ -4634,7 +4591,7 @@ impl ParallelInterceptor {
                     remove_winpkfilter_ipv6_block_filters().is_ok()
                 })
             },
-            || if_index.is_none_or(Self::restore_ipv6_default_route),
+            Self::restore_ipv6_routes,
             delete_ipv6_marker,
         );
         if restored {
@@ -7954,13 +7911,6 @@ mod adapter_selection_log_tests {
     }
 }
 
-/// Deadline for the netsh calls that steer the IPv6 default route.
-///
-/// These run on connect and on teardown. A hang on teardown is the dangerous
-/// one: it would leave IPv6 steered off after the tunnel is gone.
-#[cfg(windows)]
-const NETSH_ROUTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Roblox voice (WebRTC STUN/TURN) rides this port.
 const ROBLOX_VOICE_PORT: u16 = 3478;
 
@@ -10879,42 +10829,6 @@ mod tests {
         assert!(
             thread_cpu_time_100ns().unwrap() >= start,
             "thread CPU time must not go backwards"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn ipv6_route_steer_builds_expected_netsh_commands() {
-        // Disable: stop router discovery (non-persistent) so apps fall back to
-        // IPv4 instantly instead of stalling on black-holed IPv6.
-        assert_eq!(
-            ParallelInterceptor::ipv6_router_discovery_args(12, false),
-            vec![
-                "interface",
-                "ipv6",
-                "set",
-                "interface",
-                "interface=12",
-                "routerdiscovery=disabled",
-                "store=active",
-            ]
-        );
-        // Restore re-enables it so the default route is re-learned via RA.
-        assert_eq!(
-            ParallelInterceptor::ipv6_router_discovery_args(12, true)[5],
-            "routerdiscovery=enabled"
-        );
-        assert_eq!(
-            ParallelInterceptor::ipv6_delete_default_route_args(12),
-            vec![
-                "interface",
-                "ipv6",
-                "delete",
-                "route",
-                "prefix=::/0",
-                "interface=12",
-                "store=active",
-            ]
         );
     }
 

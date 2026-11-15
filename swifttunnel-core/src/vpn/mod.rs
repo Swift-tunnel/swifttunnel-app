@@ -26,6 +26,8 @@ pub(crate) mod diskless_passthrough;
 pub mod error_messages;
 pub mod game_destination;
 pub mod ipv6_recovery;
+#[cfg(windows)]
+mod ipv6_route_recovery;
 pub mod local_connectivity;
 mod owner_table;
 pub mod parallel_interceptor;
