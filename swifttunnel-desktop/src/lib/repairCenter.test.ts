@@ -149,6 +149,7 @@ function makeDeps(overrides: Partial<RepairCenterDeps> = {}): RepairCenterDeps {
     systemRepairWindowsFirewall: vi.fn().mockResolvedValue(healthyFirewall),
     systemRepairStartupRegistration: vi.fn().mockResolvedValue({
       outcome: "completed",
+      undo_available: true,
       snapshot: {
         exists: true,
         value: "\"C:\\Program Files\\SwiftTunnel\\SwiftTunnel.exe\" --startup",
@@ -657,6 +658,14 @@ describe("repair center logic", () => {
     });
   });
 
+  it("does not offer startup undo without a backend-held record", async () => {
+    const deps = makeDeps({ systemRepairStartupRegistration: vi.fn().mockResolvedValue({ outcome: "completed", undo_available: false, snapshot: { exists: true, value: "owned startup" } }) });
+    const report = await runRepairIssue("startup", deps, { settings: { ...DEFAULT_SETTINGS, run_on_startup: true } });
+    expect(report.changed).toBe(true);
+    expect(report.reversible).toBe(false);
+    expect(report.rollback).toBeUndefined();
+  });
+
   it("does not offer rollback when a later startup preference skips repair", async () => {
     const message = "The startup preference changed. Run Startup login again.";
     const deps = makeDeps({
@@ -681,7 +690,7 @@ describe("repair center logic", () => {
     expect(deps.systemRestoreStartupRegistration).not.toHaveBeenCalled();
   });
 
-  it("retains startup rollback when a native failure may have changed the entry", async () => {
+  it("does not offer an unsafe startup rollback after native verification fails", async () => {
     const deps = makeDeps({
       systemRepairStartupRegistration: vi.fn().mockRejectedValue(new Error("Read-back failed")),
     });
@@ -691,12 +700,9 @@ describe("repair center logic", () => {
     expect(report).toMatchObject({
       status: "failed",
       changed: true,
-      reversible: true,
-      rollback: {
-        kind: "startup_registration",
-        snapshot: { exists: false, value: null },
-      },
+      reversible: false,
     });
+    expect(report.rollback).toBeUndefined();
     expect(report.entries).toContainEqual({ label: "Repair", value: "Read-back failed", tone: "bad" });
   });
 

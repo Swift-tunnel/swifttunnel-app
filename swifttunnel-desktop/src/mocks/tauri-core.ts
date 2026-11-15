@@ -556,6 +556,7 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       Boolean((args as { enabled?: boolean }).enabled);
     return {
       outcome: "completed",
+      undo_available: false,
       snapshot: {
         exists: enabled,
         value: enabled

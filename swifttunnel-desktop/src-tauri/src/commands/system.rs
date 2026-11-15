@@ -3735,7 +3735,7 @@ pub fn system_launched_from_startup(state: tauri::State<'_, crate::state::AppSta
     state.launched_from_startup
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct StartupRegistrationSnapshot {
     pub exists: bool,
     pub value: Option<String>,
@@ -3746,6 +3746,7 @@ pub struct StartupRegistrationSnapshot {
 pub enum StartupRegistrationRepairResponse {
     Completed {
         snapshot: StartupRegistrationSnapshot,
+        undo_available: bool,
     },
     PreferenceChanged {
         message: String,
@@ -3765,7 +3766,41 @@ fn repair_current_startup_preference(
                 .to_string(),
         });
     }
-    repair().map(|snapshot| StartupRegistrationRepairResponse::Completed { snapshot })
+    repair().map(|snapshot| StartupRegistrationRepairResponse::Completed {
+        snapshot,
+        undo_available: false,
+    })
+}
+
+#[derive(Clone)]
+struct StartupUndoRecord {
+    before: StartupRegistrationSnapshot,
+    after: StartupRegistrationSnapshot,
+    generation: u64,
+    created: std::time::Instant,
+}
+
+static STARTUP_UNDO: parking_lot::Mutex<Option<StartupUndoRecord>> = parking_lot::Mutex::new(None);
+
+fn admit_startup_undo(
+    record: Option<&StartupUndoRecord>,
+    requested: &StartupRegistrationSnapshot,
+    current: &StartupRegistrationSnapshot,
+    generation: u64,
+    now: std::time::Instant,
+) -> Result<StartupRegistrationSnapshot, String> {
+    let record =
+        record.ok_or("That startup repair can no longer be undone. Run Startup login again.")?;
+    if now.saturating_duration_since(record.created) > std::time::Duration::from_secs(600)
+        || record.generation != generation
+        || requested != &record.before
+        || current != &record.after
+    {
+        return Err("Your startup setting changed after that repair. It was left unchanged. Run Startup login again.".into());
+    }
+    // Never write the command supplied by the webview. Only this backend-owned
+    // pre-repair value can be restored, once, while the expected state remains.
+    Ok(record.before.clone())
 }
 
 #[cfg(windows)]
@@ -3806,10 +3841,37 @@ pub async fn system_repair_startup_registration(
         tauri::async_runtime::spawn_blocking(move || {
             let publication = crate::autostart::begin_startup_publication();
             let current = settings.lock().run_on_startup;
-            repair_current_startup_preference(enabled, current, || {
+            let mut undo = None;
+            let mut result = repair_current_startup_preference(enabled, current, || {
+                let before = read_startup_registration()?;
+                // Disabling startup removes both clients' entries. A one-entry
+                // rollback cannot undo that action if Lite had an entry too.
+                let only_desktop_changes = enabled
+                    || matches!(
+                        swifttunnel_core::autostart::registered_command(
+                            swifttunnel_core::autostart::RUN_VALUE_LITE
+                        ),
+                        Ok(None)
+                    );
+                *STARTUP_UNDO.lock() = None;
                 publication.sync(enabled)?;
-                read_startup_registration()
-            })
+                let after = read_startup_registration()?;
+                if before != after && only_desktop_changes {
+                    undo = Some(StartupUndoRecord {
+                        before,
+                        after: after.clone(),
+                        generation: publication.generation(),
+                        created: std::time::Instant::now(),
+                    });
+                }
+                Ok(after)
+            })?;
+            if let StartupRegistrationRepairResponse::Completed { undo_available, .. } = &mut result
+            {
+                *undo_available = undo.is_some();
+                *STARTUP_UNDO.lock() = undo;
+            }
+            Ok(result)
         })
         .await
         .map_err(|e| format!("Startup repair task failed: {e}"))?
@@ -3840,7 +3902,10 @@ pub async fn system_restore_startup_registration(
             use winreg::RegKey;
             use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 
-            let _publication = crate::autostart::begin_startup_publication();
+            let publication = crate::autostart::begin_startup_publication();
+            let current = read_startup_registration()?;
+            let owned = STARTUP_UNDO.lock().clone();
+            let snapshot = admit_startup_undo(owned.as_ref(), &snapshot, &current, publication.generation(), std::time::Instant::now())?;
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
             if snapshot.exists {
@@ -3865,7 +3930,12 @@ pub async fn system_restore_startup_registration(
                 }
             }
 
-            read_startup_registration()
+            let restored = read_startup_registration()?;
+            if restored != snapshot {
+                return Err("Windows could not confirm the startup setting was restored. Run Startup login again.".into());
+            }
+            *STARTUP_UNDO.lock() = None;
+            Ok(restored)
         })
         .await
         .map_err(|e| format!("Startup restore task failed: {e}"))?
@@ -3880,6 +3950,67 @@ pub async fn system_restore_startup_registration(
 #[cfg(test)]
 mod startup_preference_tests {
     use super::*;
+
+    #[test]
+    fn startup_undo_uses_only_its_owned_snapshot_and_current_native_state() {
+        let before = StartupRegistrationSnapshot {
+            exists: false,
+            value: None,
+        };
+        let after = StartupRegistrationSnapshot {
+            exists: true,
+            value: Some("owned canonical startup".into()),
+        };
+        let record = StartupUndoRecord {
+            before: before.clone(),
+            after: after.clone(),
+            generation: 7,
+            created: std::time::Instant::now(),
+        };
+        let now = std::time::Instant::now();
+        assert_eq!(
+            admit_startup_undo(Some(&record), &before, &after, 7, now).unwrap(),
+            before
+        );
+        let forged = StartupRegistrationSnapshot {
+            exists: true,
+            value: Some("untrusted command from UI".into()),
+        };
+        assert!(admit_startup_undo(Some(&record), &forged, &after, 7, now).is_err());
+        assert!(admit_startup_undo(Some(&record), &before, &forged, 7, now).is_err());
+        assert!(admit_startup_undo(None, &before, &after, 7, now).is_err());
+    }
+
+    #[test]
+    fn startup_undo_rejects_later_preferences_and_expired_records() {
+        let before = StartupRegistrationSnapshot {
+            exists: false,
+            value: None,
+        };
+        let after = StartupRegistrationSnapshot {
+            exists: true,
+            value: Some("owned canonical startup".into()),
+        };
+        let created = std::time::Instant::now();
+        let record = StartupUndoRecord {
+            before: before.clone(),
+            after: after.clone(),
+            generation: 7,
+            created,
+        };
+        // Even if Off -> On returned to the exact same value, undo is stale.
+        assert!(admit_startup_undo(Some(&record), &before, &after, 9, created).is_err());
+        assert!(
+            admit_startup_undo(
+                Some(&record),
+                &before,
+                &after,
+                7,
+                created + std::time::Duration::from_secs(601)
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn stale_startup_repair_never_writes_or_snapshots_registration() {

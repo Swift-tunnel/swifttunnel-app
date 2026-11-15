@@ -927,6 +927,7 @@ async function repairStartupRegistration(
   }
 
   let after: StartupRegistrationSnapshot;
+  let undoAvailable = false;
   try {
     const result = await deps.systemRepairStartupRegistration(settings.run_on_startup);
     if (result.outcome === "preference_changed") {
@@ -941,14 +942,14 @@ async function repairStartupRegistration(
       };
     }
     after = result.snapshot;
+    undoAvailable = result.undo_available === true;
   } catch (error) {
     return {
       status: "failed",
       summary: "Startup registration repair failed.",
-      nextStep: "Use Revert to restore the captured startup snapshot, or copy this result for support.",
+      nextStep: "Run Startup login again. If it still fails, copy this result for support.",
       changed: true,
-      reversible: true,
-      rollback: { kind: "startup_registration", snapshot: before },
+      reversible: false,
       ranAt: deps.now(),
       entries: [
         {
@@ -983,8 +984,8 @@ async function repairStartupRegistration(
       ? "Verify after the next Windows sign-in if startup behavior still looks wrong."
       : "Copy this result for support; the backend repair command completed but the registry state did not match settings.",
     changed,
-    reversible: changed,
-    rollback: changed
+    reversible: changed && undoAvailable,
+    rollback: changed && undoAvailable
       ? { kind: "startup_registration", snapshot: before }
       : undefined,
     ranAt: deps.now(),
