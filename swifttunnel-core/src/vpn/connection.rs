@@ -3628,19 +3628,40 @@ impl VpnConnection {
     }
 
     pub async fn disconnect(&mut self) -> VpnResult<()> {
-        let support = crate::support_log::Operation::start("tunnel_disconnect", "cleanup");
+        let mut support = crate::support_log::Operation::start("tunnel_disconnect", "cleanup");
         log::info!("Disconnecting VPN");
         crate::vpn::bypass_diag::end_session();
         self.set_state(ConnectionState::Disconnecting).await;
         self.cleanup().await;
-        self.set_state(ConnectionState::Disconnected).await;
-        log::info!("VPN disconnected");
-        support.complete("disconnected");
-        // After the tunnel is down, not before. The report can need a token
+        // A timed-out packet worker remains tracked and prevents new capture.
+        // Propagate that fact to callers such as sign-out and uninstall too.
+        let result = self
+            .finish_disconnect(super::parallel_interceptor::ensure_interceptor_shutdown_complete())
+            .await;
+        match &result {
+            Ok(()) => support.complete("disconnected"),
+            Err(error) => support.fail(error.support_code()),
+        }
+        result
+    }
+
+    async fn finish_disconnect(&mut self, result: VpnResult<()>) -> VpnResult<()> {
+        match &result {
+            Ok(()) => {
+                self.set_state(ConnectionState::Disconnected).await;
+                log::info!("VPN disconnected");
+            }
+            Err(error) => {
+                self.set_state(ConnectionState::Error(super::user_friendly_error(error)))
+                    .await;
+                log::warn!("VPN disconnect did not finish: {error}");
+            }
+        }
+        // After local teardown attempts. The report can need a token
         // refresh and a web round trip, which held real disconnects in
         // "Disconnecting" for up to 3.5 seconds. It logs as its own operation.
         self.spawn_session_report();
-        Ok(())
+        result
     }
 
     /// Send this session's end-of-session report without holding up the caller.
@@ -4613,6 +4634,24 @@ mod tests {
         let conn = VpnConnection::new();
         let rx = conn.state_handle();
         assert_eq!(*rx.borrow(), ConnectionState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn unfinished_packet_workers_publish_a_retryable_disconnect_error() {
+        let mut conn = VpnConnection::new();
+        let state = conn.state_handle();
+        let result = conn
+            .finish_disconnect(Err(VpnError::NetworkWorkersStopping))
+            .await;
+        assert!(matches!(result, Err(VpnError::NetworkWorkersStopping)));
+        let failed = state.borrow().clone();
+        let ConnectionState::Error(message) = failed else {
+            panic!("an unfinished shutdown was published as successful: {failed:?}");
+        };
+        assert!(message.contains("still stopping"));
+        assert!(!message.contains("Install"));
+        assert!(conn.finish_disconnect(Ok(())).await.is_ok());
+        assert_eq!(*state.borrow(), ConnectionState::Disconnected);
     }
 
     #[test]

@@ -2143,18 +2143,32 @@ impl SplitTunnelDriver {
     pub fn close(&mut self) -> VpnResult<()> {
         log::info!("Closing split tunnel driver...");
 
-        if let Some(mut interceptor) = self.parallel_interceptor.take() {
+        let result = if let Some(mut interceptor) = self.parallel_interceptor.take() {
             // Stop can wait for driver threads and Windows state restoration.
             // Keep the interceptor owned until its teardown and Drop finish.
-            crate::utils::blocking_step(move || interceptor.stop());
-        }
+            crate::utils::blocking_step(move || {
+                interceptor.stop();
+                drop(interceptor);
+                super::parallel_interceptor::ensure_interceptor_shutdown_complete()
+            })
+        } else {
+            Ok(())
+        };
 
+        self.finish_close(result)
+    }
+
+    fn finish_close(&mut self, result: VpnResult<()>) -> VpnResult<()> {
         self.config = None;
         self.state = DriverState::NotAvailable;
         self.stop_flag.store(true, Ordering::SeqCst);
 
-        log::info!("Split tunnel driver closed");
-        Ok(())
+        if let Err(error) = &result {
+            log::warn!("Split tunnel driver teardown is incomplete: {error}");
+        } else {
+            log::info!("Split tunnel driver closed");
+        }
+        result
     }
 
     /// Get current state
@@ -2289,6 +2303,22 @@ impl Drop for SplitTunnelDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incomplete_close_revokes_the_driver_handle_but_keeps_the_failure() {
+        let mut driver = SplitTunnelDriver::new();
+        driver.state = DriverState::Active;
+        assert!(matches!(
+            driver.finish_close(Err(VpnError::NetworkWorkersStopping)),
+            Err(VpnError::NetworkWorkersStopping)
+        ));
+        assert_eq!(driver.state, DriverState::NotAvailable);
+        assert!(driver.config.is_none());
+        assert!(driver.stop_flag.load(Ordering::SeqCst));
+        // A later verified completion is still retryable, not a permanent
+        // driver-missing error. No driver/device has been opened in this test.
+        assert!(driver.finish_close(Ok(())).is_ok());
+    }
 
     #[test]
     fn install_evidence_keeps_probe_failures_distinct_from_absence() {
