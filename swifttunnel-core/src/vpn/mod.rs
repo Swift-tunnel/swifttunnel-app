@@ -27,6 +27,7 @@ pub mod error_messages;
 pub mod game_destination;
 pub mod ipv6_recovery;
 pub mod local_connectivity;
+mod owner_table;
 pub mod parallel_interceptor;
 pub(crate) mod player_usage;
 pub mod process_cache;
@@ -97,6 +98,9 @@ pub enum VpnError {
     #[error("Windows packet forwarding failed: {0}")]
     PacketForwardingFailed(String),
 
+    #[error("SwiftTunnel could not protect this PC's network disk")]
+    NetworkDiskProtectionUnavailable,
+
     #[error("Previous network workers have not finished stopping")]
     NetworkWorkersStopping,
 
@@ -156,6 +160,7 @@ impl VpnError {
             Self::NetworkWorkersStopping => "network_workers_stopping",
             Self::RecoveryRecordUnavailable => "recovery_record_unavailable",
             Self::PacketForwardingFailed(_) => "packet_forwarding_failed",
+            Self::NetworkDiskProtectionUnavailable => "network_disk_protection_failed",
             Self::Connection(_) => "connection_failed",
             Self::Network(_) => "network_failed",
             Self::Route(_) => "route_failed",

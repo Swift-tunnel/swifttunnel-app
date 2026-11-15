@@ -15,6 +15,7 @@ pub(crate) const PACKET_FORWARDING_GUIDANCE: &str = "SwiftTunnel stopped because
 pub fn user_friendly_error(error: &VpnError) -> String {
     match error {
         VpnError::PacketForwardingFailed(_) => PACKET_FORWARDING_GUIDANCE.to_string(),
+        VpnError::NetworkDiskProtectionUnavailable => "SwiftTunnel couldn't protect this PC's network disk, so it didn't start the tunnel. Restart the PC and try again. If this is an internet café PC, ask its administrator or send support your log.".to_string(),
         VpnError::RecoveryRecordUnavailable => {
             "SwiftTunnel couldn't save its network recovery file, so it didn't start the tunnel. Check free disk space and access to your Windows user folder, then try again. If it still fails, send support your log.".to_string()
         }
@@ -281,6 +282,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::NetworkWorkersStopping => "Previous connection still stopping",
         VpnError::RecoveryRecordUnavailable => "Recovery file unavailable",
         VpnError::PacketForwardingFailed(_) => "Network forwarding stopped",
+        VpnError::NetworkDiskProtectionUnavailable => "Network disk protection failed",
         VpnError::Route(_) => "Route setup failed",
         VpnError::Connection(_) => "Connection failed",
         VpnError::Network(_) => "Network error",

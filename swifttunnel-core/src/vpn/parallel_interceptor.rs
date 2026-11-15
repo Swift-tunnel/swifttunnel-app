@@ -42,6 +42,7 @@
 //!       └──────────────┘                         └──────────────┘
 //! ```
 
+use super::owner_table::{bounded_ip_helper_entries, read_owner_rows};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
@@ -4719,32 +4720,27 @@ impl ParallelInterceptor {
         // restored on app launch by `tso_recovery::recover_tso_on_startup`,
         // so users upgrading from <=2.0.20 don't end up with LSO stuck off.
 
-        // Disable public IPv6 egress on the physical adapter - SwiftTunnel is
-        // IPv4-only. This uses WinpkFilter static drop filters; the historical
-        // link-bouncing adapter-binding and Windows Firewall alternatives are
-        // documented in `ipv6_recovery`.
-        self.disable_ipv6()?;
-
-        // Diskless cafe PCs (CCBoot/gcafe/iSCSI boot): the boot NIC carries
-        // the SYSTEM DISK, and tunnel mode would route disk I/O through the
-        // user-mode pump - a stall there freezes the whole machine. Install
-        // kernel-level PASS filters for the System-owned disk flows so they
-        // never reach user mode. Best-effort: tunneling works without it.
+        // System disk traffic must bypass user-mode capture on network-booted
+        // PCs. Do this before IPv6 changes or starting any packet workers.
         #[cfg(target_os = "windows")]
-        if crate::diskless::system_is_diskless()
-            && let Some(physical_name) = self.physical_adapter_name.clone()
         {
-            match super::diskless_passthrough::install_for_adapter(&physical_name) {
-                Ok(0) => {
-                    log::info!("Diskless PC detected but no System disk flows found to protect")
-                }
-                Ok(count) => log::info!(
-                    "Diskless PC: {count} kernel pass filter(s) protect the system disk from interception"
-                ),
-                Err(e) => log::warn!(
-                    "Diskless PC: could not install disk-traffic pass filters (continuing): {e}"
-                ),
+            let count = super::diskless_passthrough::prepare_capture(
+                crate::diskless::system_is_diskless(),
+                self.physical_adapter_name.as_deref(),
+                super::diskless_passthrough::install_for_adapter,
+            )?;
+            if count != 0 {
+                log::info!(
+                    "Diskless PC: {count} kernel pass filter(s) protect System traffic from interception"
+                );
             }
+        }
+
+        // SwiftTunnel is IPv4-only. Block public IPv6 without rebinding the NIC.
+        if let Err(error) = self.disable_ipv6() {
+            #[cfg(target_os = "windows")]
+            super::diskless_passthrough::remove_installed();
+            return Err(error);
         }
 
         // Reset the panic cause alongside stop_flag. `workers_panic_cause` is
@@ -7083,78 +7079,6 @@ fn collect_tunnel_tcp_ports_for_api_tunneling(
         .collect();
 
     ports.into_iter().collect()
-}
-
-fn bounded_ip_helper_entries(
-    buffer_len: usize,
-    advertised_entries: u32,
-    entry_size: usize,
-) -> usize {
-    const TABLE_ENTRY_OFFSET: usize = std::mem::size_of::<u32>();
-    if buffer_len < TABLE_ENTRY_OFFSET || entry_size == 0 {
-        return 0;
-    }
-    let max_entries = buffer_len.saturating_sub(TABLE_ENTRY_OFFSET) / entry_size;
-    (advertised_entries as usize).min(max_entries)
-}
-
-/// Read a complete native owner table. A socket can appear between the size
-/// probe and the read, so retry resize responses instead of publishing an empty
-/// protocol table. Callers keep the previous snapshot on any unresolved error.
-fn read_owner_rows<T: Copy>(
-    mut query: impl FnMut(Option<*mut std::ffi::c_void>, &mut u32) -> u32,
-    mut row: impl FnMut(T),
-) -> Result<(), u32> {
-    use windows::Win32::Foundation::{
-        ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_NOT_ENOUGH_MEMORY,
-    };
-    const MAX_OWNER_TABLE_BYTES: usize = 64 * 1024 * 1024;
-    let mut size = 0;
-    let status = query(None, &mut size);
-    if status != 0 && status != ERROR_INSUFFICIENT_BUFFER.0 {
-        return Err(status);
-    }
-    for _ in 0..3 {
-        let capacity = size as usize;
-        if capacity < 4 || std::mem::size_of::<T>() == 0 {
-            return Err(ERROR_INVALID_DATA.0);
-        }
-        if capacity > MAX_OWNER_TABLE_BYTES {
-            return Err(ERROR_NOT_ENOUGH_MEMORY.0);
-        }
-        // IP Helper tables have a DWORD count followed by DWORD-aligned rows.
-        let mut buffer = Vec::<u32>::new();
-        let words = capacity.div_ceil(4);
-        buffer
-            .try_reserve_exact(words)
-            .map_err(|_| ERROR_NOT_ENOUGH_MEMORY.0)?;
-        buffer.resize(words, 0);
-        let status = query(Some(buffer.as_mut_ptr().cast()), &mut size);
-        if status == ERROR_INSUFFICIENT_BUFFER.0 {
-            continue;
-        }
-        if status != 0 {
-            return Err(status);
-        }
-        if size < 4 || size as usize > capacity {
-            return Err(ERROR_INVALID_DATA.0);
-        }
-        let count = buffer[0] as usize;
-        if count != bounded_ip_helper_entries(size as usize, buffer[0], std::mem::size_of::<T>()) {
-            return Err(ERROR_INVALID_DATA.0);
-        }
-        let entries = unsafe { buffer.as_ptr().cast::<u8>().add(4) };
-        for index in 0..count {
-            row(unsafe {
-                entries
-                    .add(index * std::mem::size_of::<T>())
-                    .cast::<T>()
-                    .read_unaligned()
-            });
-        }
-        return Ok(());
-    }
-    Err(ERROR_INSUFFICIENT_BUFFER.0)
 }
 
 fn read_connection_owners() -> Result<ahash::AHashMap<ConnectionKey, u32>, (&'static str, u32)> {
