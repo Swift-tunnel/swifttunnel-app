@@ -185,7 +185,9 @@ describe("stores/authStore", () => {
     const store = await loadStore();
     await store.getState().fetchState();
     const logout = store.getState().logout();
-    expect(store.getState().isLoading).toBe(true);
+    // The root uses this flag for the startup screen. Signing out must leave
+    // the existing account/connection controls on screen while it waits.
+    expect(store.getState().isLoading).toBe(false);
     expect(store.getState().state).toBe("logged_in");
     fail(new Error("Could not disconnect before signing out. Try again."));
     await logout;

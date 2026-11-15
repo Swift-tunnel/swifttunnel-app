@@ -36,7 +36,6 @@ export function SettingsTab() {
   const email = useAuthStore((s) => s.email);
   const isTester = useAuthStore((s) => s.isTester);
   const logout = useAuthStore((s) => s.logout);
-  const signingOut = useAuthStore((s) => s.isLoading);
   const authError = useAuthStore((s) => s.error);
 
   const settings = useSettingsStore((s) => s.settings);
@@ -58,6 +57,7 @@ export function SettingsTab() {
 
   const addToast = useToastStore((s) => s.addToast);
 
+  const [signingOut, setSigningOut] = useState(false);
   const [isUninstalling, setIsUninstalling] = useState(false);
   const [uninstallError, setUninstallError] = useState<string | null>(null);
   const [confirmUninstallOpen, setConfirmUninstallOpen] = useState(false);
@@ -189,7 +189,10 @@ export function SettingsTab() {
             </div>
           </div>
 
-          <Button variant="destructive" size="sm" onClick={logout} disabled={signingOut}>
+          <Button variant="destructive" size="sm" onClick={async () => {
+            setSigningOut(true);
+            try { await logout(); } finally { setSigningOut(false); }
+          }} disabled={signingOut}>
             {signingOut ? "Signing out..." : "Log out"}
           </Button>
         </div>

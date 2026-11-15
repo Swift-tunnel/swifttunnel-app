@@ -166,7 +166,9 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   logout: async () => {
     const action = ++authActionRevision;
     ++authStateRevision;
-    set({ isLoading: true, error: null });
+    // App uses isLoading to replace the entire page with its startup screen.
+    // Sign-out keeps the account/connection controls mounted until it finishes.
+    set({ error: null });
     try {
       await authLogout();
       if (action !== authActionRevision) return;
@@ -184,7 +186,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       });
     } catch (e) {
       if (action !== authActionRevision) return;
-      set({ isLoading: false, error: formatAuthError(e) });
+      set({ error: formatAuthError(e) });
     }
   },
 
