@@ -14,6 +14,10 @@ it("never includes caution changes in a tier or whole-page enable batch", () => 
   expect(bulkEnableTargets(OPTIMIZATIONS).map((item) => item.id)).not.toContain(
     "browser_hardware_accel_disable",
   );
+  // Automatic low-space cleanup needs an explicit opt-out too.
+  expect(bulkEnableTargets(OPTIMIZATIONS).map((item) => item.id)).not.toContain(
+    "storage_sense_disable",
+  );
 });
 
 it("preserves the order of eligible speed-up changes", () => {

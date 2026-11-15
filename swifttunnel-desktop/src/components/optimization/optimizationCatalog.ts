@@ -451,10 +451,10 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "storage_sense_disable",
     name: "Disable Storage Sense",
     description:
-      "Turns off Windows' automatic background disk cleanup so it never kicks in mid-game. Manual cleanup still works.",
+      "Stops Windows' automatic cleanup of temporary files. You'll need to free disk space yourself.",
     tier: "Intermediate",
     category: "System",
-    safety: "low",
+    safety: "caution",
     requiresAdmin: false,
     requiresReboot: false,
     changes: ["HKCU\\...\\StorageSense\\Parameters\\StoragePolicy → 01 = 0"],
@@ -527,7 +527,7 @@ export const OPTIMIZATIONS: OptimizationDef[] = [
     id: "notifications_disable",
     name: "Disable Notifications",
     description:
-      "Turns off toast notifications system-wide for your user, no popups, sounds, or banners until reverted.",
+      "Turns off Windows toast notifications, including SwiftTunnel's join and free-time warnings, until reverted.",
     tier: "Expert",
     category: "System",
     safety: "caution",

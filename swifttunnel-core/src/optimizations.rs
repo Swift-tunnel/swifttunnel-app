@@ -627,9 +627,9 @@ const TWEAKS: &[Tweak] = &[
         }],
     },
     Tweak {
-        // Storage Sense's automatic background cleanup. Disabling avoids
-        // surprise disk activity mid-game; cleanup can still be run manually
-        // from Windows Settings.
+        // Optional preference: disables automatic disk cleanup. This also
+        // removes Windows' automatic response to low free space, so the UI
+        // keeps it outside bulk performance recommendations.
         id: "storage_sense_disable",
         requires_admin: false,
         requires_reboot: false,
