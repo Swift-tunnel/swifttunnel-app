@@ -6,6 +6,7 @@ mod harness;
 #[cfg(windows)]
 mod log_clipboard;
 mod logging;
+mod operation_gate;
 mod runtime_assets;
 mod session_metadata;
 mod single_client;
@@ -1131,6 +1132,12 @@ pub fn run() {
                     }
                 }
                 tauri::RunEvent::Exit => {
+                    // Shutdown must be the last writer. An admitted connect,
+                    // repair or boost can still own blocking Windows work even
+                    // after its frontend request/window has disappeared.
+                    let _shutdown_operations = _app.try_state::<AppState>().map(|state| {
+                        state.runtime.block_on(commands::drain_for_shutdown())
+                    });
                     disconnect_vpn_on_exit(_app);
                     recover_stale_network_state();
                     // Restore network booster modifications (registry, MTU, firewall)

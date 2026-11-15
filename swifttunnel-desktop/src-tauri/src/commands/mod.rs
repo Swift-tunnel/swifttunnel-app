@@ -14,3 +14,11 @@ pub mod system;
 mod update_download;
 pub mod updater;
 pub mod vpn;
+
+pub(crate) async fn drain_for_shutdown() -> (
+    tokio::sync::OwnedSemaphorePermit,
+    tokio::sync::OwnedSemaphorePermit,
+) {
+    crate::operation_gate::drain_for_shutdown(network_operation::gate(), optimizer::config_gate())
+        .await
+}
