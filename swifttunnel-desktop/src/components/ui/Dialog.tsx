@@ -1,6 +1,6 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Icon } from "./Icon";
+import { Icon, type IconName } from "./Icon";
 
 interface DialogProps {
   open: boolean;
@@ -13,6 +13,9 @@ interface DialogProps {
   maxWidth?: number;
   /** Edge-to-edge body, for a dialog that lays out its own columns and footer. */
   flush?: boolean;
+  icon?: IconName;
+  tone?: "neutral" | "warning" | "danger";
+  dismissible?: boolean;
 }
 
 export function Dialog({
@@ -24,23 +27,30 @@ export function Dialog({
   children,
   maxWidth = 480,
   flush,
+  icon,
+  tone = "neutral",
+  dismissible = true,
 }: DialogProps) {
+  const titleId = useId();
+  const descriptionId = useId();
   const dialog = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
-  close.current = onClose;
+  close.current = () => { if (dismissible) onClose(); };
   useEffect(() => {
     if (!open) return;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const element = dialog.current;
     if (element && !element.contains(document.activeElement)) {
-      const initial = element.querySelector<HTMLElement>("input:not([disabled]),select:not([disabled]),textarea:not([disabled]),button:not([disabled])");
+      const initial = element.querySelector<HTMLElement>("[data-dialog-autofocus]:not([disabled])")
+        ?? element.querySelector<HTMLElement>("input:not([disabled]),select:not([disabled]),textarea:not([disabled])")
+        ?? element.querySelector<HTMLElement>("button:not([disabled])");
       (initial ?? element).focus();
     }
     const handler = (e: KeyboardEvent) => {
       const active = dialog.current;
       const all = document.querySelectorAll('[role="dialog"][aria-modal="true"]');
       if (!active || all[all.length - 1] !== active) return;
-      if (e.key === "Escape") close.current();
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close.current(); }
       if (e.key === "Tab") {
         const items = Array.from(active.querySelectorAll<HTMLElement>('button:not([disabled]),a[href],input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex="0"]')).filter(node => node.getClientRects().length > 0);
         const first = items[0]; const last = items[items.length - 1];
@@ -57,46 +67,52 @@ export function Dialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[200] flex items-center justify-center p-6"
-      style={{ backgroundColor: "rgba(0, 0, 0, 0.6)", backdropFilter: "blur(4px)" }}
-      onClick={onClose}
+      className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+      style={{ backgroundColor: "rgba(0, 0, 0, 0.48)" }}
+      onClick={() => close.current()}
     >
       <div
         role="dialog"
         ref={dialog}
         tabIndex={-1}
         aria-modal
-        aria-label={titleSuffix ? `${title} · ${titleSuffix}` : title}
+        aria-labelledby={titleId}
+        aria-describedby={description ? descriptionId : undefined}
         onClick={(e) => e.stopPropagation()}
-        className="max-h-[calc(100vh-3rem)] w-full overflow-y-auto rounded-[var(--radius-card)]"
+        className="relative max-h-[calc(100dvh-2rem)] w-full overflow-y-auto rounded-[16px] outline-none"
         style={{
           maxWidth,
-          backgroundColor: "var(--color-bg-elevated)",
+          backgroundColor: "var(--color-bg-card)",
           border: "1px solid var(--color-border-default)",
+          boxShadow: "0 24px 80px rgba(0,0,0,0.3), 0 2px 12px rgba(0,0,0,0.12)",
         }}
       >
         <div
-          className="flex items-start justify-between gap-4 border-b px-5 py-4"
+          className={`flex items-start gap-3.5 px-6 pb-5 pt-6 ${flush ? "border-b" : ""}`}
           style={{ borderColor: "var(--color-border-subtle)" }}
         >
-          <div>
-            <h2 className="text-[14px] font-semibold text-text-primary">
+          {icon && <div aria-hidden="true" className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] border ${tone === "danger" ? "border-status-error/15 bg-status-error/10 text-status-error" : tone === "warning" ? "border-status-warning/15 bg-status-warning/10 text-status-warning" : "border-border-subtle bg-bg-elevated text-text-secondary"}`}>
+            <Icon name={icon} size={21} strokeWidth={1.7} />
+          </div>}
+          <div className="min-w-0 flex-1 pr-5">
+            <h2 id={titleId} className="text-[16px] font-semibold leading-snug tracking-[-0.025em] text-text-primary">
               {title}{titleSuffix && <> · <span data-no-translate>{titleSuffix}</span></>}
             </h2>
             {description && (
-              <p className="mt-0.5 text-[12px] text-text-muted">{description}</p>
+              <p id={descriptionId} className="mt-1.5 text-[12.5px] leading-[1.65] text-text-muted">{description}</p>
             )}
           </div>
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => close.current()}
+            disabled={!dismissible}
             aria-label="Close"
-            className="rounded-[4px] p-1 text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary"
+            className="absolute right-3 top-3 flex h-7 w-7 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-bg-hover hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-text-secondary disabled:cursor-not-allowed disabled:opacity-30"
           >
             <Icon name="close" size={14} strokeWidth={2} />
           </button>
         </div>
-        <div className={flush ? "" : "px-5 py-4"}>{children}</div>
+        <div className={flush ? "" : "px-6 pb-6"}>{children}</div>
       </div>
     </div>,
     document.body,

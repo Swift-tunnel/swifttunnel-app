@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Button, Dialog, ErrorBanner, Field, Icon, Panel, Row, Segmented, Select, SliderInput, Toggle, CONTROL_WIDTH, compactFieldClass, fieldClass } from "../ui";
+import { Button, ConfirmDialog, Dialog, ErrorBanner, Field, Icon, Panel, Row, Segmented, Select, SliderInput, Toggle, CONTROL_WIDTH, compactFieldClass, fieldClass } from "../ui";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useDeepLinkStore } from "../../stores/deepLinkStore";
 import { boostCloseRoblox, boostGetMetrics, systemOpenUrl } from "../../lib/commands";
@@ -43,6 +43,7 @@ export function FastFlagsPanel() {
   const flags = parseFlags(raw);
   const rawError = validateCustomFflags(true, raw);
   const validation = validateCustomFflags(enabled, raw);
+  const addValidation = validateCustomFflags(true, JSON.stringify({ ...flags, [key]: value }));
   const changed = enabled !== baseline.custom_fflags_enabled || raw !== (baseline.custom_fflags_json || "{}");
   const externalChange = saved.custom_fflags_enabled !== baseline.custom_fflags_enabled || saved.custom_fflags_json !== baseline.custom_fflags_json || saved.ultraboost !== baseline.ultraboost;
   const locked = busy || !enabled || !!rawError;
@@ -113,9 +114,37 @@ export function FastFlagsPanel() {
       </Panel>}
       {changed && <div className="surface-elevated sticky bottom-3 z-20 flex items-center justify-between gap-3 rounded-[var(--radius-card)] py-2.5 pl-4 pr-2.5"><p className="flex items-center gap-2.5 text-[12px] font-medium text-text-primary"><span className={`h-1.5 w-1.5 rounded-full ${validation ? "bg-status-warning" : "bg-text-muted"}`} />{validation?"Fix the draft before saving.":"Unsaved FastFlag changes"}</p><div className="flex gap-2"><Button variant="secondary" size="sm" onClick={reload} disabled={busy}>Discard</Button><Button size="sm" loading={busy} disabled={!!validation||externalChange} onClick={()=>void save()}>Save & apply</Button></div></div>}
     </div>}
-    <Dialog open={closing} title="Close Roblox to apply FastFlags" description="This ends your current game." onClose={()=>{if(!busy)setClosing(false);}}><div className="flex flex-col gap-4">{error&&<ErrorBanner tone="error">{error}</ErrorBanner>}<div className="flex justify-end gap-2"><Button variant="secondary" size="sm" disabled={busy} onClick={()=>setClosing(false)}>Cancel</Button><Button size="sm" loading={busy} onClick={()=>void save(true)}>Close Roblox & apply</Button></div></div></Dialog>
-    <Dialog open={reset} title="Reset this flag draft?" description="Clears every flag here and turns FastFlags off. Nothing changes until you save." onClose={()=>setReset(false)}><div className="flex justify-end gap-2"><Button variant="secondary" size="sm" onClick={()=>setReset(false)}>Cancel</Button><Button size="sm" onClick={()=>{setFlags({});setEnabled(false);setReset(false);}}>Reset draft</Button></div></Dialog>
-    <Dialog open={adding} title="Add a supported FastFlag" onClose={()=>setAdding(false)}><div className="flex flex-col gap-4"><Field label="Flag name"><Select block aria-label="Flag name" value={key} onChange={e=>{setKey(e.target.value);setValue(booleanFlag(e.target.value)?"False":"0");}}>{FLAG_KEYS.map(k=><option key={k}>{k}</option>)}</Select></Field>{booleanFlag(key)?<div className="flex flex-col items-start gap-1.5"><span className="text-[11px] font-medium text-text-secondary">Value</span><Segmented<string> ariaLabel="Flag value" value={value} options={["True","False"]} onChange={setValue} /></div>:<Field label="Value" hint="Enter a whole number."><input aria-label="Flag value" inputMode="numeric" value={value} onChange={e=>setValue(e.target.value)} className={`${fieldClass} font-mono`} /></Field>}<div className="flex justify-end gap-2"><Button variant="secondary" size="sm" onClick={()=>setAdding(false)}>Cancel</Button><Button size="sm" disabled={!!validateCustomFflags(true,JSON.stringify({...flags,[key]:value}))} onClick={()=>{patch({[key]:value});setEnabled(true);setAdding(false);}}>Add to draft</Button></div></div></Dialog>
+    <ConfirmDialog open={closing} title="Apply FastFlags?" description="Roblox will close and your current game will end."
+      tone="warning" icon="games" busy={busy} error={error} confirmLabel="Close Roblox & apply"
+      onClose={() => setClosing(false)} onConfirm={() => void save(true)} />
+    <ConfirmDialog open={reset} title="Reset this flag draft?" description="Clears this draft and turns FastFlags off. Save to apply the reset."
+      icon="refresh" confirmLabel="Reset draft" onClose={() => setReset(false)}
+      onConfirm={() => { setFlags({}); setEnabled(false); setReset(false); }} />
+    <Dialog open={adding} title="Add a FastFlag" description="Choose a supported flag and set its value."
+      icon="flag" maxWidth={460} onClose={() => setAdding(false)}>
+      <form className="flex flex-col gap-5" onSubmit={event => {
+        event.preventDefault();
+        if (addValidation) return;
+        patch({ [key]: value }); setEnabled(true); setAdding(false);
+      }}>
+        <Field label="Flag name">
+          <Select block aria-label="Flag name" data-dialog-autofocus value={key} onChange={event => {
+            setKey(event.target.value); setValue(booleanFlag(event.target.value) ? "False" : "0");
+          }}>{FLAG_KEYS.map(name => <option key={name}>{name}</option>)}</Select>
+        </Field>
+        {booleanFlag(key) ? <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border-subtle bg-bg-base px-4 py-3">
+          <span className="text-[12px] font-medium text-text-secondary">Value</span>
+          <Segmented<string> ariaLabel="Flag value" width={136} value={value} options={["True", "False"]} onChange={setValue} />
+        </div> : <Field label="Value" hint="Enter a whole number.">
+          <input aria-label="Flag value" inputMode="numeric" value={value} onChange={event => setValue(event.target.value)} className={`${fieldClass} font-mono`} />
+        </Field>}
+        {addValidation && <p role="status" className="text-[12px] leading-relaxed text-status-warning">{addValidation}</p>}
+        <div className="grid grid-cols-2 gap-2.5 pt-1">
+          <Button type="button" variant="secondary" className="h-10" onClick={() => setAdding(false)}>Cancel</Button>
+          <Button type="submit" className="h-10" disabled={!!addValidation}>Add to draft</Button>
+        </div>
+      </form>
+    </Dialog>
   </div>;
 }
 
