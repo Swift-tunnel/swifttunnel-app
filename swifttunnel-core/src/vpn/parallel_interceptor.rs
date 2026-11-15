@@ -11236,6 +11236,39 @@ mod tests {
     }
 
     #[test]
+    fn a_real_half_closed_windows_tcp_socket_keeps_its_captured_path() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let src_port = client.local_addr().unwrap().port();
+        let dst_port = listener.local_addr().unwrap().port();
+        let ip = Ipv4Addr::LOCALHOST;
+        let key = InlineCacheKey::Tcp(ip, src_port, ip, dst_port);
+        let mut captures = InlineCache::from_iter([(
+            key,
+            InlineCacheEntry::Tcp {
+                initial_sequence: 1,
+                captured_at: Instant::now() - Duration::from_secs(1),
+            },
+        )]);
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let started = Instant::now();
+        let owners = read_connection_owners().unwrap();
+        assert!(
+            owners.contains_key(&ConnectionKey::tcp(ip, src_port, ip, dst_port)),
+            "Windows must still report this half-closed socket"
+        );
+        let mut snapshot = ProcessSnapshot::empty(Default::default());
+        snapshot.connections = owners;
+        snapshot.owner_table_started_at = Some(started);
+        prune_inline_cache_on_snapshot_refresh(&mut captures, &snapshot);
+        assert!(
+            captures.contains_key(&key),
+            "a FIN cannot retire a socket still present in Windows"
+        );
+    }
+
+    #[test]
     fn native_owner_tables_identify_owned_loopback_sockets() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
