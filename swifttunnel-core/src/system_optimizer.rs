@@ -175,12 +175,32 @@ fn system_snapshot_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("SwiftTunnel").join(SYSTEM_SNAPSHOT_FILE))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerResolutionRequest {
+    Native,
+    Multimedia,
+}
+
+fn release_timer_request_with(
+    request: &mut Option<TimerResolutionRequest>,
+    native: impl FnOnce() -> Result<()>,
+    multimedia: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    match *request {
+        Some(TimerResolutionRequest::Native) => native()?,
+        Some(TimerResolutionRequest::Multimedia) => multimedia()?,
+        None => return Ok(()),
+    }
+    *request = None;
+    Ok(())
+}
+
 pub struct SystemOptimizer {
     original_priority: Option<u32>,
     original_affinity: Option<usize>,
     priority_identity: Option<ProcessIdentity>,
     affinity_identity: Option<ProcessIdentity>,
-    timer_resolution_active: bool,
+    timer_resolution_request: Option<TimerResolutionRequest>,
     global_timer_snapshot: Option<Option<u32>>,
     original_power_plan_guid: Option<Option<String>>,
     game_bar_snapshot: Option<Option<u32>>,
@@ -218,7 +238,7 @@ impl SystemOptimizer {
             original_affinity: None,
             priority_identity: None,
             affinity_identity: None,
-            timer_resolution_active: false,
+            timer_resolution_request: None,
             global_timer_snapshot: None,
             original_power_plan_guid: None,
             game_bar_snapshot: None,
@@ -1301,17 +1321,15 @@ impl SystemOptimizer {
     /// The kernel reads that key only at boot, so the global half of this
     /// boost takes effect after the next reboot.
     pub fn set_timer_resolution(&mut self, enable: bool) -> Result<()> {
-        if enable && !self.timer_resolution_active {
+        if enable && self.timer_resolution_request.is_none() {
             info!("Setting timer resolution to 0.5ms");
-            let mut timer_applied = false;
             unsafe {
                 // Try NtSetTimerResolution for 0.5ms (5000 * 100ns = 0.5ms)
                 let mut current: u32 = 0;
                 let status = NtSetTimerResolution(5000, 1, &mut current);
                 if status == 0 {
                     // STATUS_SUCCESS
-                    self.timer_resolution_active = true;
-                    timer_applied = true;
+                    self.timer_resolution_request = Some(TimerResolutionRequest::Native);
                     info!(
                         "Timer resolution set to 0.5ms via NtSetTimerResolution (actual: {:.3}ms)",
                         current as f64 / 10000.0
@@ -1324,8 +1342,7 @@ impl SystemOptimizer {
                     );
                     let result = timeBeginPeriod(1);
                     if result == 0 {
-                        self.timer_resolution_active = true;
-                        timer_applied = true;
+                        self.timer_resolution_request = Some(TimerResolutionRequest::Multimedia);
                         info!("Timer resolution set to 1ms via timeBeginPeriod (fallback)");
                     } else {
                         warn!("Failed to set timer resolution: error code {}", result);
@@ -1333,41 +1350,63 @@ impl SystemOptimizer {
                 }
             }
 
-            if !timer_applied {
+            if self.timer_resolution_request.is_none() {
                 return Err(anyhow::anyhow!(
                     "NtSetTimerResolution and timeBeginPeriod both failed"
                 ));
             }
+        }
 
+        if enable {
             // Make sure the system-wide override is on so the per-process
             // resolution we just set is honored for other processes too on
             // Win11 22H2+. Snapshot the prior value so restore() can revert.
             if let Err(e) = self.enable_global_timer_resolution_override() {
-                self.clear_timer_resolution_request();
-                let _ = self.restore_global_timer_resolution_override();
+                if let Err(cleanup) = self.clear_timer_resolution_request() {
+                    warn!("Timer request rollback remains pending after apply failure: {cleanup}");
+                }
+                if let Err(cleanup) = self.restore_global_timer_resolution_override() {
+                    warn!(
+                        "Global timer override rollback remains pending after apply failure: {cleanup}"
+                    );
+                }
                 return Err(e);
             }
-        } else if !enable && self.timer_resolution_active {
-            info!("Restoring default timer resolution");
-            self.clear_timer_resolution_request();
+        } else {
+            if self.timer_resolution_request.is_some() {
+                info!("Restoring default timer resolution");
+            }
+            self.clear_timer_resolution_request()?;
             self.restore_global_timer_resolution_override()?;
         }
         Ok(())
     }
 
-    fn clear_timer_resolution_request(&mut self) {
-        if !self.timer_resolution_active {
-            return;
-        }
-
-        unsafe {
-            // Undo NtSetTimerResolution
-            let mut current: u32 = 0;
-            let _ = NtSetTimerResolution(5000, 0, &mut current);
-            // Also undo timeBeginPeriod in case fallback was used
-            let _ = timeEndPeriod(1);
-            self.timer_resolution_active = false;
-        }
+    fn clear_timer_resolution_request(&mut self) -> Result<()> {
+        release_timer_request_with(
+            &mut self.timer_resolution_request,
+            || {
+                let mut current = 0;
+                let status = unsafe { NtSetTimerResolution(5000, 0, &mut current) };
+                if status == 0 {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Could not release the native timer request (status 0x{status:08X})"
+                    ))
+                }
+            },
+            || {
+                let status = unsafe { timeEndPeriod(1) };
+                if status == 0 {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Could not release the multimedia timer request (code {status})"
+                    ))
+                }
+            },
+        )
     }
 
     fn enable_global_timer_resolution_override(&mut self) -> Result<()> {
@@ -1611,13 +1650,13 @@ impl SystemOptimizer {
         let mut restore_errors = Vec::new();
 
         // Restore timer resolution if active
-        if self.timer_resolution_active
+        if self.timer_resolution_request.is_some()
             && let Err(e) = self.set_timer_resolution(false)
         {
             restore_errors.push(format!("timer resolution: {}", e));
         }
         // Safety net: clean up the global timer override snapshot even if
-        // `timer_resolution_active` was already false (e.g., crash recovery).
+        // there is no owned process timer request (e.g., crash recovery).
         if let Err(e) = self.restore_global_timer_resolution_override() {
             restore_errors.push(format!("global timer override: {}", e));
         }
@@ -1718,7 +1757,7 @@ impl SystemOptimizer {
 
     /// Check if timer resolution is currently active
     pub fn is_timer_resolution_active(&self) -> bool {
-        self.timer_resolution_active
+        self.timer_resolution_request.is_some()
     }
 }
 
@@ -1755,6 +1794,53 @@ pub fn cleanup_for_uninstall() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn timer_cleanup_releases_only_the_request_this_optimizer_acquired() {
+        let mut request = Some(TimerResolutionRequest::Native);
+        release_timer_request_with(
+            &mut request,
+            || Ok(()),
+            || panic!("no multimedia request was acquired"),
+        )
+        .unwrap();
+        assert_eq!(request, None);
+        release_timer_request_with(
+            &mut request,
+            || panic!("release once only"),
+            || panic!("release once only"),
+        )
+        .unwrap();
+        request = Some(TimerResolutionRequest::Multimedia);
+        release_timer_request_with(
+            &mut request,
+            || panic!("no native request was acquired"),
+            || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(request, None);
+    }
+
+    #[test]
+    fn a_failed_timer_release_remains_owned_for_retry() {
+        for kind in [
+            TimerResolutionRequest::Native,
+            TimerResolutionRequest::Multimedia,
+        ] {
+            let mut request = Some(kind);
+            assert!(
+                release_timer_request_with(
+                    &mut request,
+                    || Err(anyhow::anyhow!("native release denied")),
+                    || Err(anyhow::anyhow!("multimedia release denied"))
+                )
+                .is_err()
+            );
+            assert_eq!(request, Some(kind));
+            release_timer_request_with(&mut request, || Ok(()), || Ok(())).unwrap();
+            assert_eq!(request, None);
+        }
+    }
+
     #[test]
     fn default_balanced_plan_keeps_the_users_own_power_plan() {
         use crate::structs::PowerPlan;
