@@ -3005,7 +3005,23 @@ impl VpnConnection {
                                 let mut blocked_events: Vec<ProcessStartEvent> = Vec::new();
                                 let mut blocked_paths: Vec<String> = Vec::new();
 
-                                let pending_events = take_process_event_batch(first_event, etw_rx.as_mut());
+                                // A queued ETW start can outlive its process. Check
+                                // the current image before blocking/registering it,
+                                // and retain its handle throughout this batch.
+                                let (pending_events, _identity_guards): (Vec<_>, Vec<_>) =
+                                    take_process_event_batch(first_event, etw_rx.as_mut())
+                                        .into_iter()
+                                        .filter_map(|event| {
+                                            let pid = event.pid;
+                                            let verified = blocking_driver_step(|| event.revalidate());
+                                            if verified.is_none() {
+                                                log::debug!(
+                                                    "Ignoring queued process-start hint: pid={pid} live image changed, exited or could not be verified"
+                                                );
+                                            }
+                                            verified
+                                        })
+                                        .unzip();
 
                                 for event in &pending_events {
                                     log::info!(

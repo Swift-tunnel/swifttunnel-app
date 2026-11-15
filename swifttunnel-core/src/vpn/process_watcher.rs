@@ -63,6 +63,51 @@ pub struct ProcessStartEvent {
     pub parent_pid: u32,
 }
 
+impl ProcessStartEvent {
+    /// A queued start is a hint, not proof that its PID still names this image.
+    /// Keep the verified process object open through admission so the PID
+    /// cannot be recycled between this query and the consumer's native work.
+    pub(super) fn revalidate(self) -> Option<(Self, std::os::windows::io::OwnedHandle)> {
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::Foundation::WAIT_TIMEOUT;
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+            WaitForSingleObject,
+        };
+
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                false,
+                self.pid,
+            )
+        }
+        .ok()?;
+        // OpenProcess returned a new, real handle, never a pseudo handle.
+        let owned = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle.0) };
+        if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
+            return None;
+        }
+        let path = process_image_path_for_handle(handle)?;
+        let verified = self.with_live_image(path)?;
+        Some((verified, owned))
+    }
+
+    fn with_live_image(mut self, path: String) -> Option<Self> {
+        let actual = path.rsplit(['\\', '/']).next()?;
+        if actual.is_empty()
+            || !crate::utils::same_path_part(
+                std::ffi::OsStr::new(actual),
+                std::ffi::OsStr::new(&self.name),
+            )
+        {
+            return None;
+        }
+        self.image_path = path;
+        Some(self)
+    }
+}
+
 /// ETW Process Watcher
 ///
 /// Monitors for process creation events in real-time using ETW.
@@ -593,7 +638,6 @@ fn enumerate_running_matching_processes(
 /// Get the full NT image path for a PID using Windows API.
 fn get_process_image_path_by_pid(pid: u32) -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::ProcessStatus::GetProcessImageFileNameW;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     unsafe {
@@ -602,25 +646,32 @@ fn get_process_image_path_by_pid(pid: u32) -> Option<String> {
             return None;
         }
 
-        let mut capacity = 260usize;
-        let path = loop {
-            let mut buffer = vec![0u16; capacity];
-            let len = GetProcessImageFileNameW(handle, &mut buffer) as usize;
-            if len == 0 {
-                let _ = CloseHandle(handle);
-                return None;
-            }
-            if len < buffer.len() || capacity >= 32 * 1024 {
-                break String::from_utf16_lossy(&buffer[..len]);
-            }
-            capacity = (capacity * 2).min(32 * 1024);
-        };
+        let path = process_image_path_for_handle(handle);
 
         if CloseHandle(handle).is_err() {
             log::debug!("Failed to close process handle for PID {}", pid);
         }
 
-        Some(path)
+        path
+    }
+}
+
+fn process_image_path_for_handle(handle: windows::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows::Win32::System::ProcessStatus::GetProcessImageFileNameW;
+    let mut capacity = 260usize;
+    loop {
+        let mut buffer = vec![0u16; capacity];
+        let len = unsafe { GetProcessImageFileNameW(handle, &mut buffer) } as usize;
+        if len == 0 {
+            return None;
+        }
+        if len < buffer.len() {
+            return Some(String::from_utf16_lossy(&buffer[..len]));
+        }
+        if capacity >= 32 * 1024 {
+            return None;
+        }
+        capacity = (capacity * 2).min(32 * 1024);
     }
 }
 
@@ -628,6 +679,66 @@ fn get_process_image_path_by_pid(pid: u32) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    fn hinted_process(pid: u32, name: &str) -> ProcessStartEvent {
+        ProcessStartEvent {
+            pid,
+            name: name.into(),
+            image_path: r"\Device\OldVolume\stale\RobloxPlayerBeta.exe".into(),
+            parent_pid: 0,
+        }
+    }
+
+    #[test]
+    fn queued_start_does_not_admit_a_pid_that_now_names_another_image() {
+        let event = hinted_process(std::process::id(), "RobloxPlayerBeta.exe");
+        assert!(event.revalidate().is_none());
+        assert!(
+            hinted_process(0, "RobloxPlayerBeta.exe")
+                .revalidate()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn live_admission_uses_the_current_nt_image_and_retains_its_process_handle() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::WaitForSingleObject;
+
+        let executable = std::env::current_exe().unwrap();
+        let name = executable
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_uppercase();
+        let (event, guard) = hinted_process(std::process::id(), &name)
+            .revalidate()
+            .unwrap();
+        assert!(event.image_path.starts_with(r"\Device\"));
+        assert_eq!(
+            event.image_path,
+            get_process_image_path_by_pid(std::process::id()).unwrap()
+        );
+        assert_eq!(
+            unsafe { WaitForSingleObject(HANDLE(guard.as_raw_handle()), 0) },
+            WAIT_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn image_validation_rejects_empty_or_different_names_without_using_the_cached_path() {
+        let event = hinted_process(42, "RobloxPlayerBeta.exe");
+        for path in ["", r"\Device\Volume\", r"\Device\Volume\browser.exe"] {
+            assert!(event.clone().with_live_image(path.into()).is_none());
+        }
+        let current = r"\Device\NewVolume\Roblox\ROBLOXPLAYERBETA.EXE";
+        assert_eq!(
+            event.with_live_image(current.into()).unwrap().image_path,
+            current
+        );
+    }
 
     #[test]
     fn stopping_a_retired_watcher_cannot_stop_a_replacement_session() {
