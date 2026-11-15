@@ -79,7 +79,7 @@ export function Dialog({
         aria-labelledby={titleId}
         aria-describedby={description ? descriptionId : undefined}
         onClick={(e) => e.stopPropagation()}
-        className="relative max-h-[calc(100dvh-2rem)] w-full overflow-y-auto rounded-[16px] outline-none"
+        className="relative max-h-[calc(100vh-2rem)] w-full overflow-y-auto rounded-[16px] outline-none"
         style={{
           maxWidth,
           backgroundColor: "var(--color-bg-card)",
