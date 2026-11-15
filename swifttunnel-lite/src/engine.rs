@@ -47,6 +47,7 @@ use crate::view::{Action, FieldId, Flag};
 /// shows up without waiting for the one-second heartbeat.
 pub const WM_ENGINE_UPDATE: u32 = WM_APP + 1;
 pub const WM_ENGINE_QUIT_READY: u32 = WM_APP + 3;
+pub const WM_PICK_FFLAG_FILE: u32 = WM_APP + 5;
 
 /// How often the relays are re-pinged.
 ///
@@ -1370,19 +1371,41 @@ impl Engine {
     /// begin with, and pasting means opening it in something first and hoping
     /// nothing is trimmed on the way through.
     ///
-    /// Windows owns the modal picker; disk access and validation run separately.
-    /// The UI keeps one pending read and discards a result after newer flag edits.
+    /// Post the picker request, then leave the settings edit. The modal dialog
+    /// pumps window messages, so it must not retain an App/State borrow while
+    /// background notifications can reenter the window procedure.
     fn import_fflags(&self, state: &mut State) {
         if state.fflag_import.pending() || state.roblox_busy {
             return;
         }
-        let Some(path) = crate::picker::pick_fflag_file(self.shared.hwnd()) else {
-            return;
-        };
-        let baseline = state.roblox_view();
-        if self.shared.roblox_edits.is_busy() {
+        if let Err(error) = unsafe {
+            PostMessageW(
+                Some(self.shared.hwnd()),
+                WM_PICK_FFLAG_FILE,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        } {
+            log::warn!("Could not post the Lite flag picker request: {error}");
+            state.edit_roblox(|draft| {
+                draft.fflag_note =
+                    Some("File not imported. Could not open the file picker. Try again.".into());
+            });
+        }
+    }
+
+    /// Begin the bounded read after the dialog, using the current draft rather
+    /// than a snapshot held while Windows ran a nested message loop.
+    pub(crate) fn import_fflags_from_path(&self, state: &mut State, path: std::path::PathBuf) {
+        if self.shared.stop.load(Ordering::Relaxed)
+            || state.lockout.is_some()
+            || state.fflag_import.pending()
+            || state.roblox_busy
+            || self.shared.roblox_edits.is_busy()
+        {
             return;
         }
+        let baseline = state.roblox_view();
         let revision = self.shared.roblox_revision.load(Ordering::Acquire);
         let shared = self.shared.clone();
         if let Err(reason) = state.fflag_import.start(

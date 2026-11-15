@@ -85,6 +85,7 @@ pub struct App {
     /// Set by the tray's Quit item, so WM_CLOSE stops hiding and closes.
     quitting: bool,
     quit_pending: bool,
+    flag_picker_open: bool,
     clipboard: crate::clipboard::Reader,
     pending_paste: Option<(FieldId, crate::state::TextField)>,
     pending_character: Option<(FieldId, u16)>,
@@ -817,6 +818,7 @@ fn new_app(engine: Option<Engine>, dpi: i32) -> Box<App> {
         tray: None,
         quitting: false,
         quit_pending: false,
+        flag_picker_open: false,
         clipboard: crate::clipboard::Reader::default(),
         pending_paste: None,
         pending_character: None,
@@ -1682,6 +1684,48 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                     if let Some(action) = action {
                         dispatch(hwnd, app, action);
+                    }
+                }
+                LRESULT(0)
+            }
+
+            crate::engine::WM_PICK_FFLAG_FILE => {
+                let can_pick = app_of(hwnd).is_some_and(|app| {
+                    if app.flag_picker_open
+                        || app.quit_pending
+                        || app.engine.is_none()
+                        || app.state.lockout.is_some()
+                        || app.state.roblox_busy
+                        || app.state.fflag_import.pending()
+                    {
+                        return false;
+                    }
+                    app.flag_picker_open = true;
+                    true
+                });
+                if can_pick {
+                    // No App/State reference crosses this call. The common
+                    // dialog runs a nested message loop, including our paint,
+                    // engine-update and potentially window-destroy handlers.
+                    let path = crate::picker::pick_fflag_file(hwnd);
+                    if let Some(app) = app_of(hwnd) {
+                        app.flag_picker_open = false;
+                        app.refresh_from_engine();
+                        if !app.quit_pending {
+                            match path {
+                                Ok(Some(path)) => {
+                                    if let Some(engine) = &app.engine {
+                                        engine.import_fflags_from_path(&mut app.state, path);
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(reason) => app.state.edit_roblox(|draft| {
+                                    draft.fflag_note = Some(format!("File not imported. {reason}"));
+                                }),
+                            }
+                            app.rebuild(client_of(hwnd));
+                            repaint(hwnd);
+                        }
                     }
                 }
                 LRESULT(0)
