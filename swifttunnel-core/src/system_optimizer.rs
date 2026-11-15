@@ -952,8 +952,12 @@ impl SystemOptimizer {
                 )?,
             });
         }
-        // Even Balanced changes the active plan. Capture it before any switch.
-        if self.original_power_plan_guid.is_none() {
+        // Balanced means keep the user's plan. Recording it despite making no
+        // switch would let a later restore overwrite an unrelated Windows edit.
+        // Keep any earlier owned original until its actual recovery completes.
+        if Self::power_plan_switch_requested(config.power_plan)
+            && self.original_power_plan_guid.is_none()
+        {
             self.original_power_plan_guid =
                 Some(Some(Self::active_power_plan_guid().ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1818,6 +1822,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(request, None);
+    }
+
+    #[test]
+    fn a_default_apply_cannot_claim_or_erase_a_power_plan_original() {
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "swift-system-power-owner-{:032x}",
+            rand::random::<u128>()
+        )));
+        fs::create_dir(&fixture.0).unwrap();
+        let path = fixture.0.join(SYSTEM_SNAPSHOT_FILE);
+        let mut optimizer = SystemOptimizer::new();
+        optimizer.snapshot_path = Some(path.clone());
+        optimizer
+            .capture_system_state_snapshots(&SystemOptimizationConfig {
+                set_high_priority: true,
+                ..Default::default()
+            })
+            .unwrap();
+        // Capturing a process-only change must not claim an unchanged Windows
+        // power policy for restore on exit or during the next apply.
+        assert_eq!(optimizer.original_power_plan_guid, None);
+        assert!(!path.exists());
+        // An original from an earlier owned switch still belongs to recovery.
+        // Merely selecting the default must not discard that pending record.
+        let original = Some(Some(HIGH_PERFORMANCE_POWER_PLAN_GUID.to_string()));
+        optimizer.original_power_plan_guid = original.clone();
+        optimizer
+            .capture_system_state_snapshots(&SystemOptimizationConfig::default())
+            .unwrap();
+        assert_eq!(optimizer.original_power_plan_guid, original);
+        assert_eq!(
+            SystemOptimizer::read_persistent_snapshot(&path)
+                .unwrap()
+                .unwrap()
+                .original_power_plan_guid,
+            Some(HIGH_PERFORMANCE_POWER_PLAN_GUID.to_string())
+        );
     }
 
     #[test]
