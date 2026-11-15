@@ -42,13 +42,17 @@ pub(super) fn read_owner_rows<T: OwnerRow>(
         return Err(status);
     }
     for _ in 0..3 {
-        let capacity = size as usize;
-        if capacity < 4 || std::mem::size_of::<T>() == 0 {
+        let reported = size as usize;
+        if reported < 4 || std::mem::size_of::<T>() == 0 {
             return Err(ERROR_INVALID_DATA.0);
         }
+        // Sockets open between the size probe and the read on a busy PC. Ask
+        // with room to spare so one new connection does not fail the round.
+        let capacity = reported.saturating_add(reported / 8).saturating_add(1024);
         if capacity > MAX_OWNER_TABLE_BYTES {
             return Err(ERROR_NOT_ENOUGH_MEMORY.0);
         }
+        size = capacity as u32;
         // IP Helper tables have a DWORD count followed by DWORD-aligned rows.
         let mut buffer = Vec::<u32>::new();
         let words = capacity.div_ceil(4);

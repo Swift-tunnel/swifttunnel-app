@@ -11085,6 +11085,35 @@ mod tests {
     }
 
     #[test]
+    fn owner_table_read_leaves_room_for_sockets_opened_after_the_size_probe() {
+        let mut calls = 0;
+        let mut rows = Vec::new();
+        read_owner_rows(
+            |buffer, size| {
+                calls += 1;
+                let Some(buffer) = buffer else {
+                    *size = 8; // one row
+                    return 122;
+                };
+                // A second socket opened after the probe. It must still fit.
+                assert!(*size >= 12, "the read asked for no spare room");
+                let buffer = buffer.cast::<u32>();
+                unsafe {
+                    buffer.write(2);
+                    buffer.add(1).write(17);
+                    buffer.add(2).write(42);
+                }
+                *size = 12;
+                0
+            },
+            |row: u32| rows.push(row),
+        )
+        .unwrap();
+        assert_eq!(calls, 2, "a grown table cost an extra round");
+        assert_eq!(rows, [17, 42]);
+    }
+
+    #[test]
     fn incomplete_owner_tables_never_publish_partial_or_empty_results() {
         for failure in [5u32, 122, 13, 14, 15] {
             let mut calls = 0;
@@ -11112,7 +11141,8 @@ mod tests {
                     *size = if failure == 14 {
                         3
                     } else if failure == 15 {
-                        12
+                        // A reply larger than the buffer it was given.
+                        *size + 4
                     } else {
                         8
                     };
