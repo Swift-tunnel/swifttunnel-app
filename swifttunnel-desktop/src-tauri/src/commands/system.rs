@@ -19,7 +19,7 @@ use tauri::Manager;
 static DRIVER_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 
 struct NetworkRepairLease {
-    _operation: super::network_operation::Permit,
+    _operation: super::network_operation::MaintenancePermit,
     _connection: tokio::sync::OwnedMutexGuard<swifttunnel_core::vpn::VpnConnection>,
 }
 
@@ -38,7 +38,9 @@ fn ensure_network_repair_is_idle(
 }
 
 fn reserve_network_repair(state: &AppState) -> Result<NetworkRepairLease, String> {
-    let operation = super::network_operation::begin()?;
+    // Driver/firewall repair and full recovery can touch the same Windows
+    // state and rollback records as an optimizer, not only an active tunnel.
+    let operation = super::network_operation::begin_maintenance()?;
     let connection = state.vpn_connection.clone().try_lock_owned().map_err(|_| {
         "SwiftTunnel is still finishing a network operation. Wait a moment, then try again."
             .to_string()
@@ -3591,7 +3593,7 @@ pub async fn system_uninstall(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let operation = super::network_operation::begin()?;
+        let operation = super::network_operation::begin_maintenance()?;
         // Resolve the product before disconnecting or cleaning up. The native
         // API includes visible per-user installations and selects Desktop's
         // upgrade family, not the first display-name match in HKLM.
