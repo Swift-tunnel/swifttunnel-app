@@ -753,14 +753,11 @@ impl Engine {
                     d.custom_fflags = false;
                 }
             }),
-            Flag::CustomFflags => state.edit_roblox(|d| {
-                d.custom_fflags = !d.custom_fflags;
-                if d.custom_fflags {
-                    d.ultraboost = false;
-                } else {
-                    d.fflag_note = None;
+            Flag::CustomFflags => {
+                if state.toggle_custom_flags() {
+                    self.import_fflags(state);
                 }
-            }),
+            }
             Flag::Fullscreen => state.edit_roblox(|d| d.fullscreen = !d.fullscreen),
         }
     }
@@ -1376,14 +1373,14 @@ impl Engine {
     /// Windows owns the modal picker; disk access and validation run separately.
     /// The UI keeps one pending read and discards a result after newer flag edits.
     fn import_fflags(&self, state: &mut State) {
-        if state.fflag_import.pending() || state.roblox_busy || !state.roblox_view().custom_fflags {
+        if state.fflag_import.pending() || state.roblox_busy {
             return;
         }
         let Some(path) = crate::picker::pick_fflag_file(self.shared.hwnd()) else {
             return;
         };
         let baseline = state.roblox_view();
-        if self.shared.roblox_edits.is_busy() || !baseline.custom_fflags {
+        if self.shared.roblox_edits.is_busy() {
             return;
         }
         let revision = self.shared.roblox_revision.load(Ordering::Acquire);
@@ -1391,11 +1388,7 @@ impl Engine {
         if let Err(reason) = state.fflag_import.start(
             baseline,
             revision,
-            move || {
-                let text = crate::picker::read_fflag_path(&path)?;
-                let count = RobloxOptimizer::validate_custom_fflags(&text)?;
-                Ok(crate::flag_import::ImportedFlags { text, count })
-            },
+            move || crate::flag_import::read_file(&path),
             move || shared.notify(),
         ) {
             state.edit_roblox(|draft| draft.fflag_note = Some(reason));

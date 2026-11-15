@@ -516,6 +516,29 @@ impl State {
         self.roblox_draft = Some(draft);
     }
 
+    /// Return true when choosing a file is needed. Do not arm an empty or
+    /// invalid Custom mode: that would block unrelated FPS/graphics changes.
+    pub fn toggle_custom_flags(&mut self) -> bool {
+        let current = self.roblox_view();
+        if !current.custom_fflags
+            && swifttunnel_core::roblox_optimizer::RobloxOptimizer::validate_custom_fflags(
+                &current.custom_json,
+            )
+            .is_err()
+        {
+            return true;
+        }
+        self.edit_roblox(|draft| {
+            draft.custom_fflags = !draft.custom_fflags;
+            if draft.custom_fflags {
+                draft.ultraboost = false;
+                draft.fflag_ok = true;
+            }
+            draft.fflag_note = None;
+        });
+        false
+    }
+
     pub fn finish_flag_import(&mut self, revision: u64) {
         if !self.fflag_import.pending() {
             return;
@@ -525,6 +548,8 @@ impl State {
             self.edit_roblox(|draft| match result {
                 Ok(imported) => {
                     draft.custom_json = imported.text;
+                    draft.custom_fflags = true;
+                    draft.ultraboost = false;
                     draft.fflag_ok = true;
                     draft.fflag_note = Some(format!(
                         "{} allowlisted flag{} ready. Apply to write them.",

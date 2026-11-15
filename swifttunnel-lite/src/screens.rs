@@ -539,18 +539,22 @@ fn roblox(state: &State) -> Vec<Item> {
             .sub("A .json or .txt file of flags")
             .right(Right::Chevron)
             .action(Action::ImportFflags)
-            .disabled(!draft.custom_fflags || state.roblox_busy || state.fflag_import.pending()),
+            .disabled(state.roblox_busy || state.fflag_import.pending()),
         ]),
+    ];
+
+    // Keep validation/read failures beside the file control. Below Reset they
+    // can be off-screen while the row misleadingly says nothing was pasted.
+    if let Some(note) = &draft.fflag_note {
+        items.push(Item::Note(note.clone()));
+    }
+    items.extend([
         Item::Gap(12),
         caption("Reset"),
         Item::Group(vec![reset_row(state)]),
         Item::Gap(10),
-    ];
-
+    ]);
     if let Some(note) = &state.roblox_reset_note {
-        items.push(Item::Note(note.clone()));
-    }
-    if let Some(note) = &draft.fflag_note {
         items.push(Item::Note(note.clone()));
     }
     if let Some(error) = &r.error {
@@ -620,6 +624,13 @@ pub fn footer(state: &State) -> Option<Item> {
             "Reading flags...".into()
         } else if !dirty {
             "No changes to apply".into()
+        } else if !draft.ready() {
+            if draft.unlock_fps && draft.fps().is_none() {
+                "Enter a valid FPS cap"
+            } else {
+                "Import valid flags to apply"
+            }
+            .into()
         } else if state.roblox.running {
             "Restart Roblox to apply".into()
         } else {
@@ -648,6 +659,16 @@ fn fps_hint(draft: &RobloxDraft) -> String {
 
 /// Whether a custom payload is loaded, and how big it is.
 fn custom_hint(draft: &RobloxDraft) -> String {
+    if draft
+        .fflag_note
+        .as_deref()
+        .is_some_and(|note| note.starts_with("File not imported."))
+    {
+        if draft.fflag_ok && !draft.custom_json.trim().is_empty() {
+            return "Import failed. Previous file kept.".into();
+        }
+        return "Import failed. Choose another file.".into();
+    }
     if draft.ultraboost {
         return "Turn Ultraboost off to use your own".into();
     }
@@ -655,7 +676,7 @@ fn custom_hint(draft: &RobloxDraft) -> String {
         return "Import your own allowlisted flags".into();
     }
     if draft.custom_json.trim().is_empty() {
-        return "Nothing pasted yet".into();
+        return "Choose a flag file".into();
     }
     "Your own flags".into()
 }
