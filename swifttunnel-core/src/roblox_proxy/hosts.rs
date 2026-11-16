@@ -1281,6 +1281,7 @@ pub fn has_overrides() -> bool {
 fn remove_marker_block(content: &str) -> Result<String, String> {
     let mut result = String::with_capacity(content.len());
     let mut inside_block = false;
+    let mut tail_is_owned = true;
     let incomplete = || {
         "SwiftTunnel's entries in the Windows hosts file are incomplete. The file was left unchanged. Contact support for help.".to_string()
     };
@@ -1295,6 +1296,7 @@ fn remove_marker_block(content: &str) -> Result<String, String> {
                 return Err(incomplete());
             }
             inside_block = true;
+            tail_is_owned = true;
             continue;
         }
         if trimmed == MARKER_END {
@@ -1307,12 +1309,21 @@ fn remove_marker_block(content: &str) -> Result<String, String> {
 
         if !inside_block {
             result.push_str(line);
+        } else if !trimmed.is_empty() {
+            // Only heal an unfinished block when every tail line could have
+            // been emitted by our writer. Unknown names, aliases and comments
+            // may belong to the user, even inside a damaged marker pair.
+            let mut fields = trimmed.split_ascii_whitespace();
+            let ip = fields.next().and_then(|ip| ip.parse::<Ipv4Addr>().ok());
+            let domain = fields.next();
+            tail_is_owned &= ip.is_some()
+                && domain.is_some_and(|domain| ROBLOX_BOOTSTRAP_DOMAINS.contains(&domain))
+                && fields.next().is_none();
         }
     }
 
-    if inside_block {
-        // We cannot tell which following entries belong to the user. Refuse
-        // the entire edit rather than discarding everything through EOF.
+    if inside_block && !tail_is_owned {
+        // Do not guess ownership of a user's remaining entries.
         return Err(incomplete());
     }
     Ok(result)
@@ -1580,6 +1591,36 @@ mod tests {
             let error = remove_overrides_at(&path).unwrap_err();
             assert!(error.contains("incomplete"));
             assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+        }
+    }
+
+    #[test]
+    fn cleanup_heals_an_unterminated_block_only_with_known_generated_entries() {
+        let dir = HostsFixture::new();
+        let path = dir.0.join("hosts");
+        let prefix = "127.0.0.1 localhost\r\n192.168.1.5 personal-server\r\n";
+        for tail in [
+            "",
+            "\r\n",
+            "34.18.1.2 www.roblox.com\r\n1.2.3.4 auth.roblox.com",
+        ] {
+            fs::write(&path, format!("{prefix}{MARKER_START}\r\n{tail}")).unwrap();
+            assert!(remove_overrides_at(&path).unwrap());
+            assert_eq!(fs::read_to_string(&path).unwrap(), prefix);
+            assert!(!remove_overrides_at(&path).unwrap());
+        }
+        for tail in [
+            "1.2.3.4 www.roblox.com personal-server",
+            "1.2.3.4 www.roblox.com.example.org",
+            "# personal comment",
+            "::1 www.roblox.com",
+            "1.2.3.4 www.roblox.com\n192.168.1.5 personal-server",
+            "1.2.3.4 www.roblox.com\n1.2.3",
+        ] {
+            let original = format!("{prefix}{MARKER_START}\n{tail}");
+            fs::write(&path, &original).unwrap();
+            assert!(remove_overrides_at(&path).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
         }
     }
 
