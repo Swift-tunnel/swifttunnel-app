@@ -1135,11 +1135,18 @@ pub fn run() {
                     // Shutdown must be the last writer. An admitted connect,
                     // repair or boost can still own blocking Windows work even
                     // after its frontend request/window has disappeared. The
-                    // wait is bounded: this is the event thread of a process
-                    // that no longer has a window.
-                    let _shutdown_operations = _app.try_state::<AppState>().and_then(|state| {
-                        state.runtime.block_on(commands::drain_for_shutdown())
-                    });
+                    // wait is bounded. A timeout is NOT permission to restore:
+                    // an admitted worker may still hold these managers or be
+                    // writing the same recovery records. Leave their durable
+                    // originals for startup recovery instead of racing them
+                    // (or blocking forever on their locks after the timeout).
+                    let _shutdown_operations = match _app.try_state::<AppState>() {
+                        Some(state) => match state.runtime.block_on(commands::drain_for_shutdown()) {
+                            Some(permits) => Some(permits),
+                            None => return,
+                        },
+                        None => None,
+                    };
                     disconnect_vpn_on_exit(_app);
                     recover_stale_network_state();
                     // Restore network booster modifications (registry, MTU, firewall)

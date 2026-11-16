@@ -30,7 +30,7 @@ pub(crate) async fn drain_for_shutdown() -> Option<(
     .await;
     if drained.is_none() {
         log::warn!(
-            "Exit: a connection, repair or boost was still running after {}s; restoring Windows settings without waiting further",
+            "Exit: a connection, repair or boost was still running after {}s; skipping overlapping restoration and retaining recovery records for next startup",
             SHUTDOWN_DRAIN_LIMIT.as_secs()
         );
     }

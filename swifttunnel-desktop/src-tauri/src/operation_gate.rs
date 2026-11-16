@@ -90,6 +90,8 @@ pub(crate) async fn drain_for_shutdown(
 /// Quitting cannot wait forever on admitted work. A native call that never
 /// returns would otherwise keep a windowless process alive, and the exit
 /// restoration after it would never run. Admission stays closed either way.
+/// None does not authorize restoration or access to the in-flight managers:
+/// callers must leave recovery records intact and skip overlapping cleanup.
 pub(crate) async fn drain_for_shutdown_within(
     network: &OperationGate,
     config: &OperationGate,
