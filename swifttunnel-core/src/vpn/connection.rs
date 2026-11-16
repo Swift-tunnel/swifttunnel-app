@@ -3627,6 +3627,15 @@ impl VpnConnection {
         self.spawn_session_report();
     }
 
+    /// End this session before removing credentials. A tracked native worker
+    /// may still be unwinding after cleanup has stopped capture and ticket
+    /// renewal. It must continue to block new capture, not block signing out.
+    /// Keep the Error state and worker guard; this is not a successful driver
+    /// shutdown and must not be used by uninstall/repair.
+    pub async fn disconnect_for_sign_out(&mut self) -> VpnResult<()> {
+        sign_out_after_teardown(self.disconnect().await)
+    }
+
     pub async fn disconnect(&mut self) -> VpnResult<()> {
         let mut support = crate::support_log::Operation::start("tunnel_disconnect", "cleanup");
         log::info!("Disconnecting VPN");
@@ -3994,6 +4003,18 @@ impl Drop for VpnConnection {
     }
 }
 
+fn sign_out_after_teardown(result: VpnResult<()>) -> VpnResult<()> {
+    match result {
+        Err(VpnError::NetworkWorkersStopping) => {
+            log::warn!(
+                "Signing out after session teardown; previous network workers remain tracked and new capture stays blocked until they exit"
+            );
+            Ok(())
+        }
+        result => result,
+    }
+}
+
 /// One report may take this long in total, token refresh included.
 const SESSION_REPORT_TIME_LIMIT: Duration = Duration::from_secs(15);
 /// Reconnecting in a loop while offline must not pile reports up. When a new
@@ -4069,6 +4090,20 @@ async fn send_session_report(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sign_out_accepts_only_the_post_teardown_worker_wait() {
+        use super::sign_out_after_teardown;
+        use crate::vpn::VpnError;
+        assert!(sign_out_after_teardown(Ok(())).is_ok());
+        assert!(sign_out_after_teardown(Err(VpnError::NetworkWorkersStopping)).is_ok());
+        for error in [
+            VpnError::RecoveryRecordUnavailable,
+            VpnError::DriverNotOpen,
+            VpnError::SplitTunnel("owned fixture".into()),
+        ] {
+            assert!(sign_out_after_teardown(Err(error)).is_err());
+        }
+    }
     use super::*;
 
     // These tests exercise DNS cleanup ownership without ever applying pins.

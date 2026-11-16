@@ -1255,7 +1255,7 @@ impl Engine {
             let shared = shared.clone();
             async move {
                 shared.intentional_disconnect.store(true, Ordering::Relaxed);
-                let disconnected = shared.vpn.lock().await.disconnect().await;
+                let disconnected = shared.vpn.lock().await.disconnect_for_sign_out().await;
                 if let Err(error) = disconnected {
                     log::warn!("Could not disconnect before signing out: {error}");
                     shared.edit(|s| {

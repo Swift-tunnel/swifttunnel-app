@@ -435,7 +435,7 @@ pub async fn auth_logout(state: State<'_, AppState>, app: AppHandle) -> Result<(
     // A signed-out window must not hide a live tunnel. Reserve the same gate
     // as Connect before cleanup, without retaining the auth lock it may need.
     let operation = super::network_operation::begin()?;
-    crate::commands::vpn::disconnect_and_persist(&state)
+    crate::commands::vpn::disconnect_and_persist_for_sign_out(&state)
         .await
         .map_err(|error| format!("Could not disconnect before signing out: {error}. Try again."))?;
     // Give the ended session's bounded usage report a chance before deleting
