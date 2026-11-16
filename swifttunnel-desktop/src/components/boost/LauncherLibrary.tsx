@@ -13,9 +13,9 @@ import { GameServerDialog } from "./GameServerDialog";
 import { Notice, iconButtonClass } from "./Notice";
 
 function Artwork({ entry }: { entry: RobloxGameEntry }) {
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
   return <div className="grid h-[60px] w-[60px] shrink-0 place-items-center overflow-hidden rounded-[10px] bg-bg-elevated">
-    {entry.icon_url && entry.icon_url !== failedUrl ? <img src={entry.icon_url} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" className="h-full w-full object-cover" onError={() => setFailedUrl(entry.icon_url ?? null)} />
+    {entry.icon_url && !failed ? <img src={entry.icon_url} alt="" loading="lazy" decoding="async" referrerPolicy="no-referrer" className="h-full w-full object-cover" onError={() => setFailed(true)} />
       : <Icon name="roblox" size={24} className="text-text-muted" />}
   </div>;
 }

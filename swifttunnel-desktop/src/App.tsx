@@ -18,13 +18,12 @@ import { UpdateRequiredScreen } from "./components/updater/UpdateRequiredScreen"
 import { useAuthStore } from "./stores/authStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { useServerStore } from "./stores/serverStore";
+import { useBoostStore } from "./stores/boostStore";
 import { useVpnStore } from "./stores/vpnStore";
 import { useUpdaterStore } from "./stores/updaterStore";
 import { cleanupEventListeners, initEventListeners } from "./lib/events";
 import { createCloseToTrayHandler } from "./lib/closeToTray";
-import { refreshMainWindowVisibility, setNativeWindowHidden } from "./lib/mainWindowVisibility";
 import { runAppBootstrap } from "./lib/appBootstrap";
-import { pollUpdateRequirement, watchStartupRecoveryCompletion } from "./lib/startup";
 import { resolveValidRegion } from "./lib/regionMatch";
 import { useOverlayDriver } from "./lib/useOverlayDriver";
 import { useGameLibrary } from "./lib/useGameLibrary";
@@ -73,11 +72,6 @@ function tabComponent(tab: TabId) {
   }
 }
 
-async function checkStartupUpdate() {
-  const updater = useUpdaterStore.getState();
-  if (updater.status === "idle") await updater.checkForUpdates();
-}
-
 function App() {
   const authState = useAuthStore((s) => s.state);
   const isLoading = useAuthStore((s) => s.isLoading);
@@ -90,11 +84,14 @@ function App() {
   const fetchServers = useServerStore((s) => s.fetchList);
   const serverRegions = useServerStore((s) => s.regions);
   const serversLoaded = useServerStore((s) => s.hasLoaded);
+  const fetchSystemInfo = useBoostStore((s) => s.fetchSystemInfo);
   const fetchVpnState = useVpnStore((s) => s.fetchState);
   const connectVpn = useVpnStore((s) => s.connect);
+  const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
   const autoCheckUpdates = useSettingsStore(
     (s) => s.settings.update_settings.auto_check,
   );
+  const updateChannel = useSettingsStore((s) => s.settings.update_channel);
 
   // Brief "preparing your connection" screen while the backend self-heals stale
   // network state at launch (see lib.rs recover_stale_network_state), so users
@@ -157,19 +154,15 @@ function App() {
     // had to launch a second time (single-instance then revealed the already-
     // running window). Showing early shows the loading spinner immediately.
     const showWindowEarly = async () => {
-      const show = async () => {
-        await getCurrentWindow().show();
-        if (!disposed) setNativeWindowHidden(false);
-      };
       try {
         const fromStartup = await systemLaunchedFromStartup();
-        if (disposed) return;
-        if (fromStartup) await refreshMainWindowVisibility(getCurrentWindow(), () => disposed);
-        else await show();
+        if (!fromStartup && !disposed) {
+          await getCurrentWindow().show();
+        }
       } catch {
         if (!disposed) {
           try {
-            await show();
+            await getCurrentWindow().show();
           } catch {}
         }
       }
@@ -201,13 +194,14 @@ function App() {
           fetchAuth,
           loadSettings,
           fetchServers,
+          fetchSystemInfo,
           fetchVpnState: async () => { await fetchVpnState(); },
           refreshAuthProfile,
           getSettings: () => useSettingsStore.getState().settings,
           getAuthState: () => useAuthStore.getState().state,
           getVpnState: () => useVpnStore.getState().state,
           connectVpn,
-          checkForUpdates: checkStartupUpdate,
+          checkForUpdates,
           reconcileSelectedRegion,
         }, bootstrapController.signal);
       } catch (error) {
@@ -241,14 +235,18 @@ function App() {
     fetchAuth,
     loadSettings,
     fetchServers,
+    fetchSystemInfo,
     fetchVpnState,
     refreshAuthProfile,
     connectVpn,
+    checkForUpdates,
     reconcileSelectedRegion,
   ]);
 
-  // If another startup task stalls, still check once after settings load.
-  // The interval then catches releases that go live while SwiftTunnel is open.
+  // Keep update announcements automatic while the app is open. Bootstrap checks
+  // once at launch; this catches releases that go live later without forcing
+  // users to dig into Settings -> Check now. The store suppresses releases the
+  // user already dismissed, so this does not pop every launch.
   useEffect(() => {
     if (!isSettingsLoaded || !autoCheckUpdates) return;
 
@@ -257,7 +255,6 @@ function App() {
       if (
         status === "checking" ||
         status === "installing" ||
-        status === "installed" ||
         status === "update_available"
       ) {
         return;
@@ -265,18 +262,19 @@ function App() {
       void useUpdaterStore.getState().checkForUpdates(false, false);
     };
 
-    const startupCheck = window.setTimeout(() => void checkStartupUpdate(), 10_000);
+    const firstCheck = window.setTimeout(runCheck, 10_000);
     const interval = window.setInterval(runCheck, 30 * 60 * 1000);
 
     return () => {
-      window.clearTimeout(startupCheck);
+      window.clearTimeout(firstCheck);
       window.clearInterval(interval);
     };
-  }, [isSettingsLoaded, autoCheckUpdates]);
+  }, [isSettingsLoaded, autoCheckUpdates, updateChannel]);
 
   // Gate the UI behind the startup network self-heal. Keep it on screen at least
   // briefly (so it doesn't flash) and cap it (so a wedged backend never traps the
-  // user). Listen for completion and check for recovery that already finished.
+  // user). Query once in case the recovery finished before this listener
+  // registered, and also listen for the completion event.
   useEffect(() => {
     let cancelled = false;
     let minElapsed = false;
@@ -284,10 +282,7 @@ function App() {
     let repairing = false;
     let repairTimer: number | undefined;
     const reveal = () => {
-      if (cancelled || !minElapsed || !recovered) return;
-      window.clearTimeout(maxTimer);
-      window.clearTimeout(repairTimer);
-      setRecovering(false);
+      if (!cancelled && minElapsed && recovered) setRecovering(false);
     };
 
     const minTimer = window.setTimeout(() => {
@@ -310,32 +305,37 @@ function App() {
 
     let unlistenStage: (() => void) | undefined;
     void listen<string>("startup-recovery-stage", (event) => {
-      if (cancelled) return;
       if (event.payload === "driver_repair") repairing = true;
       setRecoveryStage(event.payload);
     }).then((u) => {
       if (cancelled) u();
       else unlistenStage = u;
-    }).catch((error) => {
-      if (!cancelled) reportError("Failed to watch startup recovery progress", error);
     });
 
-    const stopWatching = watchStartupRecoveryCompletion(
-      (complete) => listen("startup-recovery-complete", complete),
-      systemStartupRecoveryDone,
-      () => {
-        recovered = true;
-        reveal();
-      },
-      (error) => reportError("Failed to watch startup recovery completion", error),
-    );
+    void systemStartupRecoveryDone()
+      .then((done) => {
+        if (done) {
+          recovered = true;
+          reveal();
+        }
+      })
+      .catch(() => {});
+
+    let unlisten: (() => void) | undefined;
+    void listen("startup-recovery-complete", () => {
+      recovered = true;
+      reveal();
+    }).then((u) => {
+      if (cancelled) u();
+      else unlisten = u;
+    });
 
     return () => {
       cancelled = true;
       window.clearTimeout(minTimer);
       window.clearTimeout(maxTimer);
       window.clearTimeout(repairTimer);
-      stopWatching();
+      unlisten?.();
       unlistenStage?.();
     };
   }, []);
@@ -354,17 +354,6 @@ function App() {
         return;
       }
       unlisteners.push(unlisten);
-    };
-
-    const registerWindowListener = async (
-      subscribe: () => Promise<() => void>,
-      event: string,
-    ) => {
-      try {
-        addUnlistener(await subscribe());
-      } catch (error) {
-        if (!disposed) reportError(`Could not watch window ${event}`, error);
-      }
     };
 
     const windowStateSaver = createWindowStateSaver({
@@ -407,7 +396,6 @@ function App() {
       }
       saveTimer = window.setTimeout(() => {
         void windowStateSaver.save();
-        void refreshMainWindowVisibility(appWindow, () => disposed);
       }, 300);
     };
 
@@ -474,28 +462,22 @@ function App() {
 
       if (disposed) return;
 
-      void registerWindowListener(() => appWindow.onMoved(schedulePersist), "moves");
-      void registerWindowListener(() => appWindow.onResized(schedulePersist), "resizes");
-      const refreshVisibility = () => {
-        if (!disposed) void refreshMainWindowVisibility(appWindow, () => disposed);
-      };
-      void appWindow.onFocusChanged(refreshVisibility).then(addUnlistener).catch(() => {});
-      void listen("main-window-restored", refreshVisibility).then(addUnlistener).catch(() => {});
+      addUnlistener(await appWindow.onMoved(() => schedulePersist()));
+      addUnlistener(await appWindow.onResized(() => schedulePersist()));
+      addUnlistener(
+        await appWindow.onCloseRequested(
+          createCloseToTrayHandler({
+            persistWindowState: windowStateSaver.save,
+            hide: () => appWindow.hide(),
+            close: () => appWindow.close(),
+            shouldMinimizeToTray: () =>
+              useSettingsStore.getState().settings.minimize_to_tray,
+            isDisposed: () => disposed,
+          }),
+        ),
+      );
     };
 
-    // Closing should work even if monitor discovery or geometry IPC stalls.
-    const closeHandler = createCloseToTrayHandler({
-      persistWindowState: windowStateSaver.save,
-      hide: async () => {
-        await appWindow.hide();
-        if (!disposed) setNativeWindowHidden(true);
-      },
-      close: () => appWindow.close(),
-      shouldMinimizeToTray: () =>
-        useSettingsStore.getState().settings.minimize_to_tray,
-      isDisposed: () => disposed,
-    });
-    void registerWindowListener(() => appWindow.onCloseRequested(closeHandler), "close requests");
     void initWindowState();
 
     return () => {
@@ -513,7 +495,24 @@ function App() {
   // Poll the native forced-update flag. The bootstrap profile fetch latches it
   // for old builds within the first second or two, so check shortly after
   // launch and then periodically (also catches a mid-session 426).
-  useEffect(() => pollUpdateRequirement(authUpdateRequired, setUpdateRequiredMsg), []);
+  useEffect(() => {
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const msg = await authUpdateRequired();
+        if (!cancelled && msg) setUpdateRequiredMsg(msg);
+      } catch {
+        // Command unavailable (older backend), ignore.
+      }
+    };
+    const first = window.setTimeout(() => void check(), 1500);
+    const interval = window.setInterval(() => void check(), 20000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(first);
+      window.clearInterval(interval);
+    };
+  }, []);
 
   // Accumulate lifetime "time tunneled" (persisted) regardless of active tab.
   //

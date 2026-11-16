@@ -1,6 +1,6 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { isValidElement, type ReactElement, type ReactNode } from "react";
-import type { GameLaunchPlan, RobloxGameEntry, RobloxLibrarySnapshot } from "../../lib/types";
+import type { GameLaunchPlan, RobloxLibrarySnapshot } from "../../lib/types";
 
 // Drive the component's actual handlers without native IPC or a game launch.
 const h = vi.hoisted(() => ({
@@ -153,23 +153,6 @@ it("releases the action after failure and permits a later retry", async () => {
   expect(button(render(), "Play").disabled).toBe(false);
   button(render(), "Play").onClick(); await settle();
   expect(h.launch).toHaveBeenCalledTimes(1);
-});
-
-it("loads refreshed artwork after an old thumbnail failed", () => {
-  const entry = { ...h.library!.entries[0], icon_url: "https://images.example.test/old.png" };
-  h.library!.entries = [entry];
-  const artwork = nodes(render()).find(node => typeof node.type === "function" && node.type.name === "Artwork")!;
-  const drawArtwork = artwork.type as (props: { entry: RobloxGameEntry }) => ReactNode;
-  h.hooks = [];
-  const draw = (current: RobloxGameEntry) => { h.cursor = 0; return drawArtwork({ entry: current }); };
-  const original = nodes(draw(entry)).find(node => node.type === "img")!;
-  (original.props.onError as () => void)();
-  expect(nodes(draw(entry)).some(node => node.type === "img")).toBe(false);
-  const updated = { ...entry, icon_url: "https://images.example.test/new.png" };
-  expect(nodes(draw(updated)).find(node => node.type === "img")?.props.src).toBe(updated.icon_url);
-  // A delayed error from the old image must not hide the replacement either.
-  (original.props.onError as () => void)();
-  expect(nodes(draw(updated)).some(node => node.type === "img")).toBe(true);
 });
 
 it("retains the admitted Play action when Games unmounts and mounts again", async () => {

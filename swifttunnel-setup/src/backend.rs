@@ -221,74 +221,15 @@ fn execute(
         .map_err(|e| format!("Could not start Windows Installer: {e}"))?
         .code()
         .unwrap_or(-1);
-    let after = registrations_after_action(action, target_code, code, &installed, || {
-        installed_products(package)
-    })?;
+    let after = installed_products(package)
+        .map_err(|error| format!("Installer returned {code}, but verification failed: {error}"))?;
+    if matches!(code, 0 | 3010 | 1641) {
+        let verified = registration_matches(action, target_code, &after);
+        if !verified {
+            return Err("Windows Installer finished, but the expected registration could not be confirmed. Restart Windows and contact support if it persists.".into());
+        }
+    }
     Ok((code, after))
-}
-
-fn registrations_after_action(
-    action: Action,
-    target_code: &str,
-    code: i32,
-    before: &[Installed],
-    read: impl FnOnce() -> Result<Vec<Installed>, String>,
-) -> Result<Vec<Installed>, String> {
-    if code == 1618 {
-        // The operation did not start. Querying again while another installer
-        // owns Windows Installer can obscure the original, actionable result.
-        return Ok(before.to_vec());
-    }
-    let succeeded = matches!(code, 0 | 3010 | 1641);
-    let after = match read() {
-        Ok(after) => after,
-        Err(_) if !succeeded => {
-            // Preserve the original error. The next action always rechecks
-            // registration before it invokes Windows Installer.
-            return Ok(before.to_vec());
-        }
-        Err(error) => {
-            return Err(format!(
-                "Installer returned {code}, but verification failed: {error}"
-            ));
-        }
-    };
-    if succeeded && !registration_matches(action, target_code, &after) {
-        return Err("Windows Installer finished, but the expected registration could not be confirmed. Restart Windows and contact support if it persists.".into());
-    }
-    Ok(after)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn busy_windows_installer_keeps_its_result_without_another_registry_query() {
-        let before = [Installed {
-            product_code: "old-product".into(),
-            version: "3.9.6".into(),
-            advertised: false,
-        }];
-        let after =
-            registrations_after_action(Action::Install, "new-product", 1618, &before, || {
-                panic!("another installer already owns the transaction")
-            })
-            .unwrap();
-        assert_eq!(after[0].product_code, before[0].product_code);
-        assert!(result_message(Action::Install, 1618).1.contains("Wait"));
-    }
-
-    #[test]
-    fn registry_read_failure_only_blocks_successful_operations() {
-        let unreadable = || Err("registration unavailable".to_string());
-        assert!(
-            registrations_after_action(Action::Repair, "product", 1603, &[], unreadable).is_ok()
-        );
-        assert!(
-            registrations_after_action(Action::Repair, "product", 3010, &[], unreadable).is_err()
-        );
-    }
 }
 
 pub fn worker(commands: Receiver<Command>, events: Sender<Event>) {

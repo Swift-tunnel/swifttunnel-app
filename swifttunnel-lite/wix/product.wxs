@@ -187,7 +187,7 @@
 
     <CustomAction Id="CleanupOnUninstall"
                   Property="LITE_EXE"
-                  ExeCommand="--cleanup --msi-uninstall"
+                  ExeCommand="--cleanup"
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />

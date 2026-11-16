@@ -8,8 +8,6 @@ import {
 } from "../lib/commands";
 import { formatErrorMessage, reportError } from "../lib/errors";
 import { regionPresentation, serverPresentation } from "../lib/connectedServer";
-import { isMainWindowHidden } from "../lib/mainWindowVisibility";
-import { useBoostStore } from "./boostStore";
 
 // A scan probes every relay. Timer ticks,
 // focus changes and refresh clicks must share it instead of queuing more scans.
@@ -117,11 +115,6 @@ export const useServerStore = create<ServerStore>((set, get) => {
   fetchList: () => pendingRefresh ?? loadList(),
 
   fetchLatencies: (cachedOnly = false) => {
-    // A fresh scan may be called again after an awaited cached read. Check
-    // the policy at execution time as well as when the picker requested it.
-    if (!cachedOnly && (isMainWindowHidden() || useBoostStore.getState().robloxRunning)) {
-      return Promise.resolve();
-    }
     if (pendingLatencies) {
       if (!cachedOnly && pendingCachedOnly) {
         // Closing Roblox may request a fresh round while a cached-only read

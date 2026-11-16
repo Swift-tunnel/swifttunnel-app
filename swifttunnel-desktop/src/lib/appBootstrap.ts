@@ -7,6 +7,7 @@ type AppBootstrapDeps = {
   fetchAuth: () => Promise<void>;
   loadSettings: () => Promise<void>;
   fetchServers: () => Promise<void>;
+  fetchSystemInfo: () => Promise<void>;
   fetchVpnState: () => Promise<void>;
   refreshAuthProfile: () => Promise<void>;
   getSettings: () => AppSettings;
@@ -44,6 +45,7 @@ export async function runAppBootstrap(deps: AppBootstrapDeps, signal?: AbortSign
     deps.fetchAuth(),
     deps.loadSettings(),
     deps.fetchServers(),
+    deps.fetchSystemInfo(),
     deps.fetchVpnState(),
   ]);
   if (signal?.aborted) return;

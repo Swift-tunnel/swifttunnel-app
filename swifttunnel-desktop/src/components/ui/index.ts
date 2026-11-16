@@ -15,6 +15,5 @@ export { Tooltip, InfoIcon } from "./Tooltip";
 export { Slider } from "./Slider";
 export { MetricGrid, MetricCell } from "./MetricGrid";
 export { Dialog } from "./Dialog";
-export { ConfirmDialog } from "./ConfirmDialog";
 export { Field, Select, SliderInput, fieldClass, compactFieldClass, CONTROL_WIDTH } from "./Field";
 export { Panel, Readout, Meter, StatRail, TickRule } from "./Telemetry";

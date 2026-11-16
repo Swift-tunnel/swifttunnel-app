@@ -83,28 +83,6 @@ fn bus_type_indicates_diskless(bus_type: i32) -> bool {
 }
 
 #[cfg(windows)]
-fn windows_volume_device(windows_root: &std::path::Path) -> Option<String> {
-    use std::path::{Component, Prefix};
-
-    if !windows_root.is_absolute()
-        || windows_root
-            .components()
-            .any(|part| part == Component::ParentDir)
-    {
-        return None;
-    }
-    match windows_root.components().next()? {
-        Component::Prefix(prefix) => match prefix.kind() {
-            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
-                Some(format!(r"\\.\{}:", char::from(drive)))
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-#[cfg(windows)]
 fn detect() -> SystemStorage {
     use std::ffi::c_void;
     use windows::Win32::Foundation::CloseHandle;
@@ -118,13 +96,11 @@ fn detect() -> SystemStorage {
     };
     use windows::core::PCWSTR;
 
-    let Some(volume) = crate::utils::trusted_windows_root()
-        .as_deref()
-        .and_then(windows_volume_device)
-    else {
-        return SystemStorage::Unknown;
-    };
-    let volume_path: Vec<u16> = volume.encode_utf16().chain(std::iter::once(0)).collect();
+    let system_drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+    let volume_path: Vec<u16> = format!(r"\\.\{system_drive}")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         // Desired access 0: device-property queries don't need read/write.
@@ -242,32 +218,6 @@ fn ansi_string_at(buffer: &[u8], offset: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(windows)]
-    #[test]
-    fn disk_safety_uses_the_native_windows_volume_without_a_drive_guess() {
-        use std::path::Path;
-
-        for (root, expected) in [
-            (r"C:\Windows", r"\\.\C:"),
-            (r"E:\Custom Windows", r"\\.\E:"),
-            (r"\\?\E:\Windows", r"\\.\E:"),
-        ] {
-            assert_eq!(
-                windows_volume_device(Path::new(root)).as_deref(),
-                Some(expected)
-            );
-        }
-        for root in [
-            "Windows",
-            r"E:Windows",
-            r"\Windows",
-            r"E:\Windows\..\Other",
-            r"\\server\share\Windows",
-        ] {
-            assert_eq!(windows_volume_device(Path::new(root)), None, "{root}");
-        }
-    }
 
     #[test]
     fn only_confirmed_local_storage_allows_ram_cleaning() {

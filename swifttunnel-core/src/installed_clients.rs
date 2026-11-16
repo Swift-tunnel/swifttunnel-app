@@ -43,25 +43,7 @@ pub fn other_client_still_installed() -> Result<Option<&'static str>, String> {
         .ok_or("Could not identify this SwiftTunnel executable.")?;
 
     let other = other_client_name(&name.to_string_lossy());
-    if product_is_registered(other)? {
-        return Ok(Some(other));
-    }
-    let client = if other == LITE {
-        crate::direct_uninstall::Client::Lite
-    } else {
-        crate::direct_uninstall::Client::Desktop
-    };
-    // An old build may have removed its own registration. Preserve shared
-    // components while that copy is still on disk.
-    let executable = crate::direct_uninstall::default_executable(client)
-        .map_err(|error| format!("Could not find the other SwiftTunnel install folder: {error}"))?;
-    match std::fs::symlink_metadata(executable) {
-        Ok(_) => Ok(Some(other)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!(
-            "Could not check the other SwiftTunnel installation: {error}"
-        )),
-    }
+    product_is_registered(other).map(|present| present.then_some(other))
 }
 
 #[cfg(not(windows))]
@@ -112,14 +94,6 @@ fn registration_in_views(
 /// Exact, case-insensitive comparison on purpose, for the prefix reason above.
 #[cfg(windows)]
 pub fn product_is_registered(display_name: &str) -> Result<bool, String> {
-    product_is_registered_except_machine_msi(display_name, None)
-}
-
-#[cfg(windows)]
-pub(crate) fn product_is_registered_except_machine_msi(
-    display_name: &str,
-    product_code: Option<&str>,
-) -> Result<bool, String> {
     use std::io::ErrorKind;
     use winreg::RegKey;
     use winreg::enums::{
@@ -147,12 +121,6 @@ pub(crate) fn product_is_registered_except_machine_msi(
             display_name,
             key.enum_keys().map(|entry| {
                 let entry = entry?;
-                if root == HKEY_LOCAL_MACHINE
-                    && view == KEY_WOW64_64KEY
-                    && product_code.is_some_and(|code| entry.eq_ignore_ascii_case(code))
-                {
-                    return Ok(None);
-                }
                 let product = match key.open_subkey_with_flags(entry, KEY_READ | view) {
                     Ok(product) => product,
                     Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),

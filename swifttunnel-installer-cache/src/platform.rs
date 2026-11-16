@@ -36,7 +36,6 @@ const FILE_SD: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)";
 const WORK_SD: &str = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 const CACHE_DIR: &str = "SwiftTunnelInstallerCache";
 const RECOVERY_CACHE_DIR: &str = "SwiftTunnelInstallerCache-Recovered";
-const NETWORK_RECOVERY_DIR: &str = "SwiftTunnelNetworkRecovery";
 
 /// Resolve the OS installer without consulting PATH or inherited environment.
 pub fn windows_installer_path() -> io::Result<PathBuf> {
@@ -258,40 +257,14 @@ impl ProtectedInstaller {
     }
 }
 
-fn known_program_data() -> io::Result<PathBuf> {
-    let raw = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None) }
-        .map_err(win_error)?;
-    let path = unsafe { PathBuf::from(std::ffi::OsString::from_wide(raw.as_wide())) };
-    unsafe {
-        CoTaskMemFree(Some(raw.0.cast()));
-    }
-    Ok(path)
-}
-
-/// Stable machine-wide recovery storage. Reuse the cache's directory owner,
-/// DACL, reparse and ancestry checks, but never switch to a fallback root:
-/// silently selecting another folder would hide pending network originals.
-pub struct ProtectedRecoveryStore(InstallerCache);
-
-impl ProtectedRecoveryStore {
-    pub fn open() -> io::Result<Self> {
-        InstallerCache::open_under(&known_program_data()?, NETWORK_RECOVERY_DIR).map(Self)
-    }
-
-    pub fn read_ipv6_routes(&self) -> io::Result<String> {
-        self.0.read_note(CacheNote::NetworkRoutes)
-    }
-
-    /// Publish with an explicit Administrators owner and protected file DACL,
-    /// not just an inherited directory policy or the token's default owner.
-    pub fn write_ipv6_routes(&self, bytes: &[u8]) -> io::Result<()> {
-        self.0.write_note(CacheNote::NetworkRoutes, bytes)
-    }
-}
-
 impl InstallerCache {
     pub fn open() -> io::Result<Self> {
-        let path = known_program_data()?;
+        let raw = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None) }
+            .map_err(win_error)?;
+        let path = unsafe { PathBuf::from(std::ffi::OsString::from_wide(raw.as_wide())) };
+        unsafe {
+            CoTaskMemFree(Some(raw.0.cast()));
+        }
         match Self::open_under(&path, CACHE_DIR) {
             Ok(cache) => Ok(cache),
             Err(error) if recoverable_policy_error(&error) => {

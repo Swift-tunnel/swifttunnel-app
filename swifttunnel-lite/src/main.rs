@@ -35,7 +35,6 @@ mod installer_cli;
 mod operation_gate;
 mod picker;
 mod preview;
-mod reconnect_backoff;
 mod roblox_changes;
 mod runtime;
 mod screens;
@@ -59,7 +58,6 @@ fn main() {
     let previewing = args.iter().any(|a| a == "--preview");
     if !previewing {
         init_logging();
-        swifttunnel_core::support_log::client_start("lite", env!("CARGO_PKG_VERSION"));
     }
 
     // Report this build's version, before anything can make a request.
@@ -78,15 +76,11 @@ fn main() {
     // routes, the firewall rules, the hosts entries and both clients Run
     // entries go with it rather than being left on the machine.
     if args.iter().any(|a| a == "--cleanup") {
-        use swifttunnel_core::network_booster::{
-            cleanup_all_system_state, cleanup_system_state_for_msi_uninstall,
-        };
-        let result = if args.iter().any(|arg| arg == "--msi-uninstall") {
-            cleanup_system_state_for_msi_uninstall()
-        } else {
-            cleanup_all_system_state()
-        };
-        installer_cli::finish("cleanup", result.map_err(|error| error.to_string()));
+        installer_cli::finish(
+            "cleanup",
+            swifttunnel_core::network_booster::cleanup_all_system_state()
+                .map_err(|error| error.to_string()),
+        );
     }
 
     // --install-driver: put the split tunnel driver in place and exit.
@@ -101,7 +95,9 @@ fn main() {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let program_files = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
+        let program_files = std::path::PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
+        );
 
         let health = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
         log::info!(
@@ -203,20 +199,17 @@ fn main() {
 }
 
 fn start_maintenance() {
-    // Preserve the installer source for Windows uninstall. Repair the
-    // registration only when an installer can replace it. Never run this
-    // concurrently with an install/uninstall helper, or while rendering a
-    // preview that is supposed to leave the machine untouched.
+    swifttunnel_core::lite_update::clear_install_attempt();
+    // Only the normal client repairs/preserves its installer registration.
+    // Never run this concurrently with an install/uninstall helper, or while
+    // rendering a preview that is supposed to leave the machine untouched.
     if let Err(error) = std::thread::Builder::new()
         .name("lite-installer-cache".into())
         .spawn(|| {
-            // This dedicated worker can copy whole MSI packages. Lower its
-            // CPU and I/O scheduling priority while foreground apps run.
-            unsafe {
-                use windows::Win32::System::Threading::{
-                    GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
-                };
-                let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+            if let Ok(cleared) = swifttunnel_msi_repair::repair()
+                && !cleared.is_empty()
+            {
+                log::warn!("cleared {} orphaned registration(s)", cleared.len());
             }
             match swifttunnel_msi_repair::preserve_installer_sources() {
                 Ok(kept) if !kept.is_empty() => {

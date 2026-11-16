@@ -944,11 +944,6 @@ function SpeedUpItem({ def }: { def: SpeedUpDef }) {
             Restart PC after enabling or reverting
           </span>
         )}
-        {def.safety === "caution" && (
-          <span className="mt-1 block text-[10.5px] font-medium text-status-warning">
-            Not included when enabling all
-          </span>
-        )}
       </span>
     </button>
   );

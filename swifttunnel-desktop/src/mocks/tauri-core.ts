@@ -556,7 +556,6 @@ const handlers: Record<string, (...args: unknown[]) => unknown> = {
       Boolean((args as { enabled?: boolean }).enabled);
     return {
       outcome: "completed",
-      undo_available: false,
       snapshot: {
         exists: enabled,
         value: enabled
@@ -600,12 +599,6 @@ export async function invoke<T>(cmd: string, _args?: unknown): Promise<T> {
     const result = handler(_args);
     if (result instanceof Promise) return (await result) as T;
     return result as T;
-  }
-  // The Games page has its own fixture service. Without it every games call
-  // here answered `undefined` and the page showed a raw script error.
-  if (cmd.startsWith("games_")) {
-    const { previewInvoke } = await import("../lib/gamePreviewApi");
-    return previewInvoke<T>(cmd, (_args ?? {}) as Record<string, unknown>);
   }
   console.warn(`[tauri-mock] unhandled invoke: ${cmd}`);
   return undefined as T;

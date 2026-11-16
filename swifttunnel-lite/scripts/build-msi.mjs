@@ -92,7 +92,7 @@ const actionDlls = actionOutput.split(/\r?\n/).filter(Boolean).map(line => JSON.
 if (actionDlls.length !== 1) throw new Error("Cargo did not identify one MSI action DLL");
 const actionDll = actionDlls[0];
 for (const binary of [litePath, actionDll]) {
-  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-File",
     join(repo, "scripts", "check-vc-runtime.ps1"), "-Binary", binary],
     { cwd: repo, stdio: "inherit", windowsHide: true });
 }

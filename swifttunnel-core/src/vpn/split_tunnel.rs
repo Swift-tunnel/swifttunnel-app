@@ -36,34 +36,6 @@ const DRIVER_MSI_TIMEOUT: Duration = Duration::from_secs(600);
 const SERVICE_NAME: &str = "NDISRD";
 const SERVICE_DISPLAY_NAME: &str = "Windows Packet Filter";
 
-fn driver_service_presence_error(error: windows::core::Error) -> Result<bool, String> {
-    use windows::Win32::Foundation::{
-        ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
-    };
-    if error.code() == ERROR_SERVICE_DOES_NOT_EXIST.to_hresult() {
-        Ok(false)
-    } else if error.code() == ERROR_SERVICE_MARKED_FOR_DELETE.to_hresult() {
-        // Pending deletion is positive installation evidence, not absence.
-        Ok(true)
-    } else {
-        Err(format!(
-            "Could not check the NDISRD driver service: {error}"
-        ))
-    }
-}
-
-fn combine_driver_install_checks(
-    service: Result<bool, String>,
-    driver_store: Result<bool, String>,
-) -> Result<bool, String> {
-    match (service, driver_store) {
-        (Ok(true), _) | (_, Ok(true)) => Ok(true),
-        (Ok(false), Ok(false)) => Ok(false),
-        (Err(service), Err(store)) => Err(format!("{service}; {store}")),
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    }
-}
-
 fn driver_service_open_failure(error: windows::core::Error) -> Result<(), String> {
     use windows::Win32::Foundation::{
         ERROR_ACCESS_DENIED, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
@@ -454,13 +426,14 @@ impl SplitTunnelDriver {
         ParallelInterceptor::check_driver_available()
     }
 
-    fn driver_service_exists_checked() -> Result<bool, String> {
+    fn driver_service_exists() -> bool {
         use windows::Win32::System::Services::*;
         use windows::core::PCWSTR;
 
         unsafe {
-            let scm = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)
-                .map_err(|error| format!("Could not check Windows driver services: {error}"))?;
+            let Ok(scm) = OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT) else {
+                return false;
+            };
 
             let service_name_wide: Vec<u16> = SERVICE_NAME
                 .encode_utf16()
@@ -471,35 +444,24 @@ impl SplitTunnelDriver {
                 PCWSTR(service_name_wide.as_ptr()),
                 SERVICE_QUERY_STATUS,
             );
-            let exists = match service {
-                Ok(service) => {
-                    let _ = CloseServiceHandle(service);
-                    Ok(true)
-                }
-                Err(error) => driver_service_presence_error(error),
-            };
+            let exists = service.is_ok();
+            if let Ok(service) = service {
+                let _ = CloseServiceHandle(service);
+            }
             let _ = CloseServiceHandle(scm);
             exists
         }
     }
 
     pub fn driver_install_evidence() -> bool {
-        Self::driver_install_evidence_checked().unwrap_or(false)
-    }
+        if Self::get_driver_path().is_some() || Self::driver_service_exists() {
+            return true;
+        }
 
-    /// Installation evidence for callers that must distinguish absence from
-    /// a failed Windows service or driver-store query.
-    pub fn driver_install_evidence_checked() -> Result<bool, String> {
-        if Self::get_driver_path().is_some() {
-            return Ok(true);
-        }
-        let service = Self::driver_service_exists_checked();
-        if service == Ok(true) {
-            return Ok(true);
-        }
-        let driver_store = super::winpkfilter::find_installed_driver_published_name()
-            .map(|package| package.is_some());
-        combine_driver_install_checks(service, driver_store)
+        matches!(
+            super::winpkfilter::find_installed_driver_published_name(),
+            Ok(Some(_))
+        )
     }
 
     /// Strong health check for the split tunnel driver.
@@ -609,18 +571,11 @@ impl SplitTunnelDriver {
             );
         }
 
-        // Lite polls this every 100 seconds. Writing the same line each time
-        // made it over a third of a real log and pushed useful history out
-        // sooner. A changed answer is still written.
-        static LAST_PASS: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-        let passed = format!(
+        log::info!(
             "Driver health check passed: version={}, adapters={}",
             version.as_deref().unwrap_or("unknown"),
             adapters.len()
         );
-        if crate::utils::changed_since_last(&LAST_PASS, &passed) {
-            log::info!("{passed}");
-        }
         SplitTunnelDriverHealth::ready(version, adapters.len())
     }
 
@@ -823,15 +778,14 @@ impl SplitTunnelDriver {
         }
 
         // Second try: Program Files installation
-        let program_files = super::winpkfilter::default_program_files_dir();
-        if program_files.is_absolute() {
-            let install_path = program_files
-                .join("SwiftTunnel")
-                .join("drivers")
-                .join("ndisrd.sys");
-            if install_path.exists() {
-                return Some(install_path);
-            }
+        let program_files =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let install_path = PathBuf::from(&program_files)
+            .join("SwiftTunnel")
+            .join("drivers")
+            .join("ndisrd.sys");
+        if install_path.exists() {
+            return Some(install_path);
         }
 
         // Third try: System32 drivers folder (default WinpkFilter location)
@@ -1349,16 +1303,6 @@ impl SplitTunnelDriver {
     /// `false` means the driver was preserved for the other client; it does
     /// not mean a removal took place. Repair callers must keep that distinction.
     pub fn remove_driver_for_uninstall() -> Result<bool, String> {
-        Self::remove_driver_for_uninstall_impl(true)
-    }
-
-    pub(crate) fn remove_driver_during_msi_uninstall() -> Result<bool, String> {
-        // The parent Windows Installer transaction is waiting for cleanup.
-        // It already holds the lock that a separate driver MSI would need.
-        Self::remove_driver_for_uninstall_impl(false)
-    }
-
-    fn remove_driver_for_uninstall_impl(remove_legacy_msis: bool) -> Result<bool, String> {
         // The packet filter is shared between the full app and Lite, and one
         // machine can have both. Taking it out while the other client is still
         // installed leaves that client unable to connect at all, and nothing
@@ -1382,8 +1326,12 @@ impl SplitTunnelDriver {
         }
 
         let mut issues = Vec::new();
-        // Keep removing the component, package and service if disabling an
-        // individual adapter binding fails.
+        let mut any_msi_found = false;
+
+        // Best-effort: if binding removal fails we still try the MSI uninstall
+        // below. Returning early used to skip the MSI step entirely, which
+        // left both the bindings and the driver package installed when the
+        // binding call hiccupped — strictly worse than attempting the MSI.
         if let Err(e) = Self::disable_winpkfilter_bindings_for_uninstall() {
             issues.push(format!("binding removal failed: {}", e));
         }
@@ -1396,29 +1344,6 @@ impl SplitTunnelDriver {
             issues.push(format!("network component removal failed: {}", e));
         }
 
-        if remove_legacy_msis {
-            Self::uninstall_legacy_driver_msis(&mut issues)?;
-        }
-
-        // Current installs use the extracted INF/SYS/CAT. The Driver Store
-        // package has to be removed even when no legacy MSI is registered.
-        if let Err(e) = super::winpkfilter::remove_installed_driver_package() {
-            issues.push(format!("driver-store package removal failed: {}", e));
-        }
-
-        if let Err(e) = Self::cleanup_driver_service_for_uninstall() {
-            issues.push(e);
-        }
-
-        if issues.is_empty() {
-            Ok(true)
-        } else {
-            Err(issues.join("; "))
-        }
-    }
-
-    fn uninstall_legacy_driver_msis(issues: &mut Vec<String>) -> Result<(), String> {
-        let mut any_msi_found = false;
         // Uninstall the MSI variants this machine could actually be carrying.
         // ARM64 still gets both, because Windows on ARM runs x64 installers
         // under emulation and an older build could have left an x64
@@ -1480,10 +1405,26 @@ impl SplitTunnelDriver {
 
         if !any_msi_found {
             log::warn!(
-                "No WinpkFilter MSI found during uninstall; continuing with direct driver cleanup"
+                "No WinpkFilter MSI found during uninstall; falling back to service cleanup only"
             );
         }
-        Ok(())
+
+        // The MSI installer path now installs the extracted INF/SYS/CAT package
+        // with pnputil, so uninstall must remove the Driver Store package
+        // directly even when no WinpkFilter product registration exists.
+        if let Err(e) = super::winpkfilter::remove_installed_driver_package() {
+            issues.push(format!("driver-store package removal failed: {}", e));
+        }
+
+        if let Err(e) = Self::cleanup_driver_service_for_uninstall() {
+            issues.push(e);
+        }
+
+        if issues.is_empty() {
+            Ok(true)
+        } else {
+            Err(issues.join("; "))
+        }
     }
 
     fn driver_msi_not_found_message() -> String {
@@ -1531,8 +1472,8 @@ impl SplitTunnelDriver {
         r#"
         $ErrorActionPreference = 'Stop'
         $bindings = @(
-            Get-NetAdapterBinding -AllBindings -ErrorAction Stop |
-                Where-Object { $_.ComponentID -eq 'nt_ndisrd' -and $_.Enabled -eq $true } |
+            Get-NetAdapterBinding -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
+                Where-Object { $_.Enabled -eq $true } |
                 Sort-Object -Property Name -Unique
         )
 
@@ -1547,37 +1488,34 @@ impl SplitTunnelDriver {
         foreach ($binding in $bindings) {
             $adapterName = [string]$binding.Name
             if ([string]::IsNullOrWhiteSpace($adapterName)) {
-                $failures.Add('An enabled WinpkFilter binding has no adapter name; it was left unchanged.')
                 continue
             }
 
             try {
-                Disable-NetAdapterBinding -InputObject $binding -Confirm:$false -ErrorAction Stop | Out-Null
+                Disable-NetAdapterBinding -Name $adapterName -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
                 Start-Sleep -Milliseconds 500
+                $verification = Get-NetAdapterBinding -Name $adapterName -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+
+                if ($verification -and $verification.Enabled) {
+                    $failures.Add($adapterName + ': binding still enabled after Disable-NetAdapterBinding')
+                    continue
+                }
+
                 $disabled.Add($adapterName)
             } catch {
                 $failures.Add($adapterName + ': ' + $_.Exception.Message)
             }
         }
 
-        # A failed query is not evidence that a binding disappeared. Enumerate
-        # again without a name wildcard and verify each exact adapter identity.
-        $verification = @(Get-NetAdapterBinding -AllBindings -ErrorAction Stop)
-        foreach ($adapterName in $disabled) {
-            if ($verification | Where-Object { $_.Name -eq $adapterName -and $_.ComponentID -eq 'nt_ndisrd' -and $_.Enabled -eq $true }) {
-                $failures.Add($adapterName + ': binding still enabled after Disable-NetAdapterBinding')
-            }
+        if ($disabled.Count -gt 0) {
+            Write-Output ('Disabled WinpkFilter binding on adapters: ' + ($disabled -join ', '))
         }
 
         if ($failures.Count -gt 0) {
             Write-Error ('Failed to disable WinpkFilter binding on adapters: ' + ($failures -join '; '))
             exit 1
         }
-
-        if ($disabled.Count -gt 0) {
-            Write-Output ('Disabled WinpkFilter binding on adapters: ' + ($disabled -join ', '))
-        }
-
         "#
     }
 
@@ -1645,78 +1583,6 @@ impl SplitTunnelDriver {
                     .collect()
             })
             .unwrap_or_default()
-    }
-
-    /// Whether a visible adapter may have the packet filter switched on.
-    ///
-    /// The binding clean-up script only acts on adapters Windows shows (it does
-    /// not pass `-IncludeHidden`). Windows keeps one key per switched-on binding
-    /// under the filter's `Parameters\Adapters`, and marks hidden adapters in the
-    /// network class key. When every bound adapter is hidden there is nothing
-    /// for the script to do, and starting PowerShell to find that out cost 0.9
-    /// seconds at every launch, while Connect waited for it.
-    ///
-    /// Answers `true` whenever it cannot be sure, so the full clean-up still
-    /// runs. Missing data counts as not sure: a missing key, an empty list, an
-    /// unreadable key, or a bound adapter the class key does not describe.
-    ///
-    /// Compared with `Get-NetAdapterBinding` on one Windows 11 machine on
-    /// 2026-11-12, in three states: disconnected (both: nothing to do),
-    /// connected, and after the client was killed while connected (both:
-    /// Ethernet still bound). Not compared across a reboot or on Windows 10.
-    /// The caller also skips this shortcut whenever a crash marker exists.
-    #[cfg(windows)]
-    pub fn visible_winpkfilter_binding_possible() -> bool {
-        use winreg::RegKey;
-        use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
-
-        const BINDINGS: &str = r"SYSTEM\CurrentControlSet\Services\ndisrd\Parameters\Adapters";
-        const NET_CLASS: &str =
-            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}";
-
-        let machine = RegKey::predef(HKEY_LOCAL_MACHINE);
-        let bound: Vec<String> = match machine.open_subkey_with_flags(BINDINGS, KEY_READ) {
-            Ok(key) => match key.enum_keys().collect::<Result<_, _>>() {
-                Ok(names) => names,
-                Err(_) => return true,
-            },
-            // A missing key is missing data, not proof that nothing is bound.
-            Err(_) => return true,
-        };
-        // Windows always binds the filter to some hidden adapters, so an empty
-        // list is also missing data. Only a list that is present, non-empty
-        // and entirely hidden skips the clean-up.
-        if bound.is_empty() {
-            return true;
-        }
-
-        let Ok(class) = machine.open_subkey_with_flags(NET_CLASS, KEY_READ) else {
-            return true;
-        };
-        let mut hidden = std::collections::HashSet::new();
-        for name in class.enum_keys().flatten() {
-            let Ok(adapter) = class.open_subkey_with_flags(&name, KEY_READ) else {
-                continue;
-            };
-            let Ok(guid) = adapter.get_value::<String, _>("NetCfgInstanceId") else {
-                continue;
-            };
-            // NCF_HIDDEN. A missing or unreadable value means "visible".
-            if adapter
-                .get_value::<u32, _>("Characteristics")
-                .is_ok_and(|flags| flags & 0x8 != 0)
-            {
-                hidden.insert(guid.to_ascii_lowercase());
-            }
-        }
-        Self::any_binding_visible(&bound, &hidden)
-    }
-
-    #[cfg(any(windows, test))]
-    fn any_binding_visible(bound: &[String], hidden: &std::collections::HashSet<String>) -> bool {
-        bound
-            .iter()
-            .any(|guid| !hidden.contains(&guid.to_ascii_lowercase()))
     }
 
     /// Disable any leftover `nt_ndisrd` adapter bindings as part of Internet
@@ -2143,32 +2009,18 @@ impl SplitTunnelDriver {
     pub fn close(&mut self) -> VpnResult<()> {
         log::info!("Closing split tunnel driver...");
 
-        let result = if let Some(mut interceptor) = self.parallel_interceptor.take() {
+        if let Some(mut interceptor) = self.parallel_interceptor.take() {
             // Stop can wait for driver threads and Windows state restoration.
             // Keep the interceptor owned until its teardown and Drop finish.
-            crate::utils::blocking_step(move || {
-                interceptor.stop();
-                drop(interceptor);
-                super::parallel_interceptor::ensure_interceptor_shutdown_complete()
-            })
-        } else {
-            Ok(())
-        };
+            crate::utils::blocking_step(move || interceptor.stop());
+        }
 
-        self.finish_close(result)
-    }
-
-    fn finish_close(&mut self, result: VpnResult<()>) -> VpnResult<()> {
         self.config = None;
         self.state = DriverState::NotAvailable;
         self.stop_flag.store(true, Ordering::SeqCst);
 
-        if let Err(error) = &result {
-            log::warn!("Split tunnel driver teardown is incomplete: {error}");
-        } else {
-            log::info!("Split tunnel driver closed");
-        }
-        result
+        log::info!("Split tunnel driver closed");
+        Ok(())
     }
 
     /// Get current state
@@ -2303,103 +2155,6 @@ impl Drop for SplitTunnelDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn incomplete_close_revokes_the_driver_handle_but_keeps_the_failure() {
-        let mut driver = SplitTunnelDriver::new();
-        driver.state = DriverState::Active;
-        assert!(matches!(
-            driver.finish_close(Err(VpnError::NetworkWorkersStopping)),
-            Err(VpnError::NetworkWorkersStopping)
-        ));
-        assert_eq!(driver.state, DriverState::NotAvailable);
-        assert!(driver.config.is_none());
-        assert!(driver.stop_flag.load(Ordering::SeqCst));
-        // A later verified completion is still retryable, not a permanent
-        // driver-missing error. No driver/device has been opened in this test.
-        assert!(driver.finish_close(Ok(())).is_ok());
-    }
-
-    #[test]
-    fn install_evidence_keeps_probe_failures_distinct_from_absence() {
-        assert_eq!(
-            combine_driver_install_checks(Ok(false), Ok(false)),
-            Ok(false)
-        );
-        assert_eq!(
-            combine_driver_install_checks(Ok(true), Err("store unavailable".into())),
-            Ok(true)
-        );
-        assert_eq!(
-            combine_driver_install_checks(Err("service access denied".into()), Ok(true)),
-            Ok(true)
-        );
-        for (service, store) in [
-            (Ok(false), Err("store timed out".into())),
-            (Err("service access denied".into()), Ok(false)),
-            (
-                Err("service unavailable".into()),
-                Err("store timed out".into()),
-            ),
-        ] {
-            assert!(combine_driver_install_checks(service, store).is_err());
-        }
-    }
-
-    #[test]
-    fn service_access_denial_is_unknown_and_pending_deletion_is_present() {
-        use windows::Win32::Foundation::{
-            ERROR_ACCESS_DENIED, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE,
-        };
-        let error = |code: windows::Win32::Foundation::WIN32_ERROR| {
-            windows::core::Error::from(code.to_hresult())
-        };
-        assert_eq!(
-            driver_service_presence_error(error(ERROR_SERVICE_DOES_NOT_EXIST)),
-            Ok(false)
-        );
-        assert_eq!(
-            driver_service_presence_error(error(ERROR_SERVICE_MARKED_FOR_DELETE)),
-            Ok(true)
-        );
-        assert!(driver_service_presence_error(error(ERROR_ACCESS_DENIED)).is_err());
-    }
-
-    #[test]
-    fn only_hidden_bound_adapters_skip_the_startup_cleanup() {
-        // From a real machine: after the clean-up, only hidden Wi-Fi Direct and
-        // WAN miniport adapters still have the filter bound.
-        let hidden: std::collections::HashSet<String> = [
-            "{f3676a4e-a75e-4f44-878a-0a5de51078bc}",
-            "{7473e773-0a38-4c06-a176-56fe701a9c65}",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-        let bound = |guids: &[&str]| guids.iter().map(|g| g.to_string()).collect::<Vec<_>>();
-
-        // Registry case differs from the class key's; hidden adapters only.
-        assert!(!SplitTunnelDriver::any_binding_visible(
-            &bound(&[
-                "{F3676A4E-A75E-4F44-878A-0A5DE51078BC}",
-                "{7473E773-0A38-4C06-A176-56FE701A9C65}"
-            ]),
-            &hidden
-        ));
-        // Ethernet still bound: the PowerShell clean-up must run.
-        assert!(SplitTunnelDriver::any_binding_visible(
-            &bound(&[
-                "{F3676A4E-A75E-4F44-878A-0A5DE51078BC}",
-                "{4C54BC71-312B-48F7-A0DF-D3EEEAAB3D7B}"
-            ]),
-            &hidden
-        ));
-        // An adapter missing from the class key counts as visible.
-        assert!(SplitTunnelDriver::any_binding_visible(
-            &bound(&["{00000000-0000-0000-0000-000000000001}"]),
-            &hidden
-        ));
-    }
 
     #[test]
     fn driver_service_cleanup_only_treats_confirmed_absence_as_success() {
@@ -2642,80 +2397,6 @@ mod tests {
         let script = SplitTunnelDriver::build_winpkfilter_binding_cleanup_script();
         assert!(script.contains("Disable-NetAdapterBinding"));
         assert!(script.contains("nt_ndisrd"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn binding_cleanup_does_not_confuse_provider_failures_with_absence_or_use_name_wildcards() {
-        // Replace both binding cmdlets and sleep. No real adapter is queried,
-        // disabled or renamed. Exercise the actual cleanup script in PowerShell.
-        for (mode, success, marker) in [
-            ("empty", true, "No enabled WinpkFilter bindings"),
-            ("query_failed", false, "fixture initial query failed"),
-            ("verification_failed", false, "fixture verification failed"),
-            ("disable_failed", false, "fixture disable failed"),
-            ("still_enabled", false, "binding still enabled"),
-            (
-                "success",
-                true,
-                "Disabled WinpkFilter binding on adapters: Ethernet [1]*",
-            ),
-        ] {
-            let fixture = format!(
-                r#"
-                $PSModuleAutoLoadingPreference = 'None'
-                Import-Module ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
-                $script:mode = '{mode}'
-                $script:queries = 0
-                $script:owned = [pscustomobject]@{{Name='Ethernet [1]*';ComponentID='nt_ndisrd';Enabled=$true}}
-                $script:foreign = [pscustomobject]@{{Name='Ethernet 1';ComponentID='ms_tcpip';Enabled=$true}}
-                function Get-NetAdapterBinding {{
-                    [CmdletBinding()] param([switch]$AllBindings)
-                    $script:queries++
-                    if (-not $AllBindings) {{ throw 'fixture expected all bindings' }}
-                    if ($script:mode -eq 'query_failed') {{ Write-Error 'fixture initial query failed'; return }}
-                    if ($script:queries -gt 1 -and $script:mode -eq 'verification_failed') {{
-                        Write-Error 'fixture verification failed'; return
-                    }}
-                    if (-not $script:foreign.Enabled) {{ throw 'fixture unrelated binding changed' }}
-                    if ($script:mode -ne 'empty') {{ $script:owned }}
-                    $script:foreign
-                }}
-                function Disable-NetAdapterBinding {{
-                    [CmdletBinding()] param([object[]]$InputObject, [bool]$Confirm)
-                    if ($InputObject.Count -ne 1 -or -not [object]::ReferenceEquals($InputObject[0], $script:owned)) {{
-                        throw 'fixture expected the exact owned binding object'
-                    }}
-                    if ($script:mode -eq 'disable_failed') {{ Write-Error 'fixture disable failed'; return }}
-                    if ($script:mode -ne 'still_enabled') {{ $script:owned.Enabled = $false }}
-                }}
-                function Start-Sleep {{ param([int]$Milliseconds) }}
-                {}
-            "#,
-                SplitTunnelDriver::build_winpkfilter_binding_cleanup_script()
-            );
-            let output = SplitTunnelDriver::collect_binding_cleanup(&fixture);
-            assert!(!output.timed_out, "{mode}");
-            assert_eq!(
-                output.success, success,
-                "{mode}: {} / {}",
-                output.stdout, output.stderr
-            );
-            assert!(
-                format!("{}{}", output.stdout, output.stderr).contains(marker),
-                "{mode}: {} / {}",
-                output.stdout,
-                output.stderr
-            );
-            if !success {
-                assert!(!output.stdout.contains("No enabled WinpkFilter bindings"));
-                assert!(
-                    !output
-                        .stdout
-                        .contains("Disabled WinpkFilter binding on adapters:")
-                );
-            }
-        }
     }
 
     #[cfg(windows)]

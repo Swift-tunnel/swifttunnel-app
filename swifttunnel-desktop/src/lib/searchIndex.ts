@@ -2,7 +2,7 @@ import {
   OPTIMIZATIONS,
   SPEEDUP_OPTIMIZATIONS,
 } from "../components/optimization/optimizationCatalog";
-import { ADVANCED_REPAIRS, REPAIR_SYMPTOMS } from "./repairSymptoms";
+import { REPAIR_GUIDES } from "../components/repair/RepairGuidance";
 import { navItemFor } from "../components/shell/nav";
 import type { TabId } from "./types";
 import type { IconName } from "../components/ui/Icon";
@@ -626,7 +626,7 @@ const TOOLS: SearchEntry[] = [
     id: "tool-repair-run",
     tab: "repair",
     anchor: "repair_run",
-    label: "Fix a problem",
+    label: "Run Repair",
     section: "Repair",
     icon: repairIcon,
     keywords:
@@ -697,39 +697,15 @@ const TOOLS: SearchEntry[] = [
 // ── Repair → "What are you trying to fix?" ──
 // Built from the guides themselves, so a reworded guide stays searchable by
 // its own symptoms.
-const GUIDES: SearchEntry[] = REPAIR_SYMPTOMS.flatMap((symptom) =>
-  [symptom.title, ...symptom.search].map((label, i) => ({
-    id: `guide-${symptom.id}-${i}`,
-    tab: "repair" as const,
-    anchor: "repair_guidance",
-    label,
-    section: "Repair · Troubleshooting",
-    icon: repairIcon,
-    keywords: i === 0 ? `${symptom.blurb} ${symptom.steps.join(" ")}` : symptom.title,
-  })),
-);
-
-// Resets live under Advanced with the driver reinstall, and open with it.
-const REPAIR_ADVANCED: SearchEntry[] = [
-  ...ADVANCED_REPAIRS.map((repair) => ({
-    id: `repair-advanced-${repair.id}`,
-    tab: "repair" as const,
-    anchor: "driver_reinstall",
-    label: repair.label,
-    section: "Repair · Advanced",
-    icon: repairIcon,
-    keywords: `${repair.warning} ${repair.action} reset restore default`,
-  })),
-  {
-    id: "repair-copy-diagnostics",
-    tab: "repair" as const,
-    anchor: "repair_run",
-    label: "Copy diagnostics for support",
-    section: "Repair · Support",
-    icon: repairIcon,
-    keywords: "copy diagnostics log file send support ticket discord report problem logs",
-  },
-];
+const GUIDES: SearchEntry[] = REPAIR_GUIDES.map((guide, i) => ({
+  id: `guide-${i}`,
+  tab: "repair",
+  anchor: "repair_guidance",
+  label: guide.title,
+  section: "Repair · Troubleshooting",
+  icon: repairIcon,
+  keywords: `${guide.title} ${guide.steps.join(" ")}`,
+}));
 
 const SPEEDUP: SearchEntry[] = SPEEDUP_OPTIMIZATIONS.map((def) => ({
   id: `su-${def.id}`,
@@ -748,7 +724,6 @@ const ALL_ENTRIES: SearchEntry[] = [
   ...ACTIONS,
   ...TOOLS,
   ...GUIDES,
-  ...REPAIR_ADVANCED,
   ...OVERLAY,
   ...SETTINGS_ROWS,
   ...LIBRARY,

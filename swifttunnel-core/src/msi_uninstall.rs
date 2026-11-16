@@ -1,14 +1,11 @@
 //! Resolve the running app's registered MSI before uninstall.
 
 use std::path::Path;
-use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS, ERROR_UNKNOWN_PRODUCT};
+use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
 use windows::Win32::System::ApplicationInstallationAndServicing::{
     MsiEnumRelatedProductsW, MsiGetProductInfoW,
 };
 use windows::core::{PCWSTR, PWSTR, w};
-
-const DESKTOP_FAMILY: PCWSTR = w!("{E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D}");
-const LITE_FAMILY: PCWSTR = w!("{9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520}");
 
 #[derive(Debug)]
 struct Product {
@@ -48,30 +45,39 @@ fn select_product_with_policy(
 
 pub fn desktop_product_code(install_dir: &Path) -> Result<Option<String>, String> {
     // Same family on x64 and ARM64, distinct from the standalone Lite product.
-    select_product(
-        &related_products(DESKTOP_FAMILY)?,
-        &install_dir.to_string_lossy(),
+    product_code(
+        install_dir,
+        w!("{E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D}"),
+        true,
     )
 }
 
 pub fn lite_product_code(install_dir: &Path) -> Result<Option<String>, String> {
     // Bundled Lite can coexist with standalone Lite. Missing location is not
     // sufficient evidence that a standalone product owns this executable.
-    select_product_with_policy(
-        &related_products(LITE_FAMILY)?,
-        &install_dir.to_string_lossy(),
+    product_code(
+        install_dir,
+        w!("{9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520}"),
         false,
     )
 }
 
-fn related_products(upgrade_code: PCWSTR) -> Result<Vec<Product>, String> {
+fn product_code(
+    install_dir: &Path,
+    upgrade_code: PCWSTR,
+    allow_missing_location: bool,
+) -> Result<Option<String>, String> {
     let mut products = Vec::new();
     for index in 0..128 {
         let mut code = [0u16; 39];
         let status =
             unsafe { MsiEnumRelatedProductsW(upgrade_code, None, index, PWSTR(code.as_mut_ptr())) };
         if status == ERROR_NO_MORE_ITEMS.0 {
-            return Ok(products);
+            return if allow_missing_location {
+                select_product(&products, &install_dir.to_string_lossy())
+            } else {
+                select_product_with_policy(&products, &install_dir.to_string_lossy(), false)
+            };
         }
         if status != ERROR_SUCCESS.0 {
             return Err(format!(
@@ -88,11 +94,6 @@ fn related_products(upgrade_code: PCWSTR) -> Result<Vec<Product>, String> {
                 Some(&mut length),
             )
         };
-        // Ignore an index entry only when Windows explicitly says the product
-        // is unknown. Other lookup errors cannot establish absence.
-        if status == ERROR_UNKNOWN_PRODUCT.0 {
-            continue;
-        }
         if status != ERROR_SUCCESS.0 {
             return Err(format!(
                 "Windows Installer could not read the installation location (error {status})."
@@ -104,12 +105,6 @@ fn related_products(upgrade_code: PCWSTR) -> Result<Vec<Product>, String> {
         });
     }
     Err("Too many SwiftTunnel installation records. Open Windows Settings > Apps to remove the selected installation.".to_string())
-}
-
-pub(crate) fn is_only_related_product(lite: bool, code: &str) -> Result<bool, String> {
-    let family = if lite { LITE_FAMILY } else { DESKTOP_FAMILY };
-    let products = related_products(family)?;
-    Ok(matches!(&products[..], [product] if product.code.eq_ignore_ascii_case(code)))
 }
 
 #[cfg(test)]

@@ -54,19 +54,6 @@ describe("game favourites", () => {
     expect(useGameLibraryStore.getState().library!.entries.every(entry => !entry.favourite)).toBe(true);
     save.resolve(); await pending;
   });
-  it("keeps a completed unstar when an older snapshot first groups its places", async () => {
-    const original = snapshot();
-    original.entries = original.entries.map(entry => ({ ...entry, favourite: true }));
-    useGameLibraryStore.setState({ library: original });
-    const read = deferred<RobloxLibrarySnapshot>();
-    vi.mocked(gamesGetLibrary).mockReturnValue(read.promise);
-    vi.mocked(gamesSetFavourite).mockResolvedValue(undefined);
-    const refresh = useGameLibraryStore.getState().refresh();
-    await useGameLibraryStore.getState().setFavourite("1818", "standard", false);
-    read.resolve({ ...original, entries: original.entries.map(entry => ({ ...entry, universe_id: "200" })) });
-    await refresh;
-    expect(useGameLibraryStore.getState().library!.entries.map(entry => entry.favourite)).toEqual([false, false]);
-  });
   it("updates the star immediately without loading, reordering or fetching the whole library", async () => {
     const save = deferred<void>();
     vi.mocked(gamesSetFavourite).mockReturnValue(save.promise);

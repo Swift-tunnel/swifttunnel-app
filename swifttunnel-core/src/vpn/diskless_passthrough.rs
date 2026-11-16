@@ -38,8 +38,8 @@ const SYSTEM_PID: u32 = 4;
 
 /// Caps keep the static filter table comfortably inside its capacity (256,
 /// shared with the 3 IPv6 block entries). A diskless client typically has 1-3
-/// disk sessions. Exceeding a cap must refuse capture, rather than guessing
-/// which System flow might be the boot disk.
+/// disk sessions; hitting these caps means something unusual, and protecting
+/// the first N System flows still covers the boot session.
 #[cfg(any(test, target_os = "windows"))]
 const MAX_TCP_ENDPOINTS: usize = 32;
 #[cfg(any(test, target_os = "windows"))]
@@ -224,41 +224,19 @@ fn filters_equal(a: &StaticFilter, b: &StaticFilter) -> bool {
     }
 }
 
-/// Deduplicate every endpoint or fail; truncation can omit the boot disk.
+/// Dedup and cap endpoint lists while preserving first-seen order.
 #[cfg(any(test, target_os = "windows"))]
-fn dedup_with_limit<T: PartialEq + Copy>(items: Vec<T>, cap: usize) -> Result<Vec<T>, String> {
-    let mut out = Vec::new();
+fn dedup_and_cap<T: PartialEq + Copy>(items: Vec<T>, cap: usize) -> Vec<T> {
+    let mut out: Vec<T> = Vec::new();
     for item in items {
         if !out.contains(&item) {
-            if out.len() == cap {
-                return Err(format!(
-                    "System flow protection needs more than {cap} unique entries"
-                ));
-            }
             out.push(item);
+            if out.len() >= cap {
+                break;
+            }
         }
     }
-    Ok(out)
-}
-
-/// Refuse to intercept a network-booted PC when disk protection is unavailable.
-/// Zero flows from a successful query remains valid for local VHD boots, which
-/// share the storage detector with network-backed virtual disks.
-pub(super) fn prepare_capture(
-    diskless: bool,
-    physical_name: Option<&str>,
-    install: impl FnOnce(&str) -> Result<usize, String>,
-) -> super::VpnResult<usize> {
-    if !diskless {
-        return Ok(0);
-    }
-    let result = physical_name
-        .ok_or_else(|| "Network adapter name is unavailable".to_string())
-        .and_then(install);
-    result.map_err(|reason| {
-        log::error!("Network disk protection failed before packet capture: {reason}");
-        super::VpnError::NetworkDiskProtectionUnavailable
-    })
+    out
 }
 
 /// Endpoints worth protecting: skip loopback/unspecified (not on the wire) and
@@ -271,41 +249,113 @@ fn is_protectable_remote(ip: Ipv4Addr) -> bool {
 /// Snapshot the System-owned (PID 4) IPv4 flows: established TCP remote
 /// endpoints and bound UDP local ports.
 #[cfg(target_os = "windows")]
-fn collect_system_flows() -> Result<(Vec<(Ipv4Addr, u16)>, Vec<u16>), String> {
-    use windows::Win32::NetworkManagement::IpHelper::*;
-    let mut tcp_endpoints = Vec::new();
-    let mut udp_ports = Vec::new();
-    super::owner_table::read_owner_rows(
-        |buffer, size| unsafe {
-            GetExtendedTcpTable(buffer, size, false, 2, TCP_TABLE_OWNER_PID_ALL, 0)
-        },
-        |entry: MIB_TCPROW_OWNER_PID| {
-            if entry.dwOwningPid == SYSTEM_PID && entry.dwState == 5 {
-                let remote_ip = Ipv4Addr::from(entry.dwRemoteAddr.to_ne_bytes());
-                let remote_port = u16::from_be(entry.dwRemotePort as u16);
-                if is_protectable_remote(remote_ip) && remote_port != 0 {
-                    tcp_endpoints.push((remote_ip, remote_port));
+fn collect_system_flows() -> (Vec<(Ipv4Addr, u16)>, Vec<u16>) {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetExtendedTcpTable, GetExtendedUdpTable, MIB_TCPROW_OWNER_PID, MIB_UDPROW_OWNER_PID,
+        TCP_TABLE_CLASS, TCP_TABLE_OWNER_PID_ALL, UDP_TABLE_CLASS, UDP_TABLE_OWNER_PID,
+    };
+
+    /// MIB_TCP_STATE_ESTAB.
+    const TCP_STATE_ESTABLISHED: u32 = 5;
+    const AF_INET: u32 = 2;
+
+    let mut tcp_endpoints: Vec<(Ipv4Addr, u16)> = Vec::new();
+    let mut udp_ports: Vec<u16> = Vec::new();
+
+    unsafe {
+        let mut size: u32 = 0;
+        let _ = GetExtendedTcpTable(
+            None,
+            &mut size,
+            false,
+            AF_INET,
+            TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+            0,
+        );
+        if size > 0 {
+            let mut buffer = vec![0u8; size as usize];
+            if GetExtendedTcpTable(
+                Some(buffer.as_mut_ptr() as *mut _),
+                &mut size,
+                false,
+                AF_INET,
+                TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
+                0,
+            ) == 0
+            {
+                let header_size = std::mem::size_of::<u32>();
+                if buffer.len() >= header_size {
+                    let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
+                    let entry_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
+                    let max_entries = (buffer.len() - header_size) / entry_size;
+                    let entries = (num_entries as usize).min(max_entries);
+                    let entry_base = buffer.as_ptr().add(header_size);
+                    for i in 0..entries {
+                        let entry = std::ptr::read_unaligned(
+                            entry_base.add(i * entry_size) as *const MIB_TCPROW_OWNER_PID
+                        );
+                        if entry.dwOwningPid != SYSTEM_PID || entry.dwState != TCP_STATE_ESTABLISHED
+                        {
+                            continue;
+                        }
+                        let remote_ip = Ipv4Addr::from(entry.dwRemoteAddr.to_ne_bytes());
+                        let remote_port = u16::from_be(entry.dwRemotePort as u16);
+                        if is_protectable_remote(remote_ip) && remote_port != 0 {
+                            tcp_endpoints.push((remote_ip, remote_port));
+                        }
+                    }
                 }
             }
-        },
-    )
-    .map_err(|code| format!("Could not read System TCP flows (Windows code {code})"))?;
-    super::owner_table::read_owner_rows(
-        |buffer, size| unsafe {
-            GetExtendedUdpTable(buffer, size, false, 2, UDP_TABLE_OWNER_PID, 0)
-        },
-        |entry: MIB_UDPROW_OWNER_PID| {
-            let local_port = u16::from_be(entry.dwLocalPort as u16);
-            if entry.dwOwningPid == SYSTEM_PID && local_port != 0 {
-                udp_ports.push(local_port);
+        }
+
+        let mut size: u32 = 0;
+        let _ = GetExtendedUdpTable(
+            None,
+            &mut size,
+            false,
+            AF_INET,
+            UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
+            0,
+        );
+        if size > 0 {
+            let mut buffer = vec![0u8; size as usize];
+            if GetExtendedUdpTable(
+                Some(buffer.as_mut_ptr() as *mut _),
+                &mut size,
+                false,
+                AF_INET,
+                UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
+                0,
+            ) == 0
+            {
+                let header_size = std::mem::size_of::<u32>();
+                if buffer.len() >= header_size {
+                    let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
+                    let entry_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
+                    let max_entries = (buffer.len() - header_size) / entry_size;
+                    let entries = (num_entries as usize).min(max_entries);
+                    let entry_base = buffer.as_ptr().add(header_size);
+                    for i in 0..entries {
+                        let entry = std::ptr::read_unaligned(
+                            entry_base.add(i * entry_size) as *const MIB_UDPROW_OWNER_PID
+                        );
+                        if entry.dwOwningPid != SYSTEM_PID {
+                            continue;
+                        }
+                        let local_port = u16::from_be(entry.dwLocalPort as u16);
+                        if local_port != 0 {
+                            udp_ports.push(local_port);
+                        }
+                    }
+                }
             }
-        },
+        }
+    }
+
+    (
+        dedup_and_cap(tcp_endpoints, MAX_TCP_ENDPOINTS),
+        dedup_and_cap(udp_ports, MAX_UDP_PORTS),
     )
-    .map_err(|code| format!("Could not read System UDP flows (Windows code {code})"))?;
-    Ok((
-        dedup_with_limit(tcp_endpoints, MAX_TCP_ENDPOINTS)?,
-        dedup_with_limit(udp_ports, MAX_UDP_PORTS)?,
-    ))
 }
 
 /// Build the full pass-filter set for this machine's System flows.
@@ -345,7 +395,7 @@ pub(crate) fn install_for_adapter(physical_name: &str) -> Result<usize, String> 
     };
     let adapter_handle = adapter.get_handle().0 as usize as u64;
 
-    let (tcp_endpoints, udp_ports) = collect_system_flows()?;
+    let (tcp_endpoints, udp_ports) = collect_system_flows();
     if tcp_endpoints.is_empty() && udp_ports.is_empty() {
         return Ok(0);
     }
@@ -430,61 +480,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disk_protection_failure_stops_admission_without_changing_local_boots() {
-        assert_eq!(
-            prepare_capture(false, None, |_| panic!(
-                "local boot must not query/install disk filters"
-            ))
-            .unwrap(),
-            0
-        );
-        assert_eq!(
-            prepare_capture(true, Some("adapter"), |name| {
-                assert_eq!(name, "adapter");
-                Ok(8)
-            })
-            .unwrap(),
-            8
-        );
-        assert_eq!(
-            prepare_capture(true, Some("adapter"), |_| Ok(0)).unwrap(),
-            0,
-            "a successful empty query is normal for local VHD boots"
-        );
-        assert!(matches!(
-            prepare_capture(true, None, |_| panic!("no adapter, no native mutation")),
-            Err(super::super::VpnError::NetworkDiskProtectionUnavailable)
-        ));
-        let error = prepare_capture(true, Some("adapter"), |_| {
-            Err("owned failure: native code 123, network disk at test endpoint".into())
-        })
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            super::super::VpnError::NetworkDiskProtectionUnavailable
-        ));
-        assert_eq!(error.support_code(), "network_disk_protection_failed");
-        let message = super::super::error_messages::user_friendly_error(&error);
-        assert!(message.contains("network disk"));
-        assert!(message.contains("didn't start"));
-        assert!(!message.contains("native code"));
-        assert!(!message.contains("test endpoint"));
-    }
-
-    #[test]
-    fn endpoint_limits_refuse_incomplete_disk_protection() {
+    fn dedup_and_cap_preserves_order_and_caps() {
         let items = vec![(Ipv4Addr::new(10, 0, 0, 1), 3260u16); 5];
-        assert_eq!(dedup_with_limit(items, 4).unwrap().len(), 1);
+        assert_eq!(dedup_and_cap(items, 4).len(), 1);
 
         let many: Vec<u16> = (1..100).collect();
-        let capped = dedup_with_limit(many, 24);
-        assert!(
-            capped.is_err(),
-            "omitting System flows can omit the boot disk"
-        );
-        assert_eq!(dedup_with_limit(vec![3, 2, 3, 1], 3).unwrap(), [3, 2, 1]);
-        assert!(dedup_with_limit(Vec::<u16>::new(), 0).unwrap().is_empty());
-        assert!(dedup_with_limit(vec![1], 0).is_err());
+        let capped = dedup_and_cap(many, 24);
+        assert_eq!(capped.len(), 24);
+        assert_eq!(capped[0], 1);
     }
 
     #[test]

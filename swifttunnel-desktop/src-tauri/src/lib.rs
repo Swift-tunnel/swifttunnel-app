@@ -3,16 +3,12 @@ mod commands;
 mod events;
 mod game_shortcut;
 mod harness;
-#[cfg(windows)]
-mod log_clipboard;
 mod logging;
-mod operation_gate;
 mod runtime_assets;
 mod session_metadata;
 mod single_client;
 mod startup_config;
 mod startup_failure;
-mod startup_window;
 mod state;
 mod tray;
 mod window_restore;
@@ -79,17 +75,6 @@ fn sync_runtime_assets(app: &tauri::AppHandle) {
 fn sync_runtime_assets(_app: &tauri::AppHandle) {}
 
 fn recover_stale_network_state() {
-    // Keep the evidence from entry: successful recovery below can delete its
-    // markers, but this launch must still take the full binding cleanup path.
-    #[cfg(windows)]
-    let marker_present = {
-        use swifttunnel_core::vpn::{ipv6_recovery, tso_recovery, tunnel_mode_recovery};
-
-        tunnel_mode_recovery::read_tunnel_mode_marker().is_some()
-            || ipv6_recovery::read_ipv6_marker().is_some()
-            || tso_recovery::read_tso_marker().is_some()
-    };
-
     // Clean up any stale hosts-file entries from old proxy versions.
     swifttunnel_core::roblox_proxy::hosts::recover_stale();
     // Remove old WFP process-block filters from builds before dynamic WFP sessions.
@@ -110,11 +95,16 @@ fn recover_stale_network_state() {
     // the expensive steps only touch machines that are actually broken.
     #[cfg(windows)]
     {
-        use swifttunnel_core::vpn::SplitTunnelDriver;
+        use swifttunnel_core::vpn::{
+            SplitTunnelDriver, ipv6_recovery, tso_recovery, tunnel_mode_recovery,
+        };
 
         // A clean shutdown leaves no markers; their presence means a session died
         // mid-tunnel. A driver that's installed but won't open is the half-removed
         // state that blackholes traffic ("No internet, Secured").
+        let marker_present = tunnel_mode_recovery::read_tunnel_mode_marker().is_some()
+            || ipv6_recovery::read_ipv6_marker().is_some()
+            || tso_recovery::read_tso_marker().is_some();
         let driver_broken =
             !SplitTunnelDriver::is_available() && SplitTunnelDriver::driver_install_evidence();
 
@@ -124,24 +114,13 @@ fn recover_stale_network_state() {
         // works after I reconnect SwiftTunnel". This is the same no-op-safe step
         // used by Repair -> Internet Recovery; connect re-enables it only on the
         // selected adapter when the tunnel actually starts.
-        // Most launches have nothing to clean up. Answer that from the
-        // registry instead of starting PowerShell, which Connect waits for.
-        // Only after a clean shutdown: with any sign that a session died, the
-        // full clean-up runs whatever the registry says.
-        if !marker_present
-            && !driver_broken
-            && !SplitTunnelDriver::visible_winpkfilter_binding_possible()
-        {
-            info!("Startup recovery: no visible adapter has the packet filter enabled");
-        } else {
-            match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
-                Ok(disabled) if !disabled.is_empty() => info!(
-                    "Startup recovery: disabled leftover WinpkFilter binding on adapter(s): {}",
-                    disabled.join(", ")
-                ),
-                Ok(_) => {}
-                Err(e) => warn!("Startup recovery: WinpkFilter binding cleanup failed: {e}"),
-            }
+        match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+            Ok(disabled) if !disabled.is_empty() => info!(
+                "Startup recovery: disabled leftover WinpkFilter binding on adapter(s): {}",
+                disabled.join(", ")
+            ),
+            Ok(_) => {}
+            Err(e) => warn!("Startup recovery: WinpkFilter binding cleanup failed: {e}"),
         }
 
         if marker_present || driver_broken {
@@ -169,17 +148,6 @@ fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
         return;
     };
 
-    // Disconnect hands its end-of-session report to a background task. Give it
-    // a moment here, then stop it: nothing may keep running behind the exit.
-    // This also covers a disconnect made just before quitting.
-    let finish_session_reports = || {
-        state.runtime.block_on(
-            swifttunnel_core::vpn::connection::finish_pending_session_reports(
-                std::time::Duration::from_secs(3),
-            ),
-        )
-    };
-
     let conn_state = state.vpn_state_handle.borrow().clone();
     let has_split_tunnel_handle = state.split_tunnel_handle.read().is_some();
     if matches!(
@@ -187,7 +155,6 @@ fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
         swifttunnel_core::vpn::ConnectionState::Disconnected
     ) && !has_split_tunnel_handle
     {
-        finish_session_reports();
         return;
     }
 
@@ -196,7 +163,6 @@ fn disconnect_vpn_on_exit(app: &tauri::AppHandle) {
     if let Err(e) = runtime.block_on(commands::vpn::disconnect_and_persist(&state)) {
         warn!("Failed to disconnect VPN during app exit: {}", e);
     }
-    finish_session_reports();
 }
 
 #[cfg(windows)]
@@ -682,7 +648,6 @@ fn spawn_roblox_game_join_watcher(app: tauri::AppHandle) {
 
 pub fn run() {
     logging::init();
-    swifttunnel_core::support_log::client_start("desktop", env!("CARGO_PKG_VERSION"));
 
     // Before anything touches the network stack. SwiftTunnel and SwiftTunnel
     // Lite have separate bundle identifiers, so Tauri's own single-instance
@@ -805,7 +770,6 @@ pub fn run() {
             commands::system::system_repair_network,
             commands::system::system_uninstall,
             commands::system::system_copy_log_to_clipboard,
-            commands::system::system_record_ui_failure,
             commands::optimization::optimization_apply,
             commands::optimization::optimization_revert,
             commands::optimization::optimization_get_active,
@@ -819,9 +783,6 @@ pub fn run() {
                 std::process::exit(0);
             }
             info!("SwiftTunnel desktop app starting up");
-            // Tauri creates automatic windows before this hook and panics on
-            // failure. The main window uses create: false so startup owns it.
-            startup_window::create(app);
 
             // Report our version to the API so the server can lock out old builds
             // (X-SwiftTunnel-Version). Set before any auth/relay-ticket call.
@@ -844,27 +805,62 @@ pub fn run() {
                     startup_failure::abort(startup_failure::Stage::Settings, error)
                 });
 
-            // Keep the Windows uninstall record on ordinary startup. Setup
-            // and upgrades can repair a broken registration when installing
-            // a replacement. Preserve the source here when it is available.
+            // Clear an orphaned registration now, while the machine is healthy.
+            //
+            // A registration whose cached package has gone cannot be upgraded
+            // or uninstalled: the major upgrade has to remove the old version
+            // first, asks for a package that is not there, and dies on "the
+            // feature you are trying to use is on a network resource that is
+            // unavailable". The updater and the setup launcher both repair
+            // this, but neither is on the path most people take, which is
+            // downloading the .msi from the site and double-clicking it. That
+            // path runs no repair at all, and by then the app cannot help
+            // because the failure happens before it is replaced.
+            //
+            // Doing it at startup is what makes the fix reach that path: any
+            // launch of the working version leaves the registration sound, so
+            // the next upgrade has nothing to trip over however it is started.
+            //
+            // Off the main thread and best effort. It reads the registry and
+            // touches nothing when there is no orphan, but it must never delay
+            // a window appearing or stop the app starting if it fails.
             if let Err(error) = std::thread::Builder::new()
                 .name("installer-maintenance".into())
                 .spawn(|| {
-                    // Copying cached MSIs is optional startup work. Let
-                    // foreground game and UI disk requests take priority.
-                    unsafe {
-                        use windows::Win32::System::Threading::{
-                            GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
-                        };
-                        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+                match swifttunnel_msi_repair::repair() {
+                    Ok(cleared) if !cleared.is_empty() => {
+                        log::warn!(
+                            "cleared {} orphaned SwiftTunnel registration(s) at startup; \
+                             upgrading and uninstalling will work again",
+                            cleared.len()
+                        );
                     }
-                    match swifttunnel_msi_repair::preserve_installer_sources() {
-                        Ok(kept) if !kept.is_empty() => {
-                            log::info!("installer source preserved for: {}", kept.join(", "));
-                        }
-                        Ok(_) => log::debug!("no installer source needed preserving"),
-                        Err(error) => log::warn!("could not preserve the installer source: {error}"),
+                    Ok(_) => log::debug!("no orphaned SwiftTunnel registration"),
+                    Err(error) => {
+                        log::warn!("could not check for an orphaned registration: {error}")
                     }
+                }
+
+                // Then stop the next one happening. The repair above is the
+                // cure; this is the prevention, and it is the half that
+                // reaches everybody. Windows falls back to the recorded
+                // install source when a cleanup tool deletes its cached
+                // package, and that source is usually a Downloads folder
+                // since tidied or a temp directory Windows wiped itself.
+                // Copying the package somewhere durable and pointing the
+                // source at it costs one file and means the fallback
+                // actually resolves.
+                //
+                // This runs after the fact, so unlike the launcher's own
+                // staging it covers an install done straight from the .msi
+                // as well.
+                match swifttunnel_msi_repair::preserve_installer_sources() {
+                    Ok(kept) if !kept.is_empty() => {
+                        log::info!("installer source preserved for: {}", kept.join(", "));
+                    }
+                    Ok(_) => log::debug!("no installer source needed preserving"),
+                    Err(error) => log::warn!("could not preserve the installer source: {error}"),
+                }
                 })
             {
                 log::warn!("Could not start optional installer maintenance: {error}");
@@ -1132,21 +1128,6 @@ pub fn run() {
                     }
                 }
                 tauri::RunEvent::Exit => {
-                    // Shutdown must be the last writer. An admitted connect,
-                    // repair or boost can still own blocking Windows work even
-                    // after its frontend request/window has disappeared. The
-                    // wait is bounded. A timeout is NOT permission to restore:
-                    // an admitted worker may still hold these managers or be
-                    // writing the same recovery records. Leave their durable
-                    // originals for startup recovery instead of racing them
-                    // (or blocking forever on their locks after the timeout).
-                    let _shutdown_operations = match _app.try_state::<AppState>() {
-                        Some(state) => match state.runtime.block_on(commands::drain_for_shutdown()) {
-                            Some(permits) => Some(permits),
-                            None => return,
-                        },
-                        None => None,
-                    };
                     disconnect_vpn_on_exit(_app);
                     recover_stale_network_state();
                     // Restore network booster modifications (registry, MTU, firewall)

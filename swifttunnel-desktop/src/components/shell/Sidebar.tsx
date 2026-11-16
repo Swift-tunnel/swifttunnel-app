@@ -4,7 +4,6 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useServerStore } from "../../stores/serverStore";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
-import { useLiveStoreValue } from "../../lib/useLiveUpdates";
 import { NAV_SECTIONS, type NavItem } from "./nav";
 import type { VpnState } from "../../lib/types";
 import { SwiftLogo } from "../common/SwiftLogo";
@@ -128,7 +127,7 @@ function NavButton({
 function ConnectionCard({ collapsed }: { collapsed: boolean }) {
   const vpnState = useVpnStore((s) => s.state);
   const vpnRegion = useVpnStore((s) => s.region);
-  const ping = useLiveStoreValue(useVpnStore, (s) => s.ping);
+  const ping = useVpnStore((s) => s.ping);
   const regions = useServerStore((s) => s.regions);
   const setTab = useSettingsStore((s) => s.setTab);
 

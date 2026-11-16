@@ -4,33 +4,21 @@ use tauri::{Emitter, State};
 use crate::events;
 use crate::state::AppState;
 
-static CONFIG_CHANGE: std::sync::LazyLock<crate::operation_gate::OperationGate> =
-    std::sync::LazyLock::new(crate::operation_gate::OperationGate::new);
+static CONFIG_CHANGE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-fn config_admission_error(error: crate::operation_gate::AdmissionError) -> String {
-    match error {
-        crate::operation_gate::AdmissionError::Busy => {
-            "Another settings change is running. Wait for it to finish, then retry."
-        }
-        crate::operation_gate::AdmissionError::Closing => {
-            "SwiftTunnel is closing. Reopen it to change settings."
-        }
-    }
-    .into()
-}
-
-pub(crate) fn begin_config_change() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
-    CONFIG_CHANGE.try_begin().map_err(config_admission_error)
+pub(crate) fn begin_config_change() -> Result<tokio::sync::SemaphorePermit<'static>, String> {
+    CONFIG_CHANGE.try_acquire().map_err(|_| {
+        "Another settings change is running. Wait for it to finish, then retry.".to_string()
+    })
 }
 
 /// Mandatory account cleanup waits for an admitted apply/reset rather than
 /// restoring Windows halfway through that operation or silently skipping it.
-pub(crate) async fn wait_for_config_change() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
-    CONFIG_CHANGE.wait().await.map_err(config_admission_error)
-}
-
-pub(super) fn config_gate() -> &'static crate::operation_gate::OperationGate {
-    &CONFIG_CHANGE
+pub(crate) async fn wait_for_config_change() -> Result<tokio::sync::SemaphorePermit<'static>, String>
+{
+    CONFIG_CHANGE.acquire().await.map_err(|_| {
+        "Could not finish restoring settings. Restart SwiftTunnel and try again.".into()
+    })
 }
 
 #[derive(Serialize)]

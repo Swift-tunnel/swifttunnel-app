@@ -57,7 +57,7 @@ if ($Product -eq 'Desktop') {
     }
     $view.Close()
     foreach ($helper in @(
-        @{ Action = 'RunCleanupOnUninstall'; Argument = '--cleanup --msi-uninstall'; Condition = 'Installed AND REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' },
+        @{ Action = 'RunCleanupOnUninstall'; Argument = '--cleanup'; Condition = 'Installed AND REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE' },
         @{ Action = 'RunInstallDriverAfterInstall'; Argument = '--install-driver'; Condition = 'NOT REMOVE' }
     )) {
         $action = $helper.Action
@@ -78,23 +78,6 @@ if ($Product -eq 'Desktop') {
         throw 'Driver installation must run after its executable is installed'
     }
     Write-Output 'Desktop cleanup and driver actions reference the packaged executable with safe sequencing.'
-} else {
-    # 50: property path to an executable, 1024: deferred, 2048: elevated, 64: best effort.
-    if ($types['CleanupOnUninstall'] -ne 3186 -or
-        $sources['CleanupOnUninstall'] -ne 'LITE_EXE' -or
-        $targets['CleanupOnUninstall'] -ne '--cleanup --msi-uninstall' -or
-        $sources['SetLiteCleanupPath'] -ne 'LITE_EXE' -or
-        $targets['SetLiteCleanupPath'] -ne '[INSTALLDIR]swifttunnel-lite.exe') {
-        throw 'Lite cleanup must run the installed executable in MSI uninstall mode'
-    }
-    $cleanupCondition = 'Installed AND REMOVE="ALL" AND NOT UPGRADINGPRODUCTCODE'
-    if ($conditions['CleanupOnUninstall'] -ne $cleanupCondition -or
-        $conditions['SetLiteCleanupPath'] -ne $cleanupCondition -or
-        $sequence['SetLiteCleanupPath'] -le $sequence['RemoveExistingProducts'] -or
-        $sequence['CleanupOnUninstall'] -le $sequence['SetLiteCleanupPath'] -or
-        $sequence['CleanupOnUninstall'] -ge $sequence['RemoveFiles']) {
-        throw 'Lite cleanup must run before its executable is removed, after upgrade recovery'
-    }
 }
 foreach ($action in $ordered) { Write-Output "$action $($sequence[$action])" }
 Write-Output "$Product MSI recovery sequencing verified. Installation was not executed."

@@ -178,25 +178,6 @@ describe("stores/authStore", () => {
     expect(store.getState().isLoading).toBe(false);
   });
 
-  it("keeps the account visible with a retry error when sign-out cleanup fails", async () => {
-    let fail!: (error: Error) => void;
-    commands.authGetState.mockResolvedValue(signedIn);
-    commands.authLogout.mockReturnValue(new Promise((_resolve, reject) => { fail = reject; }));
-    const store = await loadStore();
-    await store.getState().fetchState();
-    const logout = store.getState().logout();
-    // The root uses this flag for the startup screen. Signing out must leave
-    // the existing account/connection controls on screen while it waits.
-    expect(store.getState().isLoading).toBe(false);
-    expect(store.getState().state).toBe("logged_in");
-    fail(new Error("Could not disconnect before signing out. Try again."));
-    await logout;
-    expect(store.getState().isLoading).toBe(false);
-    expect(store.getState().state).toBe("logged_in");
-    expect(store.getState().email).toBe(signedIn.email);
-    expect(store.getState().error).toContain("Could not disconnect");
-  });
-
   it("does not overwrite a newer ban event with an earlier snapshot", async () => {
     let finish!: (value: typeof signedIn) => void;
     commands.authGetState.mockReturnValue(new Promise((resolve) => { finish = resolve; }));

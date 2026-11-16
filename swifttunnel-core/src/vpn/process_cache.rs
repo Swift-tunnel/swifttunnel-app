@@ -220,9 +220,6 @@ pub struct ProcessSnapshot {
     pub tunnel_tcp_ports: AHashSet<u16>,
     /// Snapshot version (monotonically increasing)
     pub version: u64,
-    /// Start of a successful, complete native TCP/UDP owner-table read.
-    /// Metadata-only publications cannot prove that a TCP socket has closed.
-    pub owner_table_started_at: Option<std::time::Instant>,
     /// Timestamp when snapshot was created
     pub created_at: std::time::Instant,
 }
@@ -282,7 +279,6 @@ impl ProcessSnapshot {
             tunnel_udp_ports: AHashSet::new(),
             tunnel_tcp_ports: AHashSet::new(),
             version: 0,
-            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         }
     }
@@ -300,28 +296,6 @@ impl ProcessSnapshot {
     pub fn should_tunnel(&self, local_ip: Ipv4Addr, local_port: u16, protocol: Protocol) -> bool {
         // V1 mode: just check process (original behavior)
         self.is_tunnel_connection(local_ip, local_port, protocol)
-    }
-
-    #[inline(always)]
-    pub fn should_tunnel_flow(
-        &self,
-        local_ip: Ipv4Addr,
-        local_port: u16,
-        protocol: Protocol,
-        remote_ip: Ipv4Addr,
-        remote_port: u16,
-    ) -> bool {
-        if protocol != Protocol::Tcp {
-            return self.is_tunnel_connection(local_ip, local_port, protocol);
-        }
-        self.connections
-            .get(&ConnectionKey::tcp(
-                local_ip,
-                local_port,
-                remote_ip,
-                remote_port,
-            ))
-            .is_some_and(|pid| self.is_tunnel_pid(*pid))
     }
 
     /// UDP fallback check for tunnel ownership by source port.
@@ -361,8 +335,7 @@ impl ProcessSnapshot {
         api_tunneling: bool,
     ) -> bool {
         // First check: Is this from a tunnel app?
-        let is_tunnel_app =
-            self.should_tunnel_flow(local_ip, local_port, protocol, dst_ip, dst_port);
+        let is_tunnel_app = self.is_tunnel_connection(local_ip, local_port, protocol);
 
         // If we KNOW it's a tunnel app, tunnel gameplay/session UDP only.
         // Roblox can fetch assets over HTTP/3 (UDP/443); relaying that in
@@ -545,42 +518,8 @@ impl LockFreeProcessCache {
             tunnel_udp_ports,
             tunnel_tcp_ports,
             version,
-            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         })
-    }
-
-    /// Whether publishing these inputs would rebuild the snapshot already live.
-    ///
-    /// With API tunneling on and Roblox running, the refresher samples every
-    /// 100ms and the owner tables are usually identical between samples.
-    /// Republishing anyway rebuilt every map and set, and the version bump made
-    /// the packet reader throw away its UDP routing cache and rescan the rest,
-    /// ten times a second for the whole session. Everything else in a snapshot
-    /// is derived from these inputs and the fixed `tunnel_apps`.
-    fn snapshot_inputs_unchanged(
-        &self,
-        connections: &AHashMap<ConnectionKey, u32>,
-        pid_names: &AHashMap<u32, String>,
-        explicit_tunnel_udp_ports: &AHashSet<u16>,
-        explicit_tunnel_tcp_ports: &AHashSet<u16>,
-    ) -> bool {
-        let current = self.current.load();
-        current.connections == *connections
-            && current.explicit_tunnel_udp_ports == *explicit_tunnel_udp_ports
-            && current.explicit_tunnel_tcp_ports == *explicit_tunnel_tcp_ports
-            && current.pid_names.len() == pid_names.len()
-            && pid_names.iter().all(|(pid, name)| {
-                current.pid_names.get(pid).is_some_and(|lower| {
-                    // Stored names are `to_lowercase()`d. The ASCII check
-                    // avoids allocating for the usual all-ASCII image name.
-                    if name.is_ascii() {
-                        lower.len() == name.len() && lower.eq_ignore_ascii_case(name)
-                    } else {
-                        *lower == name.to_lowercase()
-                    }
-                })
-            })
     }
 
     /// Create new lock-free cache
@@ -650,16 +589,8 @@ impl LockFreeProcessCache {
     ) {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
         self.merge_recent_immediate_processes(&mut pid_names);
-        let (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports) = self.clone_explicit_ports();
-        if self.snapshot_inputs_unchanged(
-            &connections,
-            &pid_names,
-            &explicit_tunnel_udp_ports,
-            &explicit_tunnel_tcp_ports,
-        ) {
-            return;
-        }
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+        let (explicit_tunnel_udp_ports, explicit_tunnel_tcp_ports) = self.clone_explicit_ports();
         let new_snapshot = self.snapshot_from_parts(
             connections,
             pid_names,
@@ -686,16 +617,8 @@ impl LockFreeProcessCache {
         let _snapshot_write_guard = self.snapshot_write_lock.lock();
         self.merge_recent_immediate_processes(&mut pid_names);
         let explicit_tunnel_tcp_ports = self.replace_explicit_tcp_ports_locked(tcp_ports);
-        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
-        if self.snapshot_inputs_unchanged(
-            &connections,
-            &pid_names,
-            &explicit_tunnel_udp_ports,
-            &explicit_tunnel_tcp_ports,
-        ) {
-            return;
-        }
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
         let new_snapshot = self.snapshot_from_parts(
             connections,
             pid_names,
@@ -723,16 +646,8 @@ impl LockFreeProcessCache {
         self.merge_recent_immediate_processes(&mut pid_names);
         let explicit_tunnel_tcp_ports =
             self.retain_recent_explicit_tcp_ports_locked(tcp_ports, retain_for);
-        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
-        if self.snapshot_inputs_unchanged(
-            &connections,
-            &pid_names,
-            &explicit_tunnel_udp_ports,
-            &explicit_tunnel_tcp_ports,
-        ) {
-            return;
-        }
         let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
+        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
         let new_snapshot = self.snapshot_from_parts(
             connections,
             pid_names,
@@ -742,56 +657,6 @@ impl LockFreeProcessCache {
         );
 
         self.current.store(new_snapshot);
-    }
-
-    /// Publish a complete native owner-table read with its start time. Refresh
-    /// unchanged proofs at most once per five seconds, so a long idle period can
-    /// retire closed captures without rebuilding maps at the 100ms poll rate.
-    pub(crate) fn update_observed_connections(
-        &self,
-        connections: AHashMap<ConnectionKey, u32>,
-        mut pid_names: AHashMap<u32, String>,
-        tcp_ports: &[u16],
-        retain_for: Option<Duration>,
-        observed_at: std::time::Instant,
-    ) {
-        let _snapshot_write_guard = self.snapshot_write_lock.lock();
-        self.merge_recent_immediate_processes(&mut pid_names);
-        let explicit_tunnel_tcp_ports = match retain_for {
-            Some(retain_for) => self.retain_recent_explicit_tcp_ports_locked(tcp_ports, retain_for),
-            None => self.replace_explicit_tcp_ports_locked(tcp_ports),
-        };
-        let explicit_tunnel_udp_ports = self.explicit_tunnel_udp_ports.lock().clone();
-        let proof_is_recent = self
-            .current
-            .load()
-            .owner_table_started_at
-            .is_some_and(|previous| {
-                observed_at.saturating_duration_since(previous) < Duration::from_secs(5)
-            });
-        if proof_is_recent
-            && self.snapshot_inputs_unchanged(
-                &connections,
-                &pid_names,
-                &explicit_tunnel_udp_ports,
-                &explicit_tunnel_tcp_ports,
-            )
-        {
-            return;
-        }
-        let version = self.version.fetch_add(1, Ordering::Relaxed) + 1;
-        let mut snapshot = self.snapshot_from_parts(
-            connections,
-            pid_names,
-            version,
-            explicit_tunnel_udp_ports,
-            explicit_tunnel_tcp_ports,
-        );
-        // This Arc was just allocated and has not been published yet.
-        Arc::get_mut(&mut snapshot)
-            .expect("unpublished owner snapshot")
-            .owner_table_started_at = Some(observed_at);
-        self.current.store(snapshot);
     }
 
     /// Update tunnel apps list and immediately refresh the snapshot
@@ -1057,109 +922,6 @@ mod tests {
 
         // New snapshot has the connection
         assert!(snap2.should_tunnel(Ipv4Addr::new(192, 168, 1, 1), 8080, Protocol::Tcp));
-    }
-
-    #[test]
-    fn complete_owner_proofs_refresh_without_per_poll_republication() {
-        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".into()]);
-        let start = std::time::Instant::now();
-        cache.update_observed_connections(Default::default(), Default::default(), &[], None, start);
-        let first = cache.get_snapshot();
-        assert_eq!(first.owner_table_started_at, Some(start));
-        cache.update_observed_connections(
-            Default::default(),
-            Default::default(),
-            &[],
-            None,
-            start + Duration::from_millis(100),
-        );
-        assert!(
-            Arc::ptr_eq(&first, &cache.get_snapshot()),
-            "unchanged fast polls must not rebuild every routing cache"
-        );
-        cache.update_observed_connections(
-            Default::default(),
-            Default::default(),
-            &[],
-            None,
-            start + Duration::from_secs(5),
-        );
-        let refreshed = cache.get_snapshot();
-        assert!(!Arc::ptr_eq(&first, &refreshed));
-        assert_eq!(
-            refreshed.owner_table_started_at,
-            Some(start + Duration::from_secs(5))
-        );
-        cache.register_process_immediate(1234, "RobloxPlayerBeta.exe".into());
-        assert!(
-            cache.get_snapshot().owner_table_started_at.is_none(),
-            "ETW-only publications must not turn stale owner rows into new closure evidence"
-        );
-    }
-
-    #[test]
-    fn identical_refresh_keeps_the_live_snapshot_and_version() {
-        let cache = LockFreeProcessCache::new(vec!["robloxplayerbeta.exe".to_string()]);
-        let sample = || {
-            let mut connections = HashMap::new();
-            connections.insert(
-                ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 1), 50000, Protocol::Udp),
-                1234,
-            );
-            connections.insert(
-                ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 1), 50001, Protocol::Tcp),
-                99,
-            );
-            let mut pid_names = HashMap::new();
-            pid_names.insert(1234, "RobloxPlayerBeta.exe".to_string());
-            pid_names.insert(99, "Explorer.EXE".to_string());
-            (connections, pid_names)
-        };
-
-        let (connections, pid_names) = sample();
-        cache.update_with_recent_tcp_ports(
-            connections,
-            pid_names,
-            &[50001],
-            Duration::from_secs(30),
-        );
-        let first = cache.get_snapshot();
-
-        // The refresher's steady state: the same tables again.
-        for _ in 0..3 {
-            let (connections, pid_names) = sample();
-            cache.update_with_recent_tcp_ports(
-                connections,
-                pid_names,
-                &[50001],
-                Duration::from_secs(30),
-            );
-        }
-        let (connections, pid_names) = sample();
-        cache.update(connections, pid_names);
-        assert!(Arc::ptr_eq(&first, &cache.get_snapshot()));
-
-        // Any real change still publishes.
-        let (mut connections, pid_names) = sample();
-        connections.insert(
-            ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 1), 50002, Protocol::Udp),
-            1234,
-        );
-        cache.update_with_recent_tcp_ports(
-            connections,
-            pid_names,
-            &[50001],
-            Duration::from_secs(30),
-        );
-        let changed = cache.get_snapshot();
-        assert_eq!(changed.version, first.version + 1);
-        assert!(changed.tunnel_udp_ports.contains(&50002));
-
-        // A renamed owner is a change too, even with the same tables.
-        let (connections, mut pid_names) = sample();
-        pid_names.insert(99, "Other.exe".to_string());
-        cache.update(connections, pid_names);
-        assert_eq!(cache.get_snapshot().version, changed.version + 1);
     }
 
     #[test]
@@ -1650,12 +1412,7 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(
-            ConnectionKey::tcp(
-                Ipv4Addr::new(192, 168, 1, 100),
-                50000,
-                Ipv4Addr::new(128, 116, 50, 100),
-                443,
-            ),
+            ConnectionKey::new(Ipv4Addr::new(192, 168, 1, 100), 50000, Protocol::Tcp),
             1234,
         );
 

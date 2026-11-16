@@ -95,12 +95,14 @@ impl RollingLog {
                 // A legacy unbounded session may already exceed the cap. Keep
                 // only its tail, streaming it without loading the file into RAM.
                 let mut old = File::open(&self.path)?;
-                let start = utf8_tail_start(&mut old, self.size, self.max)?;
-                old.seek(SeekFrom::Start(start))?;
+                old.seek(SeekFrom::Start(self.size - self.max))?;
                 io::copy(&mut old.take(self.max), &mut File::create(&self.previous)?)?;
             } else {
-                // Replace the archive in one operation. Deleting it first
-                // loses both logs if the active file cannot be renamed.
+                match std::fs::remove_file(&self.previous) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e),
+                }
                 std::fs::rename(&self.path, &self.previous)?;
             }
             Ok(())
@@ -124,25 +126,6 @@ impl RollingLog {
     }
 }
 
-// A byte cap can cut through a UTF-8 character in a localized diagnostic or
-// username. Skip only its remaining continuation bytes so a previously valid
-// text file remains readable as text. This needs at most three bytes of I/O.
-fn utf8_tail_start(file: &mut File, size: u64, max: u64) -> io::Result<u64> {
-    let start = size.saturating_sub(max);
-    if start == 0 {
-        return Ok(0);
-    }
-    let mut prefix = [0; 3];
-    let count = (size - start).min(prefix.len() as u64) as usize;
-    file.seek(SeekFrom::Start(start))?;
-    file.read_exact(&mut prefix[..count])?;
-    let continuation_bytes = prefix[..count]
-        .iter()
-        .take_while(|byte| **byte & 0xc0 == 0x80)
-        .count();
-    Ok(start + continuation_bytes as u64)
-}
-
 // Compact the tail in place using bounded memory, including archives left by
 // older versions. Reading always stays ahead of writing, so bytes are not lost.
 fn trim_archive(path: &Path, max: u64) -> io::Result<()> {
@@ -155,19 +138,17 @@ fn trim_archive(path: &Path, max: u64) -> io::Result<()> {
     if size <= max {
         return Ok(());
     }
-    let start = utf8_tail_start(&mut file, size, max)?;
-    let retained = size - start;
     let mut offset = 0;
     let mut buffer = [0; 32 * 1024];
-    while offset < retained {
-        let count = (retained - offset).min(buffer.len() as u64) as usize;
-        file.seek(SeekFrom::Start(start + offset))?;
+    while offset < max {
+        let count = (max - offset).min(buffer.len() as u64) as usize;
+        file.seek(SeekFrom::Start(size - max + offset))?;
         file.read_exact(&mut buffer[..count])?;
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(&buffer[..count])?;
         offset += count as u64;
     }
-    file.set_len(retained)
+    file.set_len(max)
 }
 
 impl Write for RollingLog {
@@ -221,22 +202,6 @@ mod tests {
         drop(blocker);
         log.write_all(b"x").unwrap();
         assert_eq!(std::fs::read(dir.current()).unwrap(), b"12345678x");
-    }
-
-    #[test]
-    fn an_archive_survives_when_the_current_log_disappears_during_rotation() {
-        let dir = Fixture::new();
-        let mut log = dir.open();
-        log.write_all(b"1234567890abcdef").unwrap();
-        std::fs::write(dir.previous(), b"previous failure").unwrap();
-        log.file.take();
-        std::fs::remove_file(dir.current()).unwrap();
-
-        log.rotate().unwrap();
-        log.write_all(b"new log").unwrap();
-
-        assert_eq!(std::fs::read(dir.previous()).unwrap(), b"previous failure");
-        assert_eq!(std::fs::read(dir.current()).unwrap(), b"new log");
     }
 
     #[test]
@@ -376,27 +341,6 @@ mod tests {
         log.write_all(b"new").unwrap();
         assert_eq!(std::fs::read(dir.previous()).unwrap(), b"1234567890abcdef");
         assert_eq!(std::fs::read(dir.current()).unwrap(), b"new");
-    }
-
-    #[test]
-    fn trimming_legacy_logs_keeps_localized_text_readable() {
-        let expected = "user=Hà Nội\n";
-        let oversized = format!("old🙂{expected}");
-        for remaining in 1..=3 {
-            let max = (expected.len() + remaining) as u64;
-            for oversized_current in [false, true] {
-                let dir = Fixture::new();
-                let path = if oversized_current {
-                    dir.current()
-                } else {
-                    dir.previous()
-                };
-                std::fs::write(&path, &oversized).unwrap();
-                let _log = RollingLog::open(&dir.current(), &dir.previous(), max).unwrap();
-                assert_eq!(std::fs::read_to_string(dir.previous()).unwrap(), expected);
-                assert!(std::fs::metadata(dir.previous()).unwrap().len() <= max);
-            }
-        }
     }
 
     #[test]

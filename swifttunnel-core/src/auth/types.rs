@@ -3,14 +3,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// Optional measurement metadata must never make an otherwise valid ticket
-// unusable. Only an explicit JSON true authorises collection.
-fn measurement_hint_default_off<'de, D: serde::Deserializer<'de>>(
-    input: D,
-) -> Result<bool, D::Error> {
-    Ok(serde_json::Value::deserialize(input)? == serde_json::Value::Bool(true))
-}
-
 // Debug must never become an accidental credential export. Serialization is
 // unchanged: authentication and encrypted storage still need the real values.
 macro_rules! redacted_debug {
@@ -267,9 +259,6 @@ pub struct RelayConnectionPolicy {
 /// Response from relay ticket bootstrap endpoint
 #[derive(Clone, Deserialize)]
 pub struct RelayTicketResponse {
-    /// Explicit measurement switch. An older server never starts reporting.
-    #[serde(default, deserialize_with = "measurement_hint_default_off")]
-    pub player_usage_enabled: bool,
     pub token: String,
     pub expires_at: String,
     pub auth_required: bool,
@@ -391,23 +380,6 @@ pub enum AuthError {
     /// Carries the server's `Retry-After` in seconds.
     #[error("Rate limited by the API; retry in {0}s")]
     RateLimited(u64),
-}
-
-impl AuthError {
-    pub(super) fn support_code(&self) -> &'static str {
-        match self {
-            Self::NotAuthenticated => "sign_in_required",
-            Self::NetworkError(_) => "network_failed",
-            Self::StorageError(_) => "storage_failed",
-            Self::ApiError(_) => "api_failed",
-            Self::InvalidCredentials => "invalid_credentials",
-            Self::RefreshTokenInvalid => "session_expired",
-            Self::UserBanned(_) => "account_blocked",
-            Self::UpdateRequired(_) => "update_required",
-            Self::FreeTierLimitReached(_) => "allowance_exhausted",
-            Self::RateLimited(_) => "rate_limited",
-        }
-    }
 }
 
 #[cfg(test)]
@@ -650,31 +622,11 @@ mod tests {
         }"#;
         let resp: RelayTicketResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.token, "abc.def");
-        assert!(!resp.player_usage_enabled);
         assert_eq!(resp.expires_at, "2026-02-17T12:34:56.000Z");
         assert!(!resp.auth_required);
         assert_eq!(resp.key_id, "relay-ed25519-2026-02");
         assert_eq!(resp.preflight_mode(), RelayPreflightMode::Legacy);
         assert_eq!(resp.queue_full_mode(), RelayQueueFullMode::Bypass);
-    }
-
-    #[test]
-    fn malformed_measurement_hints_do_not_reject_valid_tickets() {
-        for hint in [
-            serde_json::json!(null),
-            serde_json::json!("true"),
-            serde_json::json!(1),
-            serde_json::json!({}),
-            serde_json::json!(true),
-        ] {
-            let mut value = serde_json::json!({"token":"abc.def","expires_at":"2026-10-31T00:00:00Z","auth_required":true,"key_id":"fixture"});
-            value["player_usage_enabled"] = hint.clone();
-            let response: RelayTicketResponse = serde_json::from_value(value).unwrap();
-            assert_eq!(
-                response.player_usage_enabled,
-                hint == serde_json::json!(true)
-            );
-        }
     }
 
     #[test]

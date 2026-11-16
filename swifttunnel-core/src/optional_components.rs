@@ -237,40 +237,6 @@ pub fn sha256_of(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Reserve each directory from the root down before opening verified payloads.
-/// Opening only the payload leaves an earlier path-check/open gap; opening a
-/// leaf directory alone can still resolve through a replaced ancestor.
-#[cfg(windows)]
-fn pin_directory_tree(directory: &Path) -> Option<Vec<File>> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    use windows::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-    crate::roblox_native_launch::safe_path(directory).ok()?;
-    let mut guards = Vec::new();
-    for ancestor in directory.ancestors().collect::<Vec<_>>().into_iter().rev() {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | FILE_FLAG_OPEN_REPARSE_POINT.0)
-            .open(ancestor)
-            .ok()?;
-        let meta = file.metadata().ok()?;
-        if !meta.is_dir() || meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-            return None;
-        }
-        guards.push(file);
-    }
-    Some(guards)
-}
-
-#[cfg(not(windows))]
-fn pin_directory_tree(directory: &Path) -> Option<Vec<File>> {
-    crate::roblox_native_launch::safe_path(directory).ok()?;
-    Some(Vec::new())
-}
-
 fn verified_file(path: &Path, expected: &ComponentFile) -> Option<File> {
     // Refuse redirected paths and hold a read handle that denies modification
     // and deletion on Windows, including while the verified helper is running.
@@ -280,17 +246,10 @@ fn verified_file(path: &Path, expected: &ComponentFile) -> Option<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(1).custom_flags(0x0020_0000); // FILE_FLAG_OPEN_REPARSE_POINT
+        options.share_mode(1);
     }
     let mut file = options.open(path).ok()?;
     let meta = file.metadata().ok()?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if meta.file_attributes() & 0x400 != 0 {
-            return None;
-        }
-    }
     if !meta.is_file() || meta.len() != expected.size_bytes {
         return None;
     }
@@ -314,19 +273,21 @@ fn verified_file(path: &Path, expected: &ComponentFile) -> Option<File> {
     Some(file)
 }
 
-/// Verify the executable and sibling DLL/drivers, retaining file and path locks.
+/// Verify the executable and its sibling DLL/drivers, retaining their locks.
 pub(crate) fn verified_flat_directory(
     component: &OptionalComponent,
     directory: &Path,
 ) -> Option<Vec<File>> {
-    let mut guards = pin_directory_tree(directory)?;
-    for file in component.files {
-        guards.push(verified_file(
-            &directory.join(Path::new(file.relative_path).file_name()?),
-            file,
-        )?);
-    }
-    Some(guards)
+    component
+        .files
+        .iter()
+        .map(|file| {
+            verified_file(
+                &directory.join(Path::new(file.relative_path).file_name()?),
+                file,
+            )
+        })
+        .collect()
 }
 
 /// Whether an installed component is complete and unmodified.
@@ -639,58 +600,6 @@ mod tests {
         ));
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn helper_path_is_reserved_before_payload_verification_and_released_afterward() {
-        let dir = Fixture::new();
-        let payload = dir.0.join("payload");
-        let moved = dir.0.join("moved");
-        std::fs::create_dir(&payload).unwrap();
-        crate::roblox_native_launch::safe_path(&payload).unwrap();
-        // A metadata check alone reserves no path. No executable is opened here.
-        std::fs::rename(&payload, &moved).unwrap();
-        std::fs::rename(&moved, &payload).unwrap();
-        let guards = pin_directory_tree(&payload).unwrap();
-        assert!(std::fs::rename(&payload, &moved).is_err());
-        assert!(pin_directory_tree(&payload.join("missing")).is_none());
-        drop(guards);
-        std::fs::rename(&payload, &moved).unwrap();
-        std::fs::rename(&moved, &payload).unwrap();
-        assert!(pin_directory_tree(Path::new("relative")).is_none());
-        assert!(pin_directory_tree(&payload.join("../payload")).is_none());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn verified_helper_cannot_be_redirected_by_renaming_its_parent_directories() {
-        let dir = Fixture::new();
-        let container = dir.0.join("container");
-        let payload = container.join("payload");
-        std::fs::create_dir_all(&payload).unwrap();
-        std::fs::write(payload.join("helper.exe"), b"hello").unwrap();
-        let component = OptionalComponent {
-            id: "test",
-            version: "1",
-            files: &[TEST_FILE],
-        };
-        let verified = verified_flat_directory(&component, &payload).unwrap();
-        let mut movable = Vec::new();
-        for path in [&payload, &container] {
-            let moved = dir.0.join("renamed");
-            let result = std::fs::rename(path, &moved);
-            if result.is_ok() {
-                // Put our fixture back before reporting the security failure.
-                std::fs::rename(&moved, path).unwrap();
-                movable.push(path.clone());
-            }
-        }
-        drop(verified);
-        assert!(
-            movable.is_empty(),
-            "verified helper parents could be replaced before launch: {movable:?}"
-        );
-    }
-
     #[test]
     fn installed_payload_checks_hash_and_keeps_verified_files_immutable() {
         let dir = Fixture::new();
@@ -734,11 +643,7 @@ mod tests {
         assert!(verified_flat_directory(&component, &dir.0).is_none());
         std::fs::write(dir.0.join("helper.dll"), b"hello").unwrap();
         assert_eq!(
-            verified_flat_directory(&component, &dir.0)
-                .unwrap()
-                .iter()
-                .filter(|file| file.metadata().unwrap().is_file())
-                .count(),
+            verified_flat_directory(&component, &dir.0).unwrap().len(),
             2
         );
         std::fs::write(dir.0.join("helper.dll"), b"other").unwrap();

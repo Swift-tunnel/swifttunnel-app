@@ -63,7 +63,6 @@ impl NetworkTestControl {
 
     pub(super) async fn run<T>(
         &self,
-        operation: &'static str,
         id: String,
         work: impl Future<Output = Result<T, String>>,
     ) -> Result<T, String> {
@@ -83,18 +82,10 @@ impl NetworkTestControl {
         // Dropping Core's diagnostic futures aborts their owned load workers.
         // Keep the run lease until that future is dropped, never just until
         // the caller asks to cancel it.
-        let mut support = swifttunnel_core::support_log::Operation::start(operation, "measure");
         tokio::select! {
             biased;
-            _ = stop.changed() => {
-                support.complete("cancelled");
-                Err(STOPPED.into())
-            },
-            result = work => {
-                let value = support.check(result)?;
-                support.complete("measured");
-                Ok(value)
-            },
+            _ = stop.changed() => Err(STOPPED.into()),
+            result = work => result,
         }
     }
 }
@@ -121,7 +112,7 @@ mod tests {
         let worker_dropped = dropped.clone();
         let task = tokio::spawn(async move {
             worker_control
-                .run("fixture", "first".into(), async move {
+                .run("first".into(), async move {
                     let _work = Work(worker_dropped);
                     let _ = started.send(());
                     std::future::pending::<Result<(), String>>().await
@@ -131,19 +122,14 @@ mod tests {
         ready.await.unwrap();
         assert!(
             control
-                .run("fixture", "overlap".into(), async { Ok(()) })
+                .run("overlap".into(), async { Ok(()) })
                 .await
                 .is_err()
         );
         control.cancel("first").unwrap();
         assert_eq!(task.await.unwrap(), Err(STOPPED.into()));
         assert!(dropped.load(Ordering::SeqCst));
-        assert_eq!(
-            control
-                .run("fixture", "next".into(), async { Ok(42) })
-                .await,
-            Ok(42)
-        );
+        assert_eq!(control.run("next".into(), async { Ok(42) }).await, Ok(42));
     }
 
     #[tokio::test]
@@ -153,7 +139,7 @@ mod tests {
         let polled = AtomicBool::new(false);
         assert_eq!(
             control
-                .run("fixture", "old".into(), async {
+                .run("old".into(), async {
                     polled.store(true, Ordering::SeqCst);
                     Ok(())
                 })
@@ -163,7 +149,7 @@ mod tests {
         assert!(!polled.load(Ordering::SeqCst));
         assert_eq!(
             control
-                .run("fixture", "new".into(), async {
+                .run("new".into(), async {
                     control.cancel("old").unwrap();
                     tokio::task::yield_now().await;
                     Ok(7)
@@ -180,7 +166,7 @@ mod tests {
         let worker_control = control.clone();
         let task = tokio::spawn(async move {
             worker_control
-                .run("fixture", "first".into(), async {
+                .run("first".into(), async {
                     let _ = started.send(());
                     std::future::pending::<Result<(), String>>().await
                 })
@@ -189,12 +175,7 @@ mod tests {
         ready.await.unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            control
-                .run("fixture", "second".into(), async { Ok(()) })
-                .await,
-            Ok(())
-        );
+        assert_eq!(control.run("second".into(), async { Ok(()) }).await, Ok(()));
     }
 
     #[test]

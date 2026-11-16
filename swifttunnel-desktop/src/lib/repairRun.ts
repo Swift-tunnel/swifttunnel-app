@@ -15,31 +15,6 @@ export interface RepairRun {
   ranAt: number;
   items: RepairItemResult[];
   interrupted?: string;
-  /** Which problem the run was started for. Absent on older saved runs. */
-  scope?: string;
-}
-
-/** One plain sentence for the player. The per-check wording stays in details. */
-export function plainRunSummary(run: RepairRun): string {
-  const count = (...statuses: RepairStatus[]) =>
-    run.items.filter((item) => statuses.includes(item.status)).length;
-  const things = (n: number) => (n === 1 ? "1 thing" : `${n} things`);
-  const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-  const parts: string[] = [];
-  const fixed = count("fixed");
-  const failed = count("failed", "partial");
-  const skipped = count("unsupported", "not_checked");
-  if (run.interrupted) parts.push("Repair stopped before it finished.");
-  if (fixed) parts.push(`Fixed ${things(fixed)}.`);
-  if (failed) parts.push(capital(`${things(failed)} ${failed === 1 ? "needs" : "need"} attention.`));
-  if (count("needs_reboot")) parts.push("Restart Windows to finish.");
-  if (skipped) parts.push(capital(`${things(skipped)} could not be checked.`));
-  if (!parts.length) {
-    parts.push(run.items.length
-      ? `No problems found in the ${things(run.items.length)} checked.`
-      : "Nothing was checked.");
-  }
-  return parts.join(" ");
 }
 
 export function parseRepairRun(raw: string | null): RepairRun | null {
@@ -63,8 +38,7 @@ export function parseRepairRun(raw: string | null): RepairRun | null {
       items.push({ ...parsed.report, id: parsed.issue, label: item.label });
     }
     const interrupted = typeof run.interrupted === "string" ? run.interrupted.slice(0, 4096) : undefined;
-    const scope = typeof run.scope === "string" && run.scope ? run.scope.slice(0, 80) : undefined;
-    return { items, ranAt: run.ranAt, overall: interrupted ? "partial" : repairCompletion(items).status, ...(interrupted ? { interrupted } : {}), ...(scope ? { scope } : {}) };
+    return { items, ranAt: run.ranAt, overall: interrupted ? "partial" : repairCompletion(items).status, ...(interrupted ? { interrupted } : {}) };
   } catch {
     return null;
   }
@@ -85,7 +59,7 @@ export function summarizeRepairRun(run: RepairRun): string {
 
 export function formatRunForSupport(run: RepairRun): string {
   return [
-    `SwiftTunnel Repair (${run.scope ?? "all"})`,
+    "SwiftTunnel Repair (all)",
     `Overall: ${statusLabel(run.overall)}`,
     `Last run: ${new Date(run.ranAt).toLocaleString()}`,
     ...(run.interrupted ? [`Stopped: ${run.interrupted}`] : []),

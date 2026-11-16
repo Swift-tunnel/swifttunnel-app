@@ -34,7 +34,6 @@ pub enum CacheNote {
     LiteAttempt,
     SetupError,
     DriverInstall,
-    NetworkRoutes,
 }
 impl CacheNote {
     fn name(self) -> &'static str {
@@ -42,7 +41,6 @@ impl CacheNote {
             Self::LiteAttempt => "lite-last-attempt.txt",
             Self::SetupError => "setup-error.txt",
             Self::DriverInstall => "driver-install.log",
-            Self::NetworkRoutes => "ipv6-default-routes.json",
         }
     }
 }
@@ -76,8 +74,7 @@ fn append_note_bytes(previous: &str, message: &str) -> Vec<u8> {
 mod platform;
 #[cfg(windows)]
 pub use platform::{
-    windows_installer_path, InstallerCache, ProtectedInstaller, ProtectedRecoveryStore,
-    ProtectedWorkspace,
+    windows_installer_path, InstallerCache, ProtectedInstaller, ProtectedWorkspace,
 };
 
 #[cfg(test)]

@@ -1,7 +1,6 @@
 import { useEffect, useRef } from "react";
 
 import { useSettingsStore } from "../stores/settingsStore";
-import { isMainWindowHidden, subscribeMainWindowVisibility } from "./mainWindowVisibility";
 
 /**
  * Interval that slows right down while the window is not focused.
@@ -17,8 +16,10 @@ import { isMainWindowHidden, subscribeMainWindowVisibility } from "./mainWindowV
  * LiveGraph already throttles its own render loop on `document.hasFocus()`;
  * this is the same idea applied to the polling that feeds it.
  *
- * A visible but unfocused window slows down. A hidden window stops polling.
- * Returning to visibility or focus refreshes the display immediately.
+ * Unfocused ticks are not stopped altogether, only slowed: coming back to a
+ * window showing numbers from ten minutes ago looks broken. Returning to focus
+ * fires the callback immediately so the UI is current by the time it is
+ * looked at.
  *
  * Honours the `idle_when_unfocused` setting, so anyone watching the graph on a
  * second monitor can keep the fast rate.
@@ -41,10 +42,9 @@ export function pollPeriodMs(
 export function useFocusAwareInterval(
   callback: () => void,
   activeMs: number,
-  options?: { enabled?: boolean; idleMs?: number; pauseWhenHidden?: boolean },
+  options?: { enabled?: boolean; idleMs?: number },
 ) {
   const enabled = options?.enabled ?? true;
-  const pauseWhenHidden = options?.pauseWhenHidden ?? true;
   // 15s: slow enough to be negligible next to a game, frequent enough that a
   // glance at the window is never badly out of date.
   const idleMs = options?.idleMs ?? 15_000;
@@ -62,7 +62,6 @@ export function useFocusAwareInterval(
 
     let timer: number | undefined;
     let cancelled = false;
-    const paused = () => pauseWhenHidden && isMainWindowHidden();
 
     const period = () =>
       pollPeriodMs(activeMs, idleMs, {
@@ -71,34 +70,29 @@ export function useFocusAwareInterval(
       });
 
     const schedule = () => {
-      if (cancelled || paused()) return;
+      if (cancelled) return;
       timer = window.setTimeout(() => {
-        timer = undefined;
-        if (cancelled || paused()) return;
         savedCallback.current();
         schedule();
       }, period());
     };
 
-    const refresh = () => {
-      if (timer !== undefined) window.clearTimeout(timer);
-      timer = undefined;
-      if (cancelled || paused()) return;
+    const onFocus = () => {
+      if (cancelled) return;
+      // Catch up immediately rather than waiting out the idle period that was
+      // already in flight.
       savedCallback.current();
+      if (timer !== undefined) window.clearTimeout(timer);
       schedule();
     };
 
     schedule();
-    window.addEventListener("focus", refresh);
-    const stopWatchingVisibility = pauseWhenHidden
-      ? subscribeMainWindowVisibility(refresh)
-      : undefined;
+    window.addEventListener("focus", onFocus);
 
     return () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
-      window.removeEventListener("focus", refresh);
-      stopWatchingVisibility?.();
+      window.removeEventListener("focus", onFocus);
     };
-  }, [enabled, activeMs, idleMs, idleWhenUnfocused, pauseWhenHidden]);
+  }, [enabled, activeMs, idleMs, idleWhenUnfocused]);
 }

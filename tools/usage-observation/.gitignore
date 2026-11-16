@@ -1,5 +1,0 @@
-*.local
-*.json
-*.jsonl
-*.sqlite*
-__pycache__/

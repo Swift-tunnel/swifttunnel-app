@@ -183,15 +183,7 @@ impl Drop for RobloxWatcher {
     }
 }
 
-/// Literal every join line contains. `regex-lite` has no literal prefilter, so
-/// without this each log line paid for a full regex scan (~4us) per pattern.
-const JOIN_MARKER: &str = "! Joining game '";
-const UDMUX_MARKER: &str = "UDMUX Address = ";
-
 fn parse_join(line: &str) -> Option<(String, String, Ipv4Addr)> {
-    if !line.contains(JOIN_MARKER) {
-        return None;
-    }
     static JOIN: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let pattern = JOIN.get_or_init(|| {
         Regex::new(r"! Joining game '([0-9a-fA-F\-]+)' place (\d+) at (\d+\.\d+\.\d+\.\d+)")
@@ -355,8 +347,13 @@ fn watch_logs(
         if let Some(ref mut file) = current_file {
             // Catch an existing session for the library, but do not replay its
             // notifications or RAM-clean side effects when SwiftTunnel opens.
-            let fresh_join = file.position >= file.initial_end
-                || file.created_at.is_some_and(|created| created >= started);
+            let fresh_join = file
+                .reader
+                .stream_position()
+                .is_ok_and(|pos| pos >= file.initial_end)
+                || fs::metadata(&file.path)
+                    .and_then(|meta| meta.created())
+                    .is_ok_and(|created| created >= started);
             match file.read_new_lines() {
                 Ok(lines) => {
                     let was_reset = std::mem::take(&mut file.reset_observed);
@@ -377,15 +374,8 @@ fn watch_logs(
                         events.push(event);
                     }
                     for line in lines {
-                        // Try each pattern, skipping the regex unless its
-                        // fixed text is present (most lines match neither).
-                        for (marker, pattern) in [
-                            (JOIN_MARKER, joining_pattern),
-                            (UDMUX_MARKER, udmux_pattern),
-                        ] {
-                            if !line.contains(marker) {
-                                continue;
-                            }
+                        // Try each pattern
+                        for pattern in [joining_pattern, udmux_pattern] {
                             if let Some(caps) = pattern.captures(&line)
                                 && let Some(ip_match) = caps.get(1)
                                 && let Ok(ip) = ip_match.as_str().parse::<Ipv4Addr>()
@@ -521,8 +511,6 @@ struct TailedFile {
     pending_line: Vec<u8>,
     discarding_line: bool,
     initial_end: u64,
-    position: u64,
-    created_at: Option<std::time::SystemTime>,
     identity: Option<(u64, [u8; 16])>,
     reset_observed: bool,
     observed_len: u64,
@@ -552,7 +540,6 @@ impl TailedFile {
     fn new(path: &Path) -> std::io::Result<Self> {
         let file = File::open(path)?;
         let identity = file_identity(&file);
-        let created_at = file.metadata().and_then(|meta| meta.created()).ok();
         let mut reader = BufReader::new(file);
 
         // Read last 64KB to catch current session
@@ -564,7 +551,6 @@ impl TailedFile {
         // Skip first potentially incomplete line if not at file start
         let discarding_line =
             start_pos > 0 && !skip_partial_line(&mut reader, (file_size - start_pos) as usize)?;
-        let position = reader.stream_position()?;
 
         Ok(Self {
             reader,
@@ -572,8 +558,6 @@ impl TailedFile {
             pending_line: Vec::new(),
             discarding_line,
             initial_end: file_size,
-            position,
-            created_at,
             identity,
             reset_observed: false,
             observed_len: file_size,
@@ -597,26 +581,16 @@ impl TailedFile {
         // A log reused/truncated in place must not leave the old reader stuck
         // past EOF forever, or combine an old partial line with a new session.
         let length = self.reader.get_ref().metadata()?.len();
-        if length < self.observed_len || length < self.position {
+        if length < self.observed_len || length < self.reader.stream_position()? {
             self.reader.seek(SeekFrom::Start(0))?;
             self.pending_line.clear();
             self.discarding_line = false;
             self.initial_end = 0;
-            self.position = 0;
             self.reset_observed = true;
         }
         self.observed_len = length;
         let mut lines = Vec::new();
-        // The caller assigns one freshness value to a batch. Keep bytes
-        // already present at open separate from bytes appended afterward.
-        let batch_end = if self.position < self.initial_end {
-            length.min(self.initial_end)
-        } else {
-            length
-        };
-        let mut remaining = batch_end
-            .saturating_sub(self.position)
-            .min(MAX_POLL_BYTES as u64) as usize;
+        let mut remaining = MAX_POLL_BYTES;
         while remaining > 0 && lines.len() < MAX_POLL_LINES {
             let available = self.reader.fill_buf()?;
             let available = &available[..available.len().min(remaining)];
@@ -637,7 +611,6 @@ impl TailedFile {
                 }
             }
             self.reader.consume(count);
-            self.position += count as u64;
             remaining -= count;
             if complete {
                 if !self.discarding_line {
@@ -914,30 +887,6 @@ mod tests {
         writer.write_all(b"10, Port = 54321\n").unwrap();
         let lines = tail.read_new_lines().unwrap();
         assert_eq!(lines, ["UDMUX Address = 198.51.100.10, Port = 54321"]);
-        drop(writer);
-        drop(tail);
-        fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn startup_history_does_not_absorb_a_join_appended_after_open() {
-        use std::io::Write;
-
-        let (path, mut tail) = tail_fixture(b"prior session log\n");
-        let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        writer
-            .write_all(b"! Joining game '550e8400-e29b-41d4-a716-446655440000' place 1818 at 10.0.0.1\n[FLog::Network] serverId: 128.116.47.33\n")
-            .unwrap();
-
-        assert!(tail.position < tail.initial_end);
-        assert_eq!(tail.read_new_lines().unwrap(), ["prior session log"]);
-        let fresh = tail.position >= tail.initial_end;
-        let lines = tail.read_new_lines().unwrap();
-        let events = JoinTracker::default().feed(&lines, fresh, RobloxClient::Standard);
-        assert!(
-            matches!(&events[..], [RobloxEvent::GameJoined { place_id, fresh_join: true, .. }] if place_id == "1818")
-        );
-
         drop(writer);
         drop(tail);
         fs::remove_file(path).unwrap();

@@ -135,7 +135,6 @@ async fn run_download_test(
 
     let counter = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
-    let rejected_status = Arc::new(AtomicU32::new(0));
 
     // JoinSet aborts its workers if this phase is cancelled or unwinds.
     let mut workers = tokio::task::JoinSet::new();
@@ -144,9 +143,8 @@ async fn run_download_test(
         let url = url.to_owned();
         let counter = counter.clone();
         let stop = stop.clone();
-        let rejected_status = rejected_status.clone();
         workers.spawn(async move {
-            download_worker(client, url, counter, stop, rejected_status).await;
+            download_worker(client, url, counter, stop).await;
         });
     }
 
@@ -154,7 +152,6 @@ async fn run_download_test(
     let warmup_deadline = Instant::now() + warmup;
     while Instant::now() < warmup_deadline {
         tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
-        check_response(&rejected_status, &mut workers, "download").await?;
         let _ = progress_tx.send(SpeedTestProgress::DownloadProgress(0.0, 0.0));
     }
 
@@ -165,7 +162,6 @@ async fn run_download_test(
 
     while Instant::now() < measure_deadline {
         tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
-        check_response(&rejected_status, &mut workers, "download").await?;
         let bytes = counter.load(Ordering::Relaxed).saturating_sub(start_bytes);
         let elapsed = measure_start.elapsed().as_secs_f32();
         let mbps = if elapsed > 0.0 {
@@ -186,7 +182,6 @@ async fn run_download_test(
     // A stop flag cannot wake a worker awaiting HTTP headers or another chunk.
     // Measurement is finished, so cancel outstanding I/O and join the workers.
     workers.shutdown().await;
-    check_response(&rejected_status, &mut workers, "download").await?;
 
     if total_bytes == 0 {
         return Err("No data received during measurement window".to_string());
@@ -200,15 +195,11 @@ async fn download_worker(
     url: String,
     counter: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
-    rejected_status: Arc<AtomicU32>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         let resp = match client.get(&url).send().await {
             Ok(r) if r.status().is_success() => r,
-            Ok(response) => {
-                rejected_status.store(u32::from(response.status().as_u16()), Ordering::Relaxed);
-                return;
-            }
+            Ok(_) => return,
             Err(_) => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
@@ -269,7 +260,7 @@ async fn run_upload_test(
     let warmup_deadline = Instant::now() + warmup;
     while Instant::now() < warmup_deadline {
         tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
-        check_response(&rejected_status, &mut workers, "upload").await?;
+        check_upload_response(&rejected_status, &mut workers).await?;
         let _ = progress_tx.send(SpeedTestProgress::UploadProgress(0.0, 0.0));
     }
 
@@ -280,7 +271,7 @@ async fn run_upload_test(
 
     while Instant::now() < measure_deadline {
         tokio::time::sleep(Duration::from_millis(PROGRESS_INTERVAL_MS)).await;
-        check_response(&rejected_status, &mut workers, "upload").await?;
+        check_upload_response(&rejected_status, &mut workers).await?;
         let bytes = counter.load(Ordering::Relaxed).saturating_sub(start_bytes);
         let elapsed = measure_start.elapsed().as_secs_f32();
         let mbps = if elapsed > 0.0 {
@@ -298,7 +289,7 @@ async fn run_upload_test(
 
     stop.store(true, Ordering::Relaxed);
     workers.shutdown().await;
-    check_response(&rejected_status, &mut workers, "upload").await?;
+    check_upload_response(&rejected_status, &mut workers).await?;
 
     if total_bytes == 0 {
         return Err("No data sent during measurement window".to_string());
@@ -307,16 +298,15 @@ async fn run_upload_test(
     Ok(mbps)
 }
 
-async fn check_response(
+async fn check_upload_response(
     rejected_status: &AtomicU32,
     workers: &mut tokio::task::JoinSet<()>,
-    phase: &str,
 ) -> Result<(), String> {
     let status = rejected_status.load(Ordering::Relaxed);
     if status != 0 {
         workers.shutdown().await;
         return Err(format!(
-            "The speed-test service rejected the {phase} (HTTP {status}). Try again later."
+            "The speed-test service rejected the upload (HTTP {status}). Try again later."
         ));
     }
     Ok(())
@@ -403,7 +393,6 @@ mod tests {
             url,
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicU32::new(0)),
         ));
         let next = tokio::time::timeout(Duration::from_secs(3), server).await;
         worker.abort();
@@ -430,7 +419,7 @@ mod tests {
         .await;
     }
 
-    async fn rejected_phase_is_not_a_speed_result(status: u16, upload: bool) {
+    async fn rejected_upload_is_not_a_speed_result(status: u16) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -442,8 +431,8 @@ mod tests {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut finish_rx = finish_rx.clone();
                 responses.spawn(async move {
-                    // Submitted upload bytes must not make a rejected test
-                    // succeed. Downloads must retain the rejection reason too.
+                    // Receive some of the upload before rejecting it. Those
+                    // submitted bytes must not make a rejected test succeed.
                     let mut buffer = [0; 4096];
                     assert!(socket.read(&mut buffer).await.unwrap() > 0);
                     socket
@@ -462,52 +451,31 @@ mod tests {
         });
         let client = Client::builder().no_proxy().http1_only().build().unwrap();
         let (tx, _rx) = std::sync::mpsc::channel();
-        let result = if upload {
-            run_upload_test(
-                &client,
-                &tx,
-                &url,
-                Duration::ZERO,
-                Duration::from_millis(300),
-            )
-            .await
-        } else {
-            // A rejection should finish promptly rather than consuming the
-            // full ordinary measurement window with no transfers running.
-            tokio::time::timeout(
-                Duration::from_secs(2),
-                run_download_test(&client, &tx, &url, Duration::ZERO, Duration::from_secs(8)),
-            )
-            .await
-            .expect("rejected download waited for the full measurement window")
-        };
+        let result = run_upload_test(
+            &client,
+            &tx,
+            &url,
+            Duration::ZERO,
+            Duration::from_millis(300),
+        )
+        .await;
         let _ = finished.send(true);
         tokio::time::timeout(Duration::from_secs(3), server)
             .await
             .unwrap()
             .unwrap();
-        let error = result.expect_err("a rejected transfer must not report a speed");
+        let error = result.expect_err("a rejected upload must not report a speed");
         assert!(error.contains(&format!("HTTP {status}")), "{error}");
     }
 
     #[tokio::test]
     async fn speed_rejects_forbidden_upload_instead_of_reporting_sent_bytes() {
-        rejected_phase_is_not_a_speed_result(403, true).await;
+        rejected_upload_is_not_a_speed_result(403).await;
     }
 
     #[tokio::test]
     async fn speed_rejects_rate_limited_upload_instead_of_retrying() {
-        rejected_phase_is_not_a_speed_result(429, true).await;
-    }
-
-    #[tokio::test]
-    async fn speed_reports_forbidden_download_without_waiting_for_the_window() {
-        rejected_phase_is_not_a_speed_result(403, false).await;
-    }
-
-    #[tokio::test]
-    async fn speed_reports_rate_limited_download_without_retrying() {
-        rejected_phase_is_not_a_speed_result(429, false).await;
+        rejected_upload_is_not_a_speed_result(429).await;
     }
 
     async fn stalled_phase_releases_workers(upload: bool, cancel: bool) {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const h = vi.hoisted(() => ({ listen: vi.fn(), handle: vi.fn(), report: vi.fn() }));
+const h = vi.hoisted(() => ({ listen: vi.fn(), handle: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: h.listen }));
 vi.mock("../stores/vpnStore", () => ({ useVpnStore: { getState: () => ({ handleStateEvent: h.handle }) } }));
 vi.mock("../stores/authStore", () => ({ useAuthStore: { getState: () => ({ handleStateEvent: h.handle }) } }));
@@ -8,7 +8,6 @@ vi.mock("../stores/boostStore", () => ({ useBoostStore: { getState: () => ({ han
 vi.mock("../stores/serverStore", () => ({ useServerStore: { getState: () => ({ fetchList: h.handle }) } }));
 vi.mock("../stores/updaterStore", () => ({ useUpdaterStore: { getState: () => ({ handleUpdaterProgress: h.handle, handleUpdaterDone: h.handle }) } }));
 vi.mock("../stores/toastStore", () => ({ useToastStore: { getState: () => ({ addToast: h.handle }) } }));
-vi.mock("./errors", () => ({ reportError: h.report }));
 
 beforeEach(() => vi.resetModules());
 
@@ -25,7 +24,7 @@ describe("native listener lifecycle", () => {
     finish(stop);
     await init;
     expect(stop).toHaveBeenCalledTimes(1);
-    expect(h.listen).toHaveBeenCalledTimes(7);
+    expect(h.listen).toHaveBeenCalledTimes(1);
   });
 
   it("keeps only the newer registration set when starts overlap", async () => {
@@ -46,9 +45,8 @@ describe("native listener lifecycle", () => {
     finish(oldStop);
     await older;
     expect(oldStop).toHaveBeenCalledTimes(1);
-    expect(currentStops).toHaveLength(13);
-    expect(currentStops.slice(0, 6).every((stop) => stop.mock.calls.length === 1)).toBe(true);
-    expect(currentStops.slice(6).every((stop) => stop.mock.calls.length === 0)).toBe(true);
+    expect(currentStops).toHaveLength(7);
+    expect(currentStops.every((stop) => stop.mock.calls.length === 0)).toBe(true);
     await events.cleanupEventListeners();
     expect(currentStops.every((stop) => stop.mock.calls.length === 1)).toBe(true);
   });
@@ -63,26 +61,12 @@ describe("native listener lifecycle", () => {
     expect(h.handle).not.toHaveBeenCalled();
   });
 
-  it("keeps VPN and sign-in listeners when an optional registration fails or stalls", async () => {
+  it("releases earlier registrations when a later registration fails", async () => {
     const stop = vi.fn();
-    const lateStop = vi.fn();
-    const failure = new Error("registration failed");
-    let finish!: (stop: () => void) => void;
-    h.listen.mockImplementation(async (name) => {
-      if (name === "ram-clean-progress") throw failure;
-      if (name === "updater://progress") return new Promise(resolve => { finish = resolve; });
-      return stop;
-    });
+    h.listen.mockResolvedValueOnce(stop).mockRejectedValueOnce(new Error("registration failed"));
     const events = await import("./events");
-    await events.initEventListeners();
-    expect(stop).not.toHaveBeenCalled();
-    expect(h.report).toHaveBeenCalledWith(expect.stringContaining("ram-clean-progress"), failure, expect.anything());
-    h.listen.mock.calls[0][1]({ payload: { state: "connected" } });
-    h.listen.mock.calls[1][1]({ payload: { state: "logged_in" } });
-    expect(h.handle).toHaveBeenCalledTimes(2);
-    await events.cleanupEventListeners();
-    finish(lateStop);
-    await vi.waitFor(() => expect(lateStop).toHaveBeenCalledOnce());
+    await expect(events.initEventListeners()).rejects.toThrow("registration failed");
+    expect(stop).toHaveBeenCalledTimes(1);
   });
 
   it("does not tear down the newer set when an older registration fails", async () => {
@@ -96,13 +80,13 @@ describe("native listener lifecycle", () => {
     });
     const events = await import("./events");
     const older = events.initEventListeners();
+    const failure = expect(older).rejects.toThrow("old failure");
     await events.initEventListeners();
     fail(new Error("old failure"));
-    await older;
-    expect(stops).toHaveLength(13);
-    expect(stops.slice(6).every((stop) => stop.mock.calls.length === 0)).toBe(true);
-    expect(h.report).not.toHaveBeenCalled();
-    h.listen.mock.calls[7][1]({ payload: { state: "connected" } });
+    await failure;
+    expect(stops).toHaveLength(7);
+    expect(stops.every((stop) => stop.mock.calls.length === 0)).toBe(true);
+    h.listen.mock.calls[1][1]({ payload: { state: "connected" } });
     expect(h.handle).toHaveBeenCalledOnce();
     await events.cleanupEventListeners();
   });

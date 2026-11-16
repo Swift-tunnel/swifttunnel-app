@@ -334,18 +334,6 @@ impl GamesState {
         self.status = None;
     }
 
-    fn log_launch_progress(&self, event: &'static str, now: std::time::Instant) {
-        if let Some(started) = self.launch_started {
-            log::info!(
-                "[support] op=game_detection pid={} launch={} event={} elapsed_ms={}",
-                std::process::id(),
-                self.window_placement_generation,
-                event,
-                now.saturating_duration_since(started).as_millis(),
-            );
-        }
-    }
-
     pub fn player_opened(&mut self) -> bool {
         if self.launch_started.is_none() || self.launch_player_seen && !self.launch_updating {
             return false;
@@ -356,7 +344,7 @@ impl GamesState {
         self.launch_gone_since = None;
         self.warning = None;
         self.status = Some("Roblox is open.".into());
-        self.log_launch_progress("player_opened", std::time::Instant::now());
+        log::info!("Roblox launch: player opened; waiting for confirmed game metadata");
         true
     }
 
@@ -376,7 +364,6 @@ impl GamesState {
             }
             self.launch_updating = true;
             self.status = Some(message.into());
-            self.log_launch_progress("roblox_updating", now);
             return true;
         }
         if self.launch_updating {
@@ -389,7 +376,6 @@ impl GamesState {
             self.launch_gone_since = None;
             self.launch_resumed = Some(now);
             self.status = Some("Roblox is opening.".into());
-            self.log_launch_progress("waiting_after_update", now);
             return true;
         }
         if self.launch_player_seen {
@@ -397,27 +383,17 @@ impl GamesState {
             if now.saturating_duration_since(*gone) < std::time::Duration::from_secs(3) {
                 return false;
             }
-            self.log_launch_progress("player_closed_before_join", now);
             self.clear_launch();
             self.cancel_window_placement();
             self.warning = None;
             self.left_confirmed = true;
+            log::info!("Roblox launch: player closed before game metadata was confirmed");
             return true;
         }
         if self.native_launch_generation.is_none()
             && now.saturating_duration_since(self.launch_resumed.unwrap_or(started))
                 > std::time::Duration::from_secs(60)
         {
-            self.log_launch_progress("player_start_timeout", now);
-            // What the watcher saw, so "Roblox opened but SwiftTunnel missed
-            // it" can be told apart from "Roblox never started".
-            log::warn!(
-                "[support] op=game_detection pid={} launch={} event=timeout_evidence windows_accepted_start={} player_process_seen=false updater_seen=false game_traffic_seen={} observed=windows_accepted_start,player_process_seen,updater_seen,game_traffic_seen inferred=player_start_timeout",
-                std::process::id(),
-                self.window_placement_generation,
-                self.launch_resumed.is_some(),
-                self.game_traffic_seen,
-            );
             self.clear_launch();
             self.cancel_window_placement();
             self.left_confirmed = true;
@@ -448,7 +424,6 @@ impl GamesState {
     }
 
     pub fn record_join(&mut self, current: CurrentGame) {
-        self.log_launch_progress("game_confirmed", std::time::Instant::now());
         self.status = None;
         let at = chrono::Utc::now().timestamp().max(0) as u64;
         if let Err(error) = self

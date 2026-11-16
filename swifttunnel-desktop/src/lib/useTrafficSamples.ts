@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useVpnStore } from "../stores/vpnStore";
 import { vpnGetThroughput } from "./commands";
 import { useLiveUpdates } from "./useLiveUpdates";
-import { isMainWindowHidden, subscribeMainWindowVisibility } from "./mainWindowVisibility";
 import { MAX_SAMPLES, SAMPLE_INTERVAL_MS, type DataSample } from "../components/connect/LiveGraph";
 
 /** Own the fast graph updates below the connection controls and relay picker. */
@@ -12,21 +11,17 @@ export function useTrafficSamples(showGraph: boolean): DataSample[] {
   const live = useLiveUpdates();
   const liveRef = useRef(live);
   liveRef.current = live;
-  const shouldSample = showGraph || live;
 
   useEffect(() => {
-    if (!shouldSample) return;
     let cancelled = false;
     let inFlight = false;
-    let visibilityRevision = 0;
-    let timer: number | undefined;
     let previous: { up: number; down: number; at: number } | null = null;
     let session: { region: string | null; connectedAt: number } | null = null;
     samples.current = [];
     setHistory([]);
 
     const sample = async () => {
-      if (cancelled || inFlight || isMainWindowHidden()) return;
+      if (cancelled || inFlight) return;
       // A hidden graph needs no history. Keep only its visible transfer totals
       // current, and leave the background window idle.
       if (!showGraph && !liveRef.current) return;
@@ -44,7 +39,6 @@ export function useTrafficSamples(showGraph: boolean): DataSample[] {
         }
       }
       inFlight = true;
-      const revision = visibilityRevision;
       try {
         let totals: { up: number; down: number } | null = null;
         if (liveRef.current) {
@@ -57,7 +51,7 @@ export function useTrafficSamples(showGraph: boolean): DataSample[] {
           const stats = await vpnGetThroughput();
           if (stats) totals = { up: stats.bytes_up, down: stats.bytes_down };
         }
-        if (cancelled || isMainWindowHidden() || revision !== visibilityRevision || !totals || !showGraph) return;
+        if (cancelled || !totals || !showGraph) return;
         // Counter magnitudes cannot identify a reconnect. A new tunnel may
         // already have larger totals, and a slow read may cross the switch.
         const current = useVpnStore.getState();
@@ -82,41 +76,17 @@ export function useTrafficSamples(showGraph: boolean): DataSample[] {
         inFlight = false;
       }
     };
-    const startSampling = () => {
-      void sample();
-      timer = window.setInterval(() => void sample(), showGraph ? SAMPLE_INTERVAL_MS : 1000);
-    };
-    const syncVisibility = () => {
-      if (isMainWindowHidden()) {
-        if (timer !== undefined) window.clearInterval(timer);
-        timer = undefined;
-        visibilityRevision += 1;
-        // The graph uses evenly spaced samples. Start a new baseline after
-        // a hidden period so it never paints the gap as a half-second sample.
-        previous = null;
-        samples.current = [];
-        return;
-      }
-      if (cancelled || timer !== undefined) return;
-      if (showGraph && liveRef.current) setHistory(samples.current);
-      startSampling();
-    };
-    const stopWatchingVisibility = subscribeMainWindowVisibility(syncVisibility);
-    if (!isMainWindowHidden()) startSampling();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearInterval(timer);
-      stopWatchingVisibility();
-    };
-  }, [showGraph, shouldSample]);
+    void sample();
+    const timer = window.setInterval(() => void sample(), showGraph ? SAMPLE_INTERVAL_MS : 1000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [showGraph]);
 
   useEffect(() => {
-    if (!live || isMainWindowHidden()) return;
+    if (!live) return;
     setHistory(samples.current);
-    // An enabled graph sampled without updating the background UI. With the
-    // graph off, the sampler restarts and takes its own immediate reading.
-    if (showGraph) void useVpnStore.getState().fetchThroughput();
-  }, [live, showGraph]);
+    // Totals must also catch up when the graph is hidden.
+    void useVpnStore.getState().fetchThroughput();
+  }, [live]);
 
   return history;
 }

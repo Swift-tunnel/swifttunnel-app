@@ -169,30 +169,9 @@ struct PersistentSystemSnapshot {
 
 const SYSTEM_SNAPSHOT_FILE: &str = "system_optimizer_recovery_v2.json";
 const LEGACY_SYSTEM_SNAPSHOT_FILE: &str = "system_optimizer_snapshots.json";
-const MAX_SYSTEM_SNAPSHOT_BYTES: usize = 256 * 1024;
 
 fn system_snapshot_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("SwiftTunnel").join(SYSTEM_SNAPSHOT_FILE))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TimerResolutionRequest {
-    Native,
-    Multimedia,
-}
-
-fn release_timer_request_with(
-    request: &mut Option<TimerResolutionRequest>,
-    native: impl FnOnce() -> Result<()>,
-    multimedia: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    match *request {
-        Some(TimerResolutionRequest::Native) => native()?,
-        Some(TimerResolutionRequest::Multimedia) => multimedia()?,
-        None => return Ok(()),
-    }
-    *request = None;
-    Ok(())
 }
 
 pub struct SystemOptimizer {
@@ -200,7 +179,7 @@ pub struct SystemOptimizer {
     original_affinity: Option<usize>,
     priority_identity: Option<ProcessIdentity>,
     affinity_identity: Option<ProcessIdentity>,
-    timer_resolution_request: Option<TimerResolutionRequest>,
+    timer_resolution_active: bool,
     global_timer_snapshot: Option<Option<u32>>,
     original_power_plan_guid: Option<Option<String>>,
     game_bar_snapshot: Option<Option<u32>>,
@@ -238,7 +217,7 @@ impl SystemOptimizer {
             original_affinity: None,
             priority_identity: None,
             affinity_identity: None,
-            timer_resolution_request: None,
+            timer_resolution_active: false,
             global_timer_snapshot: None,
             original_power_plan_guid: None,
             game_bar_snapshot: None,
@@ -429,7 +408,7 @@ impl SystemOptimizer {
     fn read_persistent_snapshot(path: &Path) -> Result<Option<PersistentSystemSnapshot>> {
         let content = match crate::utils::read_text_file_bounded(
             path,
-            MAX_SYSTEM_SNAPSHOT_BYTES,
+            256 * 1024,
             "System optimizer recovery",
         ) {
             Ok(content) => content,
@@ -515,16 +494,11 @@ impl SystemOptimizer {
 
     fn write_persistent_snapshot(path: &Path, snapshot: &PersistentSystemSnapshot) -> Result<()> {
         use std::io::Write;
-        let bytes = serde_json::to_vec_pretty(snapshot)?;
-        if bytes.len() > MAX_SYSTEM_SNAPSHOT_BYTES {
-            return Err(anyhow::anyhow!(
-                "System recovery records are too large to save safely. Existing records were kept."
-            ));
-        }
         fs::create_dir_all(
             path.parent()
                 .ok_or_else(|| anyhow::anyhow!("Invalid system recovery path"))?,
         )?;
+        let bytes = serde_json::to_vec_pretty(snapshot)?;
         let temp = path.with_extension(format!(
             "{}.{:032x}.tmp",
             std::process::id(),
@@ -568,6 +542,19 @@ impl SystemOptimizer {
         Ok(())
     }
 
+    fn parse_guid_from_output(output: &str) -> Option<String> {
+        output
+            .split(|c: char| !c.is_ascii_hexdigit() && c != '-')
+            .find(|token| token.len() == 36 && token.matches('-').count() == 4)
+            .map(|token| token.to_ascii_lowercase())
+    }
+
+    fn output_contains_guid(output: &str, guid: &str) -> bool {
+        output
+            .split(|c: char| !c.is_ascii_hexdigit() && c != '-')
+            .any(|token| token.len() == 36 && token.eq_ignore_ascii_case(guid))
+    }
+
     fn power_plan_guid(plan: &PowerPlan) -> &'static str {
         match plan {
             PowerPlan::Balanced => BALANCED_POWER_PLAN_GUID,
@@ -578,68 +565,35 @@ impl SystemOptimizer {
     }
 
     pub(crate) fn active_power_plan_guid() -> Option<String> {
-        use windows::Win32::{
-            Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree},
-            System::Power::PowerGetActiveScheme,
-        };
-        let mut allocated = std::ptr::null_mut();
-        let status = unsafe { PowerGetActiveScheme(None, &mut allocated) };
-        let guid = (status == ERROR_SUCCESS && !allocated.is_null()).then(|| unsafe { *allocated });
-        // PowerGetActiveScheme allocates with LocalAlloc, not the Rust allocator.
-        if !allocated.is_null() {
-            unsafe {
-                let _ = LocalFree(Some(HLOCAL(allocated.cast())));
-            }
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "powercfg",
+            &["/GETACTIVESCHEME"],
+            std::time::Duration::from_secs(15),
+        )
+        .ok()?;
+
+        if !output.status.success() {
+            return None;
         }
-        guid.map(|guid| format!("{guid:?}").to_ascii_lowercase())
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        Self::parse_guid_from_output(&output_str)
     }
 
     fn is_power_plan_installed(guid: &str) -> Option<bool> {
-        let guid = windows::core::GUID::try_from(guid).ok()?;
-        Self::power_scheme_present_with(guid, Self::read_power_scheme_at)
-    }
+        let output = crate::utils::run_hidden_command_output_with_timeout(
+            "powercfg",
+            &["/list"],
+            std::time::Duration::from_secs(15),
+        )
+        .ok()?;
 
-    fn read_power_scheme_at(index: u32) -> std::io::Result<Option<windows::core::GUID>> {
-        use windows::Win32::{
-            Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS},
-            System::Power::{ACCESS_SCHEME, PowerEnumerate},
-        };
-        let mut guid = windows::core::GUID::zeroed();
-        let mut size = std::mem::size_of_val(&guid) as u32;
-        let status = unsafe {
-            PowerEnumerate(
-                None,
-                None,
-                None,
-                ACCESS_SCHEME,
-                index,
-                Some((&mut guid as *mut windows::core::GUID).cast()),
-                &mut size,
-            )
-        };
-        match status {
-            ERROR_NO_MORE_ITEMS => Ok(None),
-            ERROR_SUCCESS if size as usize == std::mem::size_of_val(&guid) => Ok(Some(guid)),
-            ERROR_SUCCESS => Err(std::io::Error::other(
-                "Windows returned an invalid power scheme identifier",
-            )),
-            _ => Err(std::io::Error::from_raw_os_error(status.0 as i32)),
+        if !output.status.success() {
+            return None;
         }
-    }
 
-    fn power_scheme_present_with(
-        target: windows::core::GUID,
-        mut read: impl FnMut(u32) -> std::io::Result<Option<windows::core::GUID>>,
-    ) -> Option<bool> {
-        for index in 0..128 {
-            match read(index).ok()? {
-                Some(guid) if guid == target => return Some(true),
-                None => return Some(false),
-                _ => {}
-            }
-        }
-        // A failed or incomplete enumeration is not proof that a scheme is absent.
-        None
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        Some(Self::output_contains_guid(&output_str, guid))
     }
 
     fn set_active_power_plan_guid(guid: &str) -> bool {
@@ -858,17 +812,6 @@ impl SystemOptimizer {
         }
     }
 
-    /// `Balanced` is the default and what the config holds whenever the user has
-    /// not picked a plan, so it means "keep the user's own plan" rather than
-    /// "switch to Windows Balanced". `restore()` runs before every apply and
-    /// already puts the user's original plan back. Activating Balanced here
-    /// used to move players off High Performance, Ultimate or an OEM gaming
-    /// plan on any Apply, even one that only changed a network toggle, which
-    /// allows core parking and slower clock ramp-up and lowers Roblox FPS.
-    fn power_plan_switch_requested(plan: PowerPlan) -> bool {
-        !matches!(plan, PowerPlan::Balanced)
-    }
-
     fn fallback_power_plan_config(config: &SystemOptimizationConfig) -> PowerPlan {
         Self::active_power_plan_guid()
             .as_deref()
@@ -952,12 +895,8 @@ impl SystemOptimizer {
                 )?,
             });
         }
-        // Balanced means keep the user's plan. Recording it despite making no
-        // switch would let a later restore overwrite an unrelated Windows edit.
-        // Keep any earlier owned original until its actual recovery completes.
-        if Self::power_plan_switch_requested(config.power_plan)
-            && self.original_power_plan_guid.is_none()
-        {
+        // Even Balanced changes the active plan. Capture it before any switch.
+        if self.original_power_plan_guid.is_none() {
             self.original_power_plan_guid =
                 Some(Some(Self::active_power_plan_guid().ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1125,9 +1064,7 @@ impl SystemOptimizer {
             );
         }
 
-        if Self::power_plan_switch_requested(config.power_plan)
-            && let Err(e) = self.set_power_plan(&config.power_plan)
-        {
+        if let Err(e) = self.set_power_plan(&config.power_plan) {
             Self::record_failure(
                 &mut applied_config,
                 &mut warnings,
@@ -1325,15 +1262,17 @@ impl SystemOptimizer {
     /// The kernel reads that key only at boot, so the global half of this
     /// boost takes effect after the next reboot.
     pub fn set_timer_resolution(&mut self, enable: bool) -> Result<()> {
-        if enable && self.timer_resolution_request.is_none() {
+        if enable && !self.timer_resolution_active {
             info!("Setting timer resolution to 0.5ms");
+            let mut timer_applied = false;
             unsafe {
                 // Try NtSetTimerResolution for 0.5ms (5000 * 100ns = 0.5ms)
                 let mut current: u32 = 0;
                 let status = NtSetTimerResolution(5000, 1, &mut current);
                 if status == 0 {
                     // STATUS_SUCCESS
-                    self.timer_resolution_request = Some(TimerResolutionRequest::Native);
+                    self.timer_resolution_active = true;
+                    timer_applied = true;
                     info!(
                         "Timer resolution set to 0.5ms via NtSetTimerResolution (actual: {:.3}ms)",
                         current as f64 / 10000.0
@@ -1346,7 +1285,8 @@ impl SystemOptimizer {
                     );
                     let result = timeBeginPeriod(1);
                     if result == 0 {
-                        self.timer_resolution_request = Some(TimerResolutionRequest::Multimedia);
+                        self.timer_resolution_active = true;
+                        timer_applied = true;
                         info!("Timer resolution set to 1ms via timeBeginPeriod (fallback)");
                     } else {
                         warn!("Failed to set timer resolution: error code {}", result);
@@ -1354,63 +1294,41 @@ impl SystemOptimizer {
                 }
             }
 
-            if self.timer_resolution_request.is_none() {
+            if !timer_applied {
                 return Err(anyhow::anyhow!(
                     "NtSetTimerResolution and timeBeginPeriod both failed"
                 ));
             }
-        }
 
-        if enable {
             // Make sure the system-wide override is on so the per-process
             // resolution we just set is honored for other processes too on
             // Win11 22H2+. Snapshot the prior value so restore() can revert.
             if let Err(e) = self.enable_global_timer_resolution_override() {
-                if let Err(cleanup) = self.clear_timer_resolution_request() {
-                    warn!("Timer request rollback remains pending after apply failure: {cleanup}");
-                }
-                if let Err(cleanup) = self.restore_global_timer_resolution_override() {
-                    warn!(
-                        "Global timer override rollback remains pending after apply failure: {cleanup}"
-                    );
-                }
+                self.clear_timer_resolution_request();
+                let _ = self.restore_global_timer_resolution_override();
                 return Err(e);
             }
-        } else {
-            if self.timer_resolution_request.is_some() {
-                info!("Restoring default timer resolution");
-            }
-            self.clear_timer_resolution_request()?;
+        } else if !enable && self.timer_resolution_active {
+            info!("Restoring default timer resolution");
+            self.clear_timer_resolution_request();
             self.restore_global_timer_resolution_override()?;
         }
         Ok(())
     }
 
-    fn clear_timer_resolution_request(&mut self) -> Result<()> {
-        release_timer_request_with(
-            &mut self.timer_resolution_request,
-            || {
-                let mut current = 0;
-                let status = unsafe { NtSetTimerResolution(5000, 0, &mut current) };
-                if status == 0 {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!(
-                        "Could not release the native timer request (status 0x{status:08X})"
-                    ))
-                }
-            },
-            || {
-                let status = unsafe { timeEndPeriod(1) };
-                if status == 0 {
-                    Ok(())
-                } else {
-                    Err(anyhow::anyhow!(
-                        "Could not release the multimedia timer request (code {status})"
-                    ))
-                }
-            },
-        )
+    fn clear_timer_resolution_request(&mut self) {
+        if !self.timer_resolution_active {
+            return;
+        }
+
+        unsafe {
+            // Undo NtSetTimerResolution
+            let mut current: u32 = 0;
+            let _ = NtSetTimerResolution(5000, 0, &mut current);
+            // Also undo timeBeginPeriod in case fallback was used
+            let _ = timeEndPeriod(1);
+            self.timer_resolution_active = false;
+        }
     }
 
     fn enable_global_timer_resolution_override(&mut self) -> Result<()> {
@@ -1654,13 +1572,13 @@ impl SystemOptimizer {
         let mut restore_errors = Vec::new();
 
         // Restore timer resolution if active
-        if self.timer_resolution_request.is_some()
+        if self.timer_resolution_active
             && let Err(e) = self.set_timer_resolution(false)
         {
             restore_errors.push(format!("timer resolution: {}", e));
         }
         // Safety net: clean up the global timer override snapshot even if
-        // there is no owned process timer request (e.g., crash recovery).
+        // `timer_resolution_active` was already false (e.g., crash recovery).
         if let Err(e) = self.restore_global_timer_resolution_override() {
             restore_errors.push(format!("global timer override: {}", e));
         }
@@ -1761,7 +1679,7 @@ impl SystemOptimizer {
 
     /// Check if timer resolution is currently active
     pub fn is_timer_resolution_active(&self) -> bool {
-        self.timer_resolution_request.is_some()
+        self.timer_resolution_active
     }
 }
 
@@ -1798,111 +1716,6 @@ pub fn cleanup_for_uninstall() {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn timer_cleanup_releases_only_the_request_this_optimizer_acquired() {
-        let mut request = Some(TimerResolutionRequest::Native);
-        release_timer_request_with(
-            &mut request,
-            || Ok(()),
-            || panic!("no multimedia request was acquired"),
-        )
-        .unwrap();
-        assert_eq!(request, None);
-        release_timer_request_with(
-            &mut request,
-            || panic!("release once only"),
-            || panic!("release once only"),
-        )
-        .unwrap();
-        request = Some(TimerResolutionRequest::Multimedia);
-        release_timer_request_with(
-            &mut request,
-            || panic!("no native request was acquired"),
-            || Ok(()),
-        )
-        .unwrap();
-        assert_eq!(request, None);
-    }
-
-    #[test]
-    fn a_default_apply_cannot_claim_or_erase_a_power_plan_original() {
-        struct Fixture(PathBuf);
-        impl Drop for Fixture {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let fixture = Fixture(std::env::temp_dir().join(format!(
-            "swift-system-power-owner-{:032x}",
-            rand::random::<u128>()
-        )));
-        fs::create_dir(&fixture.0).unwrap();
-        let path = fixture.0.join(SYSTEM_SNAPSHOT_FILE);
-        let mut optimizer = SystemOptimizer::new();
-        optimizer.snapshot_path = Some(path.clone());
-        optimizer
-            .capture_system_state_snapshots(&SystemOptimizationConfig {
-                set_high_priority: true,
-                ..Default::default()
-            })
-            .unwrap();
-        // Capturing a process-only change must not claim an unchanged Windows
-        // power policy for restore on exit or during the next apply.
-        assert_eq!(optimizer.original_power_plan_guid, None);
-        assert!(!path.exists());
-        // An original from an earlier owned switch still belongs to recovery.
-        // Merely selecting the default must not discard that pending record.
-        let original = Some(Some(HIGH_PERFORMANCE_POWER_PLAN_GUID.to_string()));
-        optimizer.original_power_plan_guid = original.clone();
-        optimizer
-            .capture_system_state_snapshots(&SystemOptimizationConfig::default())
-            .unwrap();
-        assert_eq!(optimizer.original_power_plan_guid, original);
-        assert_eq!(
-            SystemOptimizer::read_persistent_snapshot(&path)
-                .unwrap()
-                .unwrap()
-                .original_power_plan_guid,
-            Some(HIGH_PERFORMANCE_POWER_PLAN_GUID.to_string())
-        );
-    }
-
-    #[test]
-    fn a_failed_timer_release_remains_owned_for_retry() {
-        for kind in [
-            TimerResolutionRequest::Native,
-            TimerResolutionRequest::Multimedia,
-        ] {
-            let mut request = Some(kind);
-            assert!(
-                release_timer_request_with(
-                    &mut request,
-                    || Err(anyhow::anyhow!("native release denied")),
-                    || Err(anyhow::anyhow!("multimedia release denied"))
-                )
-                .is_err()
-            );
-            assert_eq!(request, Some(kind));
-            release_timer_request_with(&mut request, || Ok(()), || Ok(())).unwrap();
-            assert_eq!(request, None);
-        }
-    }
-
-    #[test]
-    fn default_balanced_plan_keeps_the_users_own_power_plan() {
-        use crate::structs::PowerPlan;
-        assert!(!super::SystemOptimizer::power_plan_switch_requested(
-            PowerPlan::Balanced
-        ));
-        for plan in [
-            PowerPlan::HighPerformance,
-            PowerPlan::Ultimate,
-            PowerPlan::SwiftTunnel,
-        ] {
-            assert!(super::SystemOptimizer::power_plan_switch_requested(plan));
-        }
-    }
-
     use super::*;
 
     #[cfg(windows)]
@@ -2040,39 +1853,6 @@ mod tests {
         );
         fs::remove_file(&path).unwrap();
         fs::remove_dir(dir).unwrap();
-    }
-
-    #[test]
-    fn oversized_system_backups_keep_the_previous_readable_record() {
-        let dir =
-            std::env::temp_dir().join(format!("swift-system-size-{:032x}", rand::random::<u128>()));
-        fs::create_dir(&dir).unwrap();
-        let path = dir.join(SYSTEM_SNAPSHOT_FILE);
-        let before = PersistentSystemSnapshot {
-            game_bar_snapshot: Some(RegistryDwordSnapshot::Present(9)),
-            ..Default::default()
-        };
-        SystemOptimizer::write_persistent_snapshot(&path, &before).unwrap();
-        let original = fs::read(&path).unwrap();
-        let string = "\u{0001}".repeat(crate::registry_value::MAX_VALUE_BYTES / 2 - 1);
-        let oversized = PersistentSystemSnapshot {
-            mmcss_snapshot: Some(MmcssSnapshot {
-                scheduling_category: Some(string.clone()),
-                sfio_priority: Some(string.clone()),
-                background_only: Some(string),
-                ..Default::default()
-            }),
-            ..before.clone()
-        };
-        assert!(serde_json::to_vec_pretty(&oversized).unwrap().len() > MAX_SYSTEM_SNAPSHOT_BYTES);
-        assert!(SystemOptimizer::write_persistent_snapshot(&path, &oversized).is_err());
-        assert_eq!(fs::read(&path).unwrap(), original);
-        assert_eq!(
-            SystemOptimizer::read_persistent_snapshot(&path).unwrap(),
-            Some(before)
-        );
-        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2233,99 +2013,26 @@ mod tests {
     }
 
     #[test]
-    fn native_power_scheme_detection_preserves_absence_failure_and_bounds() {
-        use windows::core::GUID;
-        let target = GUID::try_from(SWIFTTUNNEL_POWER_PLAN_GUID).unwrap();
-        let other = GUID::try_from("44444444-4444-4444-4444-444444444453").unwrap();
-        assert_eq!(
-            SystemOptimizer::power_scheme_present_with(target, |_| Ok(Some(target))),
-            Some(true)
+    fn power_plan_guid_parser_matches_exact_guid_tokens() {
+        let output = format!(
+            "Power Scheme GUID: {}  (SwiftTunnel) *",
+            SWIFTTUNNEL_POWER_PLAN_GUID.to_ascii_uppercase()
         );
-        assert_eq!(
-            SystemOptimizer::power_scheme_present_with(target, |index| Ok(
-                (index == 0).then_some(other)
-            )),
-            Some(false)
-        );
-        assert_eq!(
-            SystemOptimizer::power_scheme_present_with(target, |_| Err(std::io::Error::from(
-                std::io::ErrorKind::PermissionDenied
-            ))),
-            None
-        );
-        let mut reads = 0;
-        assert_eq!(
-            SystemOptimizer::power_scheme_present_with(target, |_| {
-                reads += 1;
-                Ok(Some(other))
-            }),
-            None
-        );
-        assert_eq!(reads, 128);
-        assert_eq!(SystemOptimizer::is_power_plan_installed("not a GUID"), None);
+
+        assert!(SystemOptimizer::output_contains_guid(
+            &output,
+            SWIFTTUNNEL_POWER_PLAN_GUID
+        ));
     }
 
     #[test]
-    #[ignore = "read-only comparison with this machine's power-plan inventory"]
-    fn compare_native_power_reads_with_local_powercfg() {
-        let cli_start = std::time::Instant::now();
-        let active = crate::run_hidden_command_with_timeout(
-            "powercfg",
-            &["/GETACTIVESCHEME"],
-            std::time::Duration::from_secs(15),
-        );
-        let list = crate::run_hidden_command_with_timeout(
-            "powercfg",
-            &["/list"],
-            std::time::Duration::from_secs(15),
-        );
-        let cli_elapsed = cli_start.elapsed();
-        assert!(
-            active.success && list.success,
-            "{} / {}",
-            active.stderr,
-            list.stderr
-        );
-        let ids = |text: &str| {
-            text.lines()
-                .filter_map(|line| {
-                    line.split_whitespace()
-                        .find_map(|word| windows::core::GUID::try_from(word).ok())
-                })
-                .collect::<Vec<_>>()
-        };
-        let active_id = *ids(&active.stdout)
-            .first()
-            .expect("powercfg must return an active GUID");
-        let mut installed = ids(&list.stdout);
-        let mut native = Vec::new();
-        for index in 0..128 {
-            match SystemOptimizer::read_power_scheme_at(index).unwrap() {
-                Some(guid) => native.push(guid),
-                None => break,
-            }
-        }
-        installed.sort_by_key(|g| g.to_u128());
-        native.sort_by_key(|g| g.to_u128());
-        assert_eq!(native, installed);
-        let native_start = std::time::Instant::now();
-        for _ in 0..100 {
-            assert_eq!(
-                SystemOptimizer::active_power_plan_guid(),
-                Some(format!("{active_id:?}").to_ascii_lowercase())
-            );
-        }
-        for guid in &installed {
-            assert_eq!(
-                SystemOptimizer::is_power_plan_installed(&format!("{guid:?}")),
-                Some(true)
-            );
-        }
-        eprintln!(
-            "Read-only power inventory: {} installed plans matched; two CLI reads={cli_elapsed:?}, 100 active native reads plus presence checks={:?}",
-            installed.len(),
-            native_start.elapsed()
-        );
+    fn power_plan_guid_parser_rejects_superficially_similar_text() {
+        let output = "Power Scheme GUID: 44444444-4444-4444-4444-444444444453 (Other)";
+
+        assert!(!SystemOptimizer::output_contains_guid(
+            output,
+            SWIFTTUNNEL_POWER_PLAN_GUID
+        ));
     }
 
     #[test]

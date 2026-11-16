@@ -6,22 +6,12 @@
 
 use super::VpnError;
 
-pub(crate) const PACKET_FORWARDING_GUIDANCE: &str = "SwiftTunnel stopped because Windows could not forward network traffic. Reconnect SwiftTunnel. If it happens again, run Internet recovery in Repair.";
-
 /// Convert a VPN error into a user-friendly message
 ///
 /// Returns a clear, actionable message that helps users understand
 /// what went wrong and how to fix it.
 pub fn user_friendly_error(error: &VpnError) -> String {
     match error {
-        VpnError::PacketForwardingFailed(_) => PACKET_FORWARDING_GUIDANCE.to_string(),
-        VpnError::NetworkDiskProtectionUnavailable => "SwiftTunnel couldn't protect this PC's network disk, so it didn't start the tunnel. Restart the PC and try again. If this is an internet café PC, ask its administrator or send support your log.".to_string(),
-        VpnError::RecoveryRecordUnavailable => {
-            "SwiftTunnel couldn't save its network recovery file, so it didn't start the tunnel. Check free disk space and access to your Windows user folder, then try again. If it still fails, send support your log.".to_string()
-        }
-        VpnError::NetworkWorkersStopping => {
-            "SwiftTunnel's previous connection is still stopping. Wait a moment and try again. If it stays stuck, close SwiftTunnel completely and reopen it.".to_string()
-        }
         // Split tunnel driver issues
         VpnError::SplitTunnelNotAvailable => {
             "SwiftTunnel could not start its Windows Packet Filter driver.\n\nSwiftTunnel will try to repair this automatically. If this message returns, restart Windows once and contact support with your log file.".to_string()
@@ -91,9 +81,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
         // Network issues
         VpnError::Network(msg) => {
             let lower = msg.to_lowercase();
-            if socket_access_denied(&lower) {
-                socket_access_guidance()
-            } else if lower.contains("timeout") || lower.contains("timed out") {
+            if lower.contains("timeout") || lower.contains("timed out") {
                 "Connection timed out.\n\nPlease check your internet connection and try again.".to_string()
             } else if lower.contains("dns") || lower.contains("resolve") {
                 "DNS lookup failed.\n\nPlease check your internet connection.".to_string()
@@ -104,9 +92,7 @@ pub fn user_friendly_error(error: &VpnError) -> String {
 
         // Config issues
         VpnError::ConfigFetch(msg) => {
-            if socket_access_denied(&msg.to_ascii_lowercase()) {
-                socket_access_guidance()
-            } else if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("unauthorized") {
+            if msg.contains("401") || msg.contains("Unauthorized") || msg.contains("unauthorized") {
                 "Session expired.\n\nPlease sign out and sign in again.".to_string()
             } else if msg.contains("404") || msg.contains("Not Found") {
                 "Server not found.\n\nThe selected region may be temporarily unavailable.".to_string()
@@ -156,14 +142,6 @@ pub fn user_friendly_error(error: &VpnError) -> String {
             "SwiftTunnel hit a system error.\n\nPlease try again. If it keeps happening, open the Repair tab and run a repair.".to_string()
         }
     }
-}
-
-fn socket_access_denied(lower: &str) -> bool {
-    lower.contains("os error 10013)") || lower.contains("wsaeacces")
-}
-
-fn socket_access_guidance() -> String {
-    "Windows blocked SwiftTunnel from opening a network connection.\n\nClose any other VPN and try again. If it still fails, check whether your firewall or security software is blocking SwiftTunnel, then send support your log.".to_string()
 }
 
 /// Guidance after an explicit driver reinstall. Both clients can use this
@@ -279,10 +257,6 @@ pub fn short_error(error: &VpnError) -> &'static str {
         VpnError::SplitTunnelSetupFailed(_) => "Split tunnel failed",
         VpnError::DriverNotOpen => "Driver not open",
         VpnError::DriverNotInitialized => "Driver not initialized",
-        VpnError::NetworkWorkersStopping => "Previous connection still stopping",
-        VpnError::RecoveryRecordUnavailable => "Recovery file unavailable",
-        VpnError::PacketForwardingFailed(_) => "Network forwarding stopped",
-        VpnError::NetworkDiskProtectionUnavailable => "Network disk protection failed",
         VpnError::Route(_) => "Route setup failed",
         VpnError::Connection(_) => "Connection failed",
         VpnError::Network(_) => "Network error",
@@ -300,48 +274,7 @@ pub fn short_error(error: &VpnError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn forwarding_error_hides_native_detail_and_preserves_a_specific_support_code() {
-        let error = super::VpnError::PacketForwardingFailed("owned native error 0x80070006".into());
-        assert_eq!(
-            super::user_friendly_error(&error),
-            super::PACKET_FORWARDING_GUIDANCE
-        );
-        assert_eq!(super::short_error(&error), "Network forwarding stopped");
-        assert_eq!(error.support_code(), "packet_forwarding_failed");
-    }
-
     use super::*;
-
-    #[test]
-    fn pending_worker_shutdown_does_not_request_driver_reinstallation() {
-        let message = user_friendly_error(&VpnError::NetworkWorkersStopping);
-        assert!(message.contains("still stopping"));
-        assert!(message.contains("Wait a moment"));
-        assert!(!message.to_lowercase().contains("driver"));
-        assert_eq!(
-            VpnError::NetworkWorkersStopping.support_code(),
-            "network_workers_stopping"
-        );
-    }
-
-    #[test]
-    fn socket_permission_errors_do_not_suggest_driver_repair_or_signing_out() {
-        let diagnostic = "https://example.test/401: tcp connect error: An attempt was made to access a socket in a way forbidden by its access permissions. (os error 10013)";
-        for error in [
-            VpnError::Network(diagnostic.into()),
-            VpnError::ConfigFetch(diagnostic.into()),
-            VpnError::Network("WSAEACCES".into()),
-        ] {
-            let message = user_friendly_error(&error);
-            assert!(message.contains("Windows blocked"));
-            assert!(message.contains("other VPN"));
-            assert!(!message.contains("repair"));
-            assert!(!message.contains("sign out"));
-        }
-        assert!(!socket_access_denied("os error 100130)"));
-        assert!(!socket_access_denied("http 403 forbidden"));
-    }
 
     #[test]
     fn reboot_guidance_uses_installation_markers_instead_of_reboot_history() {

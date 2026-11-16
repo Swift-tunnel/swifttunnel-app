@@ -37,14 +37,14 @@ export function MemoryCleaner() {
     void fetchSystemInfo();
   }, [fetchSystemInfo]);
 
-  // The native cleaner publishes progress with its own memory readings.
+  // Load memory immediately, then poll for a live readout (faster while
+  // cleaning), same cadence the boost page used.
   useEffect(() => {
-    if (!isCleaning) void fetchSystemMemory();
+    void fetchSystemMemory();
   }, [fetchSystemMemory, isCleaning]);
   useFocusAwareInterval(
     () => void fetchSystemMemory(),
-    1000,
-    { enabled: !isCleaning },
+    isCleaning ? 250 : 1000,
   );
 
   async function onRestartAsAdmin() {
@@ -65,8 +65,7 @@ export function MemoryCleaner() {
   const percent =
     totalMb > 0 ? Math.max(0, Math.min(100, (usedMb / totalMb) * 100)) : 0;
   const color = memColor(percent);
-  const needsAdmin = isAdmin === false;
-  const showBottom = isCleaning || needsAdmin || result;
+  const showBottom = isCleaning || !isAdmin || result;
 
   const stateLabel = isCleaning
     ? "Cleaning"
@@ -206,7 +205,7 @@ export function MemoryCleaner() {
                 </span>
               </div>
             )}
-            {needsAdmin && (
+            {!isAdmin && (
               <div className="text-[11.5px] text-text-muted">
                 Deep clean requires Administrator.{" "}
                 <button

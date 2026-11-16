@@ -11,7 +11,7 @@ import { formatConnectedServerLabel, relayDisplayLabel, regionPresentation } fro
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
 import { useRelayLatencyPolling } from "../../lib/useRelayLatencyPolling";
-import { useLiveStoreValue, useLiveUpdates } from "../../lib/useLiveUpdates";
+import { useLiveUpdates } from "../../lib/useLiveUpdates";
 import { useTrafficSamples } from "../../lib/useTrafficSamples";
 import { RouteDiagram } from "./RouteDiagram";
 import { RelayPicker } from "./RelayPicker";
@@ -47,9 +47,7 @@ export function ConnectTab() {
   const gameRoute = useVpnStore((s) => s.gameRoute);
   const serverEndpoint = useVpnStore((s) => s.serverEndpoint);
   const tunneled = useVpnStore((s) => s.tunneledProcesses);
-  // Display and ordering only. Held while in game, so a new reading does not
-  // re-render the whole tab and every region row behind the game.
-  const ping = useLiveStoreValue(useVpnStore, (s) => s.ping);
+  const ping = useVpnStore((s) => s.ping);
   const connectedAt = useVpnStore((s) => s.connectedAt);
   const driverSetupState = useVpnStore((s) => s.driverSetupState);
   const driverSetupError = useVpnStore((s) => s.driverSetupError);
@@ -673,12 +671,9 @@ function SessionClock({ connectedAt }: { connectedAt: number | null }) {
  */
 function TransferCell({ direction }: { direction: "up" | "down" }) {
   const live = useLiveUpdates();
-  const bytes = useVpnStore((s) => {
-    if (!live) return null;
-    return direction === "up" ? s.bytesUp : s.bytesDown;
-  });
-  const shown = useRef(bytes ?? 0);
-  if (bytes !== null) shown.current = bytes;
+  const bytes = useVpnStore((s) => (direction === "up" ? s.bytesUp : s.bytesDown));
+  const shown = useRef(bytes);
+  if (live) shown.current = bytes;
   return (
     <MetricCell
       label={direction === "up" ? "Upload" : "Download"}

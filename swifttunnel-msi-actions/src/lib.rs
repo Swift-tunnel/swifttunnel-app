@@ -1,6 +1,6 @@
 //! Native MSI actions. No process launch, console, or work in DllMain.
 //! The deferred action runs as SYSTEM, before any new files are installed.
-//! Only related machine products with no remaining installer source qualify.
+//! Only missing cached packages of related per-machine products in the selected family qualify.
 //! Unknown state is retained for Windows Installer to handle normally.
 
 mod registry;
@@ -186,19 +186,11 @@ fn prepare_recovery(handle: u32, family: ProductFamily) -> u32 {
 fn repair_orphans(handle: u32, family: ProductFamily) -> u32 {
     entry(handle, || {
         for code in product_list(&property(handle, "CustomActionData")?)? {
-            if registry::repair_missing_package(
-                &windows_registry::LOCAL_MACHINE,
-                &code,
-                family,
-                |code, cached| {
-                    swifttunnel_msi_repair::machine_sources_are_missing(code, cached)
-                        && swifttunnel_msi_repair::require_no_per_user_registration(code).is_ok()
-                },
-            )? {
+            if registry::repair_missing_package(&windows_registry::LOCAL_MACHINE, &code, family)? {
                 log(
                     handle,
                     &format!(
-                        "cleared {} registration after confirming installer sources are missing: {code}",
+                        "cleared missing-package {} registration {code}",
                         family.name
                     ),
                 );

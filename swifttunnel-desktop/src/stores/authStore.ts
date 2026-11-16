@@ -166,9 +166,6 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   logout: async () => {
     const action = ++authActionRevision;
     ++authStateRevision;
-    // App uses isLoading to replace the entire page with its startup screen.
-    // Sign-out keeps the account/connection controls mounted until it finishes.
-    set({ error: null });
     try {
       await authLogout();
       if (action !== authActionRevision) return;

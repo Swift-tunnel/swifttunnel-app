@@ -44,7 +44,7 @@ export function buildRecoverySetup(options, io = {
   }),
   stat: statSync,
   copy: copyFileSync,
-  checkRuntime: (binary) => execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+  checkRuntime: (binary) => execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-File",
     fileURLToPath(new URL("./check-vc-runtime.ps1", import.meta.url)), "-Binary", binary],
     { stdio: ["ignore", 2, 2], windowsHide: true }),
 }) {

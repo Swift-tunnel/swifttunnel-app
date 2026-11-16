@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 const SNAPSHOT_FILE: &str = "optimization_snapshots.json";
-const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Hive {
@@ -39,16 +38,6 @@ enum Action {
         path: &'static str,
         name: &'static str,
         value: &'static [u8],
-    },
-    /// Set one `key=value;` entry inside a shared registry string, leaving the
-    /// string's other entries alone (see `semicolon_settings`). Captured as a
-    /// `RegString` snapshot of the whole original string.
-    RegStringEntry {
-        hive: Hive,
-        path: &'static str,
-        name: &'static str,
-        key: &'static str,
-        value: &'static str,
     },
     /// Create `default_path` and set its DEFAULT value to `value`, capturing
     /// whether `owned_path` (the topmost key this tweak introduces) already
@@ -243,15 +232,12 @@ const TWEAKS: &[Tweak] = &[
         requires_admin: false,
         requires_reboot: false,
         // Windows 11 "Optimizations for windowed games" — lower-latency present
-        // path for borderless/windowed games. The same string holds the
-        // player's other Windows graphics settings (VRR for windowed games,
-        // Auto HDR), so only this entry is changed.
-        actions: &[Action::RegStringEntry {
+        // path for borderless/windowed games.
+        actions: &[Action::RegString {
             hive: Hive::Hkcu,
             path: r"Software\Microsoft\DirectX\UserGpuPreferences",
             name: "DirectXUserGlobalSettings",
-            key: "SwapEffectUpgradeEnable",
-            value: "1",
+            value: "SwapEffectUpgradeEnable=1;",
         }],
     },
     Tweak {
@@ -627,9 +613,9 @@ const TWEAKS: &[Tweak] = &[
         }],
     },
     Tweak {
-        // Optional preference: disables automatic disk cleanup. This also
-        // removes Windows' automatic response to low free space, so the UI
-        // keeps it outside bulk performance recommendations.
+        // Storage Sense's automatic background cleanup. Disabling avoids
+        // surprise disk activity mid-game; cleanup can still be run manually
+        // from Windows Settings.
         id: "storage_sense_disable",
         requires_admin: false,
         requires_reboot: false,
@@ -1096,7 +1082,7 @@ fn load_all() -> Result<Snapshots, String> {
 }
 
 fn read_snapshots(path: &Path) -> Result<Snapshots, String> {
-    match crate::utils::read_text_file_bounded(path, MAX_SNAPSHOT_BYTES, "Rollback records") {
+    match crate::utils::read_text_file_bounded(path, 4 * 1024 * 1024, "Rollback records") {
         Ok(content) => serde_json::from_str(&content).map_err(|e| {
             format!(
                 "Cannot read rollback records: {e}. Keep the snapshot file and contact support."
@@ -1118,16 +1104,11 @@ fn save_all(map: &Snapshots) -> Result<(), String> {
 
 fn write_snapshots(path: &Path, map: &Snapshots) -> std::io::Result<()> {
     use std::io::Write;
-    let json = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
-    if json.len() > MAX_SNAPSHOT_BYTES {
-        return Err(std::io::Error::other(
-            "Rollback records are too large to save safely. Existing records were kept.",
-        ));
-    }
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("No snapshot directory"))?;
     std::fs::create_dir_all(parent)?;
+    let json = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
     let staged = parent.join(format!(".optimization-{:032x}.tmp", rand::random::<u128>()));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -1174,36 +1155,6 @@ pub fn active_ids() -> Result<Vec<String>, String> {
     Ok(load_all()?.keys().cloned().collect())
 }
 
-const CORE_PARKING_TWEAK: &str = "core_parking_disable";
-const CORE_PARKING_X3D_MESSAGE: &str = "Not applied: on this Ryzen 9 X3D processor, Windows parks the cores without the extra game cache so games run on the faster ones. Turning parking off spreads Roblox across both halves of the chip and usually lowers FPS.";
-
-/// Dual-CCD Ryzen X3D parts (7900X3D, 7950X3D, 9900X3D, 9950X3D) rely on core
-/// parking: AMD's driver parks the CCD without 3D V-Cache while a game runs,
-/// so the game's threads land on the cache CCD. Forcing every core unparked
-/// defeats that and costs FPS in exactly the CPU-bound scenes the tweak is
-/// meant to help. Every Ryzen 9 X3D has two CCDs; the Ryzen 7/5 X3D parts
-/// have one and are unaffected.
-fn cpu_steers_games_with_core_parking(processor_name: &str) -> bool {
-    let name = processor_name.to_ascii_lowercase();
-    name.contains("ryzen 9") && name.contains("x3d")
-}
-
-#[cfg(windows)]
-fn processor_name() -> Option<String> {
-    read_reg_string(
-        Hive::Hklm,
-        r"HARDWARE\DESCRIPTION\System\CentralProcessor\0",
-        "ProcessorNameString",
-    )
-    .ok()
-    .flatten()
-}
-
-#[cfg(not(windows))]
-fn processor_name() -> Option<String> {
-    None
-}
-
 /// Apply a tweak. Returns whether a restart is required to finish.
 /// No-op (returns Ok) if the tweak is already applied.
 pub fn apply(id: &str) -> Result<bool, String> {
@@ -1216,12 +1167,6 @@ pub fn apply(id: &str) -> Result<bool, String> {
             return Err("A previous change did not finish. Revert this optimization before applying it again.".into());
         }
         return Ok(tweak.requires_reboot); // already applied
-    }
-
-    if id == CORE_PARKING_TWEAK
-        && processor_name().is_some_and(|name| cpu_steers_games_with_core_parking(&name))
-    {
-        return Err(CORE_PARKING_X3D_MESSAGE.to_string());
     }
 
     if tweak.requires_admin && !crate::utils::is_administrator() {
@@ -1352,9 +1297,6 @@ fn capture_action(action: &Action) -> Result<ActionSnapshot, String> {
         },
         Action::RegString {
             hive, path, name, ..
-        }
-        | Action::RegStringEntry {
-            hive, path, name, ..
         } => ActionSnapshot::RegString {
             value: read_reg_string(*hive, path, name)?,
         },
@@ -1428,17 +1370,6 @@ fn apply_action(action: &Action, snapshot: &ActionSnapshot) -> Result<(), String
             name,
             value,
         } => write_reg_string(*hive, path, name, value),
-        Action::RegStringEntry {
-            hive,
-            path,
-            name,
-            key,
-            value,
-        } => {
-            let current = read_reg_string(*hive, path, name)?;
-            let updated = crate::semicolon_settings::set_entry(current.as_deref(), key, value);
-            write_reg_string(*hive, path, name, &updated)
-        }
         Action::RegBinary {
             hive,
             path,
@@ -1502,26 +1433,6 @@ fn restore_action(action: &Action, snap: &ActionSnapshot) -> Result<(), String> 
             Some(v) => write_reg_string(*hive, path, name, v),
             None => delete_reg_value(*hive, path, name),
         },
-        (
-            Action::RegStringEntry {
-                hive,
-                path,
-                name,
-                key,
-                ..
-            },
-            ActionSnapshot::RegString { value },
-        ) => {
-            let current = read_reg_string(*hive, path, name)?;
-            match crate::semicolon_settings::restore_entry(
-                current.as_deref(),
-                value.as_deref(),
-                key,
-            ) {
-                Some(restored) => write_reg_string(*hive, path, name, &restored),
-                None => delete_reg_value(*hive, path, name),
-            }
-        }
         (
             Action::RegBinary {
                 hive, path, name, ..
@@ -1780,36 +1691,29 @@ fn valid_scheme_guid(value: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn power_setting_guids(
-    subgroup: &str,
-    setting: &str,
-) -> Option<(windows::core::GUID, windows::core::GUID)> {
-    use windows::core::GUID;
-    match (subgroup, setting) {
-        ("SUB_PROCESSOR", "CPMINCORES") => Some((
-            GUID::from_u128(0x54533251_82be_4824_96c1_47b60b740d00),
-            GUID::from_u128(0x0cc5b647_c1df_4637_891a_dec35c318583),
-        )),
-        _ => None,
-    }
-}
-
-#[cfg(windows)]
 fn read_power_ac(scheme: &str, subgroup: &str, setting: &str) -> Option<u32> {
-    use windows::Win32::{Foundation::ERROR_SUCCESS, System::Power::PowerReadACValueIndex};
-    let scheme = windows::core::GUID::try_from(scheme).ok()?;
-    let (subgroup, setting) = power_setting_guids(subgroup, setting)?;
-    let mut index = 0;
-    let status = unsafe {
-        PowerReadACValueIndex(
-            None,
-            Some(&scheme),
-            Some(&subgroup),
-            Some(&setting),
-            &mut index,
-        )
-    };
-    (status == ERROR_SUCCESS).then_some(index)
+    let out = crate::run_hidden_command_with_timeout(
+        "powercfg",
+        &["/query", scheme, subgroup, setting],
+        std::time::Duration::from_secs(20),
+    );
+    if !out.success {
+        return None;
+    }
+    let text = out.stdout;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Current AC Power Setting Index:") {
+            let token = rest.trim();
+            let parsed = if let Some(hex) = token.strip_prefix("0x") {
+                u32::from_str_radix(hex, 16).ok()
+            } else {
+                token.parse::<u32>().ok()
+            };
+            return parsed;
+        }
+    }
+    None
 }
 
 #[cfg(windows)]
@@ -2010,80 +1914,6 @@ mod tests {
         assert_eq!(service_start_keyword(Some(2)).unwrap(), "auto");
         assert_eq!(service_start_keyword(Some(3)).unwrap(), "demand");
         assert_eq!(service_start_keyword(Some(4)).unwrap(), "disabled");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn catalog_power_backups_use_known_native_ids_and_reject_unknown_inputs() {
-        use windows::core::GUID;
-        for tweak in TWEAKS {
-            for action in tweak.actions {
-                if let Action::PowerAc {
-                    subgroup, setting, ..
-                } = action
-                {
-                    let (subgroup, setting) = power_setting_guids(subgroup, setting)
-                        .expect("every catalog power setting needs a native mapping");
-                    assert_eq!(
-                        subgroup,
-                        GUID::try_from("54533251-82be-4824-96c1-47b60b740d00").unwrap()
-                    );
-                    assert_eq!(
-                        setting,
-                        GUID::try_from("0cc5b647-c1df-4637-891a-dec35c318583").unwrap()
-                    );
-                }
-            }
-        }
-        assert_eq!(
-            read_power_ac("invalid", "SUB_PROCESSOR", "CPMINCORES"),
-            None
-        );
-        assert_eq!(
-            read_power_ac(
-                "381b4222-f694-41f0-9685-ff5bb260df2e",
-                "unknown",
-                "CPMINCORES"
-            ),
-            None
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    #[ignore = "read-only comparison with this machine's English powercfg output"]
-    fn compare_native_power_backup_with_local_powercfg() {
-        let scheme = crate::system_optimizer::SystemOptimizer::active_power_plan_guid().unwrap();
-        let cli_started = std::time::Instant::now();
-        let output = crate::run_hidden_command_with_timeout(
-            "powercfg",
-            &["/qh", &scheme, "SUB_PROCESSOR", "CPMINCORES"],
-            std::time::Duration::from_secs(20),
-        );
-        let cli_elapsed = cli_started.elapsed();
-        assert!(output.success, "{}", output.stderr);
-        let expected = output
-            .stdout
-            .lines()
-            .find_map(|line| {
-                let value = line
-                    .trim()
-                    .strip_prefix("Current AC Power Setting Index:")?
-                    .trim();
-                u32::from_str_radix(value.strip_prefix("0x")?, 16).ok()
-            })
-            .expect("this read-only comparison requires English command output");
-        let native_started = std::time::Instant::now();
-        for _ in 0..100 {
-            assert_eq!(
-                read_power_ac(&scheme, "SUB_PROCESSOR", "CPMINCORES"),
-                Some(expected)
-            );
-        }
-        eprintln!(
-            "Read-only power backup: index={expected}, one CLI read={cli_elapsed:?}, 100 native reads={:?}",
-            native_started.elapsed()
-        );
     }
 
     #[cfg(windows)]
@@ -2303,50 +2133,6 @@ mod tests {
     }
 
     #[test]
-    fn oversized_registry_backups_do_not_replace_readable_rollback_records() {
-        let dir =
-            std::env::temp_dir().join(format!("swift-opt-size-{:032x}", rand::random::<u128>()));
-        std::fs::create_dir(&dir).unwrap();
-        let path = dir.join(SNAPSHOT_FILE);
-        let before = Snapshots::from([(
-            "old".into(),
-            TweakSnapshot::Legacy(vec![ActionSnapshot::Task { was_enabled: true }]),
-        )]);
-        write_snapshots(&path, &before).unwrap();
-        let original = std::fs::read(&path).unwrap();
-        // Each individual value fits the registry reader's bound. Pretty JSON
-        // and escaped strings can still push the combined catalog over its cap.
-        let string = "\u{0001}".repeat(crate::registry_value::MAX_VALUE_BYTES / 2 - 1);
-        let mut oversized = before;
-        for tweak in TWEAKS {
-            let captured: Vec<_> = tweak
-                .actions
-                .iter()
-                .filter_map(|action| match action {
-                    Action::RegString { .. } | Action::RegStringEntry { .. } => {
-                        Some(ActionSnapshot::RegString {
-                            value: Some(string.clone()),
-                        })
-                    }
-                    Action::RegBinary { .. } => Some(ActionSnapshot::RegBinary {
-                        value: Some(vec![255; crate::registry_value::MAX_VALUE_BYTES]),
-                    }),
-                    _ => None,
-                })
-                .collect();
-            if !captured.is_empty() {
-                oversized.insert(tweak.id.into(), TweakSnapshot::Legacy(captured));
-            }
-        }
-        assert!(serde_json::to_vec_pretty(&oversized).unwrap().len() > MAX_SNAPSHOT_BYTES);
-        assert!(write_snapshots(&path, &oversized).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        assert!(read_snapshots(&path).unwrap()["old"].applied());
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
     fn catalog_ids_are_unique() {
         let mut ids: Vec<&str> = TWEAKS.iter().map(|t| t.id).collect();
         ids.sort_unstable();
@@ -2449,25 +2235,6 @@ mod tests {
                 assert_eq!(was_running, None);
             }
             _ => panic!("expected service snapshot"),
-        }
-    }
-
-    #[test]
-    fn core_parking_stays_on_for_dual_ccd_x3d_processors() {
-        for name in [
-            "AMD Ryzen 9 7950X3D 16-Core Processor",
-            "AMD Ryzen 9 7900X3D 12-Core Processor",
-            "AMD Ryzen 9 9950X3D 16-Core Processor          ",
-        ] {
-            assert!(cpu_steers_games_with_core_parking(name), "{name}");
-        }
-        for name in [
-            "AMD Ryzen 7 7800X3D 8-Core Processor",
-            "AMD Ryzen 7 5800X3D 8-Core Processor",
-            "AMD Ryzen 9 7950X 16-Core Processor",
-            "13th Gen Intel(R) Core(TM) i9-13900K",
-        ] {
-            assert!(!cpu_steers_games_with_core_parking(name), "{name}");
         }
     }
 }

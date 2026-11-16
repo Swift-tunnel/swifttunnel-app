@@ -344,26 +344,13 @@ fn regions(state: &State) -> Vec<Item> {
             .disabled(busy),
     ];
 
-    let mut ordered: Vec<_> = state
-        .regions
-        .iter()
-        .map(|region| {
-            let reference = region
-                .relays
-                .iter()
-                .filter_map(|relay| relay.reference())
-                .min_by_key(|row| row.estimate.estimated_game_ms);
-            let latency = reference
-                .map(|row| row.estimate.estimated_game_ms)
-                .or(region.ping_ms);
-            (region, reference, latency)
-        })
-        .collect();
-    // Use the ping shown in the picker. Keep fleet order for equal readings.
-    ordered.sort_by_key(|(_, _, latency)| (latency.is_none(), *latency));
-
-    for (region, reference, latency) in ordered {
+    for region in &state.regions {
         let selected = !state.auto_routing && state.selected_region == region.id;
+        let reference = region
+            .relays
+            .iter()
+            .filter_map(|relay| relay.reference())
+            .min_by_key(|row| row.estimate.estimated_game_ms);
         rows.push(
             Row::new(format!("{}  {}", region.country, region.name))
                 .sub(
@@ -374,7 +361,11 @@ fn regions(state: &State) -> Vec<Item> {
                 .right(if selected {
                     Right::Tick(true)
                 } else {
-                    Right::Latency(latency)
+                    Right::Latency(
+                        reference
+                            .map(|row| row.estimate.estimated_game_ms)
+                            .or(region.ping_ms),
+                    )
                 })
                 .action(Action::PickRegion(region.id.clone()))
                 .disabled(state.auto_routing || busy),
@@ -481,19 +472,6 @@ fn roblox(state: &State) -> Vec<Item> {
 
     let draft = state.roblox_view();
     let dirty = state.roblox_dirty();
-    let mut graphics = Row::new("Graphics").right(Right::Choice(
-        [(0, "Auto"), (1, "Low"), (10, "Max")]
-            .into_iter()
-            .map(|(level, label)| Chip {
-                label: label.into(),
-                selected: draft.quality == level,
-                action: Action::SetQuality(level),
-            })
-            .collect(),
-    ));
-    if (2..=9).contains(&draft.quality) {
-        graphics = graphics.sub(format!("Level {}", draft.quality));
-    }
 
     let mut items = vec![
         caption("Frame rate"),
@@ -515,7 +493,23 @@ fn roblox(state: &State) -> Vec<Item> {
         Item::Gap(12),
         caption("Game"),
         Item::Group(vec![
-            graphics,
+            Row::new("Graphics").right(Right::Choice(vec![
+                Chip {
+                    label: "Auto".into(),
+                    selected: draft.quality == 0,
+                    action: Action::SetQuality(0),
+                },
+                Chip {
+                    label: "Low".into(),
+                    selected: draft.quality == 1,
+                    action: Action::SetQuality(1),
+                },
+                Chip {
+                    label: "Max".into(),
+                    selected: draft.quality == 10,
+                    action: Action::SetQuality(10),
+                },
+            ])),
             Row::new("Launch fullscreen")
                 .right(Right::Switch(draft.fullscreen))
                 .action(Action::Toggle(Flag::Fullscreen)),
@@ -539,22 +533,18 @@ fn roblox(state: &State) -> Vec<Item> {
             .sub("A .json or .txt file of flags")
             .right(Right::Chevron)
             .action(Action::ImportFflags)
-            .disabled(state.roblox_busy || state.fflag_import.pending()),
+            .disabled(!draft.custom_fflags || state.roblox_busy || state.fflag_import.pending()),
         ]),
-    ];
-
-    // Keep validation/read failures beside the file control. Below Reset they
-    // can be off-screen while the row misleadingly says nothing was pasted.
-    if let Some(note) = &draft.fflag_note {
-        items.push(Item::Note(note.clone()));
-    }
-    items.extend([
         Item::Gap(12),
         caption("Reset"),
         Item::Group(vec![reset_row(state)]),
         Item::Gap(10),
-    ]);
+    ];
+
     if let Some(note) = &state.roblox_reset_note {
+        items.push(Item::Note(note.clone()));
+    }
+    if let Some(note) = &draft.fflag_note {
         items.push(Item::Note(note.clone()));
     }
     if let Some(error) = &r.error {
@@ -624,13 +614,6 @@ pub fn footer(state: &State) -> Option<Item> {
             "Reading flags...".into()
         } else if !dirty {
             "No changes to apply".into()
-        } else if !draft.ready() {
-            if draft.unlock_fps && draft.fps().is_none() {
-                "Enter a valid FPS cap"
-            } else {
-                "Import valid flags to apply"
-            }
-            .into()
         } else if state.roblox.running {
             "Restart Roblox to apply".into()
         } else {
@@ -659,16 +642,6 @@ fn fps_hint(draft: &RobloxDraft) -> String {
 
 /// Whether a custom payload is loaded, and how big it is.
 fn custom_hint(draft: &RobloxDraft) -> String {
-    if draft
-        .fflag_note
-        .as_deref()
-        .is_some_and(|note| note.starts_with("File not imported."))
-    {
-        if draft.fflag_ok && !draft.custom_json.trim().is_empty() {
-            return "Import failed. Previous file kept.".into();
-        }
-        return "Import failed. Choose another file.".into();
-    }
     if draft.ultraboost {
         return "Turn Ultraboost off to use your own".into();
     }
@@ -676,7 +649,7 @@ fn custom_hint(draft: &RobloxDraft) -> String {
         return "Import your own allowlisted flags".into();
     }
     if draft.custom_json.trim().is_empty() {
-        return "Choose a flag file".into();
+        return "Nothing pasted yet".into();
     }
     "Your own flags".into()
 }
@@ -749,12 +722,10 @@ fn settings(state: &State) -> Vec<Item> {
             } else {
                 "Installed with SwiftTunnel"
             })
-            .sub(if state.unregistered {
-                "Removes Lite's files. Restart Windows to finish"
-            } else if state.standalone {
+            .sub(if state.standalone {
                 "Disconnects and cleans up before opening Windows Installer"
             } else if state.installation_unknown {
-                "See the message below for the next step"
+                "Use Windows Settings > Apps to select this installation"
             } else {
                 "Remove SwiftTunnel to remove Lite"
             })
@@ -898,34 +869,6 @@ mod quota_retry_tests {
     use super::*;
 
     #[test]
-    fn a_saved_middle_graphics_level_is_shown_without_claiming_a_different_preset() {
-        let mut state = State {
-            screen: Screen::Roblox,
-            ..Default::default()
-        };
-        state.roblox.installed = true;
-        state.roblox.quality = 5;
-        // Editing only FPS starts from the real level, not the nearest preset.
-        state.edit_roblox(|draft| draft.fps_text = "400".into());
-        let items = build(&state);
-        let row = items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Group(rows) => Some(rows),
-                _ => None,
-            })
-            .flatten()
-            .find(|row| row.label == "Graphics")
-            .unwrap();
-        assert_eq!(row.sub.as_deref(), Some("Level 5"));
-        let Right::Choice(chips) = &row.right else {
-            panic!("missing graphics presets")
-        };
-        assert!(chips.iter().all(|chip| !chip.selected));
-        assert_eq!(state.roblox_view().quality, 5);
-    }
-
-    #[test]
     fn startup_setup_disables_duplicate_toggles_and_retry_while_busy() {
         let state = State {
             screen: Screen::Settings,
@@ -1018,50 +961,6 @@ mod quota_retry_tests {
             assert!(items.iter().any(|item| matches!(item, Item::Group(rows) if rows.iter().any(|row| row.action == Some(Action::SignOut) && row.disabled))));
             state.login.busy = false;
         }
-    }
-
-    #[test]
-    fn region_picker_reorders_as_pings_arrive_and_keeps_unmeasured_regions_last() {
-        let mut state = State {
-            regions: [
-                ("singapore", Some(58)),
-                ("tokyo", None),
-                ("mumbai", Some(20)),
-                ("sydney", Some(58)),
-            ]
-            .into_iter()
-            .map(|(id, ping_ms)| crate::state::RegionRow {
-                id: id.into(),
-                name: id.into(),
-                country: String::new(),
-                ping_ms,
-                relays: Vec::new(),
-            })
-            .collect(),
-            ..State::default()
-        };
-        let region_ids = |state: &State| {
-            let items = regions(state);
-            let Item::Group(rows) = &items[1] else {
-                panic!("missing region choices");
-            };
-            assert_eq!(rows[0].action, Some(Action::PickAutoRegion));
-            rows.iter()
-                .filter_map(|row| match &row.action {
-                    Some(Action::PickRegion(id)) => Some(id.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            region_ids(&state),
-            ["mumbai", "singapore", "sydney", "tokyo"]
-        );
-        state.regions[1].ping_ms = Some(12);
-        assert_eq!(
-            region_ids(&state),
-            ["tokyo", "mumbai", "singapore", "sydney"]
-        );
     }
 
     #[test]

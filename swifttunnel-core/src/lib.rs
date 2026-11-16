@@ -6,8 +6,6 @@
 mod atomic_file;
 pub mod auth;
 pub mod autostart;
-#[cfg(windows)]
-pub mod direct_uninstall;
 pub mod discord_rpc;
 pub mod diskless;
 mod etw_lifecycle;
@@ -48,11 +46,9 @@ pub mod roblox_watcher;
 #[cfg(windows)]
 pub mod roblox_window;
 pub mod rolling_log;
-pub mod semicolon_settings;
 pub mod settings;
 pub mod single_client;
 pub mod structs;
-pub mod support_log;
 pub mod system_optimizer;
 #[cfg(test)]
 mod test_support;

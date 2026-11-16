@@ -12,7 +12,7 @@ const h = vi.hoisted(() => ({
   gameIp: "128.116.47.33",
   boostState: { robloxRunning: true, robloxForeground: true, processId: 1, fps: 60, ramTotal: 100, ramUsage: 50, cpuUsage: 10 },
   vpnState: { state:"connected", region:"mumbai", connectedAt:1, bytesUp:100, bytesDown:200, ping:30, pingReadings:0, gameRoute:null as {game_server_ip:string;estimated_path_ms:number;bypassed:boolean}|null },
-  overlay: { enabled: true, locked: true, metrics: ["ping", "upload"], size: "medium", color: "white", style: "solid", position: "top-left", custom_x: 0, custom_y: 0 },
+  overlay: { enabled: true, metrics: ["ping", "upload"], size: "medium", color: "white", style: "solid", position: "top-left", custom_x: 0, custom_y: 0 },
 }));
 
 vi.mock("react", () => ({
@@ -68,7 +68,6 @@ describe("overlay polling under slow native calls", () => {
     h.effects.length = 0;
     useOverlayRuntimeStore.setState({ error: null });
     h.overlay.enabled = true;
-    h.overlay.locked = true;
     h.overlay.metrics=["ping","upload"];
     h.vpnState={state:"connected",region:"mumbai",connectedAt:1,bytesUp:100,bytesDown:200,ping:30,pingReadings:0,gameRoute:null};
     h.gameIp="128.116.47.33";
@@ -134,32 +133,6 @@ describe("overlay polling under slow native calls", () => {
     expect(h.invoke).toHaveBeenCalledTimes(1);
     expect(h.invoke).toHaveBeenCalledWith("ensure_overlay_window", {label:"overlay-stats"});
     expect(h.push.mock.calls.every(([payload])=>payload.forceHide && !payload.enabled)).toBe(true);
-  });
-
-  it("skips locked background telemetry and resumes it when Roblox regains focus", async () => {
-    h.boostState.robloxForeground = false;
-    const stop = start();
-    await vi.advanceTimersByTimeAsync(3000);
-    expect(h.throughput).not.toHaveBeenCalled();
-    expect(h.ping).not.toHaveBeenCalled();
-    expect(h.invoke).not.toHaveBeenCalledWith("overlay_game_monitor");
-    h.boostState.robloxForeground = true;
-    await vi.advanceTimersByTimeAsync(1000);
-    stop();
-    expect(h.throughput).toHaveBeenCalledOnce();
-    expect(h.ping).toHaveBeenCalledOnce();
-    expect(h.invoke).toHaveBeenCalledWith("overlay_game_monitor");
-  });
-
-  it("keeps unlocked telemetry available while an overlay interaction takes focus", async () => {
-    h.overlay.locked = false;
-    h.boostState.robloxForeground = false;
-    const stop = start();
-    await vi.advanceTimersByTimeAsync(0);
-    stop();
-    expect(h.throughput).toHaveBeenCalledOnce();
-    expect(h.ping).toHaveBeenCalledOnce();
-    expect(h.invoke).toHaveBeenCalledWith("overlay_game_monitor");
   });
 
   it.each(["closed", "replaced"] as const)("drops a sample if the player is %s during a slow monitor lookup", async state => {

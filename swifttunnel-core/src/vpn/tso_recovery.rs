@@ -80,221 +80,66 @@ fn get_marker_path() -> Option<PathBuf> {
     Some(crate::test_support::recovery_directory().join(TSO_MARKER_FILE))
 }
 
-/// Read the selected adapter's configured LSO values without starting WMI or
-/// PowerShell. These are diagnostics only, never used to change an adapter.
-/// Missing, unsupported, ambiguous or unreadable configuration stays unknown.
-#[cfg(windows)]
-pub fn large_send_offload_is_disabled(adapter_guid: &str) -> Option<bool> {
-    use winreg::{
-        RegKey,
-        enums::{HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_WOW64_64KEY},
-    };
-    let target = parse_adapter_guid(adapter_guid)?;
-    let class = RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey_with_flags(
-            r"SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}",
-            KEY_ENUMERATE_SUB_KEYS | KEY_WOW64_64KEY,
-        )
-        .ok()?;
-    offload_disabled_in_class(&class, target)
+/// Per-query timeout for adapter offload probes.
+///
+/// The diagnostic queries IPv4 and IPv6, each with a two-second deadline.
+/// The shared runner bounds process time, output capture and inherited pipes.
+const ADAPTER_QUERY_TIMEOUT_SECS: u64 = 2;
+
+fn query_adapter_offload_value(adapter_name: &str, keyword: &str) -> Option<u32> {
+    use std::time::Duration;
+
+    let script = format!(
+        r#"
+        $adapter = '{}'
+        $value = Get-NetAdapterAdvancedProperty -Name $adapter -RegistryKeyword '{}' -ErrorAction SilentlyContinue |
+            Select-Object -First 1 -ExpandProperty RegistryValue
+        if ($null -eq $value) {{ exit 0 }}
+        if ($value -is [Array]) {{ $value = $value[0] }}
+        Write-Output $value
+        "#,
+        adapter_name.replace('\'', "''"),
+        keyword
+    );
+
+    let output = crate::run_hidden_command_with_timeout(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+        Duration::from_secs(ADAPTER_QUERY_TIMEOUT_SECS),
+    );
+    output
+        .success
+        .then_some(output.stdout)?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .parse()
+        .ok()
 }
 
-#[cfg(not(windows))]
-pub fn large_send_offload_is_disabled(_adapter_guid: &str) -> Option<bool> {
-    None
-}
-
-#[cfg(windows)]
-fn parse_adapter_guid(value: &str) -> Option<windows::core::GUID> {
-    windows::core::GUID::try_from(value.trim_matches(['{', '}'])).ok()
-}
-
-#[cfg(windows)]
-fn offload_disabled_in_class(class: &winreg::RegKey, target: windows::core::GUID) -> Option<bool> {
-    use winreg::enums::{KEY_QUERY_VALUE, KEY_WOW64_64KEY};
-    let mut selected = None;
-    for (index, name) in class.enum_keys().enumerate() {
-        if index >= 1024 {
-            return None;
-        }
-        let name = name.ok()?;
-        // Device instance keys are numeric. Do not open unrelated class
-        // metadata such as Properties, which can require extra privileges.
-        if name.len() != 4 || !name.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        let Ok(adapter) = class.open_subkey_with_flags(&name, KEY_QUERY_VALUE | KEY_WOW64_64KEY)
-        else {
-            continue;
-        };
-        let guid = crate::registry_value::read::<String>(&adapter, "NetCfgInstanceId")
-            .ok()
-            .flatten()
-            .and_then(|s| parse_adapter_guid(&s));
-        if guid == Some(target) && selected.replace(adapter).is_some() {
-            return None;
-        }
-    }
-    let adapter = selected?;
-    let values = ["*LsoV2IPv4", "*LsoV2IPv6"].map(|keyword| read_offload_value(&adapter, keyword));
-    if values.contains(&Some(0)) {
-        Some(true)
-    } else if values.contains(&Some(1)) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-#[cfg(windows)]
-fn read_offload_value(adapter: &winreg::RegKey, keyword: &str) -> Option<u32> {
-    use winreg::{enums::RegType, types::FromRegValue};
-    let raw = crate::registry_value::read_raw(adapter, keyword).ok()??;
-    let value = match raw.vtype {
-        RegType::REG_SZ => String::from_reg_value(&raw).ok()?.trim().parse().ok()?,
-        RegType::REG_DWORD => u32::from_reg_value(&raw).ok()?,
-        _ => return None,
-    };
-    (value <= 1).then_some(value)
-}
-
-#[cfg(all(test, windows))]
-mod offload_query_tests {
-    use super::*;
-    use winreg::{
-        RegKey, RegValue,
-        enums::{HKEY_CURRENT_USER, RegType},
-    };
-    struct Fixture {
-        path: String,
-        class: RegKey,
-    }
-    impl Fixture {
-        fn new() -> Self {
-            let path = format!(
-                r"Software\SwiftTunnel-Offload-{:032x}",
-                rand::random::<u128>()
-            );
-            let (class, _) = RegKey::predef(HKEY_CURRENT_USER)
-                .create_subkey(&path)
-                .unwrap();
-            Self { path, class }
-        }
-    }
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(&self.path);
-        }
-    }
-    const TARGET: &str = "381b4222-f694-41f0-9685-ff5bb260df2e";
-    #[test]
-    fn native_offload_reads_only_the_exact_adapter_and_keeps_unknown_values_unknown() {
-        let fixture = Fixture::new();
-        let target = parse_adapter_guid(TARGET).unwrap();
-        let query = || offload_disabled_in_class(&fixture.class, target);
-        let (other, _) = fixture.class.create_subkey("0000").unwrap();
-        other
-            .set_value("NetCfgInstanceId", &"8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c")
-            .unwrap();
-        other.set_value("*LsoV2IPv4", &"0").unwrap();
-        assert_eq!(query(), None);
-        let (selected, _) = fixture.class.create_subkey("0001").unwrap();
-        selected
-            .set_value(
-                "NetCfgInstanceId",
-                &format!("{{{}}}", TARGET.to_uppercase()),
-            )
-            .unwrap();
-        assert_eq!(query(), None);
-        selected.set_value("*LsoV2IPv4", &"1").unwrap();
-        assert_eq!(query(), Some(false));
-        selected.set_value("*LsoV2IPv6", &0u32).unwrap();
-        assert_eq!(query(), Some(true));
-        selected.set_value("*LsoV2IPv6", &7u32).unwrap();
-        assert_eq!(query(), Some(false));
-        selected.set_value("*LsoV2IPv4", &"invalid").unwrap();
-        assert_eq!(query(), None);
-        selected
-            .set_raw_value(
-                "*LsoV2IPv4",
-                &RegValue {
-                    vtype: RegType::REG_BINARY,
-                    bytes: vec![0],
-                },
-            )
-            .unwrap();
-        assert_eq!(query(), None);
-        selected
-            .set_raw_value(
-                "*LsoV2IPv4",
-                &RegValue {
-                    vtype: RegType::REG_SZ,
-                    bytes: vec![0; crate::registry_value::MAX_VALUE_BYTES + 2],
-                },
-            )
-            .unwrap();
-        assert_eq!(query(), None);
-        assert!(parse_adapter_guid("not-an-adapter-guid").is_none());
-    }
-    #[test]
-    fn duplicate_adapter_ids_are_not_an_authoritative_offload_reading() {
-        let fixture = Fixture::new();
-        for name in ["0000", "0001"] {
-            let (key, _) = fixture.class.create_subkey(name).unwrap();
-            key.set_value("NetCfgInstanceId", &TARGET).unwrap();
-            key.set_value("*LsoV2IPv4", &"0").unwrap();
-        }
-        assert_eq!(
-            offload_disabled_in_class(&fixture.class, parse_adapter_guid(TARGET).unwrap()),
-            None
-        );
-    }
-
-    #[test]
-    #[ignore = "read-only comparison against this machine's physical adapter settings"]
-    fn compare_native_offload_with_local_netadapter_cmdlet() {
-        #[derive(serde::Deserialize)]
-        struct Row {
-            guid: String,
-            values: Vec<String>,
-        }
-        let script = r#"
-            $ErrorActionPreference='Stop'
-            $rows = @(Get-NetAdapter -Physical -ErrorAction Stop | ForEach-Object {
-                $device = $_
-                $values = @(Get-NetAdapterAdvancedProperty -Name ([Management.Automation.WildcardPattern]::Escape($device.Name)) -RegistryKeyword '*LsoV2IPv4','*LsoV2IPv6' -ErrorAction SilentlyContinue |
-                    ForEach-Object { $_.RegistryValue } | ForEach-Object { [string]$_ })
-                [pscustomobject]@{guid=[string]$device.InterfaceGuid;values=$values}
-            })
-            ConvertTo-Json -InputObject $rows -Compress -Depth 4
-        "#;
-        let output = crate::run_hidden_command_with_timeout(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", script],
-            std::time::Duration::from_secs(15),
-        );
-        assert!(output.success, "{}", output.stderr);
-        let rows: Vec<Row> = serde_json::from_str(output.stdout.trim()).unwrap();
-        let mut known = 0;
-        for row in &rows {
-            let expected = if row.values.iter().any(|value| value == "0") {
-                Some(true)
-            } else if row.values.iter().any(|value| value == "1") {
-                Some(false)
-            } else {
-                None
-            };
-            assert_eq!(large_send_offload_is_disabled(&row.guid), expected);
-            known += usize::from(expected.is_some());
-        }
-        assert!(
-            known > 0,
-            "this comparison needs at least one supported physical adapter"
-        );
-        eprintln!(
-            "Read-only offload comparison: {} adapter(s) matched, {known} with known LSO configuration",
-            rows.len()
-        );
+/// Whether this adapter currently has large-send offload switched off.
+///
+/// `None` when the adapter cannot be queried or does not expose the setting.
+///
+/// Reported rather than acted on. Recovery here is entirely marker driven, so
+/// an adapter that an older build left with offload disabled stays that way
+/// forever once the marker is gone, which happens when the user clears
+/// %APPDATA%, reinstalls, or an uninstall tidies it away. The machine then does
+/// packet segmentation in software permanently, with SwiftTunnel not even
+/// running, and the only symptom is that everything feels slightly worse than
+/// it used to. Putting the real state in the log is how that becomes visible
+/// instead of a guess.
+///
+/// Restoring it automatically is deliberately not done here: a user may have
+/// turned offload off themselves, and silently changing a network adapter
+/// setting we did not set is worse than reporting it.
+pub fn large_send_offload_is_disabled(adapter_name: &str) -> Option<bool> {
+    let v4 = query_adapter_offload_value(adapter_name, "*LsoV2IPv4");
+    let v6 = query_adapter_offload_value(adapter_name, "*LsoV2IPv6");
+    match (v4, v6) {
+        (None, None) => None,
+        // 0 means the offload is off. Either family being off costs CPU.
+        (a, b) => Some(a == Some(0) || b == Some(0)),
     }
 }
 
@@ -421,23 +266,17 @@ pub fn restore_tso_from_marker() -> Option<bool> {
 
 /// Recover TSO settings on application startup
 pub fn recover_tso_on_startup() {
-    if let Err(e) = recover_tso_checked() {
+    if let Some(path) = get_marker_path()
+        && let Err(e) = recover_marker_at(&path, restore_tso_for_marker)
+    {
         log::warn!("Adapter recovery could not finish; its record was kept: {e}");
     }
-}
-
-/// Explicit repairs must be able to distinguish a failed restore from success.
-pub fn recover_tso_checked() -> std::io::Result<bool> {
-    let path = get_marker_path().ok_or_else(|| {
-        std::io::Error::other("Windows could not locate the adapter recovery record folder")
-    })?;
-    recover_marker_at(&path, restore_tso_for_marker)
 }
 
 fn recover_marker_at(
     path: &std::path::Path,
     restore: impl FnOnce(&TsoMarker) -> bool,
-) -> std::io::Result<bool> {
+) -> std::io::Result<()> {
     if let Some(marker) = read_marker_at(path)? {
         log::warn!(
             "TSO marker found - app may have crashed while TSO was disabled. Adapter: {}",
@@ -448,13 +287,10 @@ fn recover_marker_at(
             fs::remove_file(path)?;
             log::info!("TSO recovery complete");
         } else {
-            return Err(std::io::Error::other(
-                "Adapter offload settings could not be restored; their recovery record was kept",
-            ));
+            log::error!("TSO recovery failed - will retry on next launch");
         }
-        return Ok(true);
     }
-    Ok(false)
+    Ok(())
 }
 
 /// Emergency TSO restore for panic handler.
@@ -478,26 +314,6 @@ pub fn emergency_tso_restore() {
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
-    #[test]
-    fn recovery_reports_a_record_that_cannot_be_retired() {
-        use std::os::windows::fs::OpenOptionsExt;
-        let path = get_marker_path().unwrap();
-        let bytes = b"Owned test adapter\r\n";
-        fs::write(&path, bytes).unwrap();
-        // Windows denies deletion while this owned fixture omits FILE_SHARE_DELETE.
-        let held = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(3)
-            .open(&path)
-            .unwrap();
-        assert!(recover_marker_at(&path, |_| true).is_err());
-        assert_eq!(fs::read(&path).unwrap(), bytes);
-        drop(held);
-        assert!(recover_marker_at(&path, |_| true).unwrap());
-        assert!(!path.exists());
-    }
-
     #[test]
     fn test_marker_path() {
         let path = get_marker_path();
@@ -520,13 +336,11 @@ mod tests {
         let bytes = serde_json::to_vec(&marker).unwrap();
         fs::write(&path, &bytes).unwrap();
         assert_eq!(read_marker_at(&path).unwrap(), Some(marker.clone()));
-        assert!(
-            recover_marker_at(&path, |actual| {
-                assert_eq!(actual, &marker);
-                false
-            })
-            .is_err()
-        );
+        recover_marker_at(&path, |actual| {
+            assert_eq!(actual, &marker);
+            false
+        })
+        .unwrap();
         assert_eq!(fs::read(&path).unwrap(), bytes);
         recover_marker_at(&path, |actual| {
             assert_eq!(actual, &marker);

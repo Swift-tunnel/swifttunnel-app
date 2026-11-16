@@ -86,7 +86,6 @@ describe("stores/boostStore", () => {
     boostGetSystemMemory.mockReturnValue(new Promise(resolve => { finish = resolve; }));
     const store = await loadStore();
     const reading = store.getState().fetchSystemMemory();
-    store.setState({ isCleaningRam: true });
     const progress = { stage: "done", total_mb: 16000, used_mb: 8000, available_mb: 8000, load_pct: 50, standby_mb: null, modified_mb: null, trimmed_count: 4, current_process: null, warning: null };
     store.getState().handleRamCleanProgress(progress);
     finish({ ...progress, used_mb: 12000 });
@@ -251,7 +250,14 @@ describe("stores/boostStore", () => {
   });
 
   it("cleans RAM and updates state without notifications on success", async () => {
-    boostGetSystemMemory.mockReturnValue(new Promise(() => {}));
+    boostGetSystemMemory.mockResolvedValue({
+      total_mb: 16000,
+      used_mb: 10000,
+      available_mb: 6000,
+      load_pct: 63,
+      standby_mb: null,
+      modified_mb: null,
+    });
 
     const resp = {
       before: { total_mb: 16000, used_mb: 10000, available_mb: 6000, load_pct: 63, standby_mb: null, modified_mb: null },
@@ -278,15 +284,26 @@ describe("stores/boostStore", () => {
     const promise = useBoostStore.getState().cleanRam();
 
     expect(useBoostStore.getState().isCleaningRam).toBe(true);
+    // Allow the click-time baseline snapshot to resolve before the cleaner starts.
+    await new Promise((r) => setTimeout(r, 0));
     expect(boostCleanRam).toHaveBeenCalledTimes(1);
     resolveClean!(resp);
     await promise;
 
     expect(boostCleanRam).toHaveBeenCalledTimes(1);
-    expect(boostGetSystemMemory).not.toHaveBeenCalled();
+    expect(boostGetSystemMemory).toHaveBeenCalledTimes(1);
     expect(useBoostStore.getState().isCleaningRam).toBe(false);
     expect(useBoostStore.getState().ramCleanResult).toEqual(resp);
     expect(useBoostStore.getState().systemMem).toEqual(resp.after);
+    expect(useBoostStore.getState().ramCleanStartSnapshot).toEqual({
+      total_mb: 16000,
+      used_mb: 10000,
+      available_mb: 6000,
+      load_pct: 63,
+      standby_mb: null,
+      modified_mb: null,
+    });
+    expect(useBoostStore.getState().ramCleanDoneSnapshot).toEqual(resp.after);
     expect(notify).not.toHaveBeenCalled();
   });
 
@@ -307,6 +324,8 @@ describe("stores/boostStore", () => {
     expect(useBoostStore.getState().error).toBe("boom");
     expect(useBoostStore.getState().warning).toBeNull();
     expect(useBoostStore.getState().isCleaningRam).toBe(false);
+    expect(useBoostStore.getState().ramCleanStartSnapshot).toBeNull();
+    expect(useBoostStore.getState().ramCleanDoneSnapshot).toBeNull();
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith(
       "RAM cleaner failed",
@@ -314,10 +333,8 @@ describe("stores/boostStore", () => {
     );
   });
 
-  it("does not replace the final RAM reading with a late progress event", async () => {
+  it("captures RAM cleaner start and done snapshots from progress events", async () => {
     const useBoostStore = await loadStore();
-    const final = { total_mb: 16000, used_mb: 9000, available_mb: 7000, load_pct: 56, standby_mb: 256, modified_mb: 64 };
-    useBoostStore.setState({ isCleaningRam: false, ramCleanStage: "done", systemMem: final });
 
     useBoostStore.getState().handleRamCleanProgress({
       stage: "start",
@@ -332,13 +349,62 @@ describe("stores/boostStore", () => {
       warning: null,
     });
 
-    expect(useBoostStore.getState().systemMem).toEqual(final);
-    expect(useBoostStore.getState().ramCleanStage).toBe("done");
+    expect(useBoostStore.getState().ramCleanStartSnapshot).toEqual({
+      total_mb: 16000,
+      used_mb: 10000,
+      available_mb: 6000,
+      load_pct: 63,
+      standby_mb: 2048,
+      modified_mb: 512,
+    });
+
+    useBoostStore.getState().handleRamCleanProgress({
+      stage: "trimming",
+      total_mb: 16000,
+      used_mb: 9500,
+      available_mb: 6500,
+      load_pct: 59,
+      standby_mb: 2048,
+      modified_mb: 512,
+      trimmed_count: 1,
+      current_process: "chrome.exe",
+      warning: null,
+    });
+
+    expect(useBoostStore.getState().ramCleanStartSnapshot).toEqual({
+      total_mb: 16000,
+      used_mb: 10000,
+      available_mb: 6000,
+      load_pct: 63,
+      standby_mb: 2048,
+      modified_mb: 512,
+    });
+
+    useBoostStore.getState().handleRamCleanProgress({
+      stage: "done",
+      total_mb: 16000,
+      used_mb: 9000,
+      available_mb: 7000,
+      load_pct: 56,
+      standby_mb: 256,
+      modified_mb: 64,
+      trimmed_count: 1,
+      current_process: null,
+      warning: null,
+    });
+
+    expect(useBoostStore.getState().ramCleanDoneSnapshot).toEqual({
+      total_mb: 16000,
+      used_mb: 9000,
+      available_mb: 7000,
+      load_pct: 56,
+      standby_mb: 256,
+      modified_mb: 64,
+    });
   });
 
   it("updates system memory snapshot from ram-clean-progress events", async () => {
     const useBoostStore = await loadStore();
-    useBoostStore.setState({ isCleaningRam: true });
 
     useBoostStore.getState().handleRamCleanProgress({
       stage: "trimming",
@@ -422,7 +488,6 @@ describe("stores/boostStore", () => {
 
   it("progresses through flushing_modified stage", async () => {
     const useBoostStore = await loadStore();
-    useBoostStore.setState({ isCleaningRam: true });
 
     useBoostStore.getState().handleRamCleanProgress({
       stage: "start",

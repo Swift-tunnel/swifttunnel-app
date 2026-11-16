@@ -15,8 +15,6 @@ interface RepairState {
   currentStep: string | null;
   error: string | null;
   liveItems: RepairItemResult[];
-  /** The checks the current run will do, in order, so progress survives a tab switch. */
-  plan: { id: string; label: string }[];
   lastRun: RepairRun | null;
   reinstallReport: RepairReport | null;
 }
@@ -24,7 +22,7 @@ interface RepairState {
 // Operations outlive the tab. Navigating away must not unlock a second run.
 export const useRepairStore = create<RepairState>(() => ({
   running: false, restarting: false, reinstalling: false, progress: 0,
-  currentStep: null, error: null, liveItems: [], plan: [], lastRun: savedRun(), reinstallReport: null,
+  currentStep: null, error: null, liveItems: [], lastRun: savedRun(), reinstallReport: null,
 }));
 
 export function repairIsBusy(): boolean {
@@ -36,7 +34,7 @@ export function beginRepair(kind: "repair" | "reinstall"): boolean {
   if (repairIsBusy()) return false;
   useRepairStore.setState({
     running: kind === "repair", reinstalling: kind === "reinstall",
-    progress: 0, currentStep: "Disconnecting the tunnel", error: null, liveItems: [], plan: [],
+    progress: 0, currentStep: "Disconnecting the tunnel", error: null, liveItems: [],
   });
   return true;
 }

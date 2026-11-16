@@ -18,40 +18,6 @@ use tauri::Manager;
 #[cfg(windows)]
 static DRIVER_OPERATION_LOCK: Mutex<()> = Mutex::new(());
 
-struct NetworkRepairLease {
-    _operation: super::network_operation::MaintenancePermit,
-    _connection: tokio::sync::OwnedMutexGuard<swifttunnel_core::vpn::VpnConnection>,
-}
-
-fn ensure_network_repair_is_idle(
-    state: &swifttunnel_core::vpn::ConnectionState,
-) -> Result<(), String> {
-    use swifttunnel_core::vpn::ConnectionState;
-    if matches!(
-        state,
-        ConnectionState::Disconnected | ConnectionState::Error(_)
-    ) {
-        Ok(())
-    } else {
-        Err("Disconnect SwiftTunnel before repairing the driver or network.".into())
-    }
-}
-
-fn reserve_network_repair(state: &AppState) -> Result<NetworkRepairLease, String> {
-    // Driver/firewall repair and full recovery can touch the same Windows
-    // state and rollback records as an optimizer, not only an active tunnel.
-    let operation = super::network_operation::begin_maintenance()?;
-    let connection = state.vpn_connection.clone().try_lock_owned().map_err(|_| {
-        "SwiftTunnel is still finishing a network operation. Wait a moment, then try again."
-            .to_string()
-    })?;
-    ensure_network_repair_is_idle(&state.vpn_state_handle.borrow())?;
-    Ok(NetworkRepairLease {
-        _operation: operation,
-        _connection: connection,
-    })
-}
-
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
@@ -97,7 +63,7 @@ pub async fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Resu
         return Ok(());
     }
 
-    let builder =
+    let window =
         tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title(title)
             .inner_size(width, height)
@@ -108,15 +74,9 @@ pub async fn ensure_overlay_window(app: tauri::AppHandle, label: String) -> Resu
             .resizable(false)
             .focused(false)
             .shadow(false)
-            .visible(false);
-    #[cfg(windows)]
-    let builder = match app.try_state::<crate::startup_window::RecoveryWebviewProfile>() {
-        Some(profile) => builder.data_directory(profile.0.clone()),
-        None => builder,
-    };
-    let window = builder
-        .build()
-        .map_err(|e| format!("failed to create {label}: {e}"))?;
+            .visible(false)
+            .build()
+            .map_err(|e| format!("failed to create {label}: {e}"))?;
 
     // Same treatment the startup path used to apply: a normal topmost window
     // activates when clicked, which knocks Roblox out of the foreground and
@@ -449,16 +409,14 @@ fn winpkfilter_msi_candidate_paths(
         candidates.push(dir.join("resources").join(msi_name));
     }
 
-    if program_files_dir.is_absolute() {
-        let install_root = program_files_dir.join("SwiftTunnel");
-        candidates.push(
-            install_root
-                .join("resources")
-                .join("drivers")
-                .join(msi_name),
-        );
-        candidates.push(install_root.join("drivers").join(msi_name));
-    }
+    let install_root = program_files_dir.join("SwiftTunnel");
+    candidates.push(
+        install_root
+            .join("resources")
+            .join("drivers")
+            .join(msi_name),
+    );
+    candidates.push(install_root.join("drivers").join(msi_name));
 
     candidates
 }
@@ -1602,14 +1560,10 @@ fn repair_windows_firewall_sync() -> Result<WindowsFirewallRepairResponse, Strin
 }
 
 #[tauri::command]
-pub async fn system_repair_windows_firewall(
-    state: State<'_, AppState>,
-) -> Result<WindowsFirewallRepairResponse, String> {
+pub async fn system_repair_windows_firewall() -> Result<WindowsFirewallRepairResponse, String> {
     #[cfg(windows)]
     {
-        let repair = reserve_network_repair(&state)?;
-        tauri::async_runtime::spawn_blocking(move || {
-            let _repair = repair;
+        tauri::async_runtime::spawn_blocking(|| {
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -1621,7 +1575,6 @@ pub async fn system_repair_windows_firewall(
 
     #[cfg(not(windows))]
     {
-        let _ = state;
         Ok(WindowsFirewallRepairResponse::unsupported())
     }
 }
@@ -1842,20 +1795,19 @@ pub async fn system_check_driver() -> Result<DriverCheckResponse, String> {
 #[tauri::command]
 pub async fn system_install_driver(
     app: tauri::AppHandle,
-    state: State<'_, AppState>,
     force: Option<bool>,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let repair = reserve_network_repair(&state)?;
         let force = force.unwrap_or(false);
         let resource_dir = app.path().resource_dir().ok();
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
+        let program_files_dir = PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
+        );
         tauri::async_runtime::spawn_blocking(move || {
-            let _repair = repair;
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -1873,67 +1825,13 @@ pub async fn system_install_driver(
 
     #[cfg(not(windows))]
     {
-        let _ = (app, state, force);
+        let _ = (app, force);
         Err("Driver installation is only supported on Windows".to_string())
     }
 }
 
 /// Force a full driver reinstall regardless of what the health check says.
 ///
-/// Driver work runs on a blocking thread with many early returns. A shared
-/// handle lets each step mark its stage and the command record where it ended.
-#[cfg(windows)]
-#[derive(Clone)]
-struct DriverSupportLog(
-    std::sync::Arc<std::sync::Mutex<swifttunnel_core::support_log::Operation>>,
-    &'static str,
-);
-
-#[cfg(windows)]
-impl DriverSupportLog {
-    fn start(kind: &'static str) -> Self {
-        let operation =
-            swifttunnel_core::support_log::Operation::start(kind, "wait_for_driver_lock");
-        Self(std::sync::Arc::new(std::sync::Mutex::new(operation)), kind)
-    }
-
-    fn stage(&self, next: &'static str) {
-        if let Ok(mut operation) = self.0.lock() {
-            operation.stage(next);
-        }
-    }
-
-    /// The message can hold paths and installer text, so only the fixed
-    /// status words are written here. The stage is the last step attempted.
-    fn finish(&self, result: &Result<DriverCheckResponse, String>) {
-        let Ok(mut operation) = self.0.lock() else {
-            return;
-        };
-        match result {
-            Ok(response) => {
-                log::info!(
-                    "[support] op={} id={} event=result ready={} installed={} restart_required={} status={} recommended_action={} observed=ready,installed,status inferred=recommended_action",
-                    self.1,
-                    operation.id(),
-                    response.ready,
-                    response.installed,
-                    response.reboot_required,
-                    response.status,
-                    response.recommended_action,
-                );
-                if response.ready {
-                    operation.succeed("driver_ready");
-                } else if response.reboot_required {
-                    operation.fail("restart_required");
-                } else {
-                    operation.fail("driver_not_ready");
-                }
-            }
-            Err(_) => operation.fail("stage_failed"),
-        }
-    }
-}
-
 /// `system_repair_driver` deliberately short-circuits when the driver reports
 /// healthy — right for automated Repair-all, but useless when the driver
 /// *reports* ready yet misbehaves in practice (corrupted files, flaky binding
@@ -1948,21 +1846,19 @@ pub async fn system_reinstall_driver(
 ) -> Result<DriverCheckResponse, String> {
     #[cfg(windows)]
     {
-        let repair = reserve_network_repair(&state)?;
         let resource_dir = app.path().resource_dir().ok();
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
+        let program_files_dir = PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
+        );
         let binding_preference = {
             let mut settings = state.settings.lock();
             repair_binding_preference_from_settings(&mut settings)
         };
 
-        let support = DriverSupportLog::start("driver_reinstall");
-        let steps = support.clone();
-        let result = tauri::async_runtime::spawn_blocking(move || {
-            let _repair = repair;
+        tauri::async_runtime::spawn_blocking(move || {
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -1971,7 +1867,6 @@ pub async fn system_reinstall_driver(
             let mut reinstall_errors: Vec<String> = Vec::new();
 
             if is_admin {
-                steps.stage("bundled_package");
                 match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
                     resource_dir.as_deref(),
                     exe_dir.as_deref(),
@@ -2003,7 +1898,6 @@ pub async fn system_reinstall_driver(
                     .push("not elevated; using the elevated installer instead".to_string());
             }
 
-            steps.stage("windows_installer");
             match install_winpkfilter_driver_from_msi(
                 &app,
                 resource_dir.as_deref(),
@@ -2031,9 +1925,7 @@ pub async fn system_reinstall_driver(
             }
         })
         .await
-        .map_err(|e| format!("Driver reinstall task failed: {}", e))?;
-        support.finish(&result);
-        result
+        .map_err(|e| format!("Driver reinstall task failed: {}", e))?
     }
 
     #[cfg(not(windows))]
@@ -2050,27 +1942,24 @@ pub async fn system_repair_driver(
 ) -> Result<DriverCheckResponse, String> {
     #[cfg(windows)]
     {
-        let repair = reserve_network_repair(&state)?;
         let resource_dir = app.path().resource_dir().ok();
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let program_files_dir = swifttunnel_core::vpn::winpkfilter::default_program_files_dir();
+        let program_files_dir = PathBuf::from(
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()),
+        );
         let binding_preference = {
             let mut settings = state.settings.lock();
             repair_binding_preference_from_settings(&mut settings)
         };
 
-        let support = DriverSupportLog::start("driver_repair");
-        let steps = support.clone();
-        let result = tauri::async_runtime::spawn_blocking(move || {
-            let _repair = repair;
+        tauri::async_runtime::spawn_blocking(move || {
             use swifttunnel_core::vpn::DriverRecommendedAction;
 
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
-            steps.stage("health_and_binding_check");
             let post_repair_preflight =
                 || swifttunnel_core::vpn::preflight_binding_for_connect(binding_preference.clone());
             let initial = swifttunnel_core::vpn::SplitTunnelDriver::health_check();
@@ -2110,7 +1999,6 @@ pub async fn system_repair_driver(
                 && (initial.ready
                     || current.recommended_action == DriverRecommendedAction::ResetService)
             {
-                steps.stage("service_reset");
                 match swifttunnel_core::vpn::SplitTunnelDriver::restart_driver_service()
                     .and_then(|_| {
                         swifttunnel_core::vpn::SplitTunnelDriver::repair_and_wait_until_available(
@@ -2213,7 +2101,6 @@ pub async fn system_repair_driver(
                 }
 
                 if is_admin {
-                    steps.stage("bundled_package");
                     match swifttunnel_core::vpn::SplitTunnelDriver::install_driver_from_bundled_package(
                         resource_dir.as_deref(),
                         exe_dir.as_deref(),
@@ -2245,7 +2132,6 @@ pub async fn system_repair_driver(
                     );
                 }
 
-                steps.stage("windows_installer");
                 match install_winpkfilter_driver_from_msi(
                     &app,
                     resource_dir.as_deref(),
@@ -2279,9 +2165,7 @@ pub async fn system_repair_driver(
             Ok(response)
         })
         .await
-        .map_err(|e| format!("Driver repair task failed: {}", e))?;
-        support.finish(&result);
-        result
+        .map_err(|e| format!("Driver repair task failed: {}", e))?
     }
 
     #[cfg(not(windows))]
@@ -2370,83 +2254,6 @@ SERVICE_NAME: MpsSvc
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn inconclusive_driver_check_cannot_authorize_removing_recovery_data() {
-        let failed = swifttunnel_core::vpn::StaleCleanupReport {
-            driver_open_error: Some("fixture device-open failure".into()),
-            ..Default::default()
-        };
-        for evidence in [Err("fixture discovery timeout".into()), Ok(true)] {
-            let (step, may_clear) = adapter_mode_repair_step(&failed, &evidence);
-            assert_eq!(step.status, "failed");
-            assert!(!may_clear);
-        }
-        let (step, may_clear) = adapter_mode_repair_step(&failed, &Ok(false));
-        assert_eq!(step.status, "healthy");
-        assert!(may_clear);
-        let verified = swifttunnel_core::vpn::StaleCleanupReport::default();
-        assert!(adapter_mode_repair_step(&verified, &Err("metadata unavailable".into())).1);
-    }
-
-    #[test]
-    fn hosts_repair_reports_cleanup_failure_even_when_the_file_exists() {
-        let checked = std::cell::Cell::new(false);
-        let step = hosts_repair_step(
-            || Err("fixture malformed marker".into()),
-            || {
-                checked.set(true);
-                Ok(false)
-            },
-        );
-        assert!(checked.get());
-        assert_eq!(step.status, "failed");
-        assert!(step.detail.contains("fixture malformed marker"));
-        let both_failed = hosts_repair_step(
-            || Err("cleanup denied".into()),
-            || Err("creation denied".into()),
-        );
-        assert_eq!(both_failed.status, "failed");
-        assert!(both_failed.detail.contains("cleanup denied"));
-        assert!(both_failed.detail.contains("creation denied"));
-        assert_eq!(hosts_repair_step(|| Ok(()), || Ok(true)).status, "fixed");
-        assert_eq!(hosts_repair_step(|| Ok(()), || Ok(false)).status, "healthy");
-        assert_eq!(
-            hosts_repair_step(|| Ok(()), || Err("fixture access failure".into())).status,
-            "failed"
-        );
-    }
-
-    #[test]
-    fn network_repair_refuses_active_and_transitional_sessions() {
-        use swifttunnel_core::vpn::ConnectionState;
-        assert!(ensure_network_repair_is_idle(&ConnectionState::Disconnected).is_ok());
-        assert!(
-            ensure_network_repair_is_idle(&ConnectionState::Error("fixture failure".into()))
-                .is_ok()
-        );
-        for state in [
-            ConnectionState::FetchingConfig,
-            ConnectionState::ConfiguringSplitTunnel,
-            ConnectionState::Disconnecting,
-            ConnectionState::Connected {
-                since: std::time::Instant::now(),
-                server_region: "fixture".into(),
-                server_endpoint: "127.0.0.1:51820".into(),
-                assigned_ip: String::new(),
-                relay_auth_mode: "ticket".into(),
-                split_tunnel_active: true,
-                tunneled_processes: vec![],
-                relay_status: None,
-            },
-        ] {
-            assert!(
-                ensure_network_repair_is_idle(&state)
-                    .unwrap_err()
-                    .contains("Disconnect")
-            );
-        }
-    }
 
     fn ready_health() -> swifttunnel_core::vpn::SplitTunnelDriverHealth {
         swifttunnel_core::vpn::SplitTunnelDriverHealth {
@@ -3033,14 +2840,8 @@ mod tests {
 }
 
 #[tauri::command]
-pub async fn system_cleanup(state: State<'_, AppState>) -> Result<(), String> {
-    let repair = reserve_network_repair(&state)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let _repair = repair;
-        #[cfg(windows)]
-        let _guard = DRIVER_OPERATION_LOCK
-            .lock()
-            .map_err(|_| "Driver operation lock is poisoned".to_string())?;
+pub async fn system_cleanup() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
         swifttunnel_core::network_booster::cleanup_all_system_state().map_err(|e| e.to_string())
     })
     .await
@@ -3051,51 +2852,24 @@ pub async fn system_cleanup(state: State<'_, AppState>) -> Result<(), String> {
 /// state such as the driver package, startup registration, optimizer settings,
 /// hosts entries, or Roblox settings.
 #[tauri::command]
-pub async fn system_cleanup_tunnel_state(state: State<'_, AppState>) -> Result<(), String> {
-    let repair = reserve_network_repair(&state)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let _repair = repair;
-        #[cfg(windows)]
-        let _guard = DRIVER_OPERATION_LOCK
-            .lock()
-            .map_err(|_| "Driver operation lock is poisoned".to_string())?;
+pub async fn system_cleanup_tunnel_state() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
         log::info!("Running tunnel-state cleanup");
-        let mut errors = Vec::new();
-        if let Err(error) = swifttunnel_core::vpn::tso_recovery::recover_tso_checked() {
-            errors.push(format!("Adapter offload recovery: {error}"));
-        }
-        if let Err(error) = swifttunnel_core::vpn::ipv6_recovery::recover_ipv6_checked() {
-            errors.push(format!("IPv6 recovery: {error}"));
-        }
-        if let Err(error) = swifttunnel_core::vpn::wfp_block::cleanup_for_repair() {
-            errors.push(format!("Temporary network blocks: {error}"));
-        }
+        swifttunnel_core::vpn::recover_tso_on_startup();
+        swifttunnel_core::vpn::recover_ipv6_on_startup();
+        swifttunnel_core::vpn::wfp_block::cleanup_stale();
+        swifttunnel_core::vpn::wfp_block::cleanup();
+        swifttunnel_core::vpn::SplitTunnelDriver::cleanup_stale_state();
         #[cfg(windows)]
-        {
-            use swifttunnel_core::vpn::SplitTunnelDriver;
-            let evidence = SplitTunnelDriver::driver_install_evidence_checked();
-            let report = SplitTunnelDriver::cleanup_stale_state_checked();
-            let (step, clean) = adapter_mode_repair_step(&report, &evidence);
-            if !clean {
-                errors.push(step.detail);
-            }
-            // Continue independent recovery steps even after a failure above.
-            match SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
-                Ok(disabled) if !disabled.is_empty() => log::info!(
-                    "Tunnel-state cleanup: disabled WinpkFilter binding on adapter(s): {}",
-                    disabled.join(", ")
-                ),
-                Ok(_) => {}
-                Err(error) => errors.push(format!("Adapter binding cleanup: {error}")),
-            }
+        match swifttunnel_core::vpn::SplitTunnelDriver::disable_leftover_winpkfilter_bindings() {
+            Ok(disabled) if !disabled.is_empty() => log::info!(
+                "Tunnel-state cleanup: disabled WinpkFilter binding on adapter(s): {}",
+                disabled.join(", ")
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("Tunnel-state cleanup: WinpkFilter binding cleanup failed: {e}"),
         }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            let details = errors.join("; ");
-            log::warn!("Tunnel-state cleanup incomplete: {details}");
-            Err(format!("Tunnel cleanup could not finish. Run Internet recovery in Repair, then retry. {details}"))
-        }
+        Ok::<(), String>(())
     })
     .await
     .map_err(|e| format!("Tunnel-state cleanup task failed: {}", e))?
@@ -3154,13 +2928,19 @@ pub async fn system_repair_network(
         // Refuse while a session is active: the repair resets adapter modes
         // and removes our static filters, which would sever a live tunnel
         // mid-session and then report success.
-        let repair = reserve_network_repair(&state)?;
-        tauri::async_runtime::spawn_blocking(move || {
-            let _repair = repair;
-            run_network_repair_steps()
-        })
-        .await
-        .map_err(|e| format!("Network repair task failed: {}", e))
+        let _vpn_guard = state.vpn_connection.lock().await;
+        let conn_state = state.vpn_state_handle.borrow().clone();
+        if !matches!(
+            conn_state,
+            swifttunnel_core::vpn::ConnectionState::Disconnected
+                | swifttunnel_core::vpn::ConnectionState::Error(_)
+        ) {
+            return Err("Disconnect SwiftTunnel before running internet recovery.".to_string());
+        }
+
+        tauri::async_runtime::spawn_blocking(run_network_repair_steps)
+            .await
+            .map_err(|e| format!("Network repair task failed: {}", e))
     }
 
     #[cfg(not(windows))]
@@ -3176,21 +2956,37 @@ pub async fn system_repair_network(
 }
 
 #[cfg(windows)]
-fn adapter_mode_repair_step(
-    report: &swifttunnel_core::vpn::StaleCleanupReport,
-    evidence: &Result<bool, String>,
-) -> (NetworkRepairStep, bool) {
-    let step = if let Some(open_error) = &report.driver_open_error {
-        if let Err(error) = evidence {
-            network_repair_step(
-                "adapter_modes",
-                "Adapter packet filter modes",
-                "failed",
-                format!(
-                    "Could not verify the split tunnel driver or reset the adapter. Run driver repair, then retry. Driver check: {error}; adapter check: {open_error}"
-                ),
-            )
-        } else if matches!(evidence, Ok(true)) {
+fn run_network_repair_steps() -> NetworkRepairResponse {
+    use swifttunnel_core::vpn::tunnel_mode_recovery;
+    use swifttunnel_core::vpn::{SplitTunnelDriver, ipv6_recovery, tso_recovery};
+
+    let _guard = match DRIVER_OPERATION_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            return NetworkRepairResponse {
+                supported: true,
+                is_admin: swifttunnel_core::is_administrator(),
+                overall: "failed".to_string(),
+                steps: vec![network_repair_step(
+                    "lock",
+                    "Driver operation lock",
+                    "failed",
+                    "Another driver operation crashed while holding the lock. Restart SwiftTunnel and run recovery again.",
+                )],
+            };
+        }
+    };
+
+    let is_admin = swifttunnel_core::is_administrator();
+    log::info!("Running network repair (internet recovery)");
+    let mut steps: Vec<NetworkRepairStep> = Vec::new();
+
+    // Step 1: adapter tunnel modes — the total-blackout leftover.
+    let marker = tunnel_mode_recovery::read_tunnel_mode_marker();
+    let driver_installed = SplitTunnelDriver::driver_install_evidence();
+    let report = SplitTunnelDriver::cleanup_stale_state_checked();
+    let adapter_step = if let Some(open_error) = &report.driver_open_error {
+        if driver_installed {
             network_repair_step(
                 "adapter_modes",
                 "Adapter packet filter modes",
@@ -3241,90 +3037,8 @@ fn adapter_mode_repair_step(
             ),
         )
     };
-    let clean = report.fully_clean()
-        || (report.driver_open_error.is_some() && matches!(evidence, Ok(false)));
-    (step, clean)
-}
-
-#[cfg(windows)]
-fn hosts_repair_step(
-    cleanup: impl FnOnce() -> Result<(), String>,
-    ensure_exists: impl FnOnce() -> Result<bool, String>,
-) -> NetworkRepairStep {
-    // Keep creation/access checking independent, but never discard an error
-    // removing our entries just because the file itself is present.
-    let cleanup = cleanup();
-    let present = ensure_exists();
-    match (cleanup, present) {
-        (Err(cleanup), Err(present)) => network_repair_step(
-            "hosts",
-            "Hosts file",
-            "failed",
-            format!(
-                "Could not clean SwiftTunnel's Roblox entries or check the Windows hosts file. Cleanup: {cleanup}; file check: {present}"
-            ),
-        ),
-        (Err(error), _) => network_repair_step(
-            "hosts",
-            "Hosts file",
-            "failed",
-            format!(
-                "Could not remove SwiftTunnel's Roblox entries from the Windows hosts file: {error}"
-            ),
-        ),
-        (_, Err(error)) => network_repair_step(
-            "hosts",
-            "Hosts file",
-            "failed",
-            format!("Could not access or recreate the Windows hosts file: {error}"),
-        ),
-        (Ok(()), Ok(true)) => network_repair_step(
-            "hosts",
-            "Hosts file",
-            "fixed",
-            "The missing Windows hosts file was recreated.",
-        ),
-        (Ok(()), Ok(false)) => network_repair_step(
-            "hosts",
-            "Hosts file",
-            "healthy",
-            "Hosts file present; SwiftTunnel's Roblox entries cleaned.",
-        ),
-    }
-}
-
-#[cfg(windows)]
-fn run_network_repair_steps() -> NetworkRepairResponse {
-    use swifttunnel_core::vpn::tunnel_mode_recovery;
-    use swifttunnel_core::vpn::{SplitTunnelDriver, ipv6_recovery, tso_recovery};
-
-    let _guard = match DRIVER_OPERATION_LOCK.lock() {
-        Ok(guard) => guard,
-        Err(_) => {
-            return NetworkRepairResponse {
-                supported: true,
-                is_admin: swifttunnel_core::is_administrator(),
-                overall: "failed".to_string(),
-                steps: vec![network_repair_step(
-                    "lock",
-                    "Driver operation lock",
-                    "failed",
-                    "Another driver operation crashed while holding the lock. Restart SwiftTunnel and run recovery again.",
-                )],
-            };
-        }
-    };
-
-    let is_admin = swifttunnel_core::is_administrator();
-    log::info!("Running network repair (internet recovery)");
-    let mut steps: Vec<NetworkRepairStep> = Vec::new();
-
-    // Step 1: adapter tunnel modes — the total-blackout leftover.
-    let marker = tunnel_mode_recovery::read_tunnel_mode_marker();
-    let driver_evidence = SplitTunnelDriver::driver_install_evidence_checked();
-    let driver_known_absent = matches!(&driver_evidence, Ok(false));
-    let report = SplitTunnelDriver::cleanup_stale_state_checked();
-    let (adapter_step, adapter_modes_clean) = adapter_mode_repair_step(&report, &driver_evidence);
+    let adapter_modes_clean =
+        report.fully_clean() || (report.driver_open_error.is_some() && !driver_installed);
     steps.push(adapter_step);
 
     // Step 2: crash marker bookkeeping (must follow the verified reset).
@@ -3380,8 +3094,9 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
     });
 
     // Step 3: IPv6 block leftovers (static filters / legacy binding / firewall rule).
-    steps.push(match ipv6_recovery::recover_ipv6_checked() {
-        Ok(true) => {
+    steps.push(match ipv6_recovery::restore_ipv6_from_marker() {
+        Some(true) => {
+            ipv6_recovery::delete_ipv6_marker();
             network_repair_step(
                 "ipv6",
                 "IPv6 connectivity",
@@ -3389,13 +3104,13 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
                 "IPv6 was still blocked from a previous session — restored.",
             )
         }
-        Err(error) => network_repair_step(
+        Some(false) => network_repair_step(
             "ipv6",
             "IPv6 connectivity",
             "failed",
-            format!("IPv6 recovery could not finish. Its recovery record was kept for retry. {error}"),
+            "An IPv6 block from a previous session could not be removed; it will be retried on next launch.",
         ),
-        Ok(false) => match ipv6_recovery::remove_winpkfilter_ipv6_block_filters() {
+        None => match ipv6_recovery::remove_winpkfilter_ipv6_block_filters() {
             Ok(()) => network_repair_step(
                 "ipv6",
                 "IPv6 connectivity",
@@ -3403,7 +3118,7 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
                 "No IPv6 block marker; verified no SwiftTunnel IPv6 filters remain.",
             ),
             Err(e) => {
-                if !driver_known_absent {
+                if driver_installed {
                     network_repair_step(
                         "ipv6",
                         "IPv6 connectivity",
@@ -3423,8 +3138,9 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
     });
 
     // Step 4: TSO/LSO offload leftovers from older builds.
-    steps.push(match tso_recovery::recover_tso_checked() {
-        Ok(true) => {
+    steps.push(match tso_recovery::restore_tso_from_marker() {
+        Some(true) => {
+            tso_recovery::delete_tso_marker();
             network_repair_step(
                 "tso",
                 "Adapter offload settings",
@@ -3432,13 +3148,13 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
                 "Adapter offload settings from a previous session were restored.",
             )
         }
-        Err(error) => network_repair_step(
+        Some(false) => network_repair_step(
             "tso",
             "Adapter offload settings",
             "failed",
-            format!("Adapter offload recovery could not finish. Its recovery record was kept for retry. {error}"),
+            "Adapter offload settings could not be restored; recovery will retry on next launch.",
         ),
-        Ok(false) => network_repair_step(
+        None => network_repair_step(
             "tso",
             "Adapter offload settings",
             "healthy",
@@ -3446,27 +3162,41 @@ fn run_network_repair_steps() -> NetworkRepairResponse {
         ),
     });
 
-    // Step 5: verify that our temporary and legacy process blocks are gone.
-    steps.push(match swifttunnel_core::vpn::wfp_block::cleanup_for_repair() {
-        Ok(removed) => network_repair_step(
-            "wfp", "Windows Filtering Platform blocks",
-            if removed > 0 { "fixed" } else { "healthy" },
-            "SwiftTunnel's temporary network blocks were checked and cleared.",
-        ),
-        Err(error) => network_repair_step(
-            "wfp", "Windows Filtering Platform blocks", "failed",
-            format!("Could not clear SwiftTunnel's temporary network blocks. Close SwiftTunnel completely, reopen it, then retry. {error}"),
-        ),
-    });
+    // Step 5: WFP process-block filters (best-effort, no structured result).
+    swifttunnel_core::vpn::wfp_block::cleanup_stale();
+    swifttunnel_core::vpn::wfp_block::cleanup();
+    steps.push(network_repair_step(
+        "wfp",
+        "Windows Filtering Platform blocks",
+        "healthy",
+        "Stale SwiftTunnel WFP filters cleaned (best-effort).",
+    ));
 
     // Step 6: hosts file. Clean out anything of ours left behind, then make
     // sure the file is even there. A missing hosts file is what turned country
     // ban bypass into "unavailable on this network" with no way for anyone to
     // work out why, since Windows never complains about its absence.
-    steps.push(hosts_repair_step(
-        swifttunnel_core::roblox_proxy::hosts::remove_overrides,
-        swifttunnel_core::roblox_proxy::hosts::ensure_exists,
-    ));
+    swifttunnel_core::roblox_proxy::hosts::recover_stale();
+    steps.push(match swifttunnel_core::roblox_proxy::hosts::ensure_exists() {
+        Ok(true) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "fixed",
+            "The Windows hosts file was missing and has been recreated. Something removed it, usually antivirus or a PC cleanup tool.",
+        ),
+        Ok(false) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "healthy",
+            "Hosts file present; stale SwiftTunnel entries cleaned.",
+        ),
+        Err(e) => network_repair_step(
+            "hosts",
+            "Hosts file",
+            "failed",
+            format!("The Windows hosts file is missing and could not be recreated: {e}"),
+        ),
+    });
 
     // Step 7: DNS cache, so fixed connectivity takes effect immediately.
     steps.push(
@@ -3543,9 +3273,19 @@ pub async fn system_reset_driver(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let repair = reserve_network_repair(&state)?;
-        tauri::async_runtime::spawn_blocking(move || {
-            let _repair = repair;
+        let _vpn_guard = state.vpn_connection.lock().await;
+        let conn_state = state.vpn_state_handle.borrow().clone();
+        if !matches!(
+            conn_state,
+            swifttunnel_core::vpn::ConnectionState::Disconnected
+                | swifttunnel_core::vpn::ConnectionState::Error(_)
+        ) {
+            return Err(
+                "Disconnect SwiftTunnel before resetting the split tunnel driver.".to_string(),
+            );
+        }
+
+        tauri::async_runtime::spawn_blocking(|| {
             let _guard = DRIVER_OPERATION_LOCK
                 .lock()
                 .map_err(|_| "Driver operation lock is poisoned".to_string())?;
@@ -3593,53 +3333,26 @@ pub async fn system_uninstall(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let operation = super::network_operation::begin_maintenance()?;
         // Resolve the product before disconnecting or cleaning up. The native
         // API includes visible per-user installations and selects Desktop's
         // upgrade family, not the first display-name match in HKLM.
-        enum Route {
-            Installer(std::process::Command),
-            /// Windows has no usable uninstall record for this copy.
-            Direct(swifttunnel_core::direct_uninstall::Plan),
-        }
-        let route = tauri::async_runtime::spawn_blocking(|| {
+        let mut uninstall_command = tauri::async_runtime::spawn_blocking(|| {
             let exe = std::env::current_exe()
                 .map_err(|e| format!("Failed to locate SwiftTunnel: {e}"))?;
             let dir = exe.parent().ok_or("Failed to locate the install folder")?;
-            // A record whose installer package has gone cannot be uninstalled
-            // by Windows: msiexec would only show its "network resource is
-            // unavailable" error. That copy is removed directly instead.
-            let product = swifttunnel_core::msi_uninstall::desktop_product_code(dir)?;
-            if let Some(code) = &product
-                && !swifttunnel_core::direct_uninstall::registration_is_broken(
-                    swifttunnel_core::direct_uninstall::Client::Desktop,
-                    &exe,
-                    code,
-                )?
-            {
-                let msiexec = swifttunnel_installer_cache::windows_installer_path()
-                    .map_err(|error| format!("Could not locate Windows Installer: {error}"))?;
-                let mut command = swifttunnel_core::hidden_command(&msiexec.to_string_lossy());
-                command.args(["/x", code, "/norestart"]);
-                return Ok::<_, String>(Route::Installer(command));
+            if let Some(code) = swifttunnel_core::msi_uninstall::desktop_product_code(dir)? {
+                let mut command = swifttunnel_core::hidden_command("msiexec.exe");
+                command.args(["/x", &code, "/norestart"]);
+                return Ok::<_, String>(command);
             }
             let legacy = dir.join("uninstall.exe");
-            if product.is_none() && legacy.is_file() {
-                return Ok(Route::Installer(swifttunnel_core::hidden_command(
-                    &legacy.to_string_lossy(),
-                )));
+            if legacy.is_file() {
+                return Ok(swifttunnel_core::hidden_command(&legacy.to_string_lossy()));
             }
-            swifttunnel_core::direct_uninstall::plan_for_running_client(
-                swifttunnel_core::direct_uninstall::Client::Desktop,
-            )
-            .map(Route::Direct)
-            .map_err(|reason| {
-                format!("Windows has no uninstaller for this copy of SwiftTunnel, and it could not be removed directly. {reason}")
-            })
+            Err("No SwiftTunnel uninstaller was found. Open Windows Settings > Apps, or run the current SwiftTunnel installer to repair the installation first.".to_string())
         })
         .await
         .map_err(|e| format!("Could not check the installation: {e}"))??;
-        let direct = matches!(&route, Route::Direct(_));
 
         let conn_state = state.vpn_state_handle.borrow().clone();
         if !matches!(
@@ -3656,19 +3369,6 @@ pub async fn system_uninstall(
                 log::warn!("Uninstall proceeding despite disconnect error: {}", e);
             }
         }
-        let direct_gate = if direct {
-            let guard = state.vpn_connection.lock().await;
-            if !matches!(
-                *state.vpn_state_handle.borrow(),
-                swifttunnel_core::vpn::ConnectionState::Disconnected
-            ) || guard.split_tunnel_handle().is_some()
-            {
-                return Err("Disconnect SwiftTunnel before retrying uninstall.".into());
-            }
-            Some(guard)
-        } else {
-            None
-        };
 
         // Run the same stateless cleanup the MSI/NSIS uninstaller is supposed
         // to invoke with `--cleanup`, but do it while the elevated app binary
@@ -3678,48 +3378,22 @@ pub async fn system_uninstall(
         // WinpkFilter bindings/hosts/WFP state can otherwise survive uninstall
         // and make the PC look like it only has internet when SwiftTunnel is
         // reinstalled.
-        let cleanup_operation = operation.clone();
-        if let Err(e) = tauri::async_runtime::spawn_blocking(move || {
-            let _operation = cleanup_operation;
-            let _guard = DRIVER_OPERATION_LOCK
-                .lock()
-                .map_err(|_| "Driver operation lock is poisoned".to_string())?;
+        if let Err(e) = tauri::async_runtime::spawn_blocking(|| {
             swifttunnel_core::network_booster::cleanup_all_system_state().map_err(|e| e.to_string())
         })
         .await
         .map_err(|e| format!("Pre-uninstall cleanup task failed: {e}"))?
         {
-            if direct {
-                log::warn!("Network cleanup stopped direct uninstall: {e}");
-                return Err("Run Internet recovery in Repair, then retry uninstall.".into());
-            }
             log::warn!("Uninstall pre-cleanup failed; continuing to uninstaller: {e}");
         }
 
-        match route {
-            // Start the native uninstaller before closing so launch failures
-            // reach the user. Full MSI UI keeps missing-source and
-            // installer-busy errors visible after this process exits.
-            Route::Installer(mut command) => {
-                command
-                    .spawn()
-                    .map_err(|e| format!("Could not start Windows uninstall: {e}"))?;
-            }
-            Route::Direct(plan) => {
-                log::warn!(
-                    "Uninstall: Windows has no registration for this installation; removing its files directly"
-                );
-                let finish_operation = operation.clone();
-                tauri::async_runtime::spawn_blocking(move || {
-                    let _operation = finish_operation;
-                    swifttunnel_core::direct_uninstall::finish(plan)
-                })
-                .await
-                .map_err(|e| format!("Could not remove SwiftTunnel: {e}"))??;
-            }
-        }
+        // Start the native uninstaller before closing so launch failures reach
+        // the user. Full MSI UI keeps missing-source and installer-busy errors
+        // visible after this process exits.
+        uninstall_command
+            .spawn()
+            .map_err(|e| format!("Could not start Windows uninstall: {e}"))?;
 
-        drop(direct_gate);
         app.exit(0);
         Ok(())
     }
@@ -3737,7 +3411,7 @@ pub fn system_launched_from_startup(state: tauri::State<'_, crate::state::AppSta
     state.launched_from_startup
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct StartupRegistrationSnapshot {
     pub exists: bool,
     pub value: Option<String>,
@@ -3748,7 +3422,6 @@ pub struct StartupRegistrationSnapshot {
 pub enum StartupRegistrationRepairResponse {
     Completed {
         snapshot: StartupRegistrationSnapshot,
-        undo_available: bool,
     },
     PreferenceChanged {
         message: String,
@@ -3768,41 +3441,7 @@ fn repair_current_startup_preference(
                 .to_string(),
         });
     }
-    repair().map(|snapshot| StartupRegistrationRepairResponse::Completed {
-        snapshot,
-        undo_available: false,
-    })
-}
-
-#[derive(Clone)]
-struct StartupUndoRecord {
-    before: StartupRegistrationSnapshot,
-    after: StartupRegistrationSnapshot,
-    generation: u64,
-    created: std::time::Instant,
-}
-
-static STARTUP_UNDO: parking_lot::Mutex<Option<StartupUndoRecord>> = parking_lot::Mutex::new(None);
-
-fn admit_startup_undo(
-    record: Option<&StartupUndoRecord>,
-    requested: &StartupRegistrationSnapshot,
-    current: &StartupRegistrationSnapshot,
-    generation: u64,
-    now: std::time::Instant,
-) -> Result<StartupRegistrationSnapshot, String> {
-    let record =
-        record.ok_or("That startup repair can no longer be undone. Run Startup login again.")?;
-    if now.saturating_duration_since(record.created) > std::time::Duration::from_secs(600)
-        || record.generation != generation
-        || requested != &record.before
-        || current != &record.after
-    {
-        return Err("Your startup setting changed after that repair. It was left unchanged. Run Startup login again.".into());
-    }
-    // Never write the command supplied by the webview. Only this backend-owned
-    // pre-repair value can be restored, once, while the expected state remains.
-    Ok(record.before.clone())
+    repair().map(|snapshot| StartupRegistrationRepairResponse::Completed { snapshot })
 }
 
 #[cfg(windows)]
@@ -3843,37 +3482,10 @@ pub async fn system_repair_startup_registration(
         tauri::async_runtime::spawn_blocking(move || {
             let publication = crate::autostart::begin_startup_publication();
             let current = settings.lock().run_on_startup;
-            let mut undo = None;
-            let mut result = repair_current_startup_preference(enabled, current, || {
-                let before = read_startup_registration()?;
-                // Disabling startup removes both clients' entries. A one-entry
-                // rollback cannot undo that action if Lite had an entry too.
-                let only_desktop_changes = enabled
-                    || matches!(
-                        swifttunnel_core::autostart::registered_command(
-                            swifttunnel_core::autostart::RUN_VALUE_LITE
-                        ),
-                        Ok(None)
-                    );
-                *STARTUP_UNDO.lock() = None;
+            repair_current_startup_preference(enabled, current, || {
                 publication.sync(enabled)?;
-                let after = read_startup_registration()?;
-                if before != after && only_desktop_changes {
-                    undo = Some(StartupUndoRecord {
-                        before,
-                        after: after.clone(),
-                        generation: publication.generation(),
-                        created: std::time::Instant::now(),
-                    });
-                }
-                Ok(after)
-            })?;
-            if let StartupRegistrationRepairResponse::Completed { undo_available, .. } = &mut result
-            {
-                *undo_available = undo.is_some();
-                *STARTUP_UNDO.lock() = undo;
-            }
-            Ok(result)
+                read_startup_registration()
+            })
         })
         .await
         .map_err(|e| format!("Startup repair task failed: {e}"))?
@@ -3904,10 +3516,7 @@ pub async fn system_restore_startup_registration(
             use winreg::RegKey;
             use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
 
-            let publication = crate::autostart::begin_startup_publication();
-            let current = read_startup_registration()?;
-            let owned = STARTUP_UNDO.lock().clone();
-            let snapshot = admit_startup_undo(owned.as_ref(), &snapshot, &current, publication.generation(), std::time::Instant::now())?;
+            let _publication = crate::autostart::begin_startup_publication();
             let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
             if snapshot.exists {
@@ -3932,12 +3541,7 @@ pub async fn system_restore_startup_registration(
                 }
             }
 
-            let restored = read_startup_registration()?;
-            if restored != snapshot {
-                return Err("Windows could not confirm the startup setting was restored. Run Startup login again.".into());
-            }
-            *STARTUP_UNDO.lock() = None;
-            Ok(restored)
+            read_startup_registration()
         })
         .await
         .map_err(|e| format!("Startup restore task failed: {e}"))?
@@ -3952,67 +3556,6 @@ pub async fn system_restore_startup_registration(
 #[cfg(test)]
 mod startup_preference_tests {
     use super::*;
-
-    #[test]
-    fn startup_undo_uses_only_its_owned_snapshot_and_current_native_state() {
-        let before = StartupRegistrationSnapshot {
-            exists: false,
-            value: None,
-        };
-        let after = StartupRegistrationSnapshot {
-            exists: true,
-            value: Some("owned canonical startup".into()),
-        };
-        let record = StartupUndoRecord {
-            before: before.clone(),
-            after: after.clone(),
-            generation: 7,
-            created: std::time::Instant::now(),
-        };
-        let now = std::time::Instant::now();
-        assert_eq!(
-            admit_startup_undo(Some(&record), &before, &after, 7, now).unwrap(),
-            before
-        );
-        let forged = StartupRegistrationSnapshot {
-            exists: true,
-            value: Some("untrusted command from UI".into()),
-        };
-        assert!(admit_startup_undo(Some(&record), &forged, &after, 7, now).is_err());
-        assert!(admit_startup_undo(Some(&record), &before, &forged, 7, now).is_err());
-        assert!(admit_startup_undo(None, &before, &after, 7, now).is_err());
-    }
-
-    #[test]
-    fn startup_undo_rejects_later_preferences_and_expired_records() {
-        let before = StartupRegistrationSnapshot {
-            exists: false,
-            value: None,
-        };
-        let after = StartupRegistrationSnapshot {
-            exists: true,
-            value: Some("owned canonical startup".into()),
-        };
-        let created = std::time::Instant::now();
-        let record = StartupUndoRecord {
-            before: before.clone(),
-            after: after.clone(),
-            generation: 7,
-            created,
-        };
-        // Even if Off -> On returned to the exact same value, undo is stale.
-        assert!(admit_startup_undo(Some(&record), &before, &after, 9, created).is_err());
-        assert!(
-            admit_startup_undo(
-                Some(&record),
-                &before,
-                &after,
-                7,
-                created + std::time::Duration::from_secs(601)
-            )
-            .is_err()
-        );
-    }
 
     #[test]
     fn stale_startup_repair_never_writes_or_snapshots_registration() {
@@ -4099,89 +3642,119 @@ pub struct CopyLogFileResponse {
     pub file_path: String,
 }
 
-/// A small allowlist keeps the webview from putting arbitrary text in the
-/// support log. Report each failed surface once per process.
-#[tauri::command]
-pub fn system_record_ui_failure(window: tauri::WebviewWindow, page: Option<String>, kind: String) {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static REPORTED: AtomicU32 = AtomicU32::new(0);
-    let (bit, surface) = match (window.label(), page.as_deref()) {
-        ("main", None) => (0, "main_window"),
-        ("overlay-stats", None) => (1, "overlay"),
-        ("main", Some("connect")) => (2, "connect"),
-        ("main", Some("optimization")) => (3, "optimization"),
-        ("main", Some("games")) => (4, "games"),
-        ("main", Some("ingame")) => (5, "ingame"),
-        ("main", Some("network")) => (6, "network"),
-        ("main", Some("repair")) => (7, "repair"),
-        ("main", Some("settings")) => (8, "settings"),
-        _ => return,
-    };
-    let mask = 1 << bit;
-    if REPORTED.fetch_or(mask, Ordering::Relaxed) & mask != 0 {
-        return;
-    }
-    let kind = match kind.as_str() {
-        "type_error" => "type_error",
-        "reference_error" => "reference_error",
-        "range_error" => "range_error",
-        "syntax_error" => "syntax_error",
-        _ => "other",
-    };
-    log::warn!("[support] event=ui_load_failed surface={surface} kind={kind}");
-}
-
 /// Copy the SwiftTunnel log FILE to the clipboard (not its contents).
 ///
 /// Pasting in Discord, Outlook, or File Explorer attaches the actual file
 /// rather than the raw text — makes it easy for users to hand a log over
 /// to support staff.
 #[tauri::command]
-pub async fn system_copy_log_to_clipboard(
-    window: tauri::WebviewWindow,
-) -> Result<CopyLogFileResponse, String> {
+pub async fn system_copy_log_to_clipboard() -> Result<CopyLogFileResponse, String> {
+    // Multiple windows/IPC callers must not start parallel clipboard helpers.
+    // The worker owns the permit even if the caller stops waiting.
+    static COPY_LOG: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let _permit = COPY_LOG.try_acquire().map_err(|_| {
+        "A log copy is already running. Wait for it to finish, then retry.".to_string()
+    })?;
+    let path = crate::logging::log_file_path();
+    let path_str = path.to_string_lossy().to_string();
+
+    if !path.exists() {
+        return Err(format!(
+            "Log file not found at {}. Try connecting once so the app can write logs, then retry.",
+            path_str
+        ));
+    }
+
     #[cfg(windows)]
     {
-        use std::time::Instant;
-        use windows::Win32::Foundation::HWND;
+        let escaped = path_str.replace('\'', "''");
+        let script = format!(
+            r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$files = New-Object System.Collections.Specialized.StringCollection
+[void]$files.Add('{}')
 
-        // Keep the permit in the worker. A stuck clipboard operation can
-        // outlive the UI deadline, so another click must not stack up workers.
-        static COPY_LOG: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-        let permit = COPY_LOG.try_acquire().map_err(|_| {
-            "A log copy is already running. Wait for it to finish, then retry.".to_string()
-        })?;
-        let path = crate::logging::log_file_path();
-        if !path.is_file() {
-            return Err(format!(
-                "Log file not found at {}. Open SwiftTunnel and try again.",
-                path.display()
-            ));
+for ($i = 0; $i -lt 5; $i++) {{
+    try {{
+        [System.Windows.Forms.Clipboard]::SetFileDropList($files)
+        exit 0
+    }} catch {{
+        if ($i -eq 4) {{
+            throw
+        }}
+        Start-Sleep -Milliseconds 100
+    }}
+}}
+"#,
+            escaped
+        );
+
+        // Bounded, because this is the button people reach for when the app is
+        // already misbehaving. Two tickets on 2026-08-24 reported Copy log doing
+        // nothing at all: the previous `output()` here had no deadline, so on a
+        // machine where PowerShell will not start it simply never returned and
+        // the button stayed dead with nothing to report. Reinstalling could not
+        // help, because the broken part was Windows rather than the app.
+        const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(15);
+
+        let script_for_thread = script.clone();
+        let outcome = tauri::async_runtime::spawn_blocking(move || {
+            let _permit = _permit;
+            swifttunnel_core::run_hidden_command_with_timeout(
+                "powershell",
+                &[
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-STA",
+                    "-Command",
+                    &script_for_thread,
+                ],
+                CLIPBOARD_TIMEOUT,
+            )
+        })
+        .await
+        .map_err(|e| format!("Clipboard task failed: {}", e))?;
+
+        if !outcome.success {
+            // Failing is survivable; leaving the user with nothing is not. Hand
+            // back the path so they can attach the file by hand, which is the
+            // only thing they actually needed from this button.
+            let reason = outcome.stderr.trim();
+            log::warn!(
+                "Copy log helper failed (timed_out={}): {}",
+                outcome.timed_out,
+                if reason.is_empty() {
+                    "no output"
+                } else {
+                    reason
+                }
+            );
+
+            return Err(if outcome.timed_out {
+                format!(
+                    "Windows did not respond, so the log could not be copied.                      Open this folder and attach swifttunnel.log by hand: {}",
+                    path.parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or(path_str)
+                )
+            } else {
+                format!(
+                    "Could not copy the log. Open this folder and attach                      swifttunnel.log by hand: {}",
+                    path.parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or(path_str)
+                )
+            });
         }
 
-        let file_path = path.to_string_lossy().into_owned();
-        let timeout = Duration::from_secs(15);
-        let deadline = Instant::now() + timeout;
-        let worker = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-            let _permit = permit;
-            let owner = window.hwnd().map_err(|error| error.to_string())?;
-            crate::log_clipboard::copy_file(HWND(owner.0), &path, deadline)
-                .map_err(|error| error.to_string())
-        });
-        match tokio::time::timeout(timeout, worker).await {
-            Ok(Ok(Ok(()))) => return Ok(CopyLogFileResponse { file_path }),
-            Ok(Ok(Err(error))) => log::warn!("Could not copy log to clipboard: {error}"),
-            Ok(Err(error)) => log::warn!("Log clipboard worker failed: {error}"),
-            Err(_) => log::warn!("Log clipboard worker timed out"),
-        }
-        Err(format!(
-            "Could not copy the log. Attach this file manually: {file_path}"
-        ))
+        Ok(CopyLogFileResponse {
+            file_path: path_str,
+        })
     }
 
     #[cfg(not(windows))]
     {
-        let _ = window;
         Err("Copying the log file to the clipboard is only supported on Windows".to_string())
     }
 }

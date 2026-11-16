@@ -202,27 +202,17 @@ pub async fn check_for_update(current_version: &str) -> Result<Option<AvailableU
 pub async fn download_verified(
     update: &AvailableUpdate,
 ) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
-    let mut support = crate::support_log::Operation::start("lite_update_download", "admission");
-    let permit = support.check_explained(reserve_download(DOWNLOAD_SLOT.clone()))?;
-    support.stage("download");
-    let client = support.check_explained(http_client(INSTALLER_TIMEOUT))?;
+    let permit = reserve_download(DOWNLOAD_SLOT.clone())?;
+    let client = http_client(INSTALLER_TIMEOUT)?;
     let limit = if update.size == 0 {
         MAX_INSTALLER_BYTES
     } else {
         update.size.min(MAX_INSTALLER_BYTES)
     };
-    let bytes =
-        support.check_explained(fetch(&client, &update.url, &update.file, limit as usize).await)?;
+    let bytes = fetch(&client, &update.url, &update.file, limit as usize).await?;
 
     let update = update.clone();
-    stage_on_blocking_pool(permit, move || {
-        support.stage("verify_package");
-        let result = verify_and_stage(&update, bytes, &mut support);
-        let installer = support.check_explained(result)?;
-        support.complete("staged");
-        Ok(installer)
-    })
-    .await
+    stage_on_blocking_pool(permit, move || verify_and_stage(&update, bytes)).await
 }
 
 fn reserve_download(slots: Arc<Semaphore>) -> Result<OwnedSemaphorePermit, String> {
@@ -257,7 +247,6 @@ async fn stage_on_blocking_pool<T: Send + 'static>(
 fn verify_and_stage(
     update: &AvailableUpdate,
     bytes: Vec<u8>,
-    support: &mut crate::support_log::Operation,
 ) -> Result<swifttunnel_installer_cache::ProtectedInstaller, String> {
     // The manifest is signed, so its size is trustworthy and a mismatch means
     // this is not the file it described.
@@ -272,7 +261,6 @@ fn verify_and_stage(
 
     verify_bytes_sha256(&bytes, &update.sha256, &update.file)?;
 
-    support.stage("protected_cache");
     let installer = swifttunnel_installer_cache::InstallerCache::open()
         .and_then(|cache| cache.stage(&update.file, &bytes))
         .map_err(|e| format!("Could not prepare the protected installer cache: {e}. If Retry fails, use the signed MSI from the official release or contact support@swifttunnel.net."))?;
@@ -297,29 +285,46 @@ pub fn launch_installer(
     use std::os::windows::process::CommandExt;
     // Lite exits after handover. Its read guard lasts until then; the protected
     // owner/DACL keeps the immutable source safe for later installer reads.
-    let mut support =
-        crate::support_log::Operation::start("lite_update_handoff", "locate_installer");
-    let msiexec = support
-        .check(swifttunnel_installer_cache::windows_installer_path())
-        .map_err(|e| e.to_string())?;
-    // Leave registration changes to the Lite MSI after Windows Installer
-    // admits the upgrade.
-    support.stage("start_installer");
-    support.check_explained(
-        std::process::Command::new(msiexec)
-            .arg("/i")
-            .arg(installer.path())
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .map_err(|e| format!("could not start the installer: {e}")),
-    )?;
-    support.complete("installer_started");
-    Ok(())
+    let msiexec =
+        swifttunnel_installer_cache::windows_installer_path().map_err(|e| e.to_string())?;
+    launch_after_repair(
+        || swifttunnel_msi_repair::repair().map(|cleared| cleared.len()),
+        || {
+            std::process::Command::new(msiexec)
+                .arg("/i")
+                .arg(installer.path())
+                .creation_flags(0x0800_0000)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("could not start the installer: {e}"))
+        },
+    )
+}
+
+fn launch_after_repair(
+    repair: impl FnOnce() -> Result<usize, String>,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    // Startup is not a lasting guarantee: cleanup can remove the old package
+    // while Lite is open. Both manual and automatic updates come through here.
+    // Match Desktop's best-effort policy, since Windows may still find another
+    // valid source when inspection or repair is unavailable.
+    match repair() {
+        Ok(count) if count > 0 => {
+            log::warn!("cleared {count} orphaned SwiftTunnel registration(s) before Lite update");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("could not check installer registration before Lite update: {error}")
+        }
+    }
+    launch()
 }
 
 /// Remember that an installer was launched for this version.
 ///
-/// Record only after msiexec starts, before Lite exits to let it install.
+/// Written immediately before handing over to msiexec, because the process
+/// exits straight afterwards and gets no chance to write anything later.
 pub fn record_install_attempt(version: &Version) {
     if let Ok(cache) = swifttunnel_installer_cache::InstallerCache::open() {
         let _ = cache.write_note(
@@ -357,24 +362,11 @@ fn attempt_matches_version(recorded: &str, version: &Version) -> bool {
     Version::parse(recorded.trim()).is_ok_and(|tried| &tried == version)
 }
 
-/// Forget an attempt once Lite runs the attempted version or a newer build.
-pub fn clear_completed_install_attempt(current_version: &str) {
-    use swifttunnel_installer_cache::{CacheNote, InstallerCache};
-    let Ok(cache) = InstallerCache::open() else {
-        return;
-    };
-    if let Ok(recorded) = cache.read_note(CacheNote::LiteAttempt)
-        && install_attempt_completed(&recorded, current_version)
-    {
-        let _ = cache.write_note(CacheNote::LiteAttempt, b"");
+/// Forget the last attempt, once this build is the version that was wanted.
+pub fn clear_install_attempt() {
+    if let Ok(cache) = swifttunnel_installer_cache::InstallerCache::open() {
+        let _ = cache.write_note(swifttunnel_installer_cache::CacheNote::LiteAttempt, b"");
     }
-}
-
-fn install_attempt_completed(recorded: &str, current_version: &str) -> bool {
-    let Ok(attempted) = Version::parse(recorded.trim()) else {
-        return false;
-    };
-    Version::parse(current_version).is_ok_and(|current| current >= attempted)
 }
 
 fn base64_decode(value: &str) -> Result<Vec<u8>, String> {
@@ -451,18 +443,55 @@ mod tests {
             sha256: "00".repeat(32),
             size: 3,
         };
-        let mut trace = crate::support_log::Operation::start("fixture", "verify_package");
         assert!(
-            super::verify_and_stage(&update, vec![1, 2], &mut trace)
+            super::verify_and_stage(&update, vec![1, 2])
                 .err()
                 .expect("size mismatch must precede cache access")
                 .contains("signed manifest")
         );
         update.size = 2;
-        assert!(super::verify_and_stage(&update, vec![1, 2], &mut trace).is_err());
+        assert!(super::verify_and_stage(&update, vec![1, 2]).is_err());
     }
 
     use super::*;
+
+    #[test]
+    fn update_rechecks_an_orphan_created_after_lite_started() {
+        use std::cell::Cell;
+        // Model a healthy startup followed by a cleanup tool removing the MSI.
+        // The launch double refuses the upgrade while that orphan survives.
+        let orphan = Cell::new(false);
+        assert!(!orphan.get());
+        orphan.set(true);
+        let result = launch_after_repair(
+            || {
+                orphan.set(false);
+                Ok(1)
+            },
+            || {
+                if orphan.get() {
+                    Err("old package unavailable".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn repair_failure_still_allows_windows_to_resolve_another_source() {
+        let result = launch_after_repair(|| Err("registry unavailable".into()), || Ok(()));
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn repaired_registration_does_not_hide_installer_launch_failure() {
+        assert_eq!(
+            launch_after_repair(|| Ok(1), || Err("launch denied".into())),
+            Err("launch denied".into()),
+        );
+    }
 
     fn assets(x64: Option<&str>, arm64: Option<&str>) -> LiteAssets {
         let make = |file: &str| LiteAsset {
@@ -490,9 +519,6 @@ mod tests {
         // machine's auto-update marker or silently pass without write access.
         let wanted = Version::parse("9.9.9").unwrap();
         assert!(attempt_matches_version("9.9.9\n", &wanted));
-        assert!(!install_attempt_completed("9.9.9\n", "9.9.8"));
-        assert!(install_attempt_completed("9.9.9\n", "9.9.9"));
-        assert!(install_attempt_completed("9.9.9\n", "9.10.0"));
         for recorded in ["", "invalid", "9.9.10", "3.1.6"] {
             assert!(!attempt_matches_version(recorded, &wanted));
         }

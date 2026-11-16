@@ -45,46 +45,49 @@ export async function initEventListeners() {
 
   async function register<T>(name: string, handler: (event: { payload: T }) => void) {
     if (generation !== listenerGeneration) return;
-    try {
-      const stop = await listen<T>(name, (event) => {
-        if (generation === listenerGeneration) handler(event);
-      });
-      if (generation !== listenerGeneration) stop();
-      else unlisteners.push(stop);
-    } catch (error) {
-      if (generation === listenerGeneration) {
-        reportError(`Failed to listen for ${name}`, error, { dedupeKey: `event-listener-${name}` });
-      }
-    }
+    const stop = await listen<T>(name, (event) => {
+      if (generation === listenerGeneration) handler(event);
+    });
+    if (generation !== listenerGeneration) stop();
+    else unlisteners.push(stop);
   }
 
-  // Bootstrap reads these states once their listeners are ready. The other
-  // listeners can land independently, without holding up those first reads.
-  const vpn = register<VpnStateEvent>(EVENT_VPN_STATE_CHANGED, (event) => {
-    useVpnStore.getState().handleStateEvent(event.payload);
-  });
-  const auth = register<AuthStateEvent>(EVENT_AUTH_STATE_CHANGED, (event) => {
-    useAuthStore.getState().handleStateEvent(event.payload);
-  });
-  void register<RamCleanProgressEvent>(EVENT_RAM_CLEAN_PROGRESS, (event) => {
-    useBoostStore.getState().handleRamCleanProgress(event.payload);
-  });
-  void register<string>(EVENT_SERVER_LIST_UPDATED, () => {
-    void useServerStore.getState().fetchList();
-  });
-  void register<UpdaterProgressEvent>(EVENT_UPDATER_PROGRESS, (event) => {
-    useUpdaterStore.getState().handleUpdaterProgress(event.payload);
-  });
-  void register<void>(EVENT_UPDATER_DONE, () => {
-    useUpdaterStore.getState().handleUpdaterDone();
-  });
-  void register<void>(EVENT_COUNTRY_BAN_BYPASS_UNAVAILABLE, () => {
-    useToastStore.getState().addToast({
-      type: "warning",
-      message: "Country ban bypass could not be set up. Check Diagnostics.",
+  try {
+    await register<VpnStateEvent>(EVENT_VPN_STATE_CHANGED, (event) => {
+      useVpnStore.getState().handleStateEvent(event.payload);
     });
-  });
-  await Promise.all([vpn, auth]);
+
+    await register<AuthStateEvent>(EVENT_AUTH_STATE_CHANGED, (event) => {
+      useAuthStore.getState().handleStateEvent(event.payload);
+    });
+
+    await register<RamCleanProgressEvent>(EVENT_RAM_CLEAN_PROGRESS, (event) => {
+      useBoostStore.getState().handleRamCleanProgress(event.payload);
+    });
+
+    await register<string>(EVENT_SERVER_LIST_UPDATED, () => {
+      void useServerStore.getState().fetchList();
+    });
+
+    await register<UpdaterProgressEvent>(EVENT_UPDATER_PROGRESS, (event) => {
+      useUpdaterStore.getState().handleUpdaterProgress(event.payload);
+    });
+
+    await register<void>(EVENT_UPDATER_DONE, () => {
+      useUpdaterStore.getState().handleUpdaterDone();
+    });
+
+    await register<void>(EVENT_COUNTRY_BAN_BYPASS_UNAVAILABLE, () => {
+      useToastStore.getState().addToast({
+        type: "warning",
+        message: "Country ban bypass could not be set up. Check Diagnostics.",
+      });
+    });
+  } catch (error) {
+    // A stale registration failure must not remove a newer run's listeners.
+    if (generation === listenerGeneration) await cleanupEventListeners();
+    throw error;
+  }
 }
 
 export async function cleanupEventListeners() {

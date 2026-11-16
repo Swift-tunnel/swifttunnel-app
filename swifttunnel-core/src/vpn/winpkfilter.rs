@@ -287,8 +287,7 @@ pub fn driver_package_not_found_message() -> String {
 
 #[cfg(windows)]
 pub fn default_program_files_dir() -> PathBuf {
-    crate::utils::known_folder_path(&windows::Win32::UI::Shell::FOLDERID_ProgramFiles)
-        .unwrap_or_default()
+    PathBuf::from(std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string()))
 }
 
 #[cfg(not(windows))]
@@ -322,25 +321,21 @@ pub fn driver_package_candidate_paths(
         candidates.push(dir.join("resources").join(&legacy_rel));
     }
 
-    // An unavailable known folder must not turn a fallback into a search
-    // relative to the caller's working directory.
-    if program_files_dir.is_absolute() {
-        let install_root = program_files_dir.join("SwiftTunnel");
-        candidates.push(
-            install_root
-                .join("resources")
-                .join("drivers")
-                .join(&native_rel),
-        );
-        candidates.push(install_root.join("drivers").join(&native_rel));
-        candidates.push(
-            install_root
-                .join("resources")
-                .join("drivers")
-                .join(&legacy_rel),
-        );
-        candidates.push(install_root.join("drivers").join(&legacy_rel));
-    }
+    let install_root = program_files_dir.join("SwiftTunnel");
+    candidates.push(
+        install_root
+            .join("resources")
+            .join("drivers")
+            .join(&native_rel),
+    );
+    candidates.push(install_root.join("drivers").join(&native_rel));
+    candidates.push(
+        install_root
+            .join("resources")
+            .join("drivers")
+            .join(&legacy_rel),
+    );
+    candidates.push(install_root.join("drivers").join(&legacy_rel));
 
     candidates
 }
@@ -765,49 +760,35 @@ pub fn install_driver_from_package_dir(_package_dir: &Path) -> Result<(), String
 
 #[cfg(windows)]
 fn parse_enum_drivers_output(output: &str, original_name: &str) -> Option<String> {
+    let target_name = original_name.to_ascii_lowercase();
     let mut published_name: Option<String> = None;
-    let mut matches_original = false;
-    let mut ambiguous = false;
+    let mut current_original_name: Option<String> = None;
 
     for line in output.lines().chain(std::iter::once("")) {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            if matches_original && !ambiguous && published_name.is_some() {
+            if current_original_name.as_deref() == Some(target_name.as_str()) {
                 return published_name;
             }
             published_name = None;
-            matches_original = false;
-            ambiguous = false;
+            current_original_name = None;
             continue;
         }
 
-        let Some((_, value)) = trimmed.split_once([':', '\u{ff1a}']) else {
+        let Some((key, value)) = trimmed.split_once(':') else {
             continue;
         };
 
+        let key = key.trim().to_ascii_lowercase();
         let value = value.trim();
-        // Field labels are localized. The INF values are not. Require both
-        // the exact original filename and one unambiguous OEM package name
-        // in the same block before returning a name that may be uninstalled.
-        if value.eq_ignore_ascii_case(original_name) {
-            matches_original = true;
-        } else if let Some(name) = published_oem_inf_name(value) {
-            ambiguous |= published_name.as_ref().is_some_and(|old| old != &name);
-            published_name = Some(name);
+        match key.as_str() {
+            "published name" => published_name = Some(value.to_string()),
+            "original name" => current_original_name = Some(value.to_ascii_lowercase()),
+            _ => {}
         }
     }
 
     None
-}
-
-#[cfg(windows)]
-fn published_oem_inf_name(value: &str) -> Option<String> {
-    if value.len() > 32 {
-        return None;
-    }
-    let name = value.to_ascii_lowercase();
-    let number = name.strip_prefix("oem")?.strip_suffix(".inf")?;
-    (!number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())).then_some(name)
 }
 
 #[cfg(windows)]
@@ -1082,17 +1063,6 @@ mod tests {
         let _ = fs::remove_dir_all(base);
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn missing_program_files_does_not_search_the_working_directory() {
-        assert!(driver_package_candidate_paths(None, None, Path::new("")).is_empty());
-        assert!(driver_package_candidate_paths(None, None, Path::new("relative")).is_empty());
-        let exe = Path::new(r"D:\SwiftTunnel");
-        let paths = driver_package_candidate_paths(None, Some(exe), Path::new(""));
-        assert!(!paths.is_empty());
-        assert!(paths.iter().all(|path| path.starts_with(exe)));
-    }
-
     #[test]
     fn parse_enum_drivers_output_finds_matching_package() {
         #[cfg(windows)]
@@ -1160,49 +1130,6 @@ Provider Name:      NDISAPI
                 Some("oem12.inf")
             );
         }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn driver_store_detection_does_not_depend_on_the_windows_language() {
-        for output in [
-            "Nom publi\u{e9} : oem12.inf\nNom d'origine : ndisrd_lwf.inf\n",
-            "T\u{ea}n \u{111}\u{e3} xu\u{1ea5}t b\u{1ea3}n: OEM12.INF\nT\u{ea}n g\u{1ed1}c: NDISRD_LWF.INF\n",
-            "\u{53d1}\u{5e03}\u{540d}\u{79f0}\u{ff1a} oem12.inf\n\u{539f}\u{59cb}\u{540d}\u{79f0}\u{ff1a} ndisrd_lwf.inf\n",
-        ] {
-            assert_eq!(
-                parse_enum_drivers_output(output, DRIVER_INF_NAME).as_deref(),
-                Some("oem12.inf")
-            );
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn driver_store_names_cannot_escape_or_cross_package_blocks() {
-        for name in [
-            "../oem12.inf",
-            "oem.inf",
-            "oem12.inf /force",
-            "C:\\oem12.inf",
-        ] {
-            let output = format!("Published Name: {name}\nOriginal Name: ndisrd_lwf.inf\n");
-            assert_eq!(parse_enum_drivers_output(&output, DRIVER_INF_NAME), None);
-        }
-        assert_eq!(
-            parse_enum_drivers_output(
-                "Published Name: oem12.inf\n\nOriginal Name: ndisrd_lwf.inf\n",
-                DRIVER_INF_NAME
-            ),
-            None
-        );
-        assert_eq!(
-            parse_enum_drivers_output(
-                "Published Name: oem12.inf\nOriginal Name: ndisrd_lwf.inf\nOther: oem13.inf\n",
-                DRIVER_INF_NAME
-            ),
-            None
-        );
     }
 
     #[test]

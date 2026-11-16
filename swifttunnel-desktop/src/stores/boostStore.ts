@@ -44,12 +44,16 @@ interface BoostStore {
   ramCleanTrimmedCount: number;
   ramCleanCurrentProcess: string | null;
   ramCleanResult: RamCleanResultResponse | null;
+  ramCleanStartSnapshot: SystemMemorySnapshot | null;
+  ramCleanDoneSnapshot: SystemMemorySnapshot | null;
 
   error: string | null;
   warning: string | null;
 
   // System info
-  isAdmin: boolean | null;
+  isAdmin: boolean;
+  osVersion: string;
+  cpuCount: number;
 
   // Actions
   /** False means the displayed sample is stale; never use it to authorize work. */
@@ -80,9 +84,13 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
   ramCleanTrimmedCount: 0,
   ramCleanCurrentProcess: null,
   ramCleanResult: null,
+  ramCleanStartSnapshot: null,
+  ramCleanDoneSnapshot: null,
   error: null,
   warning: null,
-  isAdmin: null,
+  isAdmin: false,
+  osVersion: "",
+  cpuCount: 1,
 
   fetchMetrics: (options) => {
     const key = `${options?.overlayWantsFps ?? "saved"}:${options?.overlayWantsPing ?? "saved"}`;
@@ -142,7 +150,11 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
   fetchSystemInfo: async () => {
     try {
       const info = await boostGetSystemInfo();
-      set({ isAdmin: info.is_admin });
+      set({
+        isAdmin: info.is_admin,
+        osVersion: info.os_version,
+        cpuCount: info.cpu_count,
+      });
     } catch (error) {
       reportError("Failed to fetch system info", error, {
         dedupeKey: "boost-fetch-system-info",
@@ -157,7 +169,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
       if (result.warnings.length > 0) {
         const message = result.warnings.join("; ");
         set({ warning: message });
-        void notify(
+        await notify(
           "Boost applied with warnings",
           "Some optimizations could not be applied.",
         );
@@ -166,7 +178,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
     } catch (e) {
       const message = formatErrorMessage(e);
       set({ error: message, warning: null });
-      void notify("Boost config failed", "Could not save optimization profile.");
+      await notify("Boost config failed", "Could not save optimization profile.");
       throw e;
     }
   },
@@ -201,19 +213,28 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
         ramCleanTrimmedCount: 0,
         ramCleanCurrentProcess: null,
         ramCleanResult: null,
+        ramCleanStartSnapshot: null,
+        ramCleanDoneSnapshot: null,
       });
 
-      // The cleaner collects and reports its own before and after readings.
+      // Refresh a baseline snapshot immediately on click. Polling can be stale by up to 1s,
+      // which makes the UI look like the cleaner freed memory before it actually ran.
+      const baseline = await boostGetSystemMemory().catch(() => null);
+      if (baseline) {
+        set({ systemMem: baseline, ramCleanStartSnapshot: baseline });
+      }
+
       const result = await boostCleanRam();
       memoryRevision += 1;
-      set({
+      set((state) => ({
         isCleaningRam: false,
         ramCleanStage: "done",
         ramCleanResult: result,
         systemMem: result.after,
         ramCleanTrimmedCount: result.trimmed_count,
         ramCleanCurrentProcess: null,
-      });
+        ramCleanDoneSnapshot: state.ramCleanDoneSnapshot ?? result.after,
+      }));
     } catch (e) {
       const message = formatErrorMessage(e);
       set({
@@ -221,8 +242,10 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
         warning: null,
         isCleaningRam: false,
         ramCleanStage: null,
+        ramCleanStartSnapshot: null,
+        ramCleanDoneSnapshot: null,
       });
-      void notify("RAM cleaner failed", "Could not clean memory.");
+      await notify("RAM cleaner failed", "Could not clean memory.");
     }
   },
 
@@ -232,7 +255,7 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
     } catch (e) {
       const message = formatErrorMessage(e);
       set({ error: message, warning: null });
-      void notify("Restart failed", "Could not restart Roblox.");
+      await notify("Restart failed", "Could not restart Roblox.");
       throw e;
     }
   },
@@ -242,10 +265,8 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
   },
 
   handleRamCleanProgress: (event) => {
-    // Completion owns the final reading. A progress event may arrive after it.
-    if (!get().isCleaningRam) return;
     memoryRevision += 1;
-    set({
+    set((state) => ({
       systemMem: {
         total_mb: event.total_mb,
         used_mb: event.used_mb,
@@ -257,6 +278,28 @@ export const useBoostStore = create<BoostStore>((set, get) => ({
       ramCleanStage: event.stage,
       ramCleanTrimmedCount: event.trimmed_count,
       ramCleanCurrentProcess: event.current_process,
-    });
+      ramCleanStartSnapshot:
+        event.stage === "start" && !state.ramCleanStartSnapshot
+          ? {
+              total_mb: event.total_mb,
+              used_mb: event.used_mb,
+              available_mb: event.available_mb,
+              load_pct: event.load_pct,
+              standby_mb: event.standby_mb,
+              modified_mb: event.modified_mb,
+            }
+          : state.ramCleanStartSnapshot,
+      ramCleanDoneSnapshot:
+        event.stage === "done"
+          ? {
+              total_mb: event.total_mb,
+              used_mb: event.used_mb,
+              available_mb: event.available_mb,
+              load_pct: event.load_pct,
+              standby_mb: event.standby_mb,
+              modified_mb: event.modified_mb,
+            }
+          : state.ramCleanDoneSnapshot,
+    }));
   },
 }));

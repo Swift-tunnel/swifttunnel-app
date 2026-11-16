@@ -71,20 +71,6 @@ it("keeps messages containing account addresses and local file paths out of tran
   expect(nodes[3].nodeValue).toBe(sensitive[0]);
 });
 
-it("does not send embedded download or sign-in URLs to the translation service", async () => {
-  const sensitive = [
-    "Download interrupted: error sending request for url (https://assets.example.test/package.msi?token=private-download-token)",
-    "Couldn't open HTTPS://login.example.test/callback?code=private-signin-code. Retry.",
-    "Check www.example.test/recover?secret=private-recovery-code for details.",
-  ];
-  nodes.push(...sensitive.map(value => text(value)), text("Retry download"));
-  const i18n = await import("./i18n");
-  await i18n.applyLanguage("fr");
-  expect(invoke).toHaveBeenCalledTimes(1);
-  expect(invoke).toHaveBeenCalledWith("i18n_translate", { text: "Retry download", targetLang: "fr" });
-  expect(nodes.slice(0, sensitive.length).map(node => node.nodeValue)).toEqual(sensitive);
-});
-
 it("splits long labels by encoded bytes instead of poisoning a whole oversized batch", async () => {
   for (let i = 0; i < 40; i++) nodes.push(text(`Setting ${i}: ` + "x".repeat(1200)));
   invoke.mockImplementation(async (_command, args) => {

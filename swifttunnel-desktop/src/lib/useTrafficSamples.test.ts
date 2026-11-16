@@ -26,8 +26,6 @@ vi.mock("../stores/vpnStore", () => ({ useVpnStore: {
 import { useTrafficSamples } from "./useTrafficSamples";
 
 let stop: (() => void) | undefined;
-let hidden: boolean;
-let visibility: EventTarget;
 function start(showGraph = true) {
   useTrafficSamples(showGraph);
   stop = h.effects[0]() as () => void;
@@ -36,13 +34,6 @@ describe("connection traffic sampling", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date", "performance"] });
     vi.stubGlobal("window", globalThis);
-    hidden = false;
-    visibility = new EventTarget();
-    vi.stubGlobal("document", {
-      get hidden() { return hidden; },
-      addEventListener: visibility.addEventListener.bind(visibility),
-      removeEventListener: visibility.removeEventListener.bind(visibility),
-    });
     h.effects.length = 0;
     h.live = true;
     h.bytesUp = h.bytesDown = 0;
@@ -64,7 +55,6 @@ describe("connection traffic sampling", () => {
   it("does no background sampling for a hidden graph", async () => {
     h.live = false;
     start(false);
-    expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(h.fetch).not.toHaveBeenCalled();
     expect(h.native).not.toHaveBeenCalled();
@@ -76,29 +66,6 @@ describe("connection traffic sampling", () => {
     expect(h.native).toHaveBeenCalledTimes(121);
     expect(h.history).toHaveBeenCalledTimes(1);
     expect(h.fetch).not.toHaveBeenCalled();
-  });
-  it("stops sampling while minimized and starts a new baseline when restored", async () => {
-    start();
-    await vi.advanceTimersByTimeAsync(0);
-    h.bytesUp = 1000;
-    await vi.advanceTimersByTimeAsync(500);
-    expect(h.history.mock.lastCall?.[0]).toHaveLength(1);
-
-    hidden = true;
-    visibility.dispatchEvent(new Event("visibilitychange"));
-    h.bytesUp = 600_000;
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(h.fetch).toHaveBeenCalledTimes(2);
-    expect(h.native).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(0);
-
-    hidden = false;
-    visibility.dispatchEvent(new Event("visibilitychange"));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(h.history).toHaveBeenLastCalledWith([]);
-    h.bytesUp += 500;
-    await vi.advanceTimersByTimeAsync(500);
-    expect(h.history).toHaveBeenLastCalledWith([{ t: Date.now(), up: 1000, down: 0 }]);
   });
   it("uses elapsed time for rates even if the Windows clock changes", async () => {
     start();

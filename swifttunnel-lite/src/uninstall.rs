@@ -15,10 +15,6 @@ pub enum Installed {
     Standalone(String),
     /// Part of the full app's installation.
     WithTheFullApp,
-    /// Lite's own files, with nothing in Windows Installer that can remove
-    /// them: either no record at all (older builds cleared it at startup) or a
-    /// record whose installer package has gone.
-    Unregistered,
 }
 
 /// Find Lite's own registration, if it has one.
@@ -33,48 +29,11 @@ pub fn how_installed() -> &'static Installed {
 }
 
 fn look_for_registration() -> Installed {
-    use swifttunnel_core::direct_uninstall::{self, Client};
-    let Ok(exe) = std::env::current_exe() else {
-        return Installed::Unknown("Could not locate this Lite installation.".into());
-    };
-    if direct_uninstall::lite_is_bundled(&exe) {
-        return Installed::WithTheFullApp;
-    }
     match registered_product() {
-        // Windows cannot uninstall through a record whose package is missing.
-        // Offer the direct removal instead of a button that opens an error.
-        Ok(Some(code))
-            if direct_uninstall::registration_is_broken(Client::Lite, &exe, &code) == Ok(true) =>
-        {
-            Installed::Unregistered
-        }
         Ok(Some(code)) => Installed::Standalone(code),
-        // No Lite product is registered. That used to be read as "came with
-        // the full app" in every case, which told the owner of an unregistered
-        // standalone copy to remove a SwiftTunnel they may not even have.
-        Ok(None) => match direct_uninstall::is_standard_install(Client::Lite, &exe) {
-            Ok(true) => Installed::Unregistered,
-            Ok(false) => Installed::Unknown(
-                "Windows has no uninstall record for this copy. Use SwiftTunnel Setup to repair it first.".into(),
-            ),
-            Err(error) => Installed::Unknown(error),
-        },
+        Ok(None) => Installed::WithTheFullApp,
         Err(error) => Installed::Unknown(error),
     }
-}
-
-/// Undo every system change, then remove Lite's own files and shortcuts.
-///
-/// For a copy Windows has no record of. Returns once the files that can go now
-/// are gone and the executable is scheduled to follow; the caller exits.
-pub fn remove_directly() -> Result<(), String> {
-    use swifttunnel_core::direct_uninstall::{self, Client};
-    // Refuses a development build, a bundled copy, and any copy Windows still
-    // lists, before anything is touched.
-    let plan = direct_uninstall::plan_for_running_client(Client::Lite)?;
-    swifttunnel_core::network_booster::cleanup_all_system_state()
-        .map_err(|error| format!("Network cleanup could not finish. Retry uninstall after running Internet recovery. {error}"))?;
-    direct_uninstall::finish(plan)
 }
 
 fn registered_product() -> Result<Option<String>, String> {

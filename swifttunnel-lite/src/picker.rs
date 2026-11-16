@@ -3,8 +3,8 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Controls::Dialogs::{
-    CommDlgExtendedError, GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR,
-    OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST,
+    OPENFILENAMEW,
 };
 
 /// Nothing larger is read off disk.
@@ -103,8 +103,7 @@ mod tests {
 }
 
 /// Keep the modal Windows dialog on its owner thread; read its result separately.
-pub fn pick_fflag_file(owner: HWND) -> Result<Option<std::path::PathBuf>, String> {
-    use std::os::windows::ffi::OsStringExt;
+pub fn pick_fflag_file(owner: HWND) -> Option<std::path::PathBuf> {
     // Two NUL-separated pairs, terminated by an empty one, which is the shape
     // this API has always wanted. Built rather than written as a literal so no
     // escape has to survive being edited.
@@ -120,7 +119,7 @@ pub fn pick_fflag_file(owner: HWND) -> Result<Option<std::path::PathBuf>, String
         .chain(std::iter::once(0))
         .collect();
 
-    let mut file = vec![0u16; 32768];
+    let mut file = vec![0u16; 1024];
     let mut options = OPENFILENAMEW {
         lStructSize: size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: owner,
@@ -138,27 +137,14 @@ pub fn pick_fflag_file(owner: HWND) -> Result<Option<std::path::PathBuf>, String
     // by nMaxFile so the dialog cannot write past it.
     let picked = unsafe { GetOpenFileNameW(&mut options).as_bool() };
     if !picked {
-        // FALSE covers both Cancel and native failures. Do not silently treat
-        // a broken dialog or an undersized name buffer as a cancelled import.
-        let error = unsafe { CommDlgExtendedError() };
-        if error.0 == 0 {
-            return Ok(None);
-        }
-        log::warn!(
-            "Lite FFlag file dialog failed: windows_code=0x{:x}",
-            error.0
-        );
-        return Err("Could not open the file picker. Try again.".into());
+        return None;
     }
 
-    let end = file
-        .iter()
-        .position(|c| *c == 0)
-        .ok_or("The selected file path is too long. Choose another file.")?;
+    let end = file.iter().position(|c| *c == 0).unwrap_or(file.len());
     if end == 0 {
-        return Err("No file was selected. Try choosing it again.".into());
+        return None;
     }
-    Ok(Some(std::path::PathBuf::from(
-        std::ffi::OsString::from_wide(&file[..end]),
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(
+        &file[..end],
     )))
 }

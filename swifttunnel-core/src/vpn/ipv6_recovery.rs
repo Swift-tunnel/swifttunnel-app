@@ -270,11 +270,28 @@ impl Ipv6Marker {
 
     fn restore_command(&self) -> String {
         match self.method {
-            // These records use native recovery before the binding script is
-            // built. Refuse accidental fallback rather than running a second,
-            // text-based implementation with different success semantics.
-            DisableMethod::FirewallRule =>
-                "throw 'Use native firewall recovery for this record'".to_string(),
+            DisableMethod::FirewallRule => format!(
+                r#"
+        $name = "{}"
+        $deleteOutput = & netsh.exe advfirewall firewall delete rule name="$name" 2>&1
+        $deleteExit = $LASTEXITCODE
+        $showOutput = & netsh.exe advfirewall firewall show rule name="$name" 2>&1
+        $showExit = $LASTEXITCODE
+        $deleteText = ($deleteOutput | Out-String).Trim()
+        $showText = ($showOutput | Out-String).Trim()
+
+        if ($showExit -eq 0) {{
+            Write-Error ('IPv6 block firewall rule still exists after delete attempt. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText)
+            exit 1
+        }}
+
+        if ($deleteExit -ne 0 -and $showText -notmatch 'No rules match') {{
+            Write-Error ('Could not verify IPv6 block firewall rule removal. Delete exit=' + $deleteExit + '. Delete output: ' + $deleteText + '. Show output: ' + $showText)
+            exit 1
+        }}
+        "#,
+                IPV6_BLOCK_RULE_NAME
+            ),
             DisableMethod::WinpkFilterStaticFilter => {
                 "Write-Host 'WinpkFilter IPv6 filters are restored natively'".to_string()
             }
@@ -645,18 +662,58 @@ fn build_restore_script(marker: &Ipv6Marker) -> String {
 }
 
 fn restore_firewall_rule_marker(adapter_name: &str) -> bool {
-    match crate::firewall_fixer::remove_legacy_ipv6_block_rule() {
-        Ok(()) => {
-            log::info!("IPv6 firewall block absence verified for adapter: {adapter_name}");
-            true
-        }
-        Err(error) => {
-            log::warn!(
-                "IPv6 firewall recovery could not be verified for adapter {adapter_name}: {error}"
-            );
-            false
-        }
+    let name_arg = format!("name={IPV6_BLOCK_RULE_NAME}");
+
+    let delete_output = crate::run_hidden_command_with_timeout(
+        "netsh",
+        &[
+            "advfirewall",
+            "firewall",
+            "delete",
+            "rule",
+            name_arg.as_str(),
+        ],
+        RECOVERY_COMMAND_TIMEOUT,
+    );
+    if delete_output.timed_out {
+        log::error!("netsh did not respond while restoring the IPv6 firewall rule");
+        return false;
     }
+
+    let show_output = crate::run_hidden_command_with_timeout(
+        "netsh",
+        &["advfirewall", "firewall", "show", "rule", name_arg.as_str()],
+        RECOVERY_COMMAND_TIMEOUT,
+    );
+    if show_output.timed_out {
+        log::error!("netsh did not respond while verifying the IPv6 firewall restore");
+        return false;
+    }
+
+    if show_output.success {
+        log::warn!(
+            "IPv6 block firewall rule still exists after delete attempt for adapter {}",
+            adapter_name
+        );
+        return false;
+    }
+
+    let show_text = format!("{}{}", show_output.stdout, show_output.stderr);
+
+    if !delete_output.success && !show_text.contains("No rules match") {
+        log::warn!(
+            "Could not verify IPv6 block firewall rule removal for adapter {}: {}",
+            adapter_name,
+            show_text.trim()
+        );
+        return false;
+    }
+
+    log::info!(
+        "IPv6 firewall block rule removed successfully for adapter: {}",
+        adapter_name
+    );
+    true
 }
 
 /// Read the driver's current static filter table as owned entries.
@@ -845,116 +902,24 @@ pub fn restore_ipv6_from_marker() -> Option<bool> {
 
 /// Recover IPv6 settings on application startup
 pub fn recover_ipv6_on_startup() {
-    if let Err(error) = recover_ipv6_checked() {
-        log::warn!("IPv6 recovery could not finish; its record was kept: {error}");
-    }
-}
+    if let Some(marker) = read_ipv6_marker() {
+        log::warn!(
+            "IPv6 marker found - app may have crashed while IPv6 was modified. Adapter: {}",
+            marker.adapter_name()
+        );
 
-/// Restore and retire the record together. Unreadable records, failed restores
-/// and failed record removal must reach explicit Repair callers as failures.
-pub fn recover_ipv6_checked() -> std::io::Result<bool> {
-    let filters = get_marker_path()
-        .ok_or_else(|| {
-            std::io::Error::other("Windows could not locate the IPv6 recovery record folder")
-        })
-        .and_then(|path| recover_marker_at(&path, restore_ipv6_for_marker));
-    // A crash can happen after either change. Both records are independent:
-    // failed filter recovery must not hide or prevent route-policy recovery.
-    #[cfg(windows)]
-    let routes = super::ipv6_route_recovery::recover().map_err(std::io::Error::other);
-    #[cfg(not(windows))]
-    let routes = Ok(false);
-    combine_recovery_results(filters, routes)
-}
-
-fn combine_recovery_results(
-    filters: std::io::Result<bool>,
-    routes: std::io::Result<bool>,
-) -> std::io::Result<bool> {
-    match (filters, routes) {
-        (Ok(filters), Ok(routes)) => Ok(filters || routes),
-        (Err(filters), Err(routes)) => Err(std::io::Error::other(format!(
-            "IPv6 filters: {filters}; IPv6 route policy: {routes}"
-        ))),
-        (Err(error), _) | (_, Err(error)) => Err(error),
-    }
-}
-
-fn recover_marker_at(
-    path: &std::path::Path,
-    restore: impl FnOnce(&Ipv6Marker) -> bool,
-) -> std::io::Result<bool> {
-    if let Some(marker) = read_marker_at(path)? {
-        if !restore(&marker) {
-            return Err(std::io::Error::other(
-                "IPv6 could not be restored; its recovery record was kept",
-            ));
+        if restore_ipv6_for_marker(&marker) {
+            delete_ipv6_marker();
+            log::info!("IPv6 recovery complete");
+        } else {
+            log::error!("IPv6 recovery failed - will retry on next launch");
         }
-        fs::remove_file(path)?;
-        log::info!("IPv6 recovery complete");
-        return Ok(true);
     }
-    Ok(false)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn route_and_filter_recovery_failures_are_independent_and_never_hidden() {
-        let failure = |message| Err(std::io::Error::other(message));
-        assert!(combine_recovery_results(Ok(false), Ok(true)).unwrap());
-        assert!(combine_recovery_results(Ok(true), Ok(false)).unwrap());
-        assert!(!combine_recovery_results(Ok(false), Ok(false)).unwrap());
-        assert!(combine_recovery_results(failure("filters"), Ok(true)).is_err());
-        assert!(combine_recovery_results(Ok(true), failure("route policy")).is_err());
-        let error = combine_recovery_results(failure("filters"), failure("route policy"))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("filters"));
-        assert!(error.contains("route policy"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn recovery_reports_a_record_that_cannot_be_retired() {
-        use std::os::windows::fs::OpenOptionsExt;
-        let path = get_marker_path().unwrap();
-        let bytes = b"Owned test adapter\r\n";
-        fs::write(&path, bytes).unwrap();
-        // Windows denies deletion while this owned fixture omits FILE_SHARE_DELETE.
-        let held = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(3)
-            .open(&path)
-            .unwrap();
-        assert!(recover_marker_at(&path, |_| true).is_err());
-        assert_eq!(fs::read(&path).unwrap(), bytes);
-        drop(held);
-        assert!(recover_marker_at(&path, |_| true).unwrap());
-        assert!(!path.exists());
-    }
-
-    #[test]
-    fn checked_recovery_keeps_failed_originals_and_retires_them_only_after_success() {
-        let path = get_marker_path().unwrap();
-        let bytes = b"Owned test adapter\r\n";
-        fs::write(&path, bytes).unwrap();
-        assert!(recover_marker_at(&path, |_| false).is_err());
-        assert_eq!(fs::read(&path).unwrap(), bytes);
-        recover_marker_at(&path, |_| true).unwrap();
-        assert!(!path.exists());
-        recover_marker_at(&path, |_| panic!("Absent record must not restore anything")).unwrap();
-        fs::write(&path, b"{invalid").unwrap();
-        assert!(
-            recover_marker_at(&path, |_| panic!(
-                "Damaged record must not restore anything"
-            ))
-            .is_err()
-        );
-        assert_eq!(fs::read(&path).unwrap(), b"{invalid");
-    }
 
     #[test]
     fn damaged_ipv6_records_are_refused_and_preserved() {
@@ -1250,11 +1215,13 @@ mod tests {
     }
 
     #[test]
-    fn firewall_records_refuse_the_legacy_text_based_script_path() {
+    fn test_firewall_rule_restore_command_references_block_rule_name() {
         let marker = Ipv6Marker::for_firewall_rule("Ethernet".to_string());
         let cmd = marker.restore_command();
-        assert!(cmd.contains("throw"));
-        assert!(!cmd.contains("netsh"));
+        assert!(cmd.contains(IPV6_BLOCK_RULE_NAME), "{}", cmd);
+        assert!(cmd.contains("netsh.exe advfirewall firewall delete rule"));
+        assert!(cmd.contains("netsh.exe advfirewall firewall show rule"));
+        assert!(cmd.contains("exit 1"));
     }
 
     fn dest_subnet(filter: &StaticFilter) -> ([u8; 16], [u8; 16]) {

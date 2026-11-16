@@ -93,8 +93,6 @@ fn persist_signed_out_settings(
 ) -> Result<(), String> {
     // Keep the reconnect restriction in memory even if storage fails. The
     // credentials have already been removed, so rolling it back is unsafe.
-    // Clearing the session marker is enough: launch only reconnects when it
-    // is set as well. Auto-reconnect itself is the player's saved preference.
     let mut current = settings.lock();
     current.resume_vpn_on_startup = false;
     persist(&current)
@@ -255,7 +253,6 @@ mod tests {
     fn sign_out_persistence_cannot_overwrite_a_competing_preference_write() {
         let settings = parking_lot::Mutex::new(AppSettings {
             resume_vpn_on_startup: true,
-            auto_reconnect: true,
             idle_when_unfocused: true,
             ..Default::default()
         });
@@ -275,20 +272,17 @@ mod tests {
             settings.lock().idle_when_unfocused
         );
         assert!(!disk.resume_vpn_on_startup);
-        assert!(disk.auto_reconnect, "sign-out erased a saved preference");
     }
 
     #[test]
     fn failed_sign_out_save_retains_the_reconnect_restriction_and_other_preferences() {
         let settings = parking_lot::Mutex::new(AppSettings {
             resume_vpn_on_startup: true,
-            auto_reconnect: true,
             idle_when_unfocused: false,
             ..Default::default()
         });
         assert!(persist_signed_out_settings(&settings, |_| Err("locked file".into())).is_err());
         assert!(!settings.lock().resume_vpn_on_startup);
-        assert!(settings.lock().auto_reconnect);
         assert!(!settings.lock().idle_when_unfocused);
     }
 
@@ -432,26 +426,12 @@ pub async fn auth_complete_oauth(
 
 #[tauri::command]
 pub async fn auth_logout(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
-    // A signed-out window must not hide a live tunnel. Reserve the same gate
-    // as Connect before cleanup, without retaining the auth lock it may need.
-    let operation = super::network_operation::begin()?;
-    crate::commands::vpn::disconnect_and_persist_for_sign_out(&state)
-        .await
-        .map_err(|error| format!("Could not disconnect before signing out: {error}. Try again."))?;
-    // Give the ended session's bounded usage report a chance before deleting
-    // the credentials it belongs to. This does not delay tunnel shutdown.
-    swifttunnel_core::vpn::connection::finish_pending_session_reports(
-        std::time::Duration::from_secs(3),
-    )
-    .await;
     let auth_manager = state.auth_manager.clone();
     let discord_manager = state.discord_manager.clone();
     let settings = state.settings.clone();
     // Vault/file access can wait on Windows or storage. Keep it off the async
     // executor, and retain account-action ordering through the final save.
     let result = tauri::async_runtime::spawn_blocking(move || {
-        // Retain admission even if the caller is cancelled during vault I/O.
-        let _operation = operation;
         let auth = auth_manager.blocking_lock();
         auth.logout().map_err(|e| e.to_string())?;
         discord_manager.lock().clear();

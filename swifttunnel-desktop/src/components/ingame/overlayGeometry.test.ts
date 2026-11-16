@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clampOverlayPosition,
   overlayAnchor,
+  overlayHeartbeatExpired,
   validOverlayMonitor,
 } from "./overlayGeometry";
 const monitor = { x: -2560, y: 0, w: 2560, h: 1440, scale: 1.5 };
@@ -26,9 +27,13 @@ describe("overlay screen placement", () => {
       y: 0,
     });
   });
-  it("rejects unusable screens", () => {
+  it("rejects unusable screens and hides after updates stop", () => {
     expect(validOverlayMonitor(monitor)).toBe(true);
     expect(validOverlayMonitor({ ...monitor, scale: 0 })).toBe(false);
     expect(validOverlayMonitor({ ...monitor, x: NaN })).toBe(false);
+    expect(overlayHeartbeatExpired(1000, 5500)).toBe(false);
+    expect(overlayHeartbeatExpired(1000, 5501)).toBe(true);
+    expect(overlayHeartbeatExpired(null, 10000)).toBe(false);
+    expect(overlayHeartbeatExpired(0, 4501)).toBe(true);
   });
 });

@@ -858,30 +858,25 @@ pub async fn games_launch(
     allow_unverified: bool,
     safe_launch: Option<bool>,
 ) -> Result<(), String> {
-    let mut support = swifttunnel_core::support_log::Operation::start("game_launch", "plan");
-    let plan = support.check(
-        games_launch_plan(
-            state.clone(),
-            place_id.clone(),
-            client,
-            job_id,
-            datacenter_id,
-            false,
-        )
-        .await,
-    )?;
+    let plan = games_launch_plan(
+        state.clone(),
+        place_id.clone(),
+        client,
+        job_id,
+        datacenter_id,
+        false,
+    )
+    .await?;
     let place_id = plan.place_id.clone();
     if matches!(
         plan.availability,
         Availability::Full | Availability::Unavailable
     ) {
-        support.fail("server_full_or_closed");
         return Err(
             "That server is full or closed. Use Play normally or choose another server.".into(),
         );
     }
     if plan.job_id.is_some() && plan.availability == Availability::Unknown && !allow_unverified {
-        support.fail("server_unverified");
         return Err(
             "Could not verify whether this server still has room. Try Play again to review it."
                 .into(),
@@ -891,46 +886,32 @@ pub async fn games_launch(
     // when this game has no FPS/graphics overrides. Check before replacing
     // session state or writing either settings backup.
     let monitor = state.performance_monitor.clone();
-    support.stage("player_check");
-    if support
-        .check(
-            tauri::async_runtime::spawn_blocking(move || monitor.lock().is_roblox_running()).await,
-        )
+    if tauri::async_runtime::spawn_blocking(move || monitor.lock().is_roblox_running())
+        .await
         .map_err(|error| error.to_string())?
     {
-        support.fail("player_already_open");
         return Err("Close Roblox before starting another game.".into());
     }
     if plan.preferences.use_tunnel {
-        support.stage("route_check");
         let connection = state.vpn_state_handle.borrow().clone();
-        support.check(validate_launch_connection(
+        validate_launch_connection(
             &connection,
             plan.relay_region.as_deref(),
             &state.server_list.lock(),
-        ))?;
+        )?;
     }
-    support.stage("admission");
     let placement_generation = {
         let mut games = state.games.lock();
         if games.cleanup_scheduled {
-            support.fail("previous_settings_restore_pending");
             return Err("The previous game's settings are still being restored. Try Play again in a moment.".into());
         }
         if games.launch_request_in_progress(std::time::Instant::now()) {
-            support.fail("launch_in_progress");
             return Err("A Roblox launch is already in progress.".into());
         }
         let generation = games.begin_launch(client);
         games.native_launch_generation = Some(generation);
         generation
     };
-    log::info!(
-        "[support] op=game_launch pid={} id={} event=track_player launch={}",
-        std::process::id(),
-        support.id(),
-        placement_generation,
-    );
     game_destination::clear();
     let launch_guard = LaunchGuard {
         games: state.games.clone(),
@@ -957,33 +938,23 @@ pub async fn games_launch(
     // the process. Dropping the awaiting IPC cannot release the launch early.
     tauri::async_runtime::spawn_blocking(move || {
         let mut launch_guard = launch_guard;
-        support.stage("player_discovery");
         let optimizer = optimizer.lock();
-        let player = support.check(swifttunnel_core::roblox_native_launch::official_player_for(
-            client,
-        ))?;
-        support.stage("launch_settings");
+        let player = swifttunnel_core::roblox_native_launch::official_player_for(client)?;
         let global = settings.lock().config.roblox_settings.clone();
         let mut flags = if safe_launch.unwrap_or(false) {
             std::collections::HashMap::new()
         } else {
-            support
-                .check(
-                    swifttunnel_core::roblox_optimizer::RobloxOptimizer::native_launch_flags(
-                        &global,
-                    ),
-                )
+            swifttunnel_core::roblox_optimizer::RobloxOptimizer::native_launch_flags(&global)
                 .map_err(|error| error.to_string())?
         };
         {
             let mut games = games.lock();
             if games.window_placement_generation != placement_generation || games.current.is_some()
             {
-                support.fail("launch_replaced");
                 return Err("This Roblox launch was replaced. Try Play again.".into());
             }
-            let saved_preferences = support
-                .check(games.library())?
+            let saved_preferences = games
+                .library()?
                 .entry_for(&target_place, client)
                 .map(|entry| entry.preferences.clone())
                 .unwrap_or_default();
@@ -999,18 +970,16 @@ pub async fn games_launch(
         // The initial preflight may be old after file/optimizer waits. Check
         // again immediately before either temporary settings file is changed.
         if optimizer.is_roblox_running() {
-            support.fail("player_already_open");
             return Err("Close Roblox before starting another game.".into());
         }
         if profile.use_tunnel {
-            support.check(validate_launch_connection(
+            validate_launch_connection(
                 &connection.borrow().clone(),
                 requested_region.as_deref(),
                 &servers.lock(),
-            ))?;
+            )?;
         }
-        support.stage("prepare_and_start_player");
-        support.check(launch_with_recovery(
+        launch_with_recovery(
             || {
                 swifttunnel_core::roblox_game_profile::apply_native(client, &profile)?;
                 swifttunnel_core::roblox_launch_flags::prepare(&player, flags)?;
@@ -1070,10 +1039,9 @@ pub async fn games_launch(
                 }
                 swifttunnel_core::roblox_game_profile::restore_launch_settings()
             },
-        ))?;
+        )?;
         // Completion belongs to the watcher after the process is handed off.
         launch_guard.complete = true;
-        support.complete("process_created");
         Ok::<_, String>(())
     })
     .await
