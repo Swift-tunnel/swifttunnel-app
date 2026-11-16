@@ -729,6 +729,7 @@ impl AuthClient {
             .send_with_network_fallback("relay ticket", |client, base| {
                 let url = format!("{base}{path}");
                 self.add_relay_usage_header(self.add_common_headers(client.post(&url)))
+                    .timeout(RELAY_TICKET_ATTEMPT_TIMEOUT)
                     .header("Authorization", format!("Bearer {}", access_token))
                     .header("Content-Type", "application/json")
                     .json(&json!({
@@ -1128,6 +1129,13 @@ fn user_banned_error_from_body(body: &str) -> Option<AuthError> {
 }
 
 /// Default wait when a 429 arrives with no usable `Retry-After`.
+/// Longest one relay ticket request waits on one network path. The API
+/// answers in well under a second; a request still waiting after this is on a
+/// stalled connection, and a fresh attempt is the way through. The general 30 s
+/// client timeout let one stalled renewal use most of a ticket's lifetime.
+pub(crate) const RELAY_TICKET_ATTEMPT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
 const DEFAULT_RETRY_AFTER_SECONDS: u64 = 60;
 
 /// Longest we will honour from `Retry-After`. A hostile or misconfigured

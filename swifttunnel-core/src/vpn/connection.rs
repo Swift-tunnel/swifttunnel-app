@@ -91,10 +91,21 @@ const RELAY_DEAD_GRACE_SECS: u64 = 20;
 /// expiry while leaving enough room for a transient API failure and retry.
 const RELAY_LEASE_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 const RELAY_LEASE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// Pause before retrying a renewal that never reached the API.
+///
+/// A ticket lasts 300 s and is renewed after 120 s, so a renewal has 180 s to
+/// succeed before the relay stops carrying the game. With 30 s pauses on top
+/// of two 30 s request timeouts, only two attempts fitted in that window, and
+/// a few minutes of stalls on the route to the API (Cloudflare sends some
+/// Indian ISPs to Paris) ended live sessions with Roblox error 277. A new
+/// attempt opens a new connection, which usually gets through. Retries cannot
+/// buy extra time: the server charges only beyond what is already reserved.
+const RELAY_LEASE_NETWORK_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 fn relay_lease_retry_delay(error: &AuthError) -> Duration {
     match error {
         AuthError::RateLimited(seconds) => Duration::from_secs((*seconds).clamp(5, 300)),
+        AuthError::NetworkError(_) => RELAY_LEASE_NETWORK_RETRY_INTERVAL,
         _ => RELAY_LEASE_RETRY_INTERVAL,
     }
 }
@@ -4402,6 +4413,10 @@ mod tests {
         );
         assert_eq!(
             relay_lease_retry_delay(&AuthError::NetworkError("offline".into())),
+            RELAY_LEASE_NETWORK_RETRY_INTERVAL
+        );
+        assert_eq!(
+            relay_lease_retry_delay(&AuthError::ApiError("500".into())),
             RELAY_LEASE_RETRY_INTERVAL
         );
     }
