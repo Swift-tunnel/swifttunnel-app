@@ -268,18 +268,39 @@ enum RebindDecision {
 /// must still enter recovery. Preserve legacy handling of unspecified empty
 /// queue errors; do not assume all driver versions use the same empty code.
 fn reader_can_ignore_drain_error(draining: bool, error: &windows::core::Error) -> bool {
+    draining && !reader_lost_device(error)
+}
+
+fn reader_lost_device(error: &windows::core::Error) -> bool {
     use windows::Win32::Foundation::{
         ERROR_DEV_NOT_EXIST, ERROR_DEVICE_NOT_CONNECTED, ERROR_INVALID_HANDLE, ERROR_NO_SUCH_DEVICE,
     };
-    draining
-        && ![
-            ERROR_INVALID_HANDLE,
-            ERROR_DEV_NOT_EXIST,
-            ERROR_DEVICE_NOT_CONNECTED,
-            ERROR_NO_SUCH_DEVICE,
-        ]
-        .into_iter()
-        .any(|code| error.code() == windows::core::HRESULT::from_win32(code.0))
+    [
+        ERROR_INVALID_HANDLE,
+        ERROR_DEV_NOT_EXIST,
+        ERROR_DEVICE_NOT_CONNECTED,
+        ERROR_NO_SUCH_DEVICE,
+    ]
+    .into_iter()
+    .any(|code| error.code() == windows::core::HRESULT::from_win32(code.0))
+}
+
+/// Event wakes in a row that may find the driver queue empty before the read
+/// error is treated as a failed handle.
+const READER_EMPTY_WAKE_LIMIT: u32 = 2;
+
+/// The packet event is reset before each read. A packet that arrives after
+/// the reset and is taken by that same read leaves the event signaled over an
+/// empty queue, and WinpkFilter answers the next read with
+/// ERROR_INVALID_PARAMETER. That is an empty queue, not a dead handle.
+///
+/// 3.9.8 sent every one of those through the rebind path: on real PCs the
+/// reader dropped and reopened its driver handles up to 135 times a minute,
+/// stalling all traffic on the adapter each time. Each stale signal follows a
+/// read that returned packets, so more than a couple in a row with no packet
+/// between them is a real failure and still spends the rebind budget.
+fn reader_can_ignore_empty_wake(empty_wakes: u32, error: &windows::core::Error) -> bool {
+    empty_wakes < READER_EMPTY_WAKE_LIMIT && !reader_lost_device(error)
 }
 
 /// Pure state machine for reader rebind budget accounting.
@@ -6076,6 +6097,9 @@ fn run_packet_reader(
     // Set when the previous read filled the whole batch: the driver queue may
     // still hold packets, so read again without waiting on the event.
     let mut drain_more = false;
+    // Event wakes since the last read that returned packets which found the
+    // queue empty. See `reader_can_ignore_empty_wake`.
+    let mut empty_wakes = 0u32;
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
@@ -6230,12 +6254,21 @@ fn run_packet_reader(
                         prior
                     );
                 }
+                if n > 0 {
+                    empty_wakes = 0;
+                }
                 n
             }
             // A follow-up read after a full batch can find the queue empty,
             // which WinpkFilter reports as an error. That is not a dead handle.
             Err(ref error) if reader_can_ignore_drain_error(draining, error) => 0,
+            // So can a wake whose packets the previous read already took.
+            Err(ref error) if reader_can_ignore_empty_wake(empty_wakes, error) => {
+                empty_wakes += 1;
+                0
+            }
             Err(e) => {
+                empty_wakes = 0;
                 match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
                     RebindDecision::Stop => break,
                     RebindDecision::Fatal => {
@@ -18360,6 +18393,33 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    #[test]
+    fn a_wake_over_an_empty_queue_is_not_a_dead_handle_but_a_repeating_one_is() {
+        use windows::Win32::Foundation::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER};
+        let empty = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(
+            ERROR_INVALID_PARAMETER.0,
+        ));
+        // The 3.9.8 regression: the first empty wake after a good read went
+        // straight to a driver rebind.
+        assert!(reader_can_ignore_empty_wake(0, &empty));
+        assert!(reader_can_ignore_empty_wake(
+            READER_EMPTY_WAKE_LIMIT - 1,
+            &empty
+        ));
+        // A handle that keeps failing with no packet in between still recovers.
+        assert!(!reader_can_ignore_empty_wake(
+            READER_EMPTY_WAKE_LIMIT,
+            &empty
+        ));
+        let lost = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(
+            ERROR_INVALID_HANDLE.0,
+        ));
+        assert!(
+            !reader_can_ignore_empty_wake(0, &lost),
+            "a lost handle must spend the rebind budget at once"
+        );
+    }
+
     #[test]
     fn an_empty_drain_does_not_hide_a_lost_driver_or_adapter() {
         use windows::Win32::Foundation::{
