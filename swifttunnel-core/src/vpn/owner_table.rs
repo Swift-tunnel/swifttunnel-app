@@ -12,6 +12,24 @@ mod row_types {
 pub(super) trait OwnerRow: Copy + row_types::Sealed {}
 impl<T: Copy + row_types::Sealed> OwnerRow for T {}
 
+const MAX_OWNER_TABLE_BYTES: usize = 64 * 1024 * 1024;
+
+fn owner_table_capacity(reported: usize) -> Result<usize, u32> {
+    use windows::Win32::Foundation::{ERROR_INVALID_DATA, ERROR_NOT_ENOUGH_MEMORY};
+    if reported < 4 {
+        return Err(ERROR_INVALID_DATA.0);
+    }
+    if reported > MAX_OWNER_TABLE_BYTES {
+        return Err(ERROR_NOT_ENOUGH_MEMORY.0);
+    }
+    // Headroom is optional. A valid table near the cap must not be rejected
+    // just because spare space would exceed the allocation budget.
+    Ok(reported
+        .saturating_add(reported / 8)
+        .saturating_add(1024)
+        .min(MAX_OWNER_TABLE_BYTES))
+}
+
 pub(super) fn bounded_ip_helper_entries(
     buffer_len: usize,
     advertised_entries: u32,
@@ -35,7 +53,6 @@ pub(super) fn read_owner_rows<T: OwnerRow>(
     use windows::Win32::Foundation::{
         ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_NOT_ENOUGH_MEMORY,
     };
-    const MAX_OWNER_TABLE_BYTES: usize = 64 * 1024 * 1024;
     let mut size = 0;
     let status = query(None, &mut size);
     if status != 0 && status != ERROR_INSUFFICIENT_BUFFER.0 {
@@ -43,15 +60,12 @@ pub(super) fn read_owner_rows<T: OwnerRow>(
     }
     for _ in 0..3 {
         let reported = size as usize;
-        if reported < 4 || std::mem::size_of::<T>() == 0 {
+        if std::mem::size_of::<T>() == 0 {
             return Err(ERROR_INVALID_DATA.0);
         }
         // Sockets open between the size probe and the read on a busy PC. Ask
         // with room to spare so one new connection does not fail the round.
-        let capacity = reported.saturating_add(reported / 8).saturating_add(1024);
-        if capacity > MAX_OWNER_TABLE_BYTES {
-            return Err(ERROR_NOT_ENOUGH_MEMORY.0);
-        }
+        let capacity = owner_table_capacity(reported)?;
         size = capacity as u32;
         // IP Helper tables have a DWORD count followed by DWORD-aligned rows.
         let mut buffer = Vec::<u32>::new();
@@ -86,4 +100,25 @@ pub(super) fn read_owner_rows<T: OwnerRow>(
         return Ok(());
     }
     Err(ERROR_INSUFFICIENT_BUFFER.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owner_table_headroom_respects_the_cap_without_lowering_the_read_limit() {
+        assert!(owner_table_capacity(3).is_err());
+        assert_eq!(owner_table_capacity(1024), Ok(2176));
+        assert_eq!(
+            owner_table_capacity(MAX_OWNER_TABLE_BYTES - 1),
+            Ok(MAX_OWNER_TABLE_BYTES)
+        );
+        assert_eq!(
+            owner_table_capacity(MAX_OWNER_TABLE_BYTES),
+            Ok(MAX_OWNER_TABLE_BYTES)
+        );
+        assert!(owner_table_capacity(MAX_OWNER_TABLE_BYTES + 1).is_err());
+        assert!(owner_table_capacity(usize::MAX).is_err());
+    }
 }

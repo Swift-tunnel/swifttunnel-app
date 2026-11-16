@@ -173,9 +173,11 @@ fn supervise_network_worker(
 struct PassthroughSendHealth {
     consecutive_errors: u32,
     total_errors: u64,
+    first_error_at: Option<std::time::Instant>,
 }
 
 const PASSTHROUGH_SEND_FAILURE_LIMIT: u32 = 3;
+const PASSTHROUGH_SEND_FAILURE_GRACE: Duration = Duration::from_secs(1);
 
 impl PassthroughSendHealth {
     fn forward<E: std::fmt::Display>(
@@ -185,15 +187,33 @@ impl PassthroughSendHealth {
         stopping: bool,
         send: impl FnOnce() -> Result<(), E>,
     ) -> VpnResult<()> {
+        self.forward_with_clock(direction, packets, stopping, send, std::time::Instant::now)
+    }
+
+    fn forward_with_clock<E: std::fmt::Display>(
+        &mut self,
+        direction: &'static str,
+        packets: u32,
+        stopping: bool,
+        send: impl FnOnce() -> Result<(), E>,
+        now: impl FnOnce() -> std::time::Instant,
+    ) -> VpnResult<()> {
         if packets == 0 {
             return Ok(());
         }
         match send() {
-            Ok(()) => self.consecutive_errors = 0,
+            Ok(()) => {
+                self.consecutive_errors = 0;
+                self.first_error_at = None;
+            }
             // Still drain an already captured batch during orderly shutdown,
             // without turning a racing driver close into a new session error.
             Err(_) if stopping => {}
             Err(error) => {
+                // No clock read on successful forwarding. Three failed batches
+                // can occur within one driver hiccup; require sustained failure.
+                let now = now();
+                let since = *self.first_error_at.get_or_insert(now);
                 self.consecutive_errors = self.consecutive_errors.saturating_add(1);
                 if sample_forward_failure(&mut self.total_errors) {
                     log::warn!(
@@ -202,10 +222,13 @@ impl PassthroughSendHealth {
                         self.total_errors
                     );
                 }
-                if self.consecutive_errors >= PASSTHROUGH_SEND_FAILURE_LIMIT {
+                if self.consecutive_errors >= PASSTHROUGH_SEND_FAILURE_LIMIT
+                    && now.saturating_duration_since(since) >= PASSTHROUGH_SEND_FAILURE_GRACE
+                {
                     return Err(VpnError::PacketForwardingFailed(format!(
-                        "{direction}: {} consecutive failed sends; {error}",
-                        self.consecutive_errors
+                        "{direction}: {} consecutive failed sends over {} ms; {error}",
+                        self.consecutive_errors,
+                        now.saturating_duration_since(since).as_millis()
                     )));
                 }
             }
@@ -6613,9 +6636,11 @@ fn run_packet_worker(
         .map_err(|error| format!("Could not open the packet worker's driver handle: {error}"))?;
 
     // Get adapters to find physical adapter handle
-    let adapters = driver
-        .get_tcpip_bound_adapters_info()
-        .map_err(|error| format!("Could not read the packet worker's adapters: {error}"))?;
+    let mut adapters = WorkerAdapterSnapshot::new(|| {
+        driver
+            .get_tcpip_bound_adapters_info()
+            .map_err(|error| format!("Could not read the packet worker's adapters: {error}"))
+    })?;
 
     if relay_ctx.is_some() {
         log::info!("Worker {}: V3 relay context AVAILABLE", worker_id);
@@ -6840,7 +6865,7 @@ fn run_packet_worker(
                             {
                                 send_bypass_packet(
                                     &driver,
-                                    &adapters,
+                                    &mut adapters,
                                     &work,
                                     &mut bypass_failure_events,
                                 )?;
@@ -6898,11 +6923,16 @@ fn run_packet_worker(
                                 work.data.as_slice(),
                             ) == QueueFullAction::Bypass)
                     {
-                        send_bypass_packet(&driver, &adapters, &work, &mut bypass_failure_events)?;
+                        send_bypass_packet(
+                            &driver,
+                            &mut adapters,
+                            &work,
+                            &mut bypass_failure_events,
+                        )?;
                     }
                 }
             } else {
-                if send_bypass_packet(&driver, &adapters, &work, &mut bypass_failure_events)? {
+                if send_bypass_packet(&driver, &mut adapters, &work, &mut bypass_failure_events)? {
                     stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
                     stats
                         .bytes_bypassed
@@ -6927,7 +6957,7 @@ fn run_packet_worker(
 /// Send a bypass packet to the physical adapter
 fn send_bypass_packet(
     driver: &ndisapi::Ndisapi,
-    adapters: &[ndisapi::NetworkAdapterInfo],
+    adapters: &mut WorkerAdapterSnapshot<ndisapi::NetworkAdapterInfo>,
     work: &PacketWork,
     failures: &mut u64,
 ) -> Result<bool, String> {
@@ -6937,11 +6967,16 @@ fn send_bypass_packet(
     // A worker cannot use the reader's driver handle, or keep silently dropping
     // traffic for an adapter absent from its own snapshot. Supervision reports
     // this error to the connection monitor so it can tear down failed capture.
-    let index = worker_adapter_index(
-        adapters.iter().map(|adapter| adapter.get_name()),
+    let index = adapters.select(
+        |adapter| adapter.get_name() == work.physical_adapter_name.as_str(),
+        || {
+            driver
+                .get_tcpip_bound_adapters_info()
+                .map_err(|error| error.to_string())
+        },
         &work.physical_adapter_name,
     )?;
-    let adapter = &adapters[index];
+    let adapter = &adapters.entries[index];
 
     let adapter_handle = adapter.get_handle();
 
@@ -6989,13 +7024,49 @@ fn send_bypass_packet(
     Ok(true)
 }
 
-fn worker_adapter_index<'a>(
-    mut adapters: impl Iterator<Item = &'a str>,
-    target: &str,
-) -> Result<usize, String> {
-    adapters.position(|name| name == target).ok_or_else(|| {
-        format!("The packet worker cannot access the selected network adapter ({target}). Reconnect SwiftTunnel to refresh its adapter handles.")
-    })
+/// Driver bindings can settle after a worker opens its own handle. Retry a
+/// failed initial enumeration or a missing selected adapter once per worker.
+/// Never reuse another driver's handle or substitute a different adapter.
+struct WorkerAdapterSnapshot<T> {
+    entries: Vec<T>,
+    refreshed: bool,
+}
+
+impl<T> WorkerAdapterSnapshot<T> {
+    fn new(mut read: impl FnMut() -> Result<Vec<T>, String>) -> Result<Self, String> {
+        let (entries, refreshed) = match read() {
+            Ok(entries) => (entries, false),
+            Err(error) => {
+                log::warn!("Packet worker adapter enumeration failed; retrying once: {error}");
+                (read()?, true)
+            }
+        };
+        Ok(Self { entries, refreshed })
+    }
+
+    fn select(
+        &mut self,
+        matches: impl Fn(&T) -> bool,
+        refresh: impl FnOnce() -> Result<Vec<T>, String>,
+        target: &str,
+    ) -> Result<usize, String> {
+        if let Some(index) = self.entries.iter().position(&matches) {
+            return Ok(index);
+        }
+        if !self.refreshed {
+            self.refreshed = true;
+            log::warn!(
+                "Packet worker adapter snapshot lacks the selected adapter; refreshing once"
+            );
+            self.entries = refresh()?;
+            if let Some(index) = self.entries.iter().position(matches) {
+                return Ok(index);
+            }
+        }
+        Err(format!(
+            "The packet worker cannot access the selected network adapter ({target}). Reconnect SwiftTunnel to refresh its adapter handles."
+        ))
+    }
 }
 
 /// Collect TCP source ports owned by tunnel processes for API tunneling.
@@ -10131,15 +10202,22 @@ mod tests {
             .unwrap();
         assert_eq!(outbound.consecutive_errors, 0);
         assert_eq!(outbound.total_errors, 1);
-        for _ in 1..PASSTHROUGH_SEND_FAILURE_LIMIT {
+        let at = std::time::Instant::now();
+        for _ in 0..100 {
             assert!(
                 outbound
-                    .forward("adapter", 64, false, || Err("owned failure"))
+                    .forward_with_clock("adapter", 64, false, || Err("owned failure"), || at)
                     .is_ok()
             );
         }
         let error = outbound
-            .forward("adapter", 64, false, || Err("owned native error"))
+            .forward_with_clock(
+                "adapter",
+                64,
+                false,
+                || Err("owned native error"),
+                || at + PASSTHROUGH_SEND_FAILURE_GRACE,
+            )
             .unwrap_err();
         assert!(
             matches!(error, VpnError::PacketForwardingFailed(ref detail) if detail.contains("adapter") && detail.contains("owned native error"))
@@ -10150,18 +10228,42 @@ mod tests {
     #[test]
     fn missing_worker_adapter_reports_failure_instead_of_silently_dropping_each_packet() {
         use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-        let names = ["old-adapter", "selected-adapter"];
+        let mut snapshot = super::WorkerAdapterSnapshot::new(|| Ok(vec!["old-adapter"])).unwrap();
         assert_eq!(
-            super::worker_adapter_index(names.into_iter(), "selected-adapter"),
+            snapshot.select(
+                |name| *name == "selected-adapter",
+                || Ok(vec!["old-adapter", "selected-adapter"]),
+                "selected-adapter"
+            ),
             Ok(1)
         );
-        assert!(super::worker_adapter_index(names.into_iter(), "adapter").is_err());
-        assert!(super::worker_adapter_index(std::iter::empty(), "selected-adapter").is_err());
+        assert_eq!(
+            snapshot.select(
+                |name| *name == "selected-adapter",
+                || panic!("do not refresh a working snapshot"),
+                "selected-adapter"
+            ),
+            Ok(1)
+        );
+        assert!(
+            snapshot
+                .select(
+                    |name| *name == "missing-adapter",
+                    || panic!("one refresh only"),
+                    "missing-adapter"
+                )
+                .is_err()
+        );
         let stop = AtomicBool::new(false);
         let cause = AtomicU8::new(0);
         let processed = std::cell::Cell::new(false);
         super::supervise_network_worker("owned adapter fixture", &stop, &cause, || {
-            super::worker_adapter_index(["old-adapter"].into_iter(), "new-adapter")?;
+            let mut snapshot = super::WorkerAdapterSnapshot::new(|| Ok(vec!["old-adapter"]))?;
+            snapshot.select(
+                |name| *name == "new-adapter",
+                || Ok(vec!["other-adapter"]),
+                "new-adapter",
+            )?;
             processed.set(true);
             Ok(())
         });
@@ -10172,6 +10274,92 @@ mod tests {
         assert_eq!(
             super::WorkerPanicCause::from_u8(cause.load(Ordering::Acquire)),
             Some(super::WorkerPanicCause::InternalThreadFailed)
+        );
+    }
+
+    #[test]
+    fn initial_worker_enumeration_error_uses_the_same_single_retry_budget() {
+        let mut calls = 0;
+        let mut snapshot = super::WorkerAdapterSnapshot::new(|| {
+            calls += 1;
+            if calls == 1 {
+                Err("owned transient error".into())
+            } else {
+                Ok(vec!["selected"])
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(
+            snapshot.select(
+                |name| *name == "selected",
+                || panic!("already retried"),
+                "selected"
+            ),
+            Ok(0)
+        );
+        assert!(
+            snapshot
+                .select(
+                    |name| *name == "missing",
+                    || panic!("already retried"),
+                    "missing"
+                )
+                .is_err()
+        );
+        let mut failures = 0;
+        assert!(
+            super::WorkerAdapterSnapshot::<&str>::new(|| {
+                failures += 1;
+                Err("owned persistent error".into())
+            })
+            .is_err()
+        );
+        assert_eq!(failures, 2);
+    }
+
+    #[test]
+    fn passthrough_requires_both_failure_count_and_elapsed_time_and_resets_both() {
+        let at = std::time::Instant::now();
+        let mut health = PassthroughSendHealth::default();
+        for step in 0..2 {
+            health
+                .forward_with_clock(
+                    "adapter",
+                    1,
+                    false,
+                    || Err("fixture"),
+                    || at + PASSTHROUGH_SEND_FAILURE_GRACE * step,
+                )
+                .unwrap();
+        }
+        // A real success after the grace window ends the entire old streak.
+        health
+            .forward_with_clock(
+                "adapter",
+                1,
+                false,
+                || Ok::<(), &str>(()),
+                || panic!("success must not read the clock"),
+            )
+            .unwrap();
+        assert!(health.first_error_at.is_none());
+        let new_start = at + PASSTHROUGH_SEND_FAILURE_GRACE * 3;
+        for _ in 0..PASSTHROUGH_SEND_FAILURE_LIMIT {
+            health
+                .forward_with_clock("adapter", 1, false, || Err("fixture"), || new_start)
+                .unwrap();
+        }
+        assert!(
+            health
+                .forward_with_clock(
+                    "adapter",
+                    1,
+                    false,
+                    || Err("fixture"),
+                    || new_start + PASSTHROUGH_SEND_FAILURE_GRACE
+                )
+                .is_err()
         );
     }
 
