@@ -18,6 +18,7 @@ export function UpdateRequiredScreen({ message }: { message: string }) {
   const status = useUpdaterStore((s) => s.status);
   const progress = useUpdaterStore((s) => s.progressPercent);
   const error = useUpdaterStore((s) => s.error);
+  const installMessage = useUpdaterStore((s) => s.installMessage);
   const checkForUpdates = useUpdaterStore((s) => s.checkForUpdates);
 
   const busy = status === "checking" || status === "installing";
@@ -31,9 +32,11 @@ export function UpdateRequiredScreen({ message }: { message: string }) {
           : "Downloading the latest version…"
         : status === "error"
           ? (error ?? "Automatic update failed, please download manually.")
-          : status === "up_to_date"
-            ? "Couldn't update automatically. Download the latest version from the website."
-            : null;
+          : status === "installed"
+            ? installMessage
+            : status === "up_to_date"
+              ? "Couldn't update automatically. Download the latest version from the website."
+              : null;
 
   return (
     <div className="flex h-screen w-screen select-none flex-col items-center justify-center gap-6 bg-bg-base px-8 text-center">
@@ -79,23 +82,25 @@ export function UpdateRequiredScreen({ message }: { message: string }) {
         </p>
       )}
 
-      <div className="flex flex-col items-center gap-2.5">
-        <Button
-          variant="primary"
-          size="lg"
-          loading={busy}
-          onClick={() => void checkForUpdates(true, true)}
-        >
-          {busy ? "Updating…" : "Update now"}
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => void systemOpenUrl(DOWNLOAD_URL)}
-        >
-          Download from swifttunnel.net
-        </Button>
-      </div>
+      {status !== "installed" && (
+        <div className="flex flex-col items-center gap-2.5">
+          <Button
+            variant="primary"
+            size="lg"
+            loading={busy}
+            onClick={() => void checkForUpdates(true, true)}
+          >
+            {busy ? "Updating…" : "Update now"}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => void systemOpenUrl(DOWNLOAD_URL)}
+          >
+            Download from swifttunnel.net
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

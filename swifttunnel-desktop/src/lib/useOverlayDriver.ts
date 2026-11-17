@@ -123,12 +123,15 @@ export function useOverlayDriver() {
           && performance.now() - metricsAt <= MAX_SAMPLE_AGE_MS;
       };
       const gameActive = metricsFresh && b.robloxRunning;
+      // A locked overlay cannot stay visible while Roblox is unfocused.
+      // Keep checking presence, but defer its extra reads until it can show.
+      const overlayMayShow = gameActive && (b.robloxForeground || cfgBefore.locked === false);
       const needsThroughput =
         cfgBefore.metrics.includes("upload") ||
         cfgBefore.metrics.includes("download");
       const needsPing = cfgBefore.metrics.includes("ping");
       let trafficFresh = false;
-      if (gameActive && needsThroughput && vpnBefore.state === "connected") {
+      if (overlayMayShow && needsThroughput && vpnBefore.state === "connected") {
         try {
           trafficFresh = await fetchThroughput();
         } catch {
@@ -136,7 +139,7 @@ export function useOverlayDriver() {
         }
       }
       if (disposed) return;
-      if (gameActive && metricsCurrent() && needsPing && vpnBefore.state === "connected") {
+      if (overlayMayShow && metricsCurrent() && needsPing && vpnBefore.state === "connected") {
         try {
           await fetchPing();
         } catch {
@@ -197,7 +200,7 @@ export function useOverlayDriver() {
           sessionRef.current = { pid: b.processId, startedAt: metricsAt };
       }
       let monitor: OverlayMonitor | null = null;
-      if (metricsCurrent() && b.robloxRunning) {
+      if (overlayMayShow && metricsCurrent()) {
         try {
           const value = await invoke<OverlayMonitor | null>(
             "overlay_game_monitor",

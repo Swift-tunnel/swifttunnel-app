@@ -128,6 +128,33 @@ fn persist_new_session(
 }
 
 impl AuthManager {
+    #[cfg(test)]
+    pub(crate) fn signed_in_for_test(user_id: &str, token: &str) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(AuthState::LoggedIn(AuthSession {
+                access_token: token.into(),
+                refresh_token: "fixture-refresh".into(),
+                expires_at: Utc::now() + Duration::hours(1),
+                user: UserInfo {
+                    id: user_id.into(),
+                    email: "fixture@example.invalid".into(),
+                    is_tester: false,
+                    is_banned: false,
+                    banned_reason: None,
+                    banned_at: None,
+                },
+            }))),
+            storage: SecureStorage::with_test_directory(std::env::temp_dir().join(format!(
+                "swifttunnel-session-auth-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ))),
+            client: AuthClient::unavailable_for_test(),
+            oauth_server: Arc::new(Mutex::new(None)),
+            refresh_backoff: Arc::new(Mutex::new(RefreshBackoff::default())),
+        }
+    }
+
     /// Create a new AuthManager
     pub fn new() -> Result<Self, AuthError> {
         info!("========================================");
@@ -310,7 +337,8 @@ impl AuthManager {
 
     /// Sign in with email and password
     pub async fn sign_in(&self, email: &str, password: &str) -> Result<(), AuthError> {
-        info!("Signing in user");
+        let mut support =
+            crate::support_log::Operation::start("account_password_sign_in", "credentials");
 
         // Set state to logging in
         {
@@ -335,6 +363,7 @@ impl AuthManager {
                 };
 
                 // Fetch user profile to get tester and ban status.
+                support.stage("profile");
                 match self.client.fetch_user_profile(&response.access_token).await {
                     Ok(profile) => {
                         user_info.is_tester = profile.is_tester;
@@ -347,6 +376,7 @@ impl AuthManager {
                         );
                     }
                     Err(AuthError::UserBanned(reason)) => {
+                        support.fail("account_blocked");
                         let session = Self::session_from_auth_response(
                             response,
                             email.to_string(),
@@ -376,20 +406,21 @@ impl AuthManager {
                     user: user_info,
                 };
 
-                self.store_and_set_session_state(session.clone())?;
+                support.stage("store_session");
+                support.check(self.store_and_set_session_state(session.clone()))?;
 
                 if session.user.is_banned {
-                    warn!("Sign in completed for banned user {}", session.user.id);
+                    support.fail("account_blocked");
                     Err(AuthError::UserBanned(Self::ban_suffix(
                         &session.user.banned_reason,
                     )))
                 } else {
-                    info!("Sign in successful!");
+                    support.complete("signed_in");
                     Ok(())
                 }
             }
             Err(e) => {
-                error!("Sign in failed: {}", e);
+                support.fail(e.support_code());
                 // Reset state to logged out with error
                 {
                     let mut state = self.state.lock();
@@ -651,6 +682,36 @@ impl AuthManager {
         Ok(())
     }
 
+    /// The signed-in account's id. `None` while signed out, signing in, or
+    /// banned.
+    pub fn current_user_id(&self) -> Option<String> {
+        match self.get_state() {
+            AuthState::LoggedIn(session) => Some(session.user.id),
+            _ => None,
+        }
+    }
+
+    /// A valid access token, but only while `user_id` is the signed-in account.
+    ///
+    /// For work that outlives the moment it was requested, such as a session's
+    /// final report sent after the tunnel is already down. By then the player
+    /// may have signed out, or signed in as someone else, and that work must
+    /// never be sent under the other account.
+    ///
+    /// The account is checked before refreshing, so another account's session
+    /// is never refreshed on this caller's behalf, and again when the token is
+    /// read, because a refresh can end in a forced sign-out.
+    pub async fn get_access_token_for(&self, user_id: &str) -> Result<String, AuthError> {
+        if self.current_user_id().as_deref() != Some(user_id) {
+            return Err(AuthError::NotAuthenticated);
+        }
+        self.refresh_if_needed().await?;
+        match self.get_state() {
+            AuthState::LoggedIn(session) if session.user.id == user_id => Ok(session.access_token),
+            _ => Err(AuthError::NotAuthenticated),
+        }
+    }
+
     /// Get a valid access token, refreshing if needed
     pub async fn get_access_token(&self) -> Result<String, AuthError> {
         self.refresh_if_needed().await?;
@@ -744,7 +805,8 @@ impl AuthManager {
         start_listener: impl FnOnce(&str) -> Result<OAuthServer, String>,
         open_browser: impl FnOnce(&str) -> Result<(), String>,
     ) -> Result<String, AuthError> {
-        info!("Starting Google OAuth sign-in flow with localhost server");
+        let mut support =
+            crate::support_log::Operation::start("account_browser_sign_in", "local_listener");
 
         // Stop any existing OAuth server
         {
@@ -774,6 +836,7 @@ impl AuthManager {
         let oauth_server = match start_listener(&state) {
             Ok(server) => server,
             Err(e) => {
+                support.fail("listener_unavailable");
                 error!("Failed to start OAuth server: {}", e);
                 return Err(AuthError::ApiError(format!(
                     "Failed to start OAuth server: {}",
@@ -809,7 +872,10 @@ impl AuthManager {
         );
 
         // Open the browser
-        open_browser(&oauth_url).map_err(AuthError::ApiError)?;
+        support.stage("open_browser");
+        support
+            .check(open_browser(&oauth_url))
+            .map_err(AuthError::ApiError)?;
 
         // Store the OAuth server
         {
@@ -829,10 +895,7 @@ impl AuthManager {
             *auth_state = AuthState::AwaitingOAuthCallback(pending);
         }
 
-        info!(
-            "OAuth flow started, waiting for localhost callback with state: {}...",
-            &state[..8]
-        );
+        support.complete("awaiting_browser_callback");
         Ok(state)
     }
 
@@ -864,7 +927,8 @@ impl AuthManager {
         exchange_token: &str,
         callback_state: &str,
     ) -> Result<(), AuthError> {
-        debug!("Completing OAuth callback (credentials omitted)");
+        let mut support =
+            crate::support_log::Operation::start("account_browser_callback", "validate_callback");
 
         // Get expected state from memory
         let expected_state = {
@@ -873,6 +937,7 @@ impl AuthManager {
                 AuthState::AwaitingOAuthCallback(pending) => {
                     // Check if the OAuth flow has expired (10 minutes)
                     if Utc::now() - pending.started_at > Duration::minutes(10) {
+                        support.fail("callback_expired");
                         return Err(AuthError::ApiError(
                             "OAuth flow expired. Please try again.".to_string(),
                         ));
@@ -886,7 +951,7 @@ impl AuthManager {
         let expected_state = match expected_state {
             Some(s) => s,
             None => {
-                error!("OAuth state not found in memory");
+                support.fail("no_pending_sign_in");
                 return Err(AuthError::ApiError(
                     "Not waiting for OAuth callback. Please start sign-in again.".to_string(),
                 ));
@@ -894,7 +959,7 @@ impl AuthManager {
         };
 
         if callback_state != expected_state {
-            error!("OAuth callback state did not match the pending sign-in");
+            support.fail("callback_state_mismatch");
             // Reset state
             {
                 let mut state = self.state.lock();
@@ -919,6 +984,7 @@ impl AuthManager {
         }
 
         // Exchange the token for a magic link
+        support.stage("exchange");
         let exchange_response = match self
             .client
             .exchange_oauth_token(exchange_token, callback_state)
@@ -926,7 +992,7 @@ impl AuthManager {
         {
             Ok(response) => response,
             Err(e) => {
-                error!("Failed to exchange OAuth token: {}", e);
+                support.fail(e.support_code());
                 {
                     let mut state = self.state.lock();
                     *state = AuthState::Error(e.to_string());
@@ -959,6 +1025,7 @@ impl AuthManager {
                 },
             }
         } else {
+            support.stage("verify_magic_link");
             match self
                 .client
                 .verify_magic_link(&exchange_response.token)
@@ -966,7 +1033,7 @@ impl AuthManager {
             {
                 Ok(response) => response,
                 Err(e) => {
-                    error!("Failed to verify magic link: {}", e);
+                    support.fail(e.support_code());
                     {
                         let mut state = self.state.lock();
                         *state = AuthState::Error(e.to_string());
@@ -977,6 +1044,7 @@ impl AuthManager {
         };
 
         // Fetch user profile to get tester and ban status
+        support.stage("profile");
         let profile = match self
             .client
             .fetch_user_profile(&auth_response.access_token)
@@ -990,6 +1058,7 @@ impl AuthManager {
                 profile
             }
             Err(AuthError::UserBanned(reason)) => {
+                support.fail("account_blocked");
                 let session = Self::session_from_auth_response(
                     auth_response,
                     exchange_response.email,
@@ -1023,12 +1092,13 @@ impl AuthManager {
             profile.banned_at,
         );
 
-        self.store_and_set_session_state(session.clone())?;
+        support.stage("store_session");
+        support.check(self.store_and_set_session_state(session.clone()))?;
 
         if session.user.is_banned {
-            warn!("Google OAuth completed for banned user {}", session.user.id);
+            support.fail("account_blocked");
         } else {
-            info!("Google OAuth sign-in successful!");
+            support.complete("signed_in");
         }
         Ok(())
     }
@@ -1358,6 +1428,62 @@ mod tests {
                 Err(AuthError::NetworkError(message)) if message == detail
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn a_token_is_only_given_to_work_that_belongs_to_the_signed_in_account() {
+        use super::*;
+        use crate::auth::types::UserInfo;
+        let session = |user: &str, token: &str| AuthSession {
+            access_token: token.into(),
+            refresh_token: "fixture-refresh".into(),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+            user: UserInfo {
+                id: user.into(),
+                email: "fixture@example.invalid".into(),
+                is_tester: false,
+                is_banned: false,
+                banned_reason: None,
+                banned_at: None,
+            },
+        };
+        let manager = AuthManager {
+            state: Arc::new(Mutex::new(AuthState::LoggedIn(session(
+                "first",
+                "first-token",
+            )))),
+            storage: SecureStorage::with_test_directory(std::env::temp_dir().join(format!(
+                "swifttunnel-token-owner-{}-{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ))),
+            client: AuthClient::unavailable_for_test(),
+            oauth_server: Arc::new(Mutex::new(None)),
+            refresh_backoff: Arc::new(Mutex::new(RefreshBackoff::default())),
+        };
+        assert_eq!(manager.current_user_id().as_deref(), Some("first"));
+        assert_eq!(
+            manager.get_access_token_for("first").await.unwrap(),
+            "first-token"
+        );
+
+        // Signed out: the old session's work gets nothing.
+        *manager.state.lock() = AuthState::LoggedOut;
+        assert_eq!(manager.current_user_id(), None);
+        assert!(manager.get_access_token_for("first").await.is_err());
+
+        // Someone else signed in: still nothing, and never their token.
+        *manager.state.lock() = AuthState::LoggedIn(session("second", "second-token"));
+        assert!(manager.get_access_token_for("first").await.is_err());
+        assert_eq!(
+            manager.get_access_token_for("second").await.unwrap(),
+            "second-token"
+        );
+
+        // A banned account has no ordinary access either.
+        *manager.state.lock() = AuthState::Banned(session("second", "second-token"));
+        assert_eq!(manager.current_user_id(), None);
+        assert!(manager.get_access_token_for("second").await.is_err());
     }
 
     #[test]

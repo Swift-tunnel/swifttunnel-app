@@ -28,6 +28,9 @@ class MockWindow {
   async isMinimized() {
     return false;
   }
+  async isVisible() {
+    return true;
+  }
   async setSize() {}
   async setPosition() {}
   async maximize() {}
@@ -49,6 +52,10 @@ class MockWindow {
     return () => {};
   }
   async onResized(handler: () => void) {
+    void handler;
+    return () => {};
+  }
+  async onFocusChanged(handler: () => void) {
     void handler;
     return () => {};
   }

@@ -410,11 +410,21 @@ async fn handle_connect_auth_error(app: &AppHandle, state: &AppState, error: Aut
 /// uninstall path in `commands::system`, which needs the same teardown
 /// ordering before it queues the NSIS uninstaller.
 pub(crate) async fn disconnect_and_persist(state: &AppState) -> Result<(), String> {
+    disconnect_and_persist_inner(state, false).await
+}
+
+pub(crate) async fn disconnect_and_persist_for_sign_out(state: &AppState) -> Result<(), String> {
+    disconnect_and_persist_inner(state, true).await
+}
+
+async fn disconnect_and_persist_inner(state: &AppState, signing_out: bool) -> Result<(), String> {
     let mut vpn = state.vpn_connection.lock().await;
-    let result = vpn
-        .disconnect()
-        .await
-        .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
+    let result = if signing_out {
+        vpn.disconnect_for_sign_out().await
+    } else {
+        vpn.disconnect().await
+    }
+    .map_err(|e| swifttunnel_core::vpn::user_friendly_error(&e));
     // Clear the published handles whether disconnect succeeded or not — on
     // failure the driver state is undefined and we'd rather report None to
     // the UI than hand it a stale pointer.
@@ -538,6 +548,7 @@ pub async fn vpn_connect(
     game_presets: Vec<String>,
     game_region: Option<bool>,
 ) -> Result<(), String> {
+    let _operation = super::network_operation::begin()?;
     // Startup crash-recovery (stale adapter/tunnel-mode reset) runs in the
     // background so launch is instant - but a tunnel must never start while
     // adapters are mid-reset. Normally done long before anyone can click

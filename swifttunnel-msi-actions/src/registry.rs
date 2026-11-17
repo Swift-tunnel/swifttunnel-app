@@ -37,15 +37,6 @@ pub(super) fn is_machine_product(root: &Key, code: &str, family: ProductFamily) 
     family.get_string(packed_guid(code)).is_ok()
 }
 
-fn definitely_missing(path: &str, metadata: impl FnOnce(&str) -> std::io::Result<()>) -> bool {
-    // Do not perform SYSTEM filesystem probes against UNC or relative paths.
-    let bytes = path.as_bytes();
-    if bytes.len() < 3 || !bytes[0].is_ascii_alphabetic() || bytes[1] != b':' || bytes[2] != b'\\' {
-        return false;
-    }
-    matches!(metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-}
-
 pub(super) fn registration_absent(root: &Key, code: &str) -> bool {
     // All three registration roots must be confirmed absent. This does not
     // mistake an inaccessible registry key for a successful repair.
@@ -62,6 +53,7 @@ pub(super) fn repair_missing_package(
     root: &Key,
     code: &str,
     family: ProductFamily,
+    sources_are_missing: impl FnOnce(&str, &str) -> bool,
 ) -> Result<bool> {
     if !is_machine_product(root, code, family) {
         return Ok(false);
@@ -71,7 +63,7 @@ pub(super) fn repair_missing_package(
             Ok(path) => path,
             Err(_) => return Ok(false),
         };
-    if !definitely_missing(&path, |path| std::fs::metadata(path).map(|_| ())) {
+    if !sources_are_missing(code, &path) {
         return Ok(false);
     }
 
@@ -111,7 +103,18 @@ pub(super) fn repair_missing_package(
 mod tests {
     use super::*;
     use crate::{DESKTOP, LITE};
-    use std::io::{Error, ErrorKind};
+    use std::io::ErrorKind;
+
+    fn repair_missing_package(root: &Key, code: &str, family: ProductFamily) -> Result<bool> {
+        // The registrations are fixtures under HKCU. Exercise the recovery
+        // decisions without asking Windows Installer about real products.
+        super::repair_missing_package(
+            root,
+            code,
+            family,
+            |_, path| matches!(std::fs::metadata(path), Err(error) if error.kind() == ErrorKind::NotFound),
+        )
+    }
 
     struct Fixture {
         root: Key,
@@ -238,32 +241,19 @@ mod tests {
     }
 
     #[test]
-    fn only_missing_local_packages_authorize_repair() {
-        for kind in [
-            ErrorKind::PermissionDenied,
-            ErrorKind::Other,
-            ErrorKind::InvalidInput,
-        ] {
-            assert!(!definitely_missing(r"C:\Windows\Installer\old.msi", |_| {
-                Err(Error::from(kind))
-            }));
-        }
-        assert!(!definitely_missing(
-            r"C:\Windows\Installer\old.msi",
-            |_| Ok(())
-        ));
-        assert!(definitely_missing(
-            r"C:\Windows\Installer\old.msi",
-            |_| Err(Error::from(ErrorKind::NotFound))
-        ));
-    }
-
-    #[test]
-    fn remote_empty_and_relative_paths_are_never_probed_as_system() {
-        for path in ["", "old.msi", r"\\server\share\old.msi", r"C:old.msi"] {
-            assert!(!definitely_missing(path, |_| panic!(
-                "must not probe untrusted path"
-            )));
-        }
+    fn a_missing_cache_with_another_source_keeps_the_registration() {
+        let fixture = Fixture::new();
+        fixture.product(OLD, "SwiftTunnel");
+        let preserved = fixture.package.with_extension("preserved.msi");
+        std::fs::write(&preserved, b"preserved MSI").unwrap();
+        let cleared = super::repair_missing_package(&fixture.root, OLD, DESKTOP, |code, cache| {
+            assert_eq!(code, OLD);
+            assert!(!std::path::Path::new(cache).exists());
+            !preserved.exists()
+        })
+        .unwrap();
+        std::fs::remove_file(preserved).unwrap();
+        assert!(!cleared);
+        assert!(!registration_absent(&fixture.root, OLD));
     }
 }

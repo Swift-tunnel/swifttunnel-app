@@ -203,18 +203,29 @@ fn optional_registry_read<T>(read: std::io::Result<T>) -> Result<Option<T>> {
     }
 }
 
-fn run_network_migration(
-    completed: &mut bool,
-    force: bool,
-    cleanup: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    if *completed && !force {
+fn run_network_migration(completed: &mut bool, cleanup: impl FnOnce() -> Result<()>) -> Result<()> {
+    if *completed {
         return Ok(());
     }
-    *completed = false;
     cleanup()?;
     *completed = true;
     Ok(())
+}
+
+fn finish_network_restore(
+    mut errors: Vec<String>,
+    persist: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    // Completed restores must disappear from the record even when an
+    // independent cleanup failed, or a retry can replay those originals.
+    if let Err(error) = persist() {
+        errors.push(format!("Recovery records could not be updated: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("Network restore incomplete: {}", errors.join("; "))
+    }
 }
 
 fn network_registry_subkey(path: &str) -> Result<&str> {
@@ -373,7 +384,7 @@ impl NetworkBooster {
             };
         }
 
-        self.cleanup_removed_qos_policies(false);
+        self.cleanup_removed_qos_policies();
 
         let relay_qos_requested = Self::relay_qos_requested(&requested_config);
         if relay_qos_requested {
@@ -557,8 +568,8 @@ impl NetworkBooster {
         Ok(())
     }
 
-    fn cleanup_removed_qos_policies(&mut self, force: bool) {
-        let result = run_network_migration(&mut self.legacy_qos_cleanup_done, force, || {
+    fn cleanup_removed_qos_policies(&mut self) {
+        let result = run_network_migration(&mut self.legacy_qos_cleanup_done, || {
             let mut failures = Vec::new();
             for policy_name in REMOVED_QOS_POLICY_NAMES {
                 let policy_path = Self::qos_policy_path(policy_name);
@@ -735,6 +746,13 @@ impl NetworkBooster {
     }
 
     fn restore_nagle_algorithm(&mut self) -> Result<()> {
+        self.restore_nagle_with(Self::restore_registry_dword)
+    }
+
+    fn restore_nagle_with(
+        &mut self,
+        mut restore: impl FnMut(&str, &str, Option<u32>) -> Result<()>,
+    ) -> Result<()> {
         info!("Restoring Nagle settings to adapter snapshots");
 
         if self.nagle_registry_snapshot.is_empty() {
@@ -742,22 +760,36 @@ impl NetworkBooster {
             return Ok(());
         }
 
+        let mut errors = Vec::new();
         for (guid, snapshot) in self.nagle_registry_snapshot.clone() {
             let key_path = format!(
                 r"HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{}",
                 guid
             );
 
-            Self::restore_registry_dword(
-                &key_path,
-                REG_VALUE_TCP_ACK_FREQUENCY,
-                snapshot.tcp_ack_frequency,
-            )?;
-            Self::restore_registry_dword(&key_path, REG_VALUE_TCP_NO_DELAY, snapshot.tcp_no_delay)?;
+            let mut complete = true;
+            for (name, original) in [
+                (REG_VALUE_TCP_ACK_FREQUENCY, snapshot.tcp_ack_frequency),
+                (REG_VALUE_TCP_NO_DELAY, snapshot.tcp_no_delay),
+            ] {
+                if let Err(error) = restore(&key_path, name, original) {
+                    complete = false;
+                    errors.push(format!("{guid} {name}: {error}"));
+                }
+            }
+            if complete {
+                self.nagle_registry_snapshot.remove(&guid);
+            }
         }
 
-        self.nagle_registry_snapshot.clear();
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "Could not restore all adapter settings: {}",
+                errors.join("; ")
+            )
+        }
     }
 
     /// Disable Windows network throttling for full bandwidth to games
@@ -853,7 +885,10 @@ impl NetworkBooster {
             errors.push(format!("network throttling registry restore: {}", e));
         }
 
-        self.cleanup_removed_qos_policies(true);
+        // These retired policy names are never created by current boosts.
+        // A completed migration needs no second PowerShell run at shutdown.
+        // Failed migrations remain incomplete and are still retried.
+        self.cleanup_removed_qos_policies();
         if let Err(e) = self.remove_relay_socket_qos_policy() {
             errors.push(format!("relay DSCP policy restore: {}", e));
         }
@@ -863,14 +898,7 @@ impl NetworkBooster {
             errors.push(format!("firewall rule restore: {}", e));
         }
 
-        if !errors.is_empty() {
-            return Err(anyhow::anyhow!(
-                "Network restore incomplete: {}",
-                errors.join("; ")
-            ));
-        }
-
-        self.persist_snapshot()
+        finish_network_restore(errors, || self.persist_snapshot())
     }
 
     /// Save pre-modification values to disk for crash/uninstall recovery.
@@ -934,6 +962,22 @@ impl NetworkBooster {
 /// SwiftTunnel artifacts and removes them. Used by `--cleanup` (NSIS
 /// uninstaller) and the `system_cleanup` Tauri command.
 pub fn cleanup_all_system_state() -> Result<()> {
+    cleanup_system_state(crate::vpn::SplitTunnelDriver::remove_driver_for_uninstall)
+}
+
+/// Restore system state from a Windows Installer uninstall action. The
+/// running MSI owns the Windows Installer transaction, so remove the driver
+/// with the direct Windows tools.
+pub fn cleanup_system_state_for_msi_uninstall() -> Result<()> {
+    cleanup_system_state(crate::vpn::SplitTunnelDriver::remove_driver_during_msi_uninstall)
+}
+
+fn cleanup_system_state(
+    remove_driver: impl FnOnce() -> std::result::Result<bool, String>,
+) -> Result<()> {
+    // Installer/CLI helpers do not acquire the UI's single-client lock. Keep
+    // them from resetting a live client's capture, routes or shared originals.
+    let _reservation = crate::single_client::reserve_cleanup().map_err(anyhow::Error::msg)?;
     if let Err(error) = crate::vpn::process_performance::recover_gpu_preferences() {
         warn!("Cleanup: runtime GPU originals remain for recovery: {error}");
     }
@@ -954,7 +998,9 @@ pub fn cleanup_all_system_state() -> Result<()> {
 
     // 2. Delete SwiftTunnel QoS policies from older releases and the current
     // relay-scoped DSCP policy.
-    booster.cleanup_removed_qos_policies(true);
+    // Snapshot recovery above may already have completed this migration.
+    // A fresh or failed recovery still performs the stateless cleanup once.
+    booster.cleanup_removed_qos_policies();
     if let Err(error) = NetworkBooster::cleanup_relay_socket_qos_policies() {
         warn!("Cleanup: relay QoS policy removal failed: {error}");
     }
@@ -996,7 +1042,7 @@ pub fn cleanup_all_system_state() -> Result<()> {
     // permanently stuck (often the reason they are uninstalling in the first
     // place), which is worse than a stale driver that a subsequent install
     // will replace.
-    if let Err(e) = crate::vpn::split_tunnel::SplitTunnelDriver::remove_driver_for_uninstall() {
+    if let Err(e) = remove_driver() {
         warn!("Cleanup: driver removal failed (non-fatal): {}", e);
     }
 
@@ -1194,6 +1240,73 @@ mod tests {
     }
 
     #[test]
+    fn partial_adapter_recovery_saves_only_unfinished_originals_despite_other_errors() {
+        let dir = snapshot_test_dir();
+        let path = dir.join(SNAPSHOT_FILE);
+        let working = "11111111-1111-1111-1111-111111111111";
+        let blocked = "22222222-2222-2222-2222-222222222222";
+        let mut booster = NetworkBooster::new();
+        for guid in [working, blocked] {
+            booster.nagle_registry_snapshot.insert(
+                guid.into(),
+                NagleRegistrySnapshot {
+                    tcp_ack_frequency: Some(2),
+                    tcp_no_delay: None,
+                },
+            );
+        }
+        save_network_snapshot(&path, &booster.snapshot()).unwrap();
+        let mut attempted = Vec::new();
+        let result = booster.restore_nagle_with(|key, name, _| {
+            attempted.push((key.to_owned(), name.to_owned()));
+            if key.ends_with(blocked) && name == REG_VALUE_TCP_ACK_FREQUENCY {
+                anyhow::bail!("owned adapter failure");
+            }
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempted.len(), 4);
+        assert!(!booster.nagle_registry_snapshot.contains_key(working));
+        assert!(booster.nagle_registry_snapshot.contains_key(blocked));
+        assert!(
+            finish_network_restore(vec!["owned firewall failure".into()], || {
+                save_network_snapshot(&path, &booster.snapshot())
+            })
+            .is_err()
+        );
+        let saved = read_network_snapshot(&path).unwrap();
+        assert_eq!(saved.nagle_registry_snapshot.len(), 1);
+        assert!(saved.nagle_registry_snapshot.contains_key(blocked));
+        let mut retry = NetworkBooster::new();
+        retry.merge_saved_snapshot(saved);
+        retry
+            .restore_nagle_with(|key, _, _| {
+                assert!(
+                    !key.ends_with(working),
+                    "retry must not replay already restored adapter settings"
+                );
+                Ok(())
+            })
+            .unwrap();
+        finish_network_restore(Vec::new(), || {
+            save_network_snapshot(&path, &retry.snapshot())
+        })
+        .unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn network_restore_preserves_both_operation_and_record_write_failures() {
+        let error = finish_network_restore(vec!["owned restore failure".into()], || {
+            anyhow::bail!("owned record failure")
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("owned restore failure") && error.contains("owned record failure"));
+    }
+
+    #[test]
     fn corrupt_network_recovery_record_is_never_overwritten_or_deleted() {
         let dir = snapshot_test_dir();
         let path = dir.join(SNAPSHOT_FILE);
@@ -1317,24 +1430,27 @@ mod tests {
     }
 
     #[test]
-    fn network_migration_skips_only_successful_automatic_repeats_and_retries_restore() {
+    fn network_migration_retries_failures_and_skips_completed_runs() {
         let mut completed = false;
         assert!(
-            run_network_migration(&mut completed, false, || anyhow::bail!("provider failed"))
-                .is_err()
+            run_network_migration(&mut completed, || anyhow::bail!("provider failed")).is_err()
         );
         assert!(!completed);
-        run_network_migration(&mut completed, false, || Ok(())).unwrap();
+        run_network_migration(&mut completed, || Ok(())).unwrap();
         assert!(completed);
-        run_network_migration(&mut completed, false, || panic!("already completed")).unwrap();
-        assert!(
-            run_network_migration(&mut completed, true, || anyhow::bail!("restore failed"))
-                .is_err()
-        );
-        assert!(!completed);
-        run_network_migration(&mut completed, false, || Ok(())).unwrap();
-        run_network_migration(&mut completed, true, || Ok(())).unwrap();
+        run_network_migration(&mut completed, || panic!("already completed")).unwrap();
         assert!(completed);
+        // Explicit stateless cleanup creates its own booster. A previous
+        // session's completed migration must not skip that fresh sweep.
+        let mut fresh = NetworkBooster::new();
+        assert!(!fresh.legacy_qos_cleanup_done);
+        let mut swept = false;
+        run_network_migration(&mut fresh.legacy_qos_cleanup_done, || {
+            swept = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(swept && fresh.legacy_qos_cleanup_done);
     }
 
     #[cfg(windows)]

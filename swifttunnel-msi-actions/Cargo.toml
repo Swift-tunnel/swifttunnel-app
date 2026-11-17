@@ -11,6 +11,7 @@ static_vcruntime = "3"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+swifttunnel-msi-repair = { path = "../swifttunnel-msi-repair" }
 windows-registry = "0.5"
 
 [dev-dependencies]

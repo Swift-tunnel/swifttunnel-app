@@ -860,7 +860,7 @@ async function checkRouteAssist(
 
   return {
     status: "checked",
-    summary: "Route Assist state checked.",
+    summary: "Route Assist setting read. This does not test whether Roblox loads.",
     nextStep: routeAssistNextStep,
     changed: false,
     reversible: false,
@@ -927,6 +927,7 @@ async function repairStartupRegistration(
   }
 
   let after: StartupRegistrationSnapshot;
+  let undoAvailable = false;
   try {
     const result = await deps.systemRepairStartupRegistration(settings.run_on_startup);
     if (result.outcome === "preference_changed") {
@@ -941,14 +942,14 @@ async function repairStartupRegistration(
       };
     }
     after = result.snapshot;
+    undoAvailable = result.undo_available === true;
   } catch (error) {
     return {
       status: "failed",
       summary: "Startup registration repair failed.",
-      nextStep: "Use Revert to restore the captured startup snapshot, or copy this result for support.",
+      nextStep: "Run Startup login again. If it still fails, copy this result for support.",
       changed: true,
-      reversible: true,
-      rollback: { kind: "startup_registration", snapshot: before },
+      reversible: false,
       ranAt: deps.now(),
       entries: [
         {
@@ -983,8 +984,8 @@ async function repairStartupRegistration(
       ? "Verify after the next Windows sign-in if startup behavior still looks wrong."
       : "Copy this result for support; the backend repair command completed but the registry state did not match settings.",
     changed,
-    reversible: changed,
-    rollback: changed
+    reversible: changed && undoAvailable,
+    rollback: changed && undoAvailable
       ? { kind: "startup_registration", snapshot: before }
       : undefined,
     ranAt: deps.now(),
@@ -1009,7 +1010,18 @@ async function repairStartupRegistration(
 }
 
 async function checkRelay(deps: RepairCenterDeps): Promise<RepairReport> {
-  await deps.serverRefresh();
+  try {
+    await deps.serverRefresh();
+  } catch (error) {
+    const detail = formatErrorMessage(error);
+    const socketDenied = /os error 10013\)|wsaeacces/i.test(detail);
+    return {
+      ...errorReport(deps, "Couldn't download the relay list.", detail),
+      nextStep: socketDenied
+        ? "Close any other VPN and retry. If it still fails, check whether your firewall or security software is blocking SwiftTunnel, then send support this result and your log."
+        : "Check your internet connection and retry. If it still fails, send support this result and your log.",
+    };
+  }
   const [latencies, ping] = await Promise.all([
     deps.serverGetLatencies(),
     deps.vpnGetPing().catch(() => null),
@@ -1031,8 +1043,8 @@ async function checkRelay(deps: RepairCenterDeps): Promise<RepairReport> {
     ranAt: deps.now(),
     entries: [
       {
-        label: "Current ping",
-        value: ping === null ? "not connected" : `${ping} ms`,
+        label: "Current relay ping",
+        value: ping === null ? "unavailable" : `${ping} ms`,
         mono: true,
       },
       ...best.map((entry) => ({

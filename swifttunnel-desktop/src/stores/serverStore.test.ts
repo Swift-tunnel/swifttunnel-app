@@ -197,3 +197,23 @@ it("does one fresh round if Roblox closes while a cached-only read is waiting", 
   expect(serverGetLatencies.mock.calls).toEqual([[true], [false]]);
   expect(store.getState().getLatency("middle-east")).toBe(30);
 });
+
+it.each(["Roblox opens", "the window hides"])(
+  "does not start a queued fleet scan if %s before the cached read completes",
+  async (change) => {
+    let finish!: (entries: object[]) => void;
+    serverGetLatencies.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    const store = (await import("./serverStore")).useServerStore;
+    const boost = (await import("./boostStore")).useBoostStore;
+    const { setNativeWindowHidden } = await import("../lib/mainWindowVisibility");
+    const cached = store.getState().fetchLatencies(true);
+    const queued = store.getState().fetchLatencies();
+
+    if (change === "Roblox opens") boost.setState({ robloxRunning: true });
+    else setNativeWindowHidden(true);
+    finish([{ region: "middle-east", latency_ms: 27 }]);
+    await Promise.all([cached, queued]);
+    expect(serverGetLatencies.mock.calls).toEqual([[true]]);
+    expect(store.getState().getLatency("middle-east")).toBe(27);
+  },
+);

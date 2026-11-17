@@ -100,6 +100,58 @@ pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+const MAX_AUTH_LINES: usize = 48;
+
+/// Reader-local budget for recognized login handshakes. Independent of the
+/// destination log, which can fill before a player tries to sign in.
+#[derive(Default)]
+pub(super) struct RobloxAuthTrace {
+    seen: HashSet<(Ipv4Addr, u16, &'static str, bool)>,
+}
+
+impl RobloxAuthTrace {
+    pub(super) fn has_room(&self) -> bool {
+        self.seen.len() < MAX_AUTH_LINES
+    }
+
+    pub(super) fn record_client_hello(
+        &mut self,
+        payload: &[u8],
+        dst: Ipv4Addr,
+        src_port: u16,
+        relay_selected: bool,
+    ) {
+        let Some(host) = roblox_auth_hostname(payload) else {
+            return;
+        };
+        if !self.has_room() || !self.seen.insert((dst, src_port, host, relay_selected)) {
+            return;
+        }
+        log::info!(
+            "[roblox-auth] TLS ClientHello host={} dst={}:443 selected_path={} observed=client_hello,selected_path reply=not_tracked",
+            host,
+            dst,
+            if relay_selected { "relay" } else { "direct" },
+        );
+        if !self.has_room() {
+            log::info!("[roblox-auth] session trace limit reached");
+        }
+    }
+}
+
+fn roblox_auth_hostname(payload: &[u8]) -> Option<&'static str> {
+    let sni = crate::roblox_proxy::tls_sni::parse_client_hello_sni(payload)?;
+    // Emit only fixed names. Never print arbitrary SNI, TLS contents, or
+    // paths. Shared Roblox edge IPs alone do not identify the service.
+    [
+        "auth.roblox.com",
+        "captcha.roblox.com",
+        "twostepverification.roblox.com",
+    ]
+    .into_iter()
+    .find(|host| sni.eq_ignore_ascii_case(host))
+}
+
 /// Everything known about one routing decision.
 pub struct Decision<'a> {
     pub dst_ip: Ipv4Addr,
@@ -240,6 +292,48 @@ mod tests {
         record(sample(false));
 
         assert_eq!(LINES_WRITTEN.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn auth_trace_only_recognizes_allowlisted_tls_names() {
+        use crate::roblox_proxy::tls_sni::{
+            build_client_hello_with_sni, build_client_hello_without_sni,
+        };
+
+        let hello = build_client_hello_with_sni("AUTH.Roblox.Com.");
+        assert_eq!(roblox_auth_hostname(&hello), Some("auth.roblox.com"));
+        assert_eq!(roblox_auth_hostname(&hello[..hello.len() - 1]), None);
+        assert_eq!(
+            roblox_auth_hostname(&build_client_hello_without_sni()),
+            None
+        );
+        for host in [
+            "auth.roblox.com.example.org",
+            "www.roblox.com",
+            "example.org",
+        ] {
+            assert_eq!(
+                roblox_auth_hostname(&build_client_hello_with_sni(host)),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn auth_trace_keeps_route_changes_and_limits_repeated_handshakes() {
+        let hello = crate::roblox_proxy::tls_sni::build_client_hello_with_sni("auth.roblox.com");
+        let dst = Ipv4Addr::new(192, 0, 2, 10);
+        let mut trace = RobloxAuthTrace::default();
+        for _ in 0..3 {
+            trace.record_client_hello(&hello, dst, 50000, false);
+        }
+        trace.record_client_hello(&hello, dst, 50000, true);
+        assert_eq!(trace.seen.len(), 2);
+        for port in 50001..50100 {
+            trace.record_client_hello(&hello, dst, port, true);
+        }
+        assert_eq!(trace.seen.len(), MAX_AUTH_LINES);
+        assert!(!trace.has_room());
     }
 
     #[test]

@@ -48,8 +48,8 @@ describe("search index", () => {
     const top = (q: string) => searchEntries(q).map((e) => e.label);
 
     // Symptoms, not feature names.
-    expect(top("wifi")).toContain("Run Repair");
-    expect(top("no internet")).toContain("Run Repair");
+    expect(top("wifi")).toContain("Fix a problem");
+    expect(top("no internet")).toContain("Fix a problem");
     expect(top("hotkey")).toContain("Overlay hotkey");
     expect(top("fps counter")).toContain("Overlay metrics");
     expect(top("uninstall")).toContain("Uninstall SwiftTunnel");

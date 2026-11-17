@@ -1,5 +1,6 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { reportError } from "../../lib/errors";
+import { reportUiFailure } from "../../lib/uiFailureLog";
 
 /** Keep a broken optional page from taking the navigation and controls down. */
 export class PageErrorBoundary extends Component<{
@@ -13,6 +14,7 @@ export class PageErrorBoundary extends Component<{
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
+    reportUiFailure(this.props.page, error);
     reportError(`Could not render ${this.props.page}`, error, {
       dedupeKey: `page-render-${this.props.page}`,
     });

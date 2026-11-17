@@ -42,6 +42,7 @@
 //!       └──────────────┘                         └──────────────┘
 //! ```
 
+use super::owner_table::{bounded_ip_helper_entries, read_owner_rows};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
@@ -101,7 +102,7 @@ const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
 /// of collapsing distinct failures into one string.
 ///
 /// Stored in an `AtomicU8` (`workers_panic_cause`); a value of `0` means the
-/// threads are still running. The two variants map to the two things the user
+/// threads are still running. The variants distinguish failures so the user
 /// can actually do about it:
 ///
 /// - `ReaderHandleLost` — the packet reader could not acquire or hold its NDIS
@@ -109,14 +110,14 @@ const REBIND_BACKOFFS: [Duration; READER_MAX_REBINDS as usize] = [
 ///   route-change restart failed, or the reader thread had to be abandoned on
 ///   a join timeout). This is the driver-handle-loss class; the UI should
 ///   offer the reinstall-driver CTA.
-/// - `InternalThreadFailed` — the packet reader thread or the V3 inbound
-///   receiver thread panicked, or the inbound receiver returned a fatal error.
-///   The driver is fine; this is an internal bug, so the UI should offer a
-///   plain reconnect rather than a misleading "reinstall driver" prompt.
+/// - `InternalThreadFailed`: a reader, packet worker or inbound receiver
+///   failed unexpectedly. This alone does not prove the driver is missing;
+///   the UI should offer a reconnect rather than an automatic reinstall.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerPanicCause {
     ReaderHandleLost,
     InternalThreadFailed,
+    PacketForwardingFailed,
 }
 
 impl WorkerPanicCause {
@@ -124,6 +125,7 @@ impl WorkerPanicCause {
         match self {
             WorkerPanicCause::ReaderHandleLost => 1,
             WorkerPanicCause::InternalThreadFailed => 2,
+            WorkerPanicCause::PacketForwardingFailed => 3,
         }
     }
 
@@ -131,6 +133,7 @@ impl WorkerPanicCause {
         match value {
             1 => Some(WorkerPanicCause::ReaderHandleLost),
             2 => Some(WorkerPanicCause::InternalThreadFailed),
+            3 => Some(WorkerPanicCause::PacketForwardingFailed),
             _ => None,
         }
     }
@@ -141,6 +144,97 @@ impl WorkerPanicCause {
 /// must not clobber the specific cause the failing thread already reported.
 fn record_worker_panic_cause(flag: &AtomicU8, cause: WorkerPanicCause) {
     let _ = flag.compare_exchange(0, cause.as_u8(), Ordering::AcqRel, Ordering::Acquire);
+}
+
+fn supervise_network_worker(
+    name: &str,
+    stop_flag: &AtomicBool,
+    failure_flag: &AtomicU8,
+    run: impl FnOnce() -> Result<(), String>,
+) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
+    match outcome {
+        Ok(Ok(())) if stop_flag.load(Ordering::Acquire) => return,
+        Ok(Ok(())) => log::error!("{name} exited without a stop request"),
+        Ok(Err(error)) => log::error!("{name} failed: {error}"),
+        Err(_) => log::error!("{name} panicked; networking recovery is required"),
+    }
+    // A live reader can otherwise keep feeding a dead worker's queue while
+    // the UI still reports Connected. Use the same recovery as reader/inbound
+    // failures, and preserve any more-specific cause already recorded.
+    record_worker_panic_cause(failure_flag, WorkerPanicCause::InternalThreadFailed);
+}
+
+/// Direct traffic shares the capture queue with game traffic. Repeated failed
+/// passthrough IOCTLs must not silently blackhole the rest of the PC while the
+/// relay itself still answers. Track directions independently; a success or
+/// orderly stop must not turn a transient failure into a fatal session error.
+#[derive(Default)]
+struct PassthroughSendHealth {
+    consecutive_errors: u32,
+    total_errors: u64,
+    first_error_at: Option<std::time::Instant>,
+}
+
+const PASSTHROUGH_SEND_FAILURE_LIMIT: u32 = 3;
+const PASSTHROUGH_SEND_FAILURE_GRACE: Duration = Duration::from_secs(1);
+
+impl PassthroughSendHealth {
+    fn forward<E: std::fmt::Display>(
+        &mut self,
+        direction: &'static str,
+        packets: u32,
+        stopping: bool,
+        send: impl FnOnce() -> Result<(), E>,
+    ) -> VpnResult<()> {
+        self.forward_with_clock(direction, packets, stopping, send, std::time::Instant::now)
+    }
+
+    fn forward_with_clock<E: std::fmt::Display>(
+        &mut self,
+        direction: &'static str,
+        packets: u32,
+        stopping: bool,
+        send: impl FnOnce() -> Result<(), E>,
+        now: impl FnOnce() -> std::time::Instant,
+    ) -> VpnResult<()> {
+        if packets == 0 {
+            return Ok(());
+        }
+        match send() {
+            Ok(()) => {
+                self.consecutive_errors = 0;
+                self.first_error_at = None;
+            }
+            // Still drain an already captured batch during orderly shutdown,
+            // without turning a racing driver close into a new session error.
+            Err(_) if stopping => {}
+            Err(error) => {
+                // No clock read on successful forwarding. Three failed batches
+                // can occur within one driver hiccup; require sustained failure.
+                let now = now();
+                let since = *self.first_error_at.get_or_insert(now);
+                self.consecutive_errors = self.consecutive_errors.saturating_add(1);
+                if sample_forward_failure(&mut self.total_errors) {
+                    log::warn!(
+                        "Packet passthrough failed: direction={direction} packets={packets} streak={} total_errors={} error={error}",
+                        self.consecutive_errors,
+                        self.total_errors
+                    );
+                }
+                if self.consecutive_errors >= PASSTHROUGH_SEND_FAILURE_LIMIT
+                    && now.saturating_duration_since(since) >= PASSTHROUGH_SEND_FAILURE_GRACE
+                {
+                    return Err(VpnError::PacketForwardingFailed(format!(
+                        "{direction}: {} consecutive failed sends over {} ms; {error}",
+                        self.consecutive_errors,
+                        now.saturating_duration_since(since).as_millis()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// TCP owner-table refresh cadence while API tunneling is active and a tunnel
@@ -168,6 +262,45 @@ enum RebindDecision {
     Fatal,
     /// Transient error; sleep for this long, drop the bindings, and retry.
     Backoff(Duration),
+}
+
+/// A drained queue can report an error, but a definitely lost device/handle
+/// must still enter recovery. Preserve legacy handling of unspecified empty
+/// queue errors; do not assume all driver versions use the same empty code.
+fn reader_can_ignore_drain_error(draining: bool, error: &windows::core::Error) -> bool {
+    draining && !reader_lost_device(error)
+}
+
+fn reader_lost_device(error: &windows::core::Error) -> bool {
+    use windows::Win32::Foundation::{
+        ERROR_DEV_NOT_EXIST, ERROR_DEVICE_NOT_CONNECTED, ERROR_INVALID_HANDLE, ERROR_NO_SUCH_DEVICE,
+    };
+    [
+        ERROR_INVALID_HANDLE,
+        ERROR_DEV_NOT_EXIST,
+        ERROR_DEVICE_NOT_CONNECTED,
+        ERROR_NO_SUCH_DEVICE,
+    ]
+    .into_iter()
+    .any(|code| error.code() == windows::core::HRESULT::from_win32(code.0))
+}
+
+/// Event wakes in a row that may find the driver queue empty before the read
+/// error is treated as a failed handle.
+const READER_EMPTY_WAKE_LIMIT: u32 = 2;
+
+/// The packet event is reset before each read. A packet that arrives after
+/// the reset and is taken by that same read leaves the event signaled over an
+/// empty queue, and WinpkFilter answers the next read with
+/// ERROR_INVALID_PARAMETER. That is an empty queue, not a dead handle.
+///
+/// 3.9.8 sent every one of those through the rebind path: on real PCs the
+/// reader dropped and reopened its driver handles up to 135 times a minute,
+/// stalling all traffic on the adapter each time. Each stale signal follows a
+/// read that returned packets, so more than a couple in a row with no packet
+/// between them is a real failure and still spends the rebind budget.
+fn reader_can_ignore_empty_wake(empty_wakes: u32, error: &windows::core::Error) -> bool {
+    empty_wakes < READER_EMPTY_WAKE_LIMIT && !reader_lost_device(error)
 }
 
 /// Pure state machine for reader rebind budget accounting.
@@ -241,6 +374,29 @@ impl RebindState {
         let idx = (self.attempts - 1) as usize;
         RebindDecision::Backoff(self.backoffs[idx])
     }
+}
+
+/// Minimum gap between PowerShell default-route lookups; see
+/// `get_default_route_info_powershell`.
+const POWERSHELL_ROUTE_FALLBACK_INTERVAL: Duration = Duration::from_secs(30);
+
+fn powershell_route_fallback_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| {
+        now.saturating_duration_since(last) >= POWERSHELL_ROUTE_FALLBACK_INTERVAL
+    })
+}
+
+/// How often a connected session re-probes the default route.
+///
+/// The connection monitor asks every 500ms. Each probe enumerates every
+/// adapter with `GetAdaptersAddresses` several times (interface state twice,
+/// the point-to-point check, the network signature), which is a heavy query
+/// into the network stack, and it ran for the whole session just to notice a
+/// rare Ethernet/Wi-Fi switch. Two seconds still catches that switch quickly.
+const ROUTE_CHANGE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+
+fn route_change_check_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= ROUTE_CHANGE_CHECK_INTERVAL)
 }
 
 /// Sleep for `total`, waking at most every 50ms to check `stop_flag`. Returns
@@ -936,13 +1092,15 @@ impl ThroughputStats {
 /// Timeout for thread join operations during stop()
 const THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Process-lifetime counter of threads that we forgot rather than joining.
-/// `start()` warns when this is non-zero so the testbench harness can fail
-/// builds that are leaking interceptor workers.
+/// Historical shutdown timeouts, retained for testbench/diagnostic compatibility.
 static LEAKED_THREADS: AtomicU64 = AtomicU64::new(0);
+// Keep timed-out handles until their real exit. Reusing an interceptor's stop
+// flag while an old reader/refresher/worker survives can revive the old session.
+static STOPPING_THREADS: parking_lot::Mutex<Vec<JoinHandle<()>>> =
+    parking_lot::Mutex::new(Vec::new());
 static READER_DIRECT_RELAY_FORWARDED: AtomicU64 = AtomicU64::new(0);
 static READER_DIRECT_RELAY_ERRORS: AtomicU64 = AtomicU64::new(0);
-static READER_DIRECT_RELAY_BYPASS: AtomicU64 = AtomicU64::new(0);
+static READER_DEAD_RELAY_ACTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// Counter for tunneled packets that could not be forwarded intact. This can
 /// happen when the captured IPv4 payload is incomplete or larger than the
@@ -969,10 +1127,14 @@ fn log_tunnel_forwarding_drop_sampled(reason: &str, observed_len: usize, require
     }
 }
 
+fn sample_forward_failure(total: &mut u64) -> bool {
+    *total = total.saturating_add(1);
+    *total <= 5 || total.is_power_of_two()
+}
+
 const V3_NO_INBOUND_WARNING_SECS: u64 = 10;
 
-/// Number of worker threads we had to detach via `mem::forget` because they
-/// did not stop within `THREAD_JOIN_TIMEOUT`.
+/// Number of workers whose joins exceeded THREAD_JOIN_TIMEOUT in this process.
 pub fn leaked_thread_count() -> u64 {
     LEAKED_THREADS.load(Ordering::Relaxed)
 }
@@ -984,9 +1146,8 @@ pub fn leaked_thread_count() -> u64 {
 /// - If timeout is reached, log a warning and return false (thread still running)
 /// - This prevents stop() from hanging indefinitely if a thread is stuck
 ///
-/// STABILITY FIX: On timeout, we explicitly forget the JoinHandle to detach the thread.
-/// This is safer than letting the handle drop (which would call join and block forever).
-/// The detached thread will be cleaned up when the process exits.
+/// On timeout, retain the handle without waiting further. Replacement capture
+/// remains blocked until that worker's actual exit can be joined.
 fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
     let start = Instant::now();
     let poll_interval = Duration::from_millis(100);
@@ -1010,18 +1171,53 @@ fn join_with_timeout(handle: JoinHandle<()>, name: &str) -> bool {
     // Timeout reached - thread is stuck
     let leaked = LEAKED_THREADS.fetch_add(1, Ordering::Relaxed) + 1;
     log::error!(
-        "STABILITY: {} thread did not stop within {:?} - detaching thread to prevent hang (total leaked: {})",
+        "STABILITY: {} thread did not stop within {:?} - tracking its exit before allowing another capture (total shutdown timeouts: {})",
         name,
         THREAD_JOIN_TIMEOUT,
         leaked
     );
 
-    // CRITICAL: Forget the handle to detach the thread instead of blocking on drop
-    // This prevents the app from hanging during shutdown, at the cost of leaking the thread.
-    // The thread will be forcibly terminated when the process exits.
-    std::mem::forget(handle);
+    STOPPING_THREADS.lock().push(handle);
 
     false
+}
+
+pub(crate) fn ensure_interceptor_shutdown_complete() -> VpnResult<()> {
+    let mut stopping = STOPPING_THREADS.lock();
+    for index in (0..stopping.len()).rev() {
+        if stopping[index].is_finished() {
+            let handle = stopping.swap_remove(index);
+            if handle.join().is_err() {
+                log::warn!("A previously stalled network worker exited with a panic");
+            } else {
+                log::info!("A previously stalled network worker finished stopping");
+            }
+        }
+    }
+    if !stopping.is_empty() {
+        log::warn!(
+            "{} previous network worker(s) are still stopping",
+            stopping.len()
+        );
+        return Err(VpnError::NetworkWorkersStopping);
+    }
+    Ok(())
+}
+
+fn prepare_worker_start(stop_flag: &AtomicBool) -> VpnResult<()> {
+    ensure_interceptor_shutdown_complete()?;
+    stop_flag.store(false, Ordering::Release);
+    Ok(())
+}
+
+fn finish_tunnel_mode_cleanup(modes_clean: bool, clear_marker: impl FnOnce()) -> bool {
+    // A still-running reader can finish a delayed driver call after the mode
+    // snapshot. That snapshot alone is not proof that recovery is unnecessary.
+    if !modes_clean || ensure_interceptor_shutdown_complete().is_err() {
+        return false;
+    }
+    clear_marker();
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -1170,6 +1366,8 @@ pub struct ParallelInterceptor {
     queue_full_events: Arc<AtomicU64>,
     /// Last time we attempted to rebind adapters due to default-route changes.
     last_rebind_at: Option<Instant>,
+    /// Last default-route probe, see `ROUTE_CHANGE_CHECK_INTERVAL`.
+    last_route_check_at: Option<Instant>,
 }
 
 impl ParallelInterceptor {
@@ -1246,6 +1444,7 @@ impl ParallelInterceptor {
             udp_tunneling_enabled: Arc::new(AtomicBool::new(true)),
             queue_full_events: Arc::new(AtomicU64::new(0)),
             last_rebind_at: None,
+            last_route_check_at: None,
         }
     }
 
@@ -1646,6 +1845,26 @@ impl ParallelInterceptor {
     }
 
     fn get_default_route_info_powershell() -> Option<DefaultRouteInfo> {
+        // The last resort when the native lookups find no default route, which
+        // is exactly what happens for the whole of an outage (cable out, Wi-Fi
+        // dropped mid-match). The connected session re-probes every couple of
+        // seconds, so without a limit this started a PowerShell process each
+        // time, under the driver lock, for as long as the network was down.
+        static LAST: parking_lot::Mutex<Option<(Instant, Option<DefaultRouteInfo>)>> =
+            parking_lot::Mutex::new(None);
+        let mut last = LAST.lock();
+        let now = Instant::now();
+        if let Some((at, cached)) = *last
+            && !powershell_route_fallback_due(Some(at), now)
+        {
+            return cached;
+        }
+        let info = Self::get_default_route_info_powershell_uncached();
+        *last = Some((now, info));
+        info
+    }
+
+    fn get_default_route_info_powershell_uncached() -> Option<DefaultRouteInfo> {
         let script = r#"
             $route = Get-NetRoute -AddressFamily IPv4 -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue |
                 Sort-Object @{Expression='RouteMetric';Descending=$false}, @{Expression='InterfaceMetric';Descending=$false} |
@@ -1906,8 +2125,8 @@ impl ParallelInterceptor {
                         }
                     }
 
-                    // No known-UP default route; return the first unknown, else lowest metric.
-                    return first_unknown.or_else(|| defaults.first().copied());
+                    // A stale route through a known-down interface is not a usable fallback.
+                    return first_unknown;
                 }
 
                 if rc == ERROR_INSUFFICIENT_BUFFER.0 {
@@ -2012,6 +2231,7 @@ impl ParallelInterceptor {
         }
 
         Self::get_default_route_info_powershell()
+            .filter(|info| Self::is_interface_oper_up(info.if_index) != Some(false))
             .map(|info| (info, DefaultRouteSource::PowerShellFallback, None))
     }
 
@@ -2516,12 +2736,9 @@ impl ParallelInterceptor {
             return None;
         }
 
-        let any_up = candidates
-            .iter()
-            .any(|candidate| candidate.is_up == Some(true));
         let mut matches: Vec<&PhysicalCandidate> = candidates
             .iter()
-            .filter(|candidate| !any_up || candidate.is_up != Some(false))
+            .filter(|candidate| candidate.is_up != Some(false))
             .filter(|candidate| {
                 Self::normalize_binding_match_value(&candidate.friendly_name)
                     .is_some_and(|value| owner_labels.contains(&value))
@@ -2617,10 +2834,9 @@ impl ParallelInterceptor {
             return None;
         }
 
-        // Prefer UP adapters when we can determine oper status. This avoids binding
-        // to disconnected Ethernet on laptops (common cause of "connected but 0 packets").
-        let any_up = candidates.iter().any(|c| c.is_up == Some(true));
-        let is_allowed = |c: &&PhysicalCandidate| !any_up || c.is_up != Some(false);
+        // A known-down adapter cannot carry traffic, even when every candidate
+        // is down. Unknown status remains eligible for WAN/driver compatibility.
+        let is_allowed = |c: &&PhysicalCandidate| c.is_up != Some(false);
 
         // If this looks like a normal gateway-backed default route, we should bind ONLY to the
         // physical adapter that matches the default-route IfIndex. Falling back to a non-default
@@ -2675,8 +2891,7 @@ impl ParallelInterceptor {
             return None;
         }
 
-        let any_up = candidates.iter().any(|c| c.is_up == Some(true));
-        let is_allowed = |c: &&PhysicalCandidate| !any_up || c.is_up != Some(false);
+        let is_allowed = |c: &&PhysicalCandidate| c.is_up != Some(false);
 
         candidates
             .iter()
@@ -2701,6 +2916,7 @@ impl ParallelInterceptor {
         if let Some(preference) = binding_preference {
             let preferred = candidates
                 .iter()
+                .filter(|candidate| candidate.is_up != Some(false))
                 .filter(|c| {
                     Self::extract_guid_ascii_lowercase(&c.internal_name).as_deref()
                         == Some(preference.guid.as_str())
@@ -2842,7 +3058,20 @@ impl ParallelInterceptor {
             }
         };
 
-        let default_route_binding_error = if let Err(err) = validate_binding() {
+        // The driver only reports adapters its filter is attached to. When the
+        // default-route adapter is already in that list there is nothing left
+        // to ensure, and asking PowerShell to confirm it cost a measured 2.3
+        // seconds of a 5.2 second connect to print "already enabled".
+        let binding_already_live = default_route_if_index
+            .and_then(Self::get_interface_guid_ascii_lowercase_from_if_index)
+            .is_some_and(|guid| Self::driver_lists_adapter(&guid));
+
+        let default_route_binding_error = if binding_already_live {
+            log::info!(
+                "WinpkFilter binding is live on the default-route adapter (reported by the driver); skipping the PowerShell check"
+            );
+            None
+        } else if let Err(err) = validate_binding() {
             log::warn!(
                 "WinpkFilter binding check on default-route adapter failed before enumeration: {}",
                 err
@@ -3625,16 +3854,18 @@ impl ParallelInterceptor {
                 }}
             }}
 
-            function Resolve-WinpkFilterCandidates {{
+            function Resolve-WinpkFilterCandidates([bool]$IncludeLegacyMetadata) {{
                 $candidates = [System.Collections.Generic.List[object]]::new()
 
-                if ($null -ne $adapterIfIndex) {{
-                    Add-BindingCandidate $candidates 'InterfaceIndex' ([string]$adapterIfIndex) $adapterLabel
-                }}
-
-                if (-not [string]::IsNullOrWhiteSpace($adapterHint)) {{
-                    Add-BindingCandidate $candidates 'Name' $adapterHint $adapterHint
-                    Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint $adapterHint
+                if (-not $IncludeLegacyMetadata) {{
+                    if ($null -ne $adapterIfIndex) {{
+                        Add-BindingCandidate $candidates 'InterfaceIndex' ([string]$adapterIfIndex) $adapterLabel
+                    }}
+                    if (-not [string]::IsNullOrWhiteSpace($adapterHint)) {{
+                        Add-BindingCandidate $candidates 'Name' $adapterHint $adapterHint
+                        Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint $adapterHint
+                    }}
+                    return $candidates
                 }}
 
                 $legacyAdapter = Get-LegacyAdapterMetadata
@@ -3655,47 +3886,34 @@ impl ParallelInterceptor {
             }}
 
             function Get-WinpkFilterBinding([object]$Candidate) {{
-                if ($Candidate.Selector -eq 'InterfaceIndex') {{
-                    return Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value) -ErrorAction SilentlyContinue |
-                        Get-NetAdapterBinding -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
-                }}
-
-                if ($Candidate.Selector -eq 'Name') {{
-                    return Get-NetAdapterBinding -Name $Candidate.Value -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
-                }}
-
-                if ($Candidate.Selector -eq 'InterfaceDescription') {{
-                    return Get-NetAdapterBinding -InterfaceDescription $Candidate.Value -ComponentID 'nt_ndisrd' -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
-                }}
-
-                return $null
-            }}
-
-            function Enable-WinpkFilterBinding([object]$Candidate) {{
-                if ($Candidate.Selector -eq 'InterfaceIndex') {{
-                    $adapter = Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value) -ErrorAction Stop |
+                $selector = $Candidate.Selector
+                $value = $Candidate.Value
+                if ($selector -eq 'InterfaceIndex') {{
+                    $adapter = Get-NetAdapter -InterfaceIndex ([int]$value) -ErrorAction Stop |
                         Select-Object -First 1
                     if (-not $adapter) {{
-                        throw ('Could not resolve adapter by interface index: ' + $Candidate.Value)
+                        throw ('Could not resolve adapter by interface index: ' + $value)
                     }}
-                    Enable-NetAdapterBinding -Name $adapter.Name -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
-                    return
+                    $selector = 'Name'
+                    $value = [string]$adapter.Name
                 }}
-
-                if ($Candidate.Selector -eq 'Name') {{
-                    Enable-NetAdapterBinding -Name $Candidate.Value -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
-                    return
+                if ($selector -ne 'Name' -and $selector -ne 'InterfaceDescription') {{
+                    throw ('Unsupported WinpkFilter binding selector: ' + $selector)
                 }}
-
-                if ($Candidate.Selector -eq 'InterfaceDescription') {{
-                    Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value -ComponentID 'nt_ndisrd' -Confirm:$false -ErrorAction Stop | Out-Null
-                    return
+                # Query successfully, then compare literal identities. Name and
+                # description parameters can interpret user aliases as patterns.
+                $matchingBindings = @(Get-NetAdapterBinding -AllBindings -ErrorAction Stop |
+                    Where-Object {{
+                        $_.ComponentID -eq 'nt_ndisrd' -and (
+                            ($selector -eq 'Name' -and $_.Name -eq $value) -or
+                            ($selector -eq 'InterfaceDescription' -and $_.InterfaceDescription -eq $value)
+                        )
+                    }})
+                if ($matchingBindings.Count -gt 1) {{
+                    throw ('More than one adapter matches WinpkFilter selector ' + $selector + ': ' + $value)
                 }}
-
-                throw ('Unsupported WinpkFilter binding selector: ' + $Candidate.Selector)
+                if ($matchingBindings.Count -eq 1) {{ return $matchingBindings[0] }}
+                return $null
             }}
 
             function Start-NDISRDService {{
@@ -3720,19 +3938,20 @@ impl ParallelInterceptor {
             }}
 
             try {{
-                $candidates = Resolve-WinpkFilterCandidates
-                if ($candidates.Count -eq 0) {{
-                    throw ('Could not resolve any adapter identifiers for WinpkFilter validation. ifIndex=' + $adapterIfIndex + ', hint=' + $adapterLabel)
-                }}
-
                 $bindingCandidate = $null
                 $binding = $null
-                foreach ($candidate in $candidates) {{
-                    $binding = Get-WinpkFilterBinding $candidate
-                    if ($binding) {{
-                        $bindingCandidate = $candidate
-                        break
+                # Legacy WMI metadata is a fallback, not a prerequisite for a
+                # successful interface-index or alias lookup.
+                foreach ($includeLegacy in @($false, $true)) {{
+                    $candidates = Resolve-WinpkFilterCandidates $includeLegacy
+                    foreach ($candidate in $candidates) {{
+                        $binding = Get-WinpkFilterBinding $candidate
+                        if ($binding) {{
+                            $bindingCandidate = $candidate
+                            break
+                        }}
                     }}
+                    if ($bindingCandidate) {{ break }}
                 }}
 
                 if (-not $bindingCandidate) {{
@@ -3743,14 +3962,14 @@ impl ParallelInterceptor {
                 $adapterDescription = if ($binding.InterfaceDescription) {{ [string]$binding.InterfaceDescription }} else {{ '' }}
                 Write-Output ('Using adapter ''' + $adapterName + ''' via ' + $bindingCandidate.Selector + ' (ifIndex=' + $adapterIfIndex + ', description=' + $adapterDescription + ') for WinpkFilter validation')
 
-                Start-NDISRDService
+                if ($repairBinding) {{ Start-NDISRDService }}
 
                 if (-not $binding.Enabled) {{
                     if (-not $repairBinding) {{
                         throw ('winpkfilter_binding_disabled: nt_ndisrd is disabled on adapter ''' + $adapterName + ''' (ifIndex=' + $adapterIfIndex + '). SwiftTunnel will enable it automatically, then try again.')
                     }}
                     Write-Output ('Enabling WinpkFilter binding on adapter: ' + $adapterName)
-                    Enable-WinpkFilterBinding $bindingCandidate
+                    Enable-NetAdapterBinding -InputObject $binding -Confirm:$false -ErrorAction Stop | Out-Null
                     Start-Sleep -Seconds 2
                     $binding = Get-WinpkFilterBinding $bindingCandidate
 
@@ -3893,6 +4112,31 @@ impl ParallelInterceptor {
         } else {
             Self::winpkfilter_binding_missing_message(adapter_label)
         })
+    }
+
+    /// Whether the driver itself reports this adapter.
+    ///
+    /// It can only report an adapter the filter is attached to and enabled on,
+    /// so this answers the binding question in milliseconds without starting
+    /// PowerShell. Any failure answers "not known" and the caller falls back to
+    /// the full check, which can also repair the binding.
+    fn driver_lists_adapter(guid_lc: &str) -> bool {
+        let Ok(driver) = ndisapi::Ndisapi::new("NDISRD") else {
+            return false;
+        };
+        let Ok(adapters) = driver.get_tcpip_bound_adapters_info() else {
+            return false;
+        };
+        Self::adapter_names_include_guid(adapters.iter().map(|adapter| adapter.get_name()), guid_lc)
+    }
+
+    fn adapter_names_include_guid<'a>(
+        mut names: impl Iterator<Item = &'a str>,
+        guid_lc: &str,
+    ) -> bool {
+        !guid_lc.is_empty()
+            && names
+                .any(|name| Self::extract_guid_ascii_lowercase(name).as_deref() == Some(guid_lc))
     }
 
     fn winpkfilter_binding_missing_message(adapter_label: &str) -> String {
@@ -4073,6 +4317,17 @@ impl ParallelInterceptor {
     }
 
     fn ensure_winpkfilter_binding(&self) -> VpnResult<()> {
+        // The driver enumerated this adapter during selection, and it only
+        // lists adapters its filter is attached to and enabled on. Running
+        // PowerShell again cost about a second of every connect to confirm
+        // that. Its "missing" and timeout answers were already ignored below
+        // for a listed adapter, so the run could only ever agree.
+        if self.selected_adapter_seen_by_ndisrd {
+            log::info!(
+                "WinpkFilter binding confirmed by the driver's adapter list; skipping the PowerShell check"
+            );
+            return Ok(());
+        }
         match Self::ensure_winpkfilter_binding_for_adapter(
             self.physical_adapter_if_index,
             self.physical_adapter_friendly_name
@@ -4135,6 +4390,7 @@ impl ParallelInterceptor {
         Err("WinpkFilter IPv6 block filters are only available on Windows.".to_string())
     }
 
+    #[cfg(test)]
     fn disable_ipv6_with_filter_installer<F>(&mut self, installer: F) -> VpnResult<()>
     where
         F: Fn(&str) -> Result<(), String>,
@@ -4142,6 +4398,7 @@ impl ParallelInterceptor {
         self.disable_ipv6_with_filter_installer_and_probe(installer, has_ipv6_binding_native)
     }
 
+    #[cfg(test)]
     fn disable_ipv6_with_filter_installer_and_probe<F, P>(
         &mut self,
         installer: F,
@@ -4158,6 +4415,7 @@ impl ParallelInterceptor {
         )
     }
 
+    #[cfg(test)]
     fn disable_ipv6_with_filter_dependencies<F, P, C>(
         &mut self,
         installer: F,
@@ -4168,6 +4426,24 @@ impl ParallelInterceptor {
         F: Fn(&str) -> Result<(), String>,
         P: Fn(u32) -> Option<bool>,
         C: FnOnce() -> Result<(), String>,
+    {
+        // These fixtures inject filter operations and never change the host's
+        // route policy. Production injects the native steering function below.
+        self.disable_ipv6_with_full_dependencies(installer, ipv6_probe, cleanup, |_| {})
+    }
+
+    fn disable_ipv6_with_full_dependencies<F, P, C, S>(
+        &mut self,
+        installer: F,
+        ipv6_probe: P,
+        cleanup: C,
+        steer: S,
+    ) -> VpnResult<()>
+    where
+        F: Fn(&str) -> Result<(), String>,
+        P: Fn(u32) -> Option<bool>,
+        C: FnOnce() -> Result<(), String>,
+        S: FnOnce(u32),
     {
         let physical_name = match &self.physical_adapter_name {
             Some(name) => name.clone(),
@@ -4251,7 +4527,7 @@ impl ParallelInterceptor {
                 // the black-holed IPv6 the drop filters create (the "Connection
                 // Error / half-loaded avatars on IPv6 wifi" reports).
                 if let Some(if_index) = self.physical_adapter_if_index {
-                    Self::steer_ipv6_default_route_off(if_index);
+                    steer(if_index);
                 }
                 Ok(())
             }
@@ -4271,104 +4547,41 @@ impl ParallelInterceptor {
         }
     }
 
-    /// netsh args to toggle IPv6 router discovery on an interface. `store=active`
-    /// keeps it non-persistent so a reboot fully restores IPv6 even after a crash.
-    #[cfg(windows)]
-    fn ipv6_router_discovery_args(if_index: u32, enabled: bool) -> Vec<String> {
-        vec![
-            "interface".into(),
-            "ipv6".into(),
-            "set".into(),
-            "interface".into(),
-            format!("interface={if_index}"),
-            format!(
-                "routerdiscovery={}",
-                if enabled { "enabled" } else { "disabled" }
-            ),
-            "store=active".into(),
-        ]
-    }
-
-    /// netsh args to drop the learned IPv6 default route on an interface.
-    #[cfg(windows)]
-    fn ipv6_delete_default_route_args(if_index: u32) -> Vec<String> {
-        vec![
-            "interface".into(),
-            "ipv6".into(),
-            "delete".into(),
-            "route".into(),
-            "prefix=::/0".into(),
-            format!("interface={if_index}"),
-            // Without an explicit store, netsh also deletes saved routes.
-            // Temporary tunnel steering must never erase persistent config.
-            "store=active".into(),
-        ]
-    }
-
-    /// Steer Windows off public IPv6 on the selected adapter WITHOUT touching the
-    /// NIC binding (which bounces the link on many Realtek/Killer/Intel/USB NICs —
-    /// see the LSO/ms_tcpip6 notes below, the "kills my internet on Connect"
-    /// failure mode). Disabling router discovery and dropping the learned default
-    /// route makes apps fall back to IPv4 *instantly* instead of stalling on the
-    /// black-holed IPv6 our drop filters create — the root of the "Connection
-    /// Error / half-loaded avatars on IPv6 wifi" reports. The drop filters stay as
-    /// the leak backstop; this only changes *how fast* apps give up on IPv6.
+    /// Prefer IPv4 without deleting routes or changing router discovery.
+    /// Static/custom routes skip optional steering; leak-prevention filters
+    /// remain the separate backstop.
     #[cfg(windows)]
     fn steer_ipv6_default_route_off(if_index: u32) {
-        let discovery = crate::run_hidden_command_with_timeout(
-            "netsh",
-            &Self::ipv6_router_discovery_args(if_index, false),
-            NETSH_ROUTE_TIMEOUT,
-        );
-        if !discovery.success {
-            log::warn!(
-                "netsh routerdiscovery=disabled (if {if_index}) failed: {}",
-                discovery.stderr.trim()
-            );
-        }
-
-        let delete_route = crate::run_hidden_command_with_timeout(
-            "netsh",
-            &Self::ipv6_delete_default_route_args(if_index),
-            NETSH_ROUTE_TIMEOUT,
-        );
-        if delete_route.success {
-            log::info!(
-                "Steered IPv6 default route off on if_index {if_index}: apps fall back to IPv4 instantly"
-            );
-        } else {
-            log::warn!(
-                "netsh delete ::/0 route (if {if_index}) failed: {}",
-                delete_route.stderr.trim()
-            );
+        match super::ipv6_route_recovery::steer(if_index) {
+            Ok(true) => log::info!(
+                "Temporarily ignoring learned IPv6 default routes on if_index {if_index}; original policy recorded"
+            ),
+            Ok(false) => log::debug!(
+                "IPv6 default-route steering unnecessary or custom policy present on if_index {if_index}"
+            ),
+            Err(error) => log::warn!(
+                "Optional IPv6 default-route steering skipped or remains pending: {error}"
+            ),
         }
     }
 
     #[cfg(not(windows))]
     fn steer_ipv6_default_route_off(_if_index: u32) {}
 
-    /// Re-enable IPv6 router discovery so the default route is re-learned via RA.
     #[cfg(windows)]
-    fn restore_ipv6_default_route(if_index: u32) -> bool {
-        let restored = crate::run_hidden_command_with_timeout(
-            "netsh",
-            &Self::ipv6_router_discovery_args(if_index, true),
-            NETSH_ROUTE_TIMEOUT,
-        );
-        if restored.success {
-            log::info!("Restored IPv6 router discovery on if_index {if_index}");
-        } else {
-            log::warn!(
-                "netsh routerdiscovery=enabled (if {if_index}) failed: {}",
-                restored.stderr.trim()
-            );
+    fn restore_ipv6_routes() -> bool {
+        match super::ipv6_route_recovery::recover() {
+            Ok(_) => true,
+            Err(error) => {
+                log::warn!("IPv6 default-route recovery remains pending: {error}");
+                false
+            }
         }
-        restored.success
     }
 
     #[cfg(not(windows))]
-    fn restore_ipv6_default_route(_if_index: u32) -> bool {
-        false
+    fn restore_ipv6_routes() -> bool {
+        true
     }
 
     /// Block public IPv6 egress while the IPv4-only tunnel is active.
@@ -4380,7 +4593,12 @@ impl ParallelInterceptor {
     /// This is a common cause of "detection works but tunneling fails" - the process is
     /// detected, but its IPv6 traffic bypasses the VPN.
     pub fn disable_ipv6(&mut self) -> VpnResult<()> {
-        self.disable_ipv6_with_filter_installer(Self::install_winpkfilter_ipv6_block_for_adapter)
+        self.disable_ipv6_with_full_dependencies(
+            Self::install_winpkfilter_ipv6_block_for_adapter,
+            has_ipv6_binding_native,
+            remove_winpkfilter_ipv6_block_filters,
+            Self::steer_ipv6_default_route_off,
+        )
     }
     /// Restore IPv6 connectivity by removing the outbound block filters.
     ///
@@ -4409,7 +4627,6 @@ impl ParallelInterceptor {
             }
         );
 
-        let if_index = self.physical_adapter_if_index;
         let restored = finish_recorded_ipv6_restore(
             &mut self.ipv6_was_disabled,
             || {
@@ -4418,7 +4635,7 @@ impl ParallelInterceptor {
                     remove_winpkfilter_ipv6_block_filters().is_ok()
                 })
             },
-            || if_index.is_none_or(Self::restore_ipv6_default_route),
+            Self::restore_ipv6_routes,
             delete_ipv6_marker,
         );
         if restored {
@@ -4441,10 +4658,27 @@ impl ParallelInterceptor {
             .physical_adapter_idx
             .ok_or_else(|| VpnError::SplitTunnel("Physical adapter not configured".to_string()))?;
 
+        // Check before any binding/IPv6 changes or stop-flag reset, including
+        // adapter rebinds that restart this same interceptor instance.
+        prepare_worker_start(&self.stop_flag)?;
+
+        let physical_name =
+            Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
+                VpnError::SplitTunnel("Physical adapter name not set".to_string())
+            })?);
+        // Persist recovery before binding, IPv6 changes or worker creation.
+        // A failed write must never leave capture running without its record.
+        super::tunnel_mode_recovery::write_tunnel_mode_marker(physical_name.as_ref()).map_err(
+            |error| {
+                log::error!("Could not save tunnel-mode recovery record before capture: {error}");
+                VpnError::RecoveryRecordUnavailable
+            },
+        )?;
+
         let leaked = LEAKED_THREADS.load(Ordering::Relaxed);
         if leaked > 0 {
             log::warn!(
-                "Starting parallel interceptor with {} leaked worker thread(s) from a previous session — investigate before shipping",
+                "Previous network shutdowns exceeded their deadline {} time(s); all tracked workers have now exited",
                 leaked
             );
         }
@@ -4487,35 +4721,29 @@ impl ParallelInterceptor {
         // restored on app launch by `tso_recovery::recover_tso_on_startup`,
         // so users upgrading from <=2.0.20 don't end up with LSO stuck off.
 
-        // Disable public IPv6 egress on the physical adapter - SwiftTunnel is
-        // IPv4-only. This uses WinpkFilter static drop filters; the historical
-        // link-bouncing adapter-binding and Windows Firewall alternatives are
-        // documented in `ipv6_recovery`.
-        self.disable_ipv6()?;
-
-        // Diskless cafe PCs (CCBoot/gcafe/iSCSI boot): the boot NIC carries
-        // the SYSTEM DISK, and tunnel mode would route disk I/O through the
-        // user-mode pump - a stall there freezes the whole machine. Install
-        // kernel-level PASS filters for the System-owned disk flows so they
-        // never reach user mode. Best-effort: tunneling works without it.
+        // System disk traffic must bypass user-mode capture on network-booted
+        // PCs. Do this before IPv6 changes or starting any packet workers.
         #[cfg(target_os = "windows")]
-        if crate::diskless::system_is_diskless()
-            && let Some(physical_name) = self.physical_adapter_name.clone()
         {
-            match super::diskless_passthrough::install_for_adapter(&physical_name) {
-                Ok(0) => {
-                    log::info!("Diskless PC detected but no System disk flows found to protect")
-                }
-                Ok(count) => log::info!(
-                    "Diskless PC: {count} kernel pass filter(s) protect the system disk from interception"
-                ),
-                Err(e) => log::warn!(
-                    "Diskless PC: could not install disk-traffic pass filters (continuing): {e}"
-                ),
+            let count = super::diskless_passthrough::prepare_capture(
+                crate::diskless::system_is_diskless(),
+                self.physical_adapter_name.as_deref(),
+                super::diskless_passthrough::install_for_adapter,
+            )?;
+            if count != 0 {
+                log::info!(
+                    "Diskless PC: {count} kernel pass filter(s) protect System traffic from interception"
+                );
             }
         }
 
-        self.stop_flag.store(false, Ordering::Release);
+        // SwiftTunnel is IPv4-only. Block public IPv6 without rebinding the NIC.
+        if let Err(error) = self.disable_ipv6() {
+            #[cfg(target_os = "windows")]
+            super::diskless_passthrough::remove_installed();
+            return Err(error);
+        }
+
         // Reset the panic cause alongside stop_flag. `workers_panic_cause` is
         // written by the reader/inbound-receiver threads on panic or budget
         // exhaustion, and is never cleared on its own. Without this reset, a
@@ -4538,15 +4766,25 @@ impl ParallelInterceptor {
         let refresh_now = Arc::clone(&self.refresh_now_flag);
         let refresh_condvar = Arc::clone(&self.refresh_condvar);
         let refresher_api_tunneling = Arc::clone(&self.api_tunneling_enabled);
+        let refresher_failure = Arc::clone(&self.workers_panic_cause);
         let (initial_refresh_tx, initial_refresh_rx) = crossbeam_channel::bounded::<()>(1);
         self.refresher_handle = Some(thread::spawn(move || {
-            run_cache_refresher(
-                refresher_cache,
-                refresher_stop,
-                refresh_now,
-                refresh_condvar,
-                refresher_api_tunneling,
-                Some(initial_refresh_tx),
+            let supervised_stop = Arc::clone(&refresher_stop);
+            supervise_network_worker(
+                "Process cache refresher",
+                &supervised_stop,
+                &refresher_failure,
+                move || {
+                    run_cache_refresher(
+                        refresher_cache,
+                        refresher_stop,
+                        refresh_now,
+                        refresh_condvar,
+                        refresher_api_tunneling,
+                        Some(initial_refresh_tx),
+                    );
+                    Ok(())
+                },
             );
         }));
 
@@ -4571,21 +4809,28 @@ impl ParallelInterceptor {
             let detected_game_servers = Arc::clone(&self.detected_game_servers);
             let auto_router = self.auto_router.clone();
             let queue_overflow_mode = Arc::clone(&self.queue_overflow_mode);
+            let failure_flag = Arc::clone(&self.workers_panic_cause);
 
             let handle = thread::spawn(move || {
-                // Set CPU affinity for this worker
-                set_thread_affinity(worker_id);
-
-                run_packet_worker(
-                    worker_id,
-                    receiver,
-                    stats,
-                    throughput,
-                    stop_flag,
-                    relay_ctx,
-                    detected_game_servers,
-                    auto_router,
-                    queue_overflow_mode,
+                let supervised_stop = Arc::clone(&stop_flag);
+                supervise_network_worker(
+                    &format!("Packet worker {worker_id}"),
+                    &supervised_stop,
+                    &failure_flag,
+                    move || {
+                        set_thread_affinity(worker_id);
+                        run_packet_worker(
+                            worker_id,
+                            receiver,
+                            stats,
+                            throughput,
+                            stop_flag,
+                            relay_ctx,
+                            detected_game_servers,
+                            auto_router,
+                            queue_overflow_mode,
+                        )
+                    },
                 );
             });
 
@@ -4616,12 +4861,16 @@ impl ParallelInterceptor {
                 .clone()
                 .or_else(|| self.physical_adapter_kind.clone())
                 .unwrap_or_else(|| "unknown adapter".to_string());
-            // Ask the adapter, do not trust our own flag. We no longer switch
+            // Read the selected adapter by GUID, not a friendly-name wildcard.
+            // Do not trust our own flag. We no longer switch
             // offload off on connect, so the flag is always false and would
             // have hidden the case that matters: a machine an older build left
             // with it disabled, whose marker has since been lost, doing packet
             // segmentation in software permanently.
-            let offload_adapter = self.physical_adapter_friendly_name.clone();
+            let offload_adapter = self
+                .physical_adapter_name
+                .as_deref()
+                .and_then(Self::extract_guid_ascii_lowercase);
 
             self.monitor_handle = Some(thread::spawn(move || {
                 const EVERY: Duration = Duration::from_secs(60);
@@ -4632,8 +4881,7 @@ impl ParallelInterceptor {
                 let mut last_system = system_cpu_time_100ns();
                 let mut last_at = Instant::now();
 
-                // Once, at the top. The query spawns PowerShell and the answer
-                // does not change under us during a session.
+                // Read the configured LSO values once, without launching PowerShell.
                 let offload_off = offload_adapter
                     .as_deref()
                     .and_then(super::tso_recovery::large_send_offload_is_disabled)
@@ -4744,18 +4992,6 @@ impl ParallelInterceptor {
         let reader_queue_full_events = Arc::clone(&self.queue_full_events);
         let reader_refresh_now = Arc::clone(&self.refresh_now_flag);
         let reader_refresh_condvar = Arc::clone(&self.refresh_condvar);
-        let physical_name =
-            Arc::new(self.physical_adapter_name.clone().ok_or_else(|| {
-                VpnError::SplitTunnel("Physical adapter name not set".to_string())
-            })?);
-
-        // Written BEFORE the reader thread can enter tunnel mode, deleted in
-        // stop() only after a verified all-adapter mode reset. If the process
-        // dies anywhere in between (force-kill, crash, OS shutdown), the
-        // marker survives and startup recovery resets the stale tunnel mode
-        // that would otherwise blackhole all traffic on the adapter.
-        super::tunnel_mode_recovery::write_tunnel_mode_marker(physical_name.as_ref());
-
         let reader_panic_cause_flag = Arc::clone(&self.workers_panic_cause);
         self.reader_handle = Some(thread::spawn(move || {
             // Wrap in catch_unwind so we can distinguish graceful shutdown
@@ -4793,7 +5029,11 @@ impl ParallelInterceptor {
                     log::error!("Packet reader error: {}", e);
                     record_worker_panic_cause(
                         &reader_panic_cause_flag,
-                        WorkerPanicCause::ReaderHandleLost,
+                        if matches!(e, VpnError::PacketForwardingFailed(_)) {
+                            WorkerPanicCause::PacketForwardingFailed
+                        } else {
+                            WorkerPanicCause::ReaderHandleLost
+                        },
                     );
                 }
                 Err(panic_payload) => {
@@ -4960,11 +5200,12 @@ impl ParallelInterceptor {
         // start() is deleted only when every adapter mode reads back as
         // default; otherwise it persists so startup recovery retries.
         let report = super::split_tunnel::SplitTunnelDriver::cleanup_stale_state_checked();
-        if report.fully_clean() {
-            super::tunnel_mode_recovery::delete_tunnel_mode_marker();
-        } else {
+        if !finish_tunnel_mode_cleanup(
+            report.fully_clean(),
+            super::tunnel_mode_recovery::delete_tunnel_mode_marker,
+        ) {
             log::error!(
-                "Adapter mode reset could not be verified on stop (open error: {:?}, errors: {:?}); \
+                "Adapter reset or worker exit could not be verified on stop (open error: {:?}, errors: {:?}); \
                  keeping tunnel-mode marker for startup recovery",
                 report.driver_open_error,
                 report.errors
@@ -4997,6 +5238,10 @@ impl ParallelInterceptor {
         {
             return Ok(false);
         }
+        if !route_change_check_due(self.last_route_check_at, now) {
+            return Ok(false);
+        }
+        self.last_route_check_at = Some(now);
 
         let prev_default_if_index = self.default_route_if_index;
         let prev_default_next_hop = self.default_route_next_hop;
@@ -5144,11 +5389,15 @@ impl ParallelInterceptor {
         }
 
         if let Err(e) = self.start() {
-            // Restart after a route change failed to re-acquire the adapter —
-            // driver-handle-loss class.
+            // Preserve a real reader-handle loss, but do not label a stalled
+            // refresher/worker as a missing or broken driver.
             record_worker_panic_cause(
                 &self.workers_panic_cause,
-                WorkerPanicCause::ReaderHandleLost,
+                if matches!(e, VpnError::NetworkWorkersStopping) {
+                    WorkerPanicCause::InternalThreadFailed
+                } else {
+                    WorkerPanicCause::ReaderHandleLost
+                },
             );
             return Err(e);
         }
@@ -5546,14 +5795,22 @@ fn forward_tunneled_packet_from_reader(
         relay.relay_health(),
         super::udp_relay::RelayHealthState::Dead
     ) {
-        let event = READER_DIRECT_RELAY_BYPASS.fetch_add(1, Ordering::Relaxed) + 1;
+        // Health does not authorize a source-path change. TCP, cloud game
+        // traffic, fragments and Drop policy must remain captured even while
+        // the connection monitor gives the relay time to recover.
+        let action = match queue_overflow_action(queue_overflow_mode, data) {
+            QueueFullAction::Drop => ReaderTunnelAction::Consumed,
+            QueueFullAction::Bypass => ReaderTunnelAction::BypassPhysical,
+        };
+        let event = READER_DEAD_RELAY_ACTIONS.fetch_add(1, Ordering::Relaxed) + 1;
         if event <= 5 || event.is_power_of_two() {
             log::warn!(
-                "Reader direct relay: relay is dead, bypassing tunnel packet to physical adapter (event #{})",
+                "Reader direct relay: relay is dead, applying captured-packet policy {:?} (event #{})",
+                action,
                 event
             );
         }
-        return ReaderTunnelAction::BypassPhysical;
+        return action;
     }
 
     let forward_result = PACKET_BUFFER.with(|buf| {
@@ -5657,6 +5914,9 @@ fn run_packet_reader(
     let mut snapshot_version = snapshot.version;
     let mut inline_cache: InlineCache = ahash::AHashMap::with_capacity(1024);
     let mut cloud_routes = super::cloud_game_routes::CloudGameRoutes::new(&snapshot);
+    let mut adapter_sends = PassthroughSendHealth::default();
+    let mut mstcp_sends = PassthroughSendHealth::default();
+    let mut roblox_auth_trace = super::bypass_diag::RobloxAuthTrace::default();
     // A short, bounded wait for the existing background owner-table reader.
     // No IP Helper calls or sleeps are added to the packet path.
     const MAX_CLOUD_PENDING: usize = 64;
@@ -5834,6 +6094,12 @@ fn run_packet_reader(
     let mut packets: Vec<IntermediateBuffer> = vec![Default::default(); BATCH_SIZE];
     let mut passthrough_to_adapter: EthMRequest<BATCH_SIZE>;
     let mut passthrough_to_mstcp: EthMRequest<BATCH_SIZE>;
+    // Set when the previous read filled the whole batch: the driver queue may
+    // still hold packets, so read again without waiting on the event.
+    let mut drain_more = false;
+    // Event wakes since the last read that returned packets which found the
+    // queue empty. See `reader_can_ignore_empty_wake`.
+    let mut empty_wakes = 0u32;
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
@@ -5891,7 +6157,25 @@ fn run_packet_reader(
         // Using 100ms timeout allows responsive stop_flag checking while
         // avoiding 1000Hz polling that wastes CPU when idle
         // (When packets arrive, event signals immediately - no added latency)
-        let wait_result = unsafe { WaitForSingleObject(b.event, 100) };
+        //
+        // Packets held for an owner lookup are replayed on the next pass, so
+        // wake sooner while any are waiting instead of after the full 100ms.
+        let wait_result = if drain_more {
+            WAIT_OBJECT_0
+        } else {
+            let timeout_ms = reader_wait_timeout_ms(!cloud_pending.is_empty());
+            unsafe { WaitForSingleObject(b.event, timeout_ms) }
+        };
+        let draining = std::mem::take(&mut drain_more);
+        if wait_result == WAIT_OBJECT_0 {
+            // Reset before reading, not after the batch. The event is
+            // manual-reset: clearing it after processing would also clear a
+            // signal for packets that arrived mid-batch, leaving them queued
+            // until the next arrival or the 100ms timeout.
+            unsafe {
+                let _ = ResetEvent(b.event);
+            }
+        }
         if wait_result == WAIT_TIMEOUT {
             // A timeout is the normal idle path. Do not call read_packets()
             // with an empty queue: WinpkFilter can report ERROR_INVALID_PARAMETER
@@ -5970,9 +6254,21 @@ fn run_packet_reader(
                         prior
                     );
                 }
+                if n > 0 {
+                    empty_wakes = 0;
+                }
                 n
             }
+            // A follow-up read after a full batch can find the queue empty,
+            // which WinpkFilter reports as an error. That is not a dead handle.
+            Err(ref error) if reader_can_ignore_drain_error(draining, error) => 0,
+            // So can a wake whose packets the previous read already took.
+            Err(ref error) if reader_can_ignore_empty_wake(empty_wakes, error) => {
+                empty_wakes += 1;
+                0
+            }
             Err(e) => {
+                empty_wakes = 0;
                 match rebind.record_error(stop_flag.load(Ordering::Acquire)) {
                     RebindDecision::Stop => break,
                     RebindDecision::Fatal => {
@@ -6015,10 +6311,8 @@ fn run_packet_reader(
             }
         };
 
+        drain_more = packets_read == BATCH_SIZE;
         if packets_read == 0 && cloud_pending.is_empty() {
-            unsafe {
-                let _ = ResetEvent(b.event);
-            }
             continue;
         }
 
@@ -6031,7 +6325,7 @@ fn run_packet_reader(
         let new_snapshot = process_cache.get_snapshot();
         if new_snapshot.version != snapshot_version {
             snapshot_version = new_snapshot.version;
-            prune_inline_cache_on_snapshot_refresh(&mut inline_cache, api_tunneling);
+            prune_inline_cache_on_snapshot_refresh(&mut inline_cache, &new_snapshot);
         }
         snapshot = new_snapshot;
 
@@ -6054,9 +6348,15 @@ fn run_packet_reader(
         {
             // A replay can add one batch. Flush before borrowing another packet.
             if passthrough_to_adapter.get_packet_number() as usize == BATCH_SIZE {
-                let _ = b
-                    .driver
-                    .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
+                adapter_sends.forward(
+                    "network adapter",
+                    passthrough_to_adapter.get_packet_number(),
+                    stop_flag.load(Ordering::Acquire),
+                    || {
+                        b.driver
+                            .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter)
+                    },
+                )?;
                 passthrough_to_adapter = EthMRequest::new(b.physical_handle);
             }
             let direction_flags = packet.get_device_flags();
@@ -6141,6 +6441,18 @@ fn run_packet_reader(
 
                     if auto_action == AutoRoutingPacketAction::Hold {
                         continue;
+                    }
+
+                    if let Some(ip) = cloud_ip
+                        && ip.get(9) == Some(&6) // TCP
+                        && roblox_auth_trace.has_room()
+                        && super::bypass_diag::is_enabled()
+                    {
+                        record_roblox_auth_route(
+                            &mut roblox_auth_trace,
+                            ip,
+                            should_tunnel && !auto_routing_bypass,
+                        );
                     }
 
                     if !should_tunnel || auto_routing_bypass {
@@ -6291,21 +6603,24 @@ fn run_packet_reader(
         }
 
         // Send passthrough packets
-        if passthrough_to_adapter.get_packet_number() > 0 {
-            let _ = b
-                .driver
-                .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter);
-        }
-
-        if passthrough_to_mstcp.get_packet_number() > 0 {
-            let _ = b
-                .driver
-                .send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp);
-        }
-
-        unsafe {
-            let _ = ResetEvent(b.event);
-        }
+        adapter_sends.forward(
+            "network adapter",
+            passthrough_to_adapter.get_packet_number(),
+            stop_flag.load(Ordering::Acquire),
+            || {
+                b.driver
+                    .send_packets_to_adapter::<BATCH_SIZE>(&passthrough_to_adapter)
+            },
+        )?;
+        mstcp_sends.forward(
+            "Windows network stack",
+            passthrough_to_mstcp.get_packet_number(),
+            stop_flag.load(Ordering::Acquire),
+            || {
+                b.driver
+                    .send_packets_to_mstcp::<BATCH_SIZE>(&passthrough_to_mstcp)
+            },
+        )?;
     }
 
     // Cleanup is handled by `impl Drop for ReaderBindings` when `bindings`
@@ -6314,6 +6629,15 @@ fn run_packet_reader(
     log::info!("Packet reader stopped");
     Ok(())
 }
+
+/// Packet-event wait for the reader. Idle waits stay long so a quiet adapter
+/// costs nothing; held cloud-game packets need a quick replay pass.
+fn reader_wait_timeout_ms(has_held_packets: bool) -> u32 {
+    if has_held_packets { 10 } else { 100 }
+}
+
+/// Longest a packet worker sleeps before rechecking its stop flag.
+const WORKER_IDLE_WAKE: Duration = Duration::from_millis(150);
 
 /// Worker thread - processes packets and routes to VPN or passthrough
 #[allow(clippy::too_many_arguments)]
@@ -6327,7 +6651,7 @@ fn run_packet_worker(
     detected_game_servers: Arc<parking_lot::RwLock<std::collections::HashSet<std::net::Ipv4Addr>>>,
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     queue_overflow_mode: Arc<std::sync::atomic::AtomicU8>,
-) {
+) -> Result<(), String> {
     log::info!("Worker {} started", worker_id);
 
     // Diagnostic logging
@@ -6341,22 +6665,15 @@ fn run_packet_worker(
     let mut cpu_at_last_sample = thread_cpu_time_100ns().unwrap_or(0);
 
     // Open driver for this worker (each worker needs own handle for sending bypass packets)
-    let driver = match ndisapi::Ndisapi::new("NDISRD") {
-        Ok(d) => d,
-        Err(e) => {
-            log::error!("Worker {} failed to open driver: {}", worker_id, e);
-            return;
-        }
-    };
+    let driver = ndisapi::Ndisapi::new("NDISRD")
+        .map_err(|error| format!("Could not open the packet worker's driver handle: {error}"))?;
 
     // Get adapters to find physical adapter handle
-    let adapters = match driver.get_tcpip_bound_adapters_info() {
-        Ok(a) => a,
-        Err(e) => {
-            log::error!("Worker {} failed to get adapters: {}", worker_id, e);
-            return;
-        }
-    };
+    let mut adapters = WorkerAdapterSnapshot::new(|| {
+        driver
+            .get_tcpip_bound_adapters_info()
+            .map_err(|error| format!("Could not read the packet worker's adapters: {error}"))
+    })?;
 
     if relay_ctx.is_some() {
         log::info!("Worker {}: V3 relay context AVAILABLE", worker_id);
@@ -6370,32 +6687,24 @@ fn run_packet_worker(
     // Track relay stats
     let mut relay_success = 0u64;
     let mut relay_fail = 0u64;
-
-    // Adaptive timeout: short when active, longer when idle to save CPU
-    // This is the key optimization - avoid 1000Hz polling when no packets
-    let mut consecutive_timeouts = 0u32;
+    // Health-window counters reset regularly. Logging needs a separate total
+    // or a persistent failure keeps re-enabling its first-packet messages.
+    let mut relay_failure_events = 0u64;
+    let mut bypass_failure_events = 0u64;
 
     loop {
         if stop_flag.load(Ordering::Acquire) {
             break;
         }
 
-        // Adaptive timeout based on recent activity:
-        // - 5ms when recently active (gaming latency acceptable)
-        // - 150ms after 10 consecutive timeouts (idle, save CPU)
-        // The reader thread has the event-driven wakeup, workers just need
-        // to process what the reader dispatches to them
-        let timeout_ms = if consecutive_timeouts > 10 { 150 } else { 5 };
-
-        let work = match receiver.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
-            Ok(w) => {
-                consecutive_timeouts = 0; // Reset on successful receive
-                w
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                consecutive_timeouts = consecutive_timeouts.saturating_add(1);
-                continue;
-            }
+        // `recv_timeout` returns as soon as the reader dispatches work, so the
+        // timeout adds no latency; it only bounds how long a stop request
+        // waits. This used to drop to 5ms for ten timeouts after every packet,
+        // which made a worker fed one packet per game tick wake ~200 times a
+        // second in between for nothing.
+        let work = match receiver.recv_timeout(WORKER_IDLE_WAKE) {
+            Ok(w) => w,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
             Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
         };
 
@@ -6526,22 +6835,20 @@ fn run_packet_worker(
                 // borrow alive for the entire `forward_outbound` call rather
                 // than letting a raw pointer escape the `with()` closure.
                 //
-                // If relay health is Dead, skip the relay path entirely: the
-                // sender would silently drop every frame and the game would
-                // stall. Fall through to the physical-adapter bypass so
-                // traffic at least reaches the internet while the connection
-                // state machine tears the tunnel down.
+                // A dead relay is handled by the connection monitor. Only
+                // eligible UDP can use direct fallback in the meantime:
+                // captured TCP must retain its source path through teardown.
                 let relay_for_forward = relay_ctx.as_ref().filter(|r| {
                     !matches!(r.relay_health(), super::udp_relay::RelayHealthState::Dead)
                 });
                 if let Some(relay) = relay_for_forward {
                     // Log relay destination for first few packets (auto-routing debug)
-                    if relay_success + relay_fail < 10 {
+                    if diagnostic_counter <= 10 {
                         log::info!(
                             "Worker {}: Forwarding to relay {} (pkt #{}, dst={})",
                             worker_id,
                             relay.relay_addr(),
-                            relay_success + relay_fail + 1,
+                            diagnostic_counter,
                             if ip_packet.len() >= 20 {
                                 format!(
                                     "{}.{}.{}.{}",
@@ -6568,7 +6875,7 @@ fn run_packet_worker(
                     match forward_result {
                         Ok(super::udp_relay::RelaySendOutcome::Enqueued(sent)) => {
                             relay_success += 1;
-                            if relay_success <= 5 && sent > 0 {
+                            if diagnostic_counter <= 5 && sent > 0 {
                                 log::info!(
                                     "Worker {}: V3 relay forward OK - {} bytes",
                                     worker_id,
@@ -6578,6 +6885,7 @@ fn run_packet_worker(
                         }
                         Ok(super::udp_relay::RelaySendOutcome::Backpressure) => {
                             relay_fail += 1;
+                            let log_failure = sample_forward_failure(&mut relay_failure_events);
                             let mode = if super::cloud_game_routes::is_cloud_game_ip(dst_ip) {
                                 QueueOverflowMode::Drop
                             } else {
@@ -6588,34 +6896,37 @@ fn run_packet_worker(
                             if queue_overflow_action(mode, work.data.as_slice())
                                 == QueueFullAction::Bypass
                             {
-                                send_bypass_packet(&driver, &adapters, &work);
-                            } else if relay_fail <= 10 || relay_fail.is_multiple_of(100) {
+                                send_bypass_packet(
+                                    &driver,
+                                    &mut adapters,
+                                    &work,
+                                    &mut bypass_failure_events,
+                                )?;
+                            } else if log_failure {
                                 log::warn!(
                                     "Worker {}: V3 relay sender backpressure, dropping tunnel packet ({} total)",
                                     worker_id,
-                                    relay_fail
+                                    relay_failure_events
                                 );
                             }
                         }
                         Ok(super::udp_relay::RelaySendOutcome::Oversize) => {
                             relay_fail += 1;
-                            if relay_fail <= 10 || relay_fail.is_multiple_of(100) {
+                            if sample_forward_failure(&mut relay_failure_events) {
                                 log::warn!(
                                     "Worker {}: V3 relay packet oversized, dropping tunnel packet ({} total)",
                                     worker_id,
-                                    relay_fail
+                                    relay_failure_events
                                 );
                             }
                         }
                         Err(e) => {
                             relay_fail += 1;
-                            // Log first 10 failures, then every 100th to avoid log spam
-                            // but keep visibility into persistent relay issues (Error 277)
-                            if relay_fail <= 10 || relay_fail.is_multiple_of(100) {
+                            if sample_forward_failure(&mut relay_failure_events) {
                                 log::warn!(
                                     "Worker {}: V3 relay forward failed ({} total): {}",
                                     worker_id,
-                                    relay_fail,
+                                    relay_failure_events,
                                     e
                                 );
                             }
@@ -6633,22 +6944,33 @@ fn run_packet_worker(
                         }
                     }
                 } else {
-                    // Either no relay context, or the relay is marked Dead —
-                    // forward to the physical adapter (bypass) so the game
-                    // isn't silently drop-forwarded to nowhere.
-                    if !super::cloud_game_routes::is_cloud_game_ip(dst_ip) {
-                        send_bypass_packet(&driver, &adapters, &work);
+                    // Without a relay context, legacy passthrough has never
+                    // assigned a relay source. An existing dead relay must
+                    // obey the configured policy and protocol safety used for queue pressure.
+                    if !super::cloud_game_routes::is_cloud_game_ip(dst_ip)
+                        && (relay_ctx.is_none()
+                            || queue_overflow_action(
+                                QueueOverflowMode::from_u8(
+                                    queue_overflow_mode.load(Ordering::Relaxed),
+                                ),
+                                work.data.as_slice(),
+                            ) == QueueFullAction::Bypass)
+                    {
+                        send_bypass_packet(
+                            &driver,
+                            &mut adapters,
+                            &work,
+                            &mut bypass_failure_events,
+                        )?;
                     }
                 }
             } else {
-                stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
-                stats
-                    .bytes_bypassed
-                    .fetch_add(packet_len, Ordering::Relaxed);
-
-                // CRITICAL FIX: Forward bypass packets to adapter
-                // Previously this was missing, causing all non-tunnel traffic to be dropped!
-                send_bypass_packet(&driver, &adapters, &work);
+                if send_bypass_packet(&driver, &mut adapters, &work, &mut bypass_failure_events)? {
+                    stats.packets_bypassed.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .bytes_bypassed
+                        .fetch_add(packet_len, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -6662,43 +6984,47 @@ fn run_packet_worker(
         stats.packets_bypassed.load(Ordering::Relaxed),
         stats.bytes_bypassed.load(Ordering::Relaxed)
     );
+    Ok(())
 }
 
 /// Send a bypass packet to the physical adapter
 fn send_bypass_packet(
     driver: &ndisapi::Ndisapi,
-    adapters: &[ndisapi::NetworkAdapterInfo],
+    adapters: &mut WorkerAdapterSnapshot<ndisapi::NetworkAdapterInfo>,
     work: &PacketWork,
-) {
+    failures: &mut u64,
+) -> Result<bool, String> {
     use ndisapi::{DirectionFlags, EthMRequest, IntermediateBuffer};
 
     // Find adapter by internal name (GUID) - this is consistent across driver instances
-    let adapter = match adapters
-        .iter()
-        .find(|a| a.get_name() == work.physical_adapter_name.as_str())
-    {
-        Some(a) => a,
-        None => {
-            log::warn!(
-                "send_bypass_packet: adapter '{}' not found in worker's adapter list ({} adapters)",
-                work.physical_adapter_name,
-                adapters.len()
-            );
-            return;
-        }
-    };
+    // A worker cannot use the reader's driver handle, or keep silently dropping
+    // traffic for an adapter absent from its own snapshot. Supervision reports
+    // this error to the connection monitor so it can tear down failed capture.
+    let index = adapters.select(
+        |adapter| adapter.get_name() == work.physical_adapter_name.as_str(),
+        || {
+            driver
+                .get_tcpip_bound_adapters_info()
+                .map_err(|error| error.to_string())
+        },
+        &work.physical_adapter_name,
+    )?;
+    let adapter = &adapters.entries[index];
 
     let adapter_handle = adapter.get_handle();
 
     // Safety check: Don't process oversized packets that would overflow IntermediateBuffer.
     let mut buffer = IntermediateBuffer::default();
     if work.data.len() > buffer.buffer.0.len() {
-        log::warn!(
-            "send_bypass_packet: packet too large ({} > {} bytes), dropping",
-            work.data.len(),
-            buffer.buffer.0.len()
-        );
-        return;
+        if sample_forward_failure(failures) {
+            log::warn!(
+                "send_bypass_packet: packet too large ({} > {} bytes), dropping ({} total failures)",
+                work.data.len(),
+                buffer.buffer.0.len(),
+                failures
+            );
+        }
+        return Ok(false);
     }
 
     // Create IntermediateBuffer with packet data
@@ -6709,10 +7035,70 @@ fn send_bypass_packet(
 
     // Send to adapter (bypasses VPN, goes directly to physical network)
     let mut to_adapter: EthMRequest<1> = EthMRequest::new(adapter_handle);
-    if to_adapter.push(&buffer).is_ok()
-        && let Err(e) = driver.send_packets_to_adapter::<1>(&to_adapter)
-    {
-        log::warn!("send_bypass_packet: send failed: {:?}", e);
+    if to_adapter.push(&buffer).is_err() {
+        if sample_forward_failure(failures) {
+            log::warn!(
+                "send_bypass_packet: could not prepare the packet ({} total failures)",
+                failures
+            );
+        }
+        return Ok(false);
+    }
+    if let Err(e) = driver.send_packets_to_adapter::<1>(&to_adapter) {
+        if sample_forward_failure(failures) {
+            log::warn!(
+                "send_bypass_packet: send failed ({} total failures): {:?}",
+                failures,
+                e
+            );
+        }
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+/// Driver bindings can settle after a worker opens its own handle. Retry a
+/// failed initial enumeration or a missing selected adapter once per worker.
+/// Never reuse another driver's handle or substitute a different adapter.
+struct WorkerAdapterSnapshot<T> {
+    entries: Vec<T>,
+    refreshed: bool,
+}
+
+impl<T> WorkerAdapterSnapshot<T> {
+    fn new(mut read: impl FnMut() -> Result<Vec<T>, String>) -> Result<Self, String> {
+        let (entries, refreshed) = match read() {
+            Ok(entries) => (entries, false),
+            Err(error) => {
+                log::warn!("Packet worker adapter enumeration failed; retrying once: {error}");
+                (read()?, true)
+            }
+        };
+        Ok(Self { entries, refreshed })
+    }
+
+    fn select(
+        &mut self,
+        matches: impl Fn(&T) -> bool,
+        refresh: impl FnOnce() -> Result<Vec<T>, String>,
+        target: &str,
+    ) -> Result<usize, String> {
+        if let Some(index) = self.entries.iter().position(&matches) {
+            return Ok(index);
+        }
+        if !self.refreshed {
+            self.refreshed = true;
+            log::warn!(
+                "Packet worker adapter snapshot lacks the selected adapter; refreshing once"
+            );
+            self.entries = refresh()?;
+            if let Some(index) = self.entries.iter().position(matches) {
+                return Ok(index);
+            }
+        }
+        Err(format!(
+            "The packet worker cannot access the selected network adapter ({target}). Reconnect SwiftTunnel to refresh its adapter handles."
+        ))
     }
 }
 
@@ -6756,21 +7142,81 @@ fn collect_tunnel_tcp_ports_for_api_tunneling(
     ports.into_iter().collect()
 }
 
-fn bounded_ip_helper_entries(
-    buffer_len: usize,
-    advertised_entries: u32,
-    entry_size: usize,
-) -> usize {
-    const TABLE_ENTRY_OFFSET: usize = std::mem::size_of::<u32>();
-    if buffer_len < TABLE_ENTRY_OFFSET || entry_size == 0 {
-        return 0;
-    }
-    let max_entries = buffer_len.saturating_sub(TABLE_ENTRY_OFFSET) / entry_size;
-    (advertised_entries as usize).min(max_entries)
+fn read_connection_owners() -> Result<ahash::AHashMap<ConnectionKey, u32>, (&'static str, u32)> {
+    use windows::Win32::NetworkManagement::IpHelper::*;
+    let mut connections = ahash::AHashMap::with_capacity(2048);
+    read_owner_rows(
+        |buffer, size| unsafe {
+            GetExtendedTcpTable(buffer, size, false, 2, TCP_TABLE_OWNER_PID_ALL, 0)
+        },
+        |entry: MIB_TCPROW_OWNER_PID| {
+            record_tcp_connection_owner(
+                &mut connections,
+                Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes()),
+                u16::from_be(entry.dwLocalPort as u16),
+                Ipv4Addr::from(entry.dwRemoteAddr.to_ne_bytes()),
+                u16::from_be(entry.dwRemotePort as u16),
+                entry.dwOwningPid,
+            );
+        },
+    )
+    .map_err(|code| ("TCP", code))?;
+    read_owner_rows(
+        |buffer, size| unsafe {
+            GetExtendedUdpTable(buffer, size, false, 2, UDP_TABLE_OWNER_PID, 0)
+        },
+        |entry: MIB_UDPROW_OWNER_PID| {
+            connections.insert(
+                ConnectionKey::new(
+                    Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes()),
+                    u16::from_be(entry.dwLocalPort as u16),
+                    Protocol::Udp,
+                ),
+                entry.dwOwningPid,
+            );
+        },
+    )
+    .map_err(|code| ("UDP", code))?;
+    Ok(connections)
+}
+
+fn record_tcp_connection_owner(
+    connections: &mut ahash::AHashMap<ConnectionKey, u32>,
+    local_ip: Ipv4Addr,
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+    pid: u32,
+) {
+    connections.insert(
+        ConnectionKey::tcp(local_ip, local_port, remote_ip, remote_port),
+        pid,
+    );
 }
 
 #[cfg(target_os = "windows")]
-fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
+fn tcp_row_owner_for_flow(
+    entry: &windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID,
+    local_ip: Ipv4Addr,
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+) -> Option<u32> {
+    (entry.dwOwningPid != 0
+        && Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes()) == local_ip
+        && u16::from_be(entry.dwLocalPort as u16) == local_port
+        && Ipv4Addr::from(entry.dwRemoteAddr.to_ne_bytes()) == remote_ip
+        && u16::from_be(entry.dwRemotePort as u16) == remote_port)
+        .then_some(entry.dwOwningPid)
+}
+
+#[cfg(target_os = "windows")]
+fn lookup_tcp_owner_pid(
+    local_ip: Ipv4Addr,
+    local_port: u16,
+    remote_ip: Ipv4Addr,
+    remote_port: u16,
+) -> Option<u32> {
     use windows::Win32::NetworkManagement::IpHelper::*;
 
     unsafe {
@@ -6814,10 +7260,10 @@ fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
             let entry = std::ptr::read_unaligned(
                 entry_base.add(i * entry_size) as *const MIB_TCPROW_OWNER_PID
             );
-            let entry_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
-            let entry_port = u16::from_be(entry.dwLocalPort as u16);
-            if entry_ip == local_ip && entry_port == local_port {
-                return Some(entry.dwOwningPid);
+            if let Some(pid) =
+                tcp_row_owner_for_flow(&entry, local_ip, local_port, remote_ip, remote_port)
+            {
+                return Some(pid);
             }
         }
     }
@@ -6826,8 +7272,30 @@ fn lookup_tcp_owner_pid(local_ip: Ipv4Addr, local_port: u16) -> Option<u32> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn lookup_tcp_owner_pid(_local_ip: Ipv4Addr, _local_port: u16) -> Option<u32> {
+fn lookup_tcp_owner_pid(
+    _local_ip: Ipv4Addr,
+    _local_port: u16,
+    _remote_ip: Ipv4Addr,
+    _remote_port: u16,
+) -> Option<u32> {
     None
+}
+
+fn tcp_packet_remote_endpoint(data: &[u8]) -> Option<(Ipv4Addr, u16)> {
+    let ip_start = parse_ipv4_header_offset(data)?;
+    if *data.get(ip_start + 9)? != 6 {
+        return None;
+    }
+    let ihl = ((*data.get(ip_start)? & 0xf) as usize) * 4;
+    if ihl < 20 {
+        return None;
+    }
+    let remote_ip =
+        Ipv4Addr::from(<[u8; 4]>::try_from(data.get(ip_start + 16..ip_start + 20)?).ok()?);
+    let remote_port = u16::from_be_bytes(
+        <[u8; 2]>::try_from(data.get(ip_start + ihl + 2..ip_start + ihl + 4)?).ok()?,
+    );
+    Some((remote_ip, remote_port))
 }
 
 #[cfg(target_os = "windows")]
@@ -6897,8 +7365,7 @@ fn run_cache_refresher(
     api_tunneling_enabled: Arc<AtomicBool>,
     mut initial_refresh_done: Option<crossbeam_channel::Sender<()>>,
 ) {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    use windows::Win32::NetworkManagement::IpHelper::*;
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
     log::info!(
         "Cache refresher started (event-driven, 2s fallback, {}ms API TCP fast path)",
@@ -6920,6 +7387,7 @@ fn run_cache_refresher(
     let mut system = System::new();
     let mut refresh_count = 0u64;
     let mut first_run = true;
+    let mut owner_read_failures = 0u64;
     let mut last_full_process_scan: Option<Instant> = None;
 
     loop {
@@ -6977,99 +7445,26 @@ fn run_cache_refresher(
             }
         }
 
-        let mut connections: ahash::AHashMap<ConnectionKey, u32> =
-            ahash::AHashMap::with_capacity(2048);
+        let owner_table_started_at = Instant::now();
+        let connections = match read_connection_owners() {
+            Ok(connections) => connections,
+            Err((protocol, code)) => {
+                owner_read_failures = owner_read_failures.saturating_add(1);
+                if super::relay_support::log_counter_example(owner_read_failures) {
+                    log::warn!(
+                        "Connection owner refresh failed: protocol={protocol} os_code={code} consecutive_failures={owner_read_failures}; preserving the previous complete snapshot"
+                    );
+                }
+                continue;
+            }
+        };
+        if owner_read_failures != 0 {
+            log::info!(
+                "Connection owner refresh recovered after {owner_read_failures} failed round(s)"
+            );
+            owner_read_failures = 0;
+        }
         let mut pid_names: ahash::AHashMap<u32, String> = ahash::AHashMap::with_capacity(512);
-
-        // Get TCP table
-        unsafe {
-            let mut size: u32 = 0;
-            let _ = GetExtendedTcpTable(
-                None,
-                &mut size,
-                false,
-                2,
-                TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
-                0,
-            );
-
-            if size > 0 {
-                let mut buffer = vec![0u8; size as usize];
-                if GetExtendedTcpTable(
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut size,
-                    false,
-                    2,
-                    TCP_TABLE_CLASS(TCP_TABLE_OWNER_PID_ALL.0),
-                    0,
-                ) == 0
-                {
-                    let header_size = std::mem::size_of::<u32>(); // dwNumEntries
-                    if buffer.len() >= header_size {
-                        let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
-                        let entry_size = std::mem::size_of::<MIB_TCPROW_OWNER_PID>();
-                        let safe_entries =
-                            bounded_ip_helper_entries(buffer.len(), num_entries, entry_size);
-                        let entry_base = buffer.as_ptr().add(header_size);
-
-                        for i in 0..safe_entries {
-                            let entry = std::ptr::read_unaligned(
-                                entry_base.add(i * entry_size) as *const MIB_TCPROW_OWNER_PID
-                            );
-                            let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
-                            let local_port = u16::from_be(entry.dwLocalPort as u16);
-                            let key = ConnectionKey::new(local_ip, local_port, Protocol::Tcp);
-                            connections.insert(key, entry.dwOwningPid);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Get UDP table
-        unsafe {
-            let mut size: u32 = 0;
-            let _ = GetExtendedUdpTable(
-                None,
-                &mut size,
-                false,
-                2,
-                UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
-                0,
-            );
-
-            if size > 0 {
-                let mut buffer = vec![0u8; size as usize];
-                if GetExtendedUdpTable(
-                    Some(buffer.as_mut_ptr() as *mut _),
-                    &mut size,
-                    false,
-                    2,
-                    UDP_TABLE_CLASS(UDP_TABLE_OWNER_PID.0),
-                    0,
-                ) == 0
-                {
-                    let header_size = std::mem::size_of::<u32>(); // dwNumEntries
-                    if buffer.len() >= header_size {
-                        let num_entries = std::ptr::read_unaligned(buffer.as_ptr() as *const u32);
-                        let entry_size = std::mem::size_of::<MIB_UDPROW_OWNER_PID>();
-                        let safe_entries =
-                            bounded_ip_helper_entries(buffer.len(), num_entries, entry_size);
-                        let entry_base = buffer.as_ptr().add(header_size);
-
-                        for i in 0..safe_entries {
-                            let entry = std::ptr::read_unaligned(
-                                entry_base.add(i * entry_size) as *const MIB_UDPROW_OWNER_PID
-                            );
-                            let local_ip = Ipv4Addr::from(entry.dwLocalAddr.to_ne_bytes());
-                            let local_port = u16::from_be(entry.dwLocalPort as u16);
-                            let key = ConnectionKey::new(local_ip, local_port, Protocol::Udp);
-                            connections.insert(key, entry.dwOwningPid);
-                        }
-                    }
-                }
-            }
-        }
 
         // OPTIMIZATION: Keep full process scans time-based so the API TCP fast
         // cadence does not turn them into once-per-second whole-system scans.
@@ -7093,14 +7488,18 @@ fn run_cache_refresher(
             last_full_process_scan = Some(Instant::now());
 
             // Full process scan - expensive, so it runs on a wall-clock interval.
-            // `UpdateKind::Always` so sysinfo overwrites the cached exe name
-            // when a PID has been reused by a different process since the last
-            // refresh (C7); `OnlyIfNotSet` would leave the stale tunnel-app
-            // name in place and let that app's traffic route incorrectly.
+            //
+            // Only `name()` is read below, and sysinfo takes that from the
+            // system process list it fetches anyway. PID reuse is handled by
+            // sysinfo itself: an entry whose start time no longer matches is
+            // rebuilt from scratch, name included. Asking for `exe` (this used
+            // `with_exe(UpdateKind::Always)`) never refreshed the name; it only
+            // added a cross-process `GetModuleFileNameExW` for every process on
+            // the machine every 5 seconds while the player was in a game.
             system.refresh_processes_specifics(
                 ProcessesToUpdate::All,
                 true,
-                ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+                ProcessRefreshKind::new(),
             );
 
             for pid in connections.values() {
@@ -7160,14 +7559,21 @@ fn run_cache_refresher(
         if api_tunneling_enabled.load(Ordering::Relaxed) {
             let explicit_tcp_ports =
                 collect_tunnel_tcp_ports_for_api_tunneling(&connections, &pid_names, tunnel_apps);
-            cache.update_with_recent_tcp_ports(
+            cache.update_observed_connections(
                 connections,
                 pid_names,
                 &explicit_tcp_ports,
-                Duration::from_secs(API_TUNNEL_TCP_PORT_RETENTION_SECS),
+                Some(Duration::from_secs(API_TUNNEL_TCP_PORT_RETENTION_SECS)),
+                owner_table_started_at,
             );
         } else {
-            cache.update_with_tcp_ports(connections, pid_names, &[]);
+            cache.update_observed_connections(
+                connections,
+                pid_names,
+                &[],
+                None,
+                owner_table_started_at,
+            );
         }
 
         if let Some(done) = initial_refresh_done.take() {
@@ -7609,13 +8015,6 @@ mod adapter_selection_log_tests {
     }
 }
 
-/// Deadline for the netsh calls that steer the IPv6 default route.
-///
-/// These run on connect and on teardown. A hang on teardown is the dangerous
-/// one: it would leave IPv6 steered off after the tunnel is gone.
-#[cfg(windows)]
-const NETSH_ROUTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// Roblox voice (WebRTC STUN/TURN) rides this port.
 const ROBLOX_VOICE_PORT: u16 = 3478;
 
@@ -7685,11 +8084,40 @@ fn queue_overflow_action(mode: QueueOverflowMode, data: &[u8]) -> QueueFullActio
     match mode {
         QueueOverflowMode::Drop => QueueFullAction::Drop,
         QueueOverflowMode::Bypass => {
-            if is_ipv4_fragment(data) {
-                QueueFullAction::Drop
-            } else {
-                QueueFullAction::Bypass
+            let Some(ip_start) = parse_ipv4_header_offset(data) else {
+                return QueueFullAction::Drop;
+            };
+            // These packets have already been assigned to the relay. Sending
+            // a TCP SYN direct then relaying its retry/ACK changes the source
+            // midway through the handshake; doing it to an active TCP flow
+            // can reset it. Let TCP retransmit on its captured path instead.
+            if data[ip_start + 9] != 17 || is_ipv4_fragment(data) {
+                return QueueFullAction::Drop;
             }
+            let dst = Ipv4Addr::new(
+                data[ip_start + 16],
+                data[ip_start + 17],
+                data[ip_start + 18],
+                data[ip_start + 19],
+            );
+            if super::cloud_game_routes::is_cloud_game_ip(dst) {
+                return QueueFullAction::Drop;
+            }
+            let transport = ip_start + usize::from(data[ip_start] & 0x0f) * 4;
+            let Some(port) = data.get(transport + 2..transport + 4) else {
+                return QueueFullAction::Drop;
+            };
+            let port = u16::from_be_bytes([port[0], port[1]]);
+            // These are already captured packets, not a new eligibility rule.
+            // Sending a game's first handshake direct under pressure and its
+            // next packet via the relay commits two different source addresses.
+            // Keep gameplay/STUN/voice on the captured path so it can retry.
+            if super::process_cache::is_likely_gameplay_udp(dst, port, Protocol::Udp)
+                || (!matches!(port, 53 | 443) && super::game_destination::contains(dst))
+            {
+                return QueueFullAction::Drop;
+            }
+            QueueFullAction::Bypass
         }
     }
 }
@@ -7770,29 +8198,103 @@ fn auto_routing_packet_action(
     AutoRoutingPacketAction::Pass
 }
 
-/// Per-worker inline cache for connection lookups
-/// This amortizes the expensive GetExtendedTcpTable syscall across multiple packets
-/// from the same connection. First packet: ~500μs, subsequent packets: <1μs
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Per-reader cache of UDP ownership hints and captured TCP connections.
+#[derive(Clone, Copy, Debug)]
 enum InlineCacheEntry {
-    Active,
-    FinSeen,
+    Udp,
+    Tcp {
+        initial_sequence: u32,
+        captured_at: Instant,
+    },
 }
 
-type InlineCache = ahash::AHashMap<(Ipv4Addr, u16, Protocol), InlineCacheEntry>;
-type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
+// A captured TCP connection is identified by its key and initial sequence.
+// The timestamp is only evidence for safe retirement, not a new flow identity.
+impl PartialEq for InlineCacheEntry {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Udp, Self::Udp) => true,
+            (
+                Self::Tcp {
+                    initial_sequence: left,
+                    ..
+                },
+                Self::Tcp {
+                    initial_sequence: right,
+                    ..
+                },
+            ) => left == right,
+            _ => false,
+        }
+    }
+}
+impl Eq for InlineCacheEntry {}
 
-fn prune_inline_cache_on_snapshot_refresh(inline_cache: &mut InlineCache, api_tunneling: bool) {
-    if !api_tunneling {
-        inline_cache.clear();
-        return;
+impl InlineCacheEntry {
+    fn tcp(initial_sequence: u32) -> Self {
+        Self::Tcp {
+            initial_sequence,
+            captured_at: Instant::now(),
+        }
     }
 
-    // UDP ownership entries must track the newest process snapshot, but captured
-    // Route Assist TCP flows must survive owner-table refreshes after their SYN
-    // was MSS-clamped and relayed. RST packets evict TCP entries immediately;
-    // FIN must stay cached so the final teardown ACK still uses the relay.
-    inline_cache.retain(|(_, _, protocol), _| *protocol == Protocol::Tcp);
+    fn initial_sequence(self) -> Option<u32> {
+        match self {
+            Self::Tcp {
+                initial_sequence, ..
+            } => Some(initial_sequence),
+            Self::Udp => None,
+        }
+    }
+
+    fn new_capture(protocol: Protocol, syn_sequence: Option<u32>) -> Option<Self> {
+        match protocol {
+            Protocol::Tcp => syn_sequence.map(Self::tcp),
+            Protocol::Udp => Some(Self::Udp),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum InlineCacheKey {
+    // UDP entries cache process ownership, not a destination's routing choice.
+    Udp(Ipv4Addr, u16),
+    // TCP entries record a captured SYN. A local port alone cannot identify
+    // the connection: Windows can reuse it with different remote endpoints.
+    Tcp(Ipv4Addr, u16, Ipv4Addr, u16),
+}
+
+type InlineCache = ahash::AHashMap<InlineCacheKey, InlineCacheEntry>;
+const MAX_INLINE_CACHE_ENTRIES: usize = 10_000;
+type FragmentKey = (Ipv4Addr, Ipv4Addr, u16, Protocol);
+
+fn prune_inline_cache_on_snapshot_refresh(
+    inline_cache: &mut InlineCache,
+    snapshot: &ProcessSnapshot,
+) {
+    inline_cache.retain(|key, entry| {
+        let (
+            InlineCacheKey::Tcp(local_ip, local_port, remote_ip, remote_port),
+            InlineCacheEntry::Tcp { captured_at, .. },
+        ) = (key, entry)
+        else {
+            return false; // UDP ownership must follow the latest process snapshot.
+        };
+        let Some(observed_at) = snapshot.owner_table_started_at else {
+            return true;
+        };
+        if observed_at <= *captured_at {
+            return true; // The query started before this SYN was captured.
+        }
+        // Keep every live/half-closed/TIME_WAIT socket, even if its PID is zero
+        // or no longer in tunnel scope. Only confirmed absence permits reuse.
+        snapshot.connections.contains_key(&ConnectionKey::tcp(
+            *local_ip,
+            *local_port,
+            *remote_ip,
+            *remote_port,
+        ))
+    });
 }
 
 fn process_name_in_tunnel_scope(name: &str, snapshot: &ProcessSnapshot) -> bool {
@@ -7927,6 +8429,37 @@ fn tcp_payload(data: &[u8], ip_start: usize, transport_start: usize) -> Option<&
     data.get(payload_start..ip_end)
 }
 
+#[inline]
+fn record_roblox_auth_route(
+    trace: &mut super::bypass_diag::RobloxAuthTrace,
+    ip: &[u8],
+    relay_selected: bool,
+) {
+    // IPv4 HTTPS only. Later fragments do not contain a TCP header.
+    let Some(header) = ip.get(..20) else {
+        return;
+    };
+    if u16::from_be_bytes([header[6], header[7]]) & 0x1FFF != 0 {
+        return;
+    }
+    let ihl = usize::from(header[0] & 0x0F) * 4;
+    if ihl < 20 {
+        return;
+    }
+    let Some([src_high, src_low, 0x01, 0xBB]) = ip.get(ihl..ihl + 4) else {
+        return;
+    };
+    if let Some(payload) = tcp_payload(ip, 0, ihl) {
+        let dst = Ipv4Addr::new(header[16], header[17], header[18], header[19]);
+        trace.record_client_hello(
+            payload,
+            dst,
+            u16::from_be_bytes([*src_high, *src_low]),
+            relay_selected,
+        );
+    }
+}
+
 /// Direction of a packet for tunnel-process flow accounting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum FlowAccountingDirection {
@@ -8041,7 +8574,12 @@ fn should_route_to_vpn_with_routing_flags(
         inline_cache,
         api_tunneling,
         udp_tunneling,
-        lookup_tcp_owner_pid,
+        |local_ip, local_port| {
+            // Parse the remote endpoint only when the slow owner lookup is
+            // needed. Established flows keep their existing O(1) cache path.
+            let (remote_ip, remote_port) = tcp_packet_remote_endpoint(data)?;
+            lookup_tcp_owner_pid(local_ip, local_port, remote_ip, remote_port)
+        },
     )
 }
 
@@ -8223,7 +8761,17 @@ where
     };
     let is_tcp_initial_syn =
         tcp_flags.is_some_and(|flags| (flags & 0x02) != 0 && (flags & 0x10) == 0);
-    let cache_key = (src_ip, src_port, protocol);
+    let tcp_syn_sequence = if is_tcp_initial_syn {
+        data.get(transport_start + 4..transport_start + 8)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map(u32::from_be_bytes)
+    } else {
+        None
+    };
+    let cache_key = match protocol {
+        Protocol::Udp => InlineCacheKey::Udp(src_ip, src_port),
+        Protocol::Tcp => InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+    };
 
     let is_full_country_ban_routing =
         crate::roblox_proxy::hosts::is_country_ban_bypass_routing_active();
@@ -8257,8 +8805,54 @@ where
     //
     // IMPORTANT: This is process-based only. Destination-based speculative tunneling
     // is handled below so we can seed the inline cache for game-server hits.
-    let snapshot_tunnel_hit = snapshot.should_tunnel(src_ip, src_port, protocol);
-    if snapshot_tunnel_hit && !(protocol == Protocol::Tcp && api_tunneling) {
+    let (snapshot_tunnel_hit, known_other_udp) = if protocol == Protocol::Udp {
+        // Resolve ownership once. A shared port on another interface must not
+        // override this packet's exact owner, or its wildcard-bound owner.
+        let owner = snapshot
+            .connections
+            .get(&ConnectionKey::new(src_ip, src_port, Protocol::Udp))
+            .or_else(|| {
+                snapshot.connections.get(&ConnectionKey::new(
+                    Ipv4Addr::UNSPECIFIED,
+                    src_port,
+                    Protocol::Udp,
+                ))
+            })
+            .copied();
+        let in_scope = owner.is_some_and(|pid| snapshot.is_tunnel_pid_public(pid));
+        let known_other =
+            !in_scope && owner.is_some_and(|pid| snapshot.pid_names.contains_key(&pid));
+        let country_ban_browser = known_other
+            && country_ban_relays_web
+            && dst_port == 443
+            && (super::process_cache::is_game_server(dst_ip, dst_port, protocol, false)
+                || crate::roblox_proxy::hosts::is_active_bootstrap_ip(dst_ip))
+            && owner
+                .and_then(|pid| snapshot.pid_names.get(&pid))
+                .is_some_and(|name| process_name_in_browser_http_scope(name));
+        (in_scope, known_other && !country_ban_browser)
+    } else {
+        (
+            snapshot.should_tunnel_flow(src_ip, src_port, protocol, dst_ip, dst_port),
+            false,
+        )
+    };
+    if known_other_udp {
+        // Invalidate old positive ownership and remember a direct decision for
+        // all fragments. Unknown owners still reach the existing startup fallback.
+        inline_cache.remove(&cache_key);
+        if more_fragments {
+            FRAGMENT_DECISIONS.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                if cache.len() >= 4096 {
+                    cache.clear();
+                }
+                cache.insert(fragment_key, false);
+            });
+        }
+        return false;
+    }
+    if snapshot_tunnel_hit && protocol != Protocol::Tcp {
         SNAPSHOT_HITS.with(|c| c.set(c.get() + 1));
         let result = if protocol == Protocol::Udp {
             should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
@@ -8286,37 +8880,23 @@ where
     // mutually exclusive with SNAPSHOT_HITS.
 
     // Phase 2: Check per-worker inline cache (fast path, O(1))
-    // Cache ONLY stores TRUE results (v0.9.25) - finding key means it's a tunnel app
-    if inline_cache.contains_key(&cache_key) {
-        let recycled_tcp_syn = protocol == Protocol::Tcp && is_tcp_initial_syn;
+    // UDP entries identify tunnel ownership; TCP entries identify one captured
+    // connection, including its remote address and port.
+    if let Some(entry) = inline_cache.get(&cache_key).copied() {
+        let recycled_tcp_syn = protocol == Protocol::Tcp
+            && is_tcp_initial_syn
+            && entry.initial_sequence() != tcp_syn_sequence;
         if recycled_tcp_syn {
             inline_cache.remove(&cache_key);
         } else {
             INLINE_HITS.with(|c| c.set(c.get() + 1));
-            let evict_after_route = if protocol == Protocol::Tcp {
-                let entry = inline_cache
-                    .get_mut(&cache_key)
-                    .expect("checked contains_key");
-                let flags = tcp_flags.unwrap_or(0);
-                if (flags & 0x04) != 0 {
-                    true
-                } else if *entry == InlineCacheEntry::FinSeen {
-                    // Bare ACKs after a local FIN can still acknowledge
-                    // in-flight server data in a half-closed connection.
-                    // Keep routing until RST, a second FIN, or a future SYN
-                    // reclassifies a recycled port.
-                    (flags & 0x01) != 0
-                } else if (flags & 0x01) != 0 {
-                    *entry = InlineCacheEntry::FinSeen;
-                    false
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            let result = if protocol == Protocol::Tcp && api_tunneling {
-                !dst_is_direct_tcp && (country_ban_relays_web || is_route_assist_control_tcp_dst)
+            let evict_after_route =
+                protocol == Protocol::Tcp && tcp_flags.is_some_and(|flags| flags & 0x04 != 0);
+            let result = if protocol == Protocol::Tcp {
+                // A captured SYN commits this full tuple to the relay. DNS,
+                // SNI and DPI hints, or API opt-out, can only affect new flows.
+                // Re-evaluating them here changes the source mid-connection.
+                true
             } else if protocol == Protocol::Udp {
                 should_relay_udp_for_mode(dst_ip, dst_port, protocol, is_full_country_ban_routing)
             } else {
@@ -8326,7 +8906,7 @@ where
             if result && protocol == Protocol::Tcp && api_tunneling && dst_port == 443 {
                 maybe_learn_direct_only_destination(data, ip_start, transport_start, dst_ip);
             }
-            if evict_after_route || (protocol == Protocol::Tcp && api_tunneling && !result) {
+            if evict_after_route {
                 inline_cache.remove(&cache_key);
             }
             if more_fragments {
@@ -8405,11 +8985,19 @@ where
             && matches!(dst_port, 80 | 443)
             && country_ban_relays_web
             && !dst_is_direct_tcp;
-        let tcp_api_bootstrap_owner = if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit {
-            tcp_owner_lookup(src_ip, src_port)
-        } else {
-            None
-        };
+        // The owner lookup reads the whole TCP table (and may open the owning
+        // process) on the reader thread, stalling every queued packet. Only do
+        // it when the owner can change the decision: a Route Assist control
+        // host, or Full Country Ban web traffic. Elsewhere the SYN stays
+        // direct whoever owns it.
+        let owner_can_change_decision =
+            is_route_assist_http_dst || is_full_country_ban_owner_missing_http_dst;
+        let tcp_api_bootstrap_owner =
+            if is_tcp_api_bootstrap_syn && !snapshot_tunnel_hit && owner_can_change_decision {
+                tcp_owner_lookup(src_ip, src_port)
+            } else {
+                None
+            };
         let (tcp_api_bootstrap_owned_by_tunnel, tcp_api_bootstrap_owned_by_browser) =
             if is_tcp_api_bootstrap_syn && snapshot_tunnel_hit {
                 (true, false)
@@ -8446,13 +9034,24 @@ where
         let tcp_api_bootstrap_allowed = is_tcp_api_bootstrap_syn
             && !dst_is_direct_tcp
             && !tcp_api_bootstrap_known_unrelated
-            && tcp_api_bootstrap_destination_allowed;
+            && tcp_api_bootstrap_destination_allowed
+            // A relayed SYN needs recorded ownership for every later packet.
+            // Keep a new flow direct from its first packet if the bounded
+            // ownership cache cannot admit it. Reused ports were cleared above.
+            && inline_cache.len() < MAX_INLINE_CACHE_ENTRIES;
         let is_game_dst = if protocol == Protocol::Udp {
             super::process_cache::is_game_server(dst_ip, dst_port, protocol, api_tunneling)
+                && should_relay_udp_for_mode(
+                    dst_ip,
+                    dst_port,
+                    protocol,
+                    is_full_country_ban_routing,
+                )
         } else {
             (is_full_country_ban_effective_http_dst || is_route_assist_http_dst)
                 && is_tcp_initial_syn
                 && !tcp_api_bootstrap_known_unrelated
+                && inline_cache.len() < MAX_INLINE_CACHE_ENTRIES
         };
         // Record what this destination was decided to be, relayed or not.
         //
@@ -8532,18 +9131,18 @@ where
                 }
             }
 
-            // Cache speculative hit so subsequent packets from this source port
-            // use the fast inline cache path. Critical for V3 mode where
+            // Cache speculative hits so later packets from this UDP endpoint
+            // or exact TCP connection use the fast inline cache path. Critical for V3 mode where
             // inline_connection_lookup is disabled (stability fix v1.0.8).
             // Without this, every V3 packet re-does the speculative IP range check.
             //
             // TCP API bootstrap SYNs must seed the inline cache too; otherwise
             // the SYN is tunneled but the following ACK/request can bypass
             // before the Windows owner table publishes the source port.
-            if (protocol == Protocol::Udp || protocol == Protocol::Tcp)
-                && inline_cache.len() < 10000
+            if inline_cache.len() < MAX_INLINE_CACHE_ENTRIES
+                && let Some(entry) = InlineCacheEntry::new_capture(protocol, tcp_syn_sequence)
             {
-                inline_cache.insert(cache_key, InlineCacheEntry::Active);
+                inline_cache.insert(cache_key, entry);
             }
 
             true // Speculatively tunnel to game server
@@ -8566,8 +9165,13 @@ where
         }
     };
 
-    if is_tunnel_app && result && !dst_is_direct_tcp && inline_cache.len() < 10000 {
-        inline_cache.insert(cache_key, InlineCacheEntry::Active);
+    if is_tunnel_app
+        && result
+        && !dst_is_direct_tcp
+        && inline_cache.len() < MAX_INLINE_CACHE_ENTRIES
+        && let Some(entry) = InlineCacheEntry::new_capture(protocol, tcp_syn_sequence)
+    {
+        inline_cache.insert(cache_key, entry);
     }
 
     if more_fragments {
@@ -9590,6 +10194,464 @@ fn should_log_no_inbound_warning(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn passthrough_errors_are_bounded_per_direction_and_success_resets_the_streak() {
+        let mut outbound = PassthroughSendHealth::default();
+        let mut inbound = PassthroughSendHealth::default();
+        assert!(
+            outbound
+                .forward("adapter", 64, false, || Err("owned failure"))
+                .is_ok()
+        );
+        assert_eq!(outbound.consecutive_errors, 1);
+        assert!(
+            inbound
+                .forward("Windows stack", 64, false, || Ok::<(), &str>(()))
+                .is_ok()
+        );
+        assert_eq!(
+            outbound.consecutive_errors, 1,
+            "the opposite direction must not hide failure"
+        );
+        outbound
+            .forward::<&str>("adapter", 0, false, || panic!("empty batch must not send"))
+            .unwrap();
+        let drained = std::cell::Cell::new(false);
+        outbound
+            .forward("adapter", 64, true, || {
+                drained.set(true);
+                Err("owned driver-close race")
+            })
+            .unwrap();
+        assert!(
+            drained.get(),
+            "orderly shutdown still attempts to drain captured traffic"
+        );
+        assert_eq!(
+            outbound.consecutive_errors, 1,
+            "an empty batch or failed shutdown drain cannot claim recovery"
+        );
+        outbound
+            .forward("adapter", 64, false, || Ok::<(), &str>(()))
+            .unwrap();
+        assert_eq!(outbound.consecutive_errors, 0);
+        assert_eq!(outbound.total_errors, 1);
+        let at = std::time::Instant::now();
+        for _ in 0..100 {
+            assert!(
+                outbound
+                    .forward_with_clock("adapter", 64, false, || Err("owned failure"), || at)
+                    .is_ok()
+            );
+        }
+        let error = outbound
+            .forward_with_clock(
+                "adapter",
+                64,
+                false,
+                || Err("owned native error"),
+                || at + PASSTHROUGH_SEND_FAILURE_GRACE,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(error, VpnError::PacketForwardingFailed(ref detail) if detail.contains("adapter") && detail.contains("owned native error"))
+        );
+        assert_eq!(inbound.consecutive_errors, 0);
+    }
+
+    #[test]
+    fn missing_worker_adapter_reports_failure_instead_of_silently_dropping_each_packet() {
+        use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+        let mut snapshot = super::WorkerAdapterSnapshot::new(|| Ok(vec!["old-adapter"])).unwrap();
+        assert_eq!(
+            snapshot.select(
+                |name| *name == "selected-adapter",
+                || Ok(vec!["old-adapter", "selected-adapter"]),
+                "selected-adapter"
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            snapshot.select(
+                |name| *name == "selected-adapter",
+                || panic!("do not refresh a working snapshot"),
+                "selected-adapter"
+            ),
+            Ok(1)
+        );
+        assert!(
+            snapshot
+                .select(
+                    |name| *name == "missing-adapter",
+                    || panic!("one refresh only"),
+                    "missing-adapter"
+                )
+                .is_err()
+        );
+        let stop = AtomicBool::new(false);
+        let cause = AtomicU8::new(0);
+        let processed = std::cell::Cell::new(false);
+        super::supervise_network_worker("owned adapter fixture", &stop, &cause, || {
+            let mut snapshot = super::WorkerAdapterSnapshot::new(|| Ok(vec!["old-adapter"]))?;
+            snapshot.select(
+                |name| *name == "new-adapter",
+                || Ok(vec!["other-adapter"]),
+                "new-adapter",
+            )?;
+            processed.set(true);
+            Ok(())
+        });
+        assert!(
+            !processed.get(),
+            "missing adapter traffic must not be processed"
+        );
+        assert_eq!(
+            super::WorkerPanicCause::from_u8(cause.load(Ordering::Acquire)),
+            Some(super::WorkerPanicCause::InternalThreadFailed)
+        );
+    }
+
+    #[test]
+    fn initial_worker_enumeration_error_uses_the_same_single_retry_budget() {
+        let mut calls = 0;
+        let mut snapshot = super::WorkerAdapterSnapshot::new(|| {
+            calls += 1;
+            if calls == 1 {
+                Err("owned transient error".into())
+            } else {
+                Ok(vec!["selected"])
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(
+            snapshot.select(
+                |name| *name == "selected",
+                || panic!("already retried"),
+                "selected"
+            ),
+            Ok(0)
+        );
+        assert!(
+            snapshot
+                .select(
+                    |name| *name == "missing",
+                    || panic!("already retried"),
+                    "missing"
+                )
+                .is_err()
+        );
+        let mut failures = 0;
+        assert!(
+            super::WorkerAdapterSnapshot::<&str>::new(|| {
+                failures += 1;
+                Err("owned persistent error".into())
+            })
+            .is_err()
+        );
+        assert_eq!(failures, 2);
+    }
+
+    #[test]
+    fn passthrough_requires_both_failure_count_and_elapsed_time_and_resets_both() {
+        let at = std::time::Instant::now();
+        let mut health = PassthroughSendHealth::default();
+        for step in 0..2 {
+            health
+                .forward_with_clock(
+                    "adapter",
+                    1,
+                    false,
+                    || Err("fixture"),
+                    || at + PASSTHROUGH_SEND_FAILURE_GRACE * step,
+                )
+                .unwrap();
+        }
+        // A real success after the grace window ends the entire old streak.
+        health
+            .forward_with_clock(
+                "adapter",
+                1,
+                false,
+                || Ok::<(), &str>(()),
+                || panic!("success must not read the clock"),
+            )
+            .unwrap();
+        assert!(health.first_error_at.is_none());
+        let new_start = at + PASSTHROUGH_SEND_FAILURE_GRACE * 3;
+        for _ in 0..PASSTHROUGH_SEND_FAILURE_LIMIT {
+            health
+                .forward_with_clock("adapter", 1, false, || Err("fixture"), || new_start)
+                .unwrap();
+        }
+        assert!(
+            health
+                .forward_with_clock(
+                    "adapter",
+                    1,
+                    false,
+                    || Err("fixture"),
+                    || new_start + PASSTHROUGH_SEND_FAILURE_GRACE
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn repeated_health_windows_cannot_reenable_unbounded_relay_failure_logs() {
+        let mut lifetime_failures = 0;
+        let mut health_window_failures = 0;
+        let mut warnings = 0;
+        for _ in 0..1_000_000 {
+            health_window_failures += 1;
+            warnings += usize::from(super::sample_forward_failure(&mut lifetime_failures));
+            if health_window_failures == 100 {
+                health_window_failures = 0;
+            }
+        }
+        assert_eq!(lifetime_failures, 1_000_000);
+        assert!(
+            warnings <= 25,
+            "persistent failure generated {warnings} warning opportunities"
+        );
+    }
+
+    #[test]
+    fn shared_tcp_port_does_not_inherit_the_last_programs_identity() {
+        let local_ip = std::net::Ipv4Addr::new(10, 0, 0, 20);
+        let game = std::net::Ipv4Addr::new(128, 116, 47, 3);
+        let other = std::net::Ipv4Addr::new(1, 1, 1, 1);
+        let mut rows = [(game, 443, 111), (other, 443, 222), (game, 80, 333)];
+        for _ in 0..2 {
+            let mut connections = ahash::AHashMap::new();
+            for (remote, port, pid) in rows {
+                super::record_tcp_connection_owner(
+                    &mut connections,
+                    local_ip,
+                    55000,
+                    remote,
+                    port,
+                    pid,
+                );
+            }
+            let mut snapshot = super::ProcessSnapshot::empty(ahash::AHashSet::new());
+            snapshot.connections = connections;
+            snapshot.tunnel_pids.insert(111);
+            assert_eq!(snapshot.connections.len(), 3);
+            assert!(snapshot.should_tunnel_flow(local_ip, 55000, super::Protocol::Tcp, game, 443));
+            assert!(!snapshot.should_tunnel_flow(
+                local_ip,
+                55000,
+                super::Protocol::Tcp,
+                other,
+                443
+            ));
+            assert!(!snapshot.should_tunnel_flow(local_ip, 55000, super::Protocol::Tcp, game, 80));
+            // A new connection absent from this snapshot must not inherit
+            // the known Roblox owner's local port while refresh is pending.
+            assert!(!snapshot.should_tunnel_flow(
+                local_ip,
+                55000,
+                super::Protocol::Tcp,
+                game,
+                8080
+            ));
+            rows.reverse();
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_tcp_owner_lookup_matches_both_endpoints_not_table_order() {
+        use windows::Win32::NetworkManagement::IpHelper::MIB_TCPROW_OWNER_PID;
+        let local = std::net::Ipv4Addr::new(10, 0, 0, 20);
+        let remote = std::net::Ipv4Addr::new(128, 116, 47, 3);
+        let row = MIB_TCPROW_OWNER_PID {
+            dwLocalAddr: u32::from_ne_bytes(local.octets()),
+            dwLocalPort: 55000u16.to_be() as u32,
+            dwRemoteAddr: u32::from_ne_bytes(remote.octets()),
+            dwRemotePort: 443u16.to_be() as u32,
+            dwOwningPid: 111,
+            ..Default::default()
+        };
+        let mut rows = vec![
+            MIB_TCPROW_OWNER_PID {
+                dwRemoteAddr: u32::from_ne_bytes([1, 1, 1, 1]),
+                dwOwningPid: 222,
+                ..row
+            },
+            MIB_TCPROW_OWNER_PID {
+                dwRemotePort: 80u16.to_be() as u32,
+                dwOwningPid: 333,
+                ..row
+            },
+            MIB_TCPROW_OWNER_PID {
+                dwLocalPort: 55001u16.to_be() as u32,
+                dwOwningPid: 444,
+                ..row
+            },
+            MIB_TCPROW_OWNER_PID {
+                dwLocalAddr: u32::from_ne_bytes([10, 0, 0, 21]),
+                dwOwningPid: 555,
+                ..row
+            },
+            MIB_TCPROW_OWNER_PID {
+                dwOwningPid: 0,
+                ..row
+            },
+            row,
+        ];
+        for _ in 0..2 {
+            let matches: Vec<_> = rows
+                .iter()
+                .filter_map(|entry| super::tcp_row_owner_for_flow(entry, local, 55000, remote, 443))
+                .collect();
+            assert_eq!(matches, vec![111]);
+            rows.reverse();
+        }
+        let packet = build_ipv4_frame(6, local, remote, 55000, 443);
+        assert_eq!(
+            super::tcp_packet_remote_endpoint(&packet),
+            Some((remote, 443))
+        );
+        assert!(super::tcp_packet_remote_endpoint(&packet[..packet.len().min(36)]).is_none());
+    }
+
+    #[test]
+    fn packet_worker_failures_reach_the_connection_monitor() {
+        use super::{AtomicBool, AtomicU8, Ordering, WorkerPanicCause, supervise_network_worker};
+        for outcome in 0..3 {
+            let failed = Arc::new(AtomicU8::new(0));
+            let reported = failed.clone();
+            // Exercise the actual thread wrapper, without opening the network
+            // driver: startup error, panic and an unexpected normal exit.
+            std::thread::spawn(move || {
+                supervise_network_worker(
+                    "Packet worker fixture",
+                    &AtomicBool::new(false),
+                    &reported,
+                    || match outcome {
+                        0 => Err("fixture driver handle unavailable".into()),
+                        1 => panic!("fixture worker panic"),
+                        _ => Ok(()),
+                    },
+                );
+            })
+            .join()
+            .unwrap();
+            assert_eq!(
+                WorkerPanicCause::from_u8(failed.load(Ordering::Acquire)),
+                Some(WorkerPanicCause::InternalThreadFailed)
+            );
+        }
+    }
+
+    #[test]
+    fn requested_worker_stop_is_clean_and_prior_failure_is_preserved() {
+        use super::{AtomicBool, AtomicU8, Ordering, WorkerPanicCause, supervise_network_worker};
+        let stop = AtomicBool::new(false);
+        let failure = AtomicU8::new(0);
+        supervise_network_worker("Packet worker fixture", &stop, &failure, || {
+            stop.store(true, Ordering::Release);
+            Ok(())
+        });
+        assert_eq!(failure.load(Ordering::Acquire), 0);
+        failure.store(
+            WorkerPanicCause::ReaderHandleLost.as_u8(),
+            Ordering::Release,
+        );
+        supervise_network_worker("Refresher fixture", &stop, &failure, || {
+            Err("secondary failure".into())
+        });
+        assert_eq!(
+            WorkerPanicCause::from_u8(failure.load(Ordering::Acquire)),
+            Some(WorkerPanicCause::ReaderHandleLost)
+        );
+    }
+
+    #[test]
+    fn restart_cannot_revive_a_worker_that_has_not_finished_stopping() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::{Duration, Instant};
+        let stop = Arc::new(AtomicBool::new(true));
+        let previous_stop = stop.clone();
+        let (ready, started) = mpsc::channel();
+        let (release, stalled) = mpsc::channel();
+        let (observed, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            let _ = stalled.recv();
+            observed
+                .send(previous_stop.load(Ordering::Acquire))
+                .unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(!super::join_with_timeout(worker, "Stalled-fixture"));
+        let (release_second, stalled_second) = mpsc::channel();
+        let (observed_second, second_result) = mpsc::channel();
+        let second_stop = stop.clone();
+        // Represent another timed-out worker without spending a second
+        // three-second join budget in this regression.
+        super::STOPPING_THREADS
+            .lock()
+            .push(std::thread::spawn(move || {
+                let _ = stalled_second.recv();
+                let _ = observed_second.send(second_stop.load(Ordering::Acquire));
+            }));
+        let restart = super::prepare_worker_start(&stop);
+        let still_stopping = stop.load(Ordering::Acquire);
+        let marker_cleared = std::cell::Cell::new(false);
+        assert!(!super::finish_tunnel_mode_cleanup(true, || marker_cleared.set(true)));
+        assert!(
+            !marker_cleared.get(),
+            "a mode snapshot erased recovery while a worker could still change it"
+        );
+        release.send(()).unwrap();
+        let old_worker_saw_stop = result.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(
+            restart.is_err(),
+            "a replacement was admitted while its predecessor was still running"
+        );
+        assert!(
+            still_stopping && old_worker_saw_stop,
+            "restart revived the old session's worker"
+        );
+        assert!(
+            super::prepare_worker_start(&stop).is_err(),
+            "one finished worker hid another still stopping"
+        );
+        release_second.send(()).unwrap();
+        assert!(second_result.recv_timeout(Duration::from_secs(3)).unwrap());
+        // Once its real exit is observed, retry must work without requiring
+        // an app restart or keeping a permanent leaked-thread lockout.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if super::prepare_worker_start(&stop).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "finished worker stranded future connections"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!stop.load(Ordering::Acquire));
+        assert!(!super::finish_tunnel_mode_cleanup(false, || marker_cleared.set(true)));
+        assert!(!marker_cleared.get());
+        assert!(super::finish_tunnel_mode_cleanup(true, || marker_cleared.set(true)));
+        assert!(marker_cleared.get());
+    }
+
+    #[test]
+    fn reader_wakes_quickly_only_while_cloud_packets_are_held() {
+        assert_eq!(super::reader_wait_timeout_ms(false), 100);
+        assert!(super::reader_wait_timeout_ms(true) <= 10);
+    }
+
+    #[test]
     fn binding_preflight_timeout_cannot_request_adapter_choice_or_recommend_a_down_adapter() {
         use super::{
             BindingCandidateInfo, BindingPreflightInfo, VpnError, validated_binding_preflight,
@@ -9962,13 +11024,23 @@ mod tests {
             "sleeping charged {idle_cost} units of CPU, so this is measuring wall clock"
         );
 
+        // Spin until the work itself has been charged, not for a fixed wall
+        // time. On a loaded machine this thread can be off the CPU for most of
+        // a 120ms window, and Windows only updates the figure every clock tick
+        // (about 15ms), so a fixed window sometimes charged nothing and the
+        // test failed without anything being wrong. The wall limit only stops
+        // a broken clock from hanging the suite.
         let busy_before = thread_cpu_time_100ns().unwrap();
-        let spin_until = std::time::Instant::now() + std::time::Duration::from_millis(120);
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut sink = 0u64;
-        while std::time::Instant::now() < spin_until {
-            sink = sink.wrapping_add(1);
+        while thread_cpu_time_100ns().unwrap() - busy_before <= idle_cost.max(300_000)
+            && std::time::Instant::now() < give_up
+        {
+            for _ in 0..10_000 {
+                sink = sink.wrapping_add(1);
+            }
+            std::hint::black_box(sink);
         }
-        std::hint::black_box(sink);
         let busy_cost = thread_cpu_time_100ns().unwrap() - busy_before;
 
         assert!(
@@ -9978,42 +11050,6 @@ mod tests {
         assert!(
             thread_cpu_time_100ns().unwrap() >= start,
             "thread CPU time must not go backwards"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn ipv6_route_steer_builds_expected_netsh_commands() {
-        // Disable: stop router discovery (non-persistent) so apps fall back to
-        // IPv4 instantly instead of stalling on black-holed IPv6.
-        assert_eq!(
-            ParallelInterceptor::ipv6_router_discovery_args(12, false),
-            vec![
-                "interface",
-                "ipv6",
-                "set",
-                "interface",
-                "interface=12",
-                "routerdiscovery=disabled",
-                "store=active",
-            ]
-        );
-        // Restore re-enables it so the default route is re-learned via RA.
-        assert_eq!(
-            ParallelInterceptor::ipv6_router_discovery_args(12, true)[5],
-            "routerdiscovery=enabled"
-        );
-        assert_eq!(
-            ParallelInterceptor::ipv6_delete_default_route_args(12),
-            vec![
-                "interface",
-                "ipv6",
-                "delete",
-                "route",
-                "prefix=::/0",
-                "interface=12",
-                "store=active",
-            ]
         );
     }
 
@@ -10229,6 +11265,221 @@ mod tests {
         frame[transport_start + 2..transport_start + 4].copy_from_slice(&dst_port.to_be_bytes());
 
         frame
+    }
+
+    #[test]
+    fn owner_table_growth_is_retried_before_delivering_any_rows() {
+        let mut calls = 0;
+        let mut rows = Vec::new();
+        read_owner_rows(
+            |buffer, size| {
+                calls += 1;
+                match calls {
+                    1 => {
+                        assert!(buffer.is_none());
+                        *size = 8;
+                        122
+                    }
+                    2 => {
+                        assert!(buffer.is_some());
+                        *size = 12;
+                        122
+                    }
+                    3 => {
+                        let buffer = buffer.unwrap().cast::<u32>();
+                        unsafe {
+                            buffer.write(2);
+                            buffer.add(1).write(17);
+                            buffer.add(2).write(42);
+                        }
+                        *size = 12;
+                        0
+                    }
+                    _ => panic!("retry budget exceeded"),
+                }
+            },
+            |row: u32| rows.push(row),
+        )
+        .unwrap();
+        assert_eq!(calls, 3);
+        assert_eq!(rows, [17, 42]);
+    }
+
+    #[test]
+    fn owner_table_read_leaves_room_for_sockets_opened_after_the_size_probe() {
+        let mut calls = 0;
+        let mut rows = Vec::new();
+        read_owner_rows(
+            |buffer, size| {
+                calls += 1;
+                let Some(buffer) = buffer else {
+                    *size = 8; // one row
+                    return 122;
+                };
+                // A second socket opened after the probe. It must still fit.
+                assert!(*size >= 12, "the read asked for no spare room");
+                let buffer = buffer.cast::<u32>();
+                unsafe {
+                    buffer.write(2);
+                    buffer.add(1).write(17);
+                    buffer.add(2).write(42);
+                }
+                *size = 12;
+                0
+            },
+            |row: u32| rows.push(row),
+        )
+        .unwrap();
+        assert_eq!(calls, 2, "a grown table cost an extra round");
+        assert_eq!(rows, [17, 42]);
+    }
+
+    #[test]
+    fn incomplete_owner_tables_never_publish_partial_or_empty_results() {
+        for failure in [5u32, 122, 13, 14, 15] {
+            let mut calls = 0;
+            let mut delivered = 0;
+            let result = read_owner_rows(
+                |buffer, size| {
+                    calls += 1;
+                    if buffer.is_none() {
+                        *size = 8;
+                        return 122;
+                    }
+                    if failure == 5 {
+                        return 5;
+                    }
+                    if failure == 122 {
+                        *size += 4;
+                        return 122;
+                    }
+                    unsafe {
+                        let buffer = buffer.unwrap().cast::<u32>();
+                        // Two advertised rows cannot fit into the eight-byte reply.
+                        buffer.write(if failure == 13 { 2 } else { 0 });
+                        buffer.add(1).write(17);
+                    }
+                    *size = if failure == 14 {
+                        3
+                    } else if failure == 15 {
+                        // A reply larger than the buffer it was given.
+                        *size + 4
+                    } else {
+                        8
+                    };
+                    0
+                },
+                |_row: u32| delivered += 1,
+            );
+            assert_eq!(
+                result,
+                Err(if failure == 5 || failure == 122 {
+                    failure
+                } else {
+                    13
+                })
+            );
+            assert_eq!(
+                delivered, 0,
+                "a failed refresh must not supply a replacement snapshot"
+            );
+            assert_eq!(calls, if failure == 122 { 4 } else { 2 });
+        }
+        let mut calls = 0;
+        assert_eq!(
+            read_owner_rows(
+                |_, size| {
+                    calls += 1;
+                    *size = u32::MAX;
+                    122
+                },
+                |_: u32| panic!("no allocation or rows permitted")
+            ),
+            Err(8)
+        );
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_real_half_closed_windows_tcp_socket_keeps_its_captured_path() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let src_port = client.local_addr().unwrap().port();
+        let dst_port = listener.local_addr().unwrap().port();
+        let ip = Ipv4Addr::LOCALHOST;
+        let key = InlineCacheKey::Tcp(ip, src_port, ip, dst_port);
+        let mut captures = InlineCache::from_iter([(
+            key,
+            InlineCacheEntry::Tcp {
+                initial_sequence: 1,
+                captured_at: Instant::now() - Duration::from_secs(1),
+            },
+        )]);
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let started = Instant::now();
+        let owners = read_connection_owners().unwrap();
+        assert!(
+            owners.contains_key(&ConnectionKey::tcp(ip, src_port, ip, dst_port)),
+            "Windows must still report this half-closed socket"
+        );
+        let mut snapshot = ProcessSnapshot::empty(Default::default());
+        snapshot.connections = owners;
+        snapshot.owner_table_started_at = Some(started);
+        prune_inline_cache_on_snapshot_refresh(&mut captures, &snapshot);
+        assert!(
+            captures.contains_key(&key),
+            "a FIN cannot retire a socket still present in Windows"
+        );
+    }
+
+    #[test]
+    fn native_owner_tables_identify_owned_loopback_sockets() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let owners = read_connection_owners().expect("read-only native owner query");
+        let loopback = Ipv4Addr::LOCALHOST;
+        assert_eq!(
+            owners.get(&ConnectionKey::tcp(
+                loopback,
+                client.local_addr().unwrap().port(),
+                loopback,
+                listener.local_addr().unwrap().port()
+            )),
+            Some(&std::process::id())
+        );
+        assert_eq!(
+            owners.get(&ConnectionKey::new(
+                loopback,
+                udp.local_addr().unwrap().port(),
+                Protocol::Udp
+            )),
+            Some(&std::process::id())
+        );
+    }
+
+    #[test]
+    fn a_successful_empty_owner_table_is_distinct_from_a_failed_read() {
+        let mut calls = 0;
+        let mut delivered = 0;
+        let result = read_owner_rows(
+            |buffer, size| {
+                calls += 1;
+                *size = 4;
+                if let Some(buffer) = buffer {
+                    unsafe { buffer.cast::<u32>().write(0) };
+                    0
+                } else {
+                    122
+                }
+            },
+            |_: u32| delivered += 1,
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(calls, 2);
+        assert_eq!(delivered, 0);
     }
 
     #[test]
@@ -10710,6 +11961,27 @@ mod tests {
             ParallelInterceptor::select_best_physical_candidate(&candidates, Some(77), false)
                 .expect("expected a best candidate");
         assert_eq!(selected.friendly_name, "NordVPN Tunnel");
+    }
+
+    #[test]
+    fn driver_adapter_list_answers_the_binding_question_by_guid() {
+        let names = [
+            r"\DEVICE\{F3676A4E-A75E-4F44-878A-0A5DE51078BC}",
+            r"\DEVICE\{4C54BC71-312B-48F7-A0DF-D3EEEAAB3D7B}",
+        ];
+        let listed = |guid: &str| {
+            ParallelInterceptor::adapter_names_include_guid(names.iter().copied(), guid)
+        };
+        // The driver reports upper case; the route lookup yields lower case.
+        assert!(listed("4c54bc71-312b-48f7-a0df-d3eeeaab3d7b"));
+        // An adapter the filter is not attached to is simply absent, and an
+        // unknown GUID must never be read as "bound".
+        assert!(!listed("00000000-0000-0000-0000-000000000000"));
+        assert!(!listed(""));
+        assert!(!ParallelInterceptor::adapter_names_include_guid(
+            std::iter::empty(),
+            "4c54bc71-312b-48f7-a0df-d3eeeaab3d7b"
+        ));
     }
 
     #[test]
@@ -11358,37 +12630,100 @@ mod tests {
     }
 
     #[test]
-    fn test_select_best_physical_candidate_keeps_down_when_no_up_known() {
-        let candidates = vec![
-            PhysicalCandidate {
-                idx: 0,
-                guid: "eth-guid".to_string(),
-                friendly_name: "Ethernet".to_string(),
-                description: "Ethernet".to_string(),
-                kind: "ethernet".to_string(),
-                internal_name: "eth".to_string(),
-                if_index: Some(20),
-                score: 9000,
-                is_up: Some(false),
-            },
-            PhysicalCandidate {
-                idx: 1,
-                guid: "wifi-guid".to_string(),
-                friendly_name: "Wi-Fi".to_string(),
-                description: "Wi-Fi".to_string(),
-                kind: "wifi".to_string(),
-                internal_name: "wifi".to_string(),
-                if_index: Some(11),
-                score: 1,
-                is_up: Some(false),
-            },
-        ];
-
-        let selected =
-            ParallelInterceptor::select_best_physical_candidate(&candidates, None, false)
-                .expect("should select a candidate");
-
-        assert_eq!(selected.friendly_name, "Ethernet");
+    fn known_down_adapters_cannot_be_selected_by_any_binding_fallback() {
+        let mut candidate = PhysicalCandidate {
+            idx: 0,
+            guid: "eth-guid".into(),
+            friendly_name: "Ethernet".into(),
+            description: "Ethernet".into(),
+            kind: "ethernet".into(),
+            internal_name: "\\DEVICE\\{01234567-89ab-cdef-0123-456789abcdef}".into(),
+            if_index: Some(20),
+            score: 9000,
+            is_up: Some(false),
+        };
+        let owner = Some((
+            "Ethernet".into(),
+            "Ethernet".into(),
+            "ethernet".into(),
+            false,
+        ));
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate(
+                std::slice::from_ref(&candidate),
+                None,
+                false
+            )
+            .is_none()
+        );
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate(
+                std::slice::from_ref(&candidate),
+                Some(20),
+                true
+            )
+            .is_none()
+        );
+        assert!(
+            ParallelInterceptor::select_route_owner_named_candidate(
+                std::slice::from_ref(&candidate),
+                owner.as_ref()
+            )
+            .is_none()
+        );
+        let preference = AdapterBindingPreference {
+            guid: "01234567-89ab-cdef-0123-456789abcdef".into(),
+            source: BindingPreferenceSource::RememberedAuto,
+            network_signature: None,
+        };
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate_with_preference(
+                std::slice::from_ref(&candidate),
+                Some(20),
+                true,
+                Some(&preference)
+            )
+            .0
+            .is_none()
+        );
+        candidate.friendly_name = "WAN Miniport (IP)".into();
+        candidate.description = "WAN Miniport (IP)".into();
+        candidate.kind = "ppp".into();
+        assert!(
+            ParallelInterceptor::select_point_to_point_wan_candidate(std::slice::from_ref(
+                &candidate
+            ))
+            .is_none()
+        );
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate_with_wan_fallback(
+                std::slice::from_ref(&candidate),
+                Some(99),
+                true
+            )
+            .0
+            .is_none()
+        );
+        candidate.is_up = None;
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate(
+                std::slice::from_ref(&candidate),
+                Some(20),
+                true
+            )
+            .is_some(),
+            "unknown status must remain usable for devices Windows cannot query"
+        );
+        assert!(
+            ParallelInterceptor::select_best_physical_candidate_with_preference(
+                std::slice::from_ref(&candidate),
+                Some(20),
+                true,
+                Some(&preference)
+            )
+            .0
+            .is_some()
+        );
     }
 
     #[test]
@@ -11619,6 +12954,7 @@ mod tests {
             tunnel_udp_ports: udp_ports.iter().copied().collect(),
             tunnel_tcp_ports: tcp_ports.iter().copied().collect(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         }
     }
@@ -11844,6 +13180,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -11885,6 +13222,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -11923,6 +13261,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -11961,6 +13300,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -11999,6 +13339,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12037,6 +13378,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12075,6 +13417,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12121,6 +13464,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12158,8 +13502,10 @@ mod tests {
                 // Only port 55000 belongs to an established relayed flow. The
                 // other flow goes direct. Tail payload must never be treated
                 // as a new TCP header, even when it resembles that port.
-                let mut cache =
-                    HashMap::from([((src, 55000, Protocol::Tcp), InlineCacheEntry::Active)]);
+                let mut cache = HashMap::from([(
+                    InlineCacheKey::Tcp(src, 55000, dst, 443),
+                    InlineCacheEntry::tcp(1),
+                )]);
                 let mut first =
                     build_ipv4_tcp_frame_with_payload(src, dst, first_port, 443, &[0; 4]);
                 first[18..20].copy_from_slice(&id.to_be_bytes());
@@ -12421,6 +13767,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12457,13 +13804,214 @@ mod tests {
     }
 
     #[test]
-    fn test_queue_overflow_action_bypass_keeps_non_fragment_packets() {
+    fn dead_relay_reader_respects_drop_policy_and_captured_connection_safety() {
+        let relay = super::super::udp_relay::UdpRelay::new("127.0.0.1:9".parse().unwrap()).unwrap();
+        relay.relay_health_arc().store(
+            super::super::udp_relay::RelayHealthState::Dead as u8,
+            Ordering::Relaxed,
+        );
+        let local = Ipv4Addr::new(192, 168, 1, 200);
+        let regular = Ipv4Addr::new(128, 116, 47, 3);
+        let cloud = Ipv4Addr::new(34, 18, 186, 248);
+        let packets = [
+            (
+                build_ipv4_tcp_frame_with_flags(local, regular, 55000, 443, 0x10),
+                QueueOverflowMode::Bypass,
+                ReaderTunnelAction::Consumed,
+            ),
+            (
+                build_ipv4_frame(17, local, cloud, 55000, 55001),
+                QueueOverflowMode::Bypass,
+                ReaderTunnelAction::Consumed,
+            ),
+            (
+                build_ipv4_frame(17, local, regular, 55000, 55001),
+                QueueOverflowMode::Drop,
+                ReaderTunnelAction::Consumed,
+            ),
+            (
+                build_ipv4_frame(17, local, Ipv4Addr::new(203, 0, 113, 10), 55000, 123),
+                QueueOverflowMode::Bypass,
+                ReaderTunnelAction::BypassPhysical,
+            ),
+        ];
+        let stats = WorkerStats::default();
+        let throughput = ThroughputStats::default();
+        let detected = parking_lot::RwLock::new(std::collections::HashSet::new());
+        for (mut packet, mode, expected) in packets {
+            let total = (packet.len() - 14) as u16;
+            packet[16..18].copy_from_slice(&total.to_be_bytes());
+            assert!(forwardable_tunnel_ip_packet(&packet).is_some());
+            assert_eq!(
+                forward_tunneled_packet_from_reader(
+                    &packet,
+                    &relay,
+                    &stats,
+                    &throughput,
+                    &detected,
+                    None,
+                    mode
+                ),
+                expected,
+                "dead-relay fallback must follow the same rules as queue pressure"
+            );
+        }
+        assert_eq!(relay.stats().0, 0);
+    }
+
+    #[test]
+    fn udp_https_speculation_respects_normal_mode_and_country_ban_browser_signin() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        use crate::roblox_proxy::hosts;
+        hosts::clear_active_bootstrap_ips_for_test();
+        let local = Ipv4Addr::new(192, 168, 1, 200);
+        let dst = Ipv4Addr::new(128, 116, 47, 3);
+        let quic = build_ipv4_frame(17, local, dst, 55000, 443);
+        let game = build_ipv4_frame(17, local, dst, 55000, 55001);
+        let empty = ProcessSnapshot::empty(HashSet::new());
+        let normal_unknown =
+            should_route_to_vpn_with_inline_cache(&quic, &empty, &mut InlineCache::new(), false);
+        let normal_game =
+            should_route_to_vpn_with_inline_cache(&game, &empty, &mut InlineCache::new(), false);
+        let mut browser = ProcessSnapshot::empty(HashSet::new());
+        browser
+            .connections
+            .insert(ConnectionKey::new(local, 55000, Protocol::Udp), 5678);
+        browser.pid_names.insert(5678, "chrome.exe".into());
+        let normal_browser =
+            should_route_to_vpn_with_inline_cache(&quic, &browser, &mut InlineCache::new(), false);
+        hosts::set_country_ban_bypass_routing_for_test(true);
+        let bypass_unknown =
+            should_route_to_vpn_with_inline_cache(&quic, &empty, &mut InlineCache::new(), false);
+        let bypass_browser =
+            should_route_to_vpn_with_inline_cache(&quic, &browser, &mut InlineCache::new(), false);
+        hosts::clear_active_bootstrap_ips_for_test();
+        assert!(
+            !normal_unknown,
+            "normal-mode QUIC must stay direct even before its owner appears"
+        );
+        assert!(!normal_browser);
+        assert!(
+            normal_game,
+            "gameplay's first-packet fallback remains available"
+        );
+        assert!(
+            bypass_unknown && bypass_browser,
+            "country-ban Roblox browser sign-in remains available"
+        );
+    }
+
+    #[test]
+    fn known_other_udp_owner_cannot_borrow_roblox_port_ownership() {
+        let roblox_ip = Ipv4Addr::new(10, 2, 0, 2);
+        let other_ip = Ipv4Addr::new(192, 168, 1, 200);
+        let destination = Ipv4Addr::new(128, 116, 47, 33);
+        let port = 55000;
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot
+            .connections
+            .insert(ConnectionKey::new(roblox_ip, port, Protocol::Udp), 1234);
+        snapshot.tunnel_pids.insert(1234);
+        snapshot.tunnel_udp_ports.insert(port);
+        snapshot
+            .pid_names
+            .insert(1234, "RobloxPlayerBeta.exe".into());
+        snapshot.pid_names.insert(5678, "unrelated-app.exe".into());
+        let packet = build_ipv4_frame(17, other_ip, destination, port, 55001);
+        for owner_ip in [other_ip, Ipv4Addr::UNSPECIFIED] {
+            let key = ConnectionKey::new(owner_ip, port, Protocol::Udp);
+            snapshot.connections.insert(key.clone(), 5678);
+            for warm in [false, true] {
+                let mut cache = InlineCache::new();
+                if warm {
+                    // An older positive hint cannot override a published owner.
+                    cache.insert(InlineCacheKey::Udp(other_ip, port), InlineCacheEntry::Udp);
+                }
+                let borrowed =
+                    should_route_to_vpn_with_inline_cache(&packet, &snapshot, &mut cache, false);
+                assert!(
+                    !borrowed,
+                    "known unrelated owner at {owner_ip} borrowed Roblox's port (warm={warm})"
+                );
+                assert!(cache.is_empty());
+            }
+            snapshot.connections.remove(&key);
+        }
+        // Preserve the intended address-drift fallback when ownership is unknown.
+        assert!(should_route_to_vpn_with_inline_cache(
+            &packet,
+            &snapshot,
+            &mut InlineCache::new(),
+            false
+        ));
+        let roblox = build_ipv4_frame(17, roblox_ip, destination, port, 55001);
+        assert!(should_route_to_vpn_with_inline_cache(
+            &roblox,
+            &snapshot,
+            &mut InlineCache::new(),
+            false
+        ));
+    }
+
+    #[test]
+    fn captured_game_udp_never_bypasses_on_queue_pressure() {
+        let local = Ipv4Addr::new(192, 168, 1, 200);
+        for (remote, port) in [
+            (Ipv4Addr::new(128, 116, 47, 33), 55001),
+            (Ipv4Addr::new(34, 18, 186, 248), 12345),
+            (Ipv4Addr::new(203, 0, 113, 10), 55001),
+            (Ipv4Addr::new(203, 0, 113, 10), 3478),
+        ] {
+            let packet = build_ipv4_frame(17, local, remote, 55000, port);
+            assert_eq!(
+                queue_overflow_action(QueueOverflowMode::Bypass, &packet),
+                QueueFullAction::Drop,
+                "captured gameplay cannot start direct or change source at {remote}:{port}"
+            );
+        }
+    }
+
+    #[test]
+    fn captured_tcp_queue_pressure_never_switches_a_connection_direct() {
+        let local = Ipv4Addr::new(192, 168, 1, 200);
+        let remote = Ipv4Addr::new(128, 116, 47, 3);
+        for flags in [0x02, 0x10, 0x18, 0x11, 0x04] {
+            let packet = build_ipv4_tcp_frame_with_flags(local, remote, 55000, 443, flags);
+            assert_eq!(
+                queue_overflow_action(QueueOverflowMode::Bypass, &packet),
+                QueueFullAction::Drop,
+                "a captured TCP flow must retain its source path for flags {flags:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_drops_cloud_game_packets_and_unparseable_frames() {
+        let cloud = build_ipv4_frame(
+            17,
+            Ipv4Addr::new(192, 168, 1, 200),
+            Ipv4Addr::new(34, 18, 186, 248),
+            55000,
+            55001,
+        );
+        assert_eq!(
+            queue_overflow_action(QueueOverflowMode::Bypass, &cloud),
+            QueueFullAction::Drop
+        );
+        assert_eq!(
+            queue_overflow_action(QueueOverflowMode::Bypass, &[0; 10]),
+            QueueFullAction::Drop
+        );
+    }
+
+    #[test]
+    fn queue_overflow_bypass_keeps_eligible_non_game_udp() {
         let frame = build_ipv4_frame(
             17,
             Ipv4Addr::new(192, 168, 1, 200),
-            Ipv4Addr::new(128, 116, 10, 10),
+            Ipv4Addr::new(203, 0, 113, 10),
             53010,
-            54010,
+            123,
         );
 
         assert!(!is_ipv4_fragment(&frame));
@@ -12663,6 +14211,7 @@ mod tests {
             tunnel_udp_ports: [src_port].into_iter().collect(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12675,7 +14224,7 @@ mod tests {
             &mut inline_cache,
             false,
         ));
-        assert!(inline_cache.contains_key(&(packet_ip, src_port, Protocol::Udp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Udp(packet_ip, src_port)));
     }
 
     #[test]
@@ -12700,6 +14249,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12712,7 +14262,7 @@ mod tests {
             &mut inline_cache,
             false,
         ));
-        assert!(!inline_cache.contains_key(&(packet_ip, src_port, Protocol::Udp)));
+        assert!(!inline_cache.contains_key(&InlineCacheKey::Udp(packet_ip, src_port)));
     }
 
     #[test]
@@ -12772,6 +14322,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12837,7 +14388,7 @@ mod tests {
         let pid = 1234;
 
         let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+        connections.insert(ConnectionKey::tcp(src_ip, src_port, dst_ip, dst_port), pid);
 
         let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
@@ -12851,6 +14402,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -12883,12 +14435,13 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
         let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Udp), InlineCacheEntry::Active);
+        inline_cache.insert(InlineCacheKey::Udp(src_ip, src_port), InlineCacheEntry::Udp);
 
         assert!(should_route_to_vpn_with_inline_cache(
             &frame,
@@ -12899,23 +14452,182 @@ mod tests {
     }
 
     #[test]
-    fn test_snapshot_refresh_keeps_tcp_inline_entries_and_clears_udp_when_api_tunneling() {
+    fn test_snapshot_refresh_keeps_captured_tcp_and_clears_udp_ownership() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, 40000, Protocol::Tcp), InlineCacheEntry::Active);
-        inline_cache.insert((src_ip, 40001, Protocol::Udp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, 40000, Ipv4Addr::LOCALHOST, 443),
+            InlineCacheEntry::tcp(1),
+        );
+        inline_cache.insert(InlineCacheKey::Udp(src_ip, 40001), InlineCacheEntry::Udp);
 
-        prune_inline_cache_on_snapshot_refresh(&mut inline_cache, true);
+        prune_inline_cache_on_snapshot_refresh(
+            &mut inline_cache,
+            &ProcessSnapshot::empty(Default::default()),
+        );
 
-        assert!(inline_cache.contains_key(&(src_ip, 40000, Protocol::Tcp)));
-        assert!(!inline_cache.contains_key(&(src_ip, 40001, Protocol::Udp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            40000,
+            Ipv4Addr::LOCALHOST,
+            443
+        )));
+        assert!(!inline_cache.contains_key(&InlineCacheKey::Udp(src_ip, 40001)));
 
-        prune_inline_cache_on_snapshot_refresh(&mut inline_cache, false);
-        assert!(inline_cache.is_empty());
+        prune_inline_cache_on_snapshot_refresh(
+            &mut inline_cache,
+            &ProcessSnapshot::empty(Default::default()),
+        );
+        assert_eq!(inline_cache.len(), 1);
     }
 
     #[test]
-    fn test_tcp_inline_cache_hit_keeps_fin_seen_through_half_close_acks() {
+    fn captured_syn_retransmission_keeps_its_route_but_a_new_sequence_reclassifies() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        use crate::roblox_proxy::hosts;
+        hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(128, 116, 50, 100);
+        hosts::set_active_bootstrap_ips_for_test([dst]);
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot.tunnel_pids.insert(1234);
+        let mut syn = build_ipv4_tcp_frame_with_flags(src, dst, 40000, 443, 0x02);
+        syn[38..42].copy_from_slice(&0x11223344u32.to_be_bytes());
+        let mut cache = InlineCache::new();
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &syn,
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into())
+            )
+        );
+        hosts::clear_active_bootstrap_ips_for_test();
+        let retransmission = should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+            &syn,
+            &snapshot,
+            &mut cache,
+            true,
+            |_, _| None,
+            |_| None,
+        );
+        let after_opt_out = should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+            &syn,
+            &snapshot,
+            &mut cache,
+            false,
+            |_, _| None,
+            |_| None,
+        );
+        let mut recycled = syn.clone();
+        recycled[38..42].copy_from_slice(&0x55667788u32.to_be_bytes());
+        let new_flow = should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+            &recycled,
+            &snapshot,
+            &mut cache,
+            true,
+            |_, _| Some(1234),
+            |_| Some("RobloxPlayerBeta.exe".into()),
+        );
+        hosts::clear_active_bootstrap_ips_for_test();
+        assert!(
+            retransmission,
+            "a SYN retry cannot switch the source of its handshake"
+        );
+        assert!(
+            after_opt_out,
+            "API opt-out must not move a handshake already relayed"
+        );
+        assert!(
+            !new_flow,
+            "a recycled tuple with a different sequence obeys current policy"
+        );
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn captured_tcp_path_survives_destination_hints_dpi_confirmation_and_api_opt_out() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        use crate::roblox_proxy::hosts;
+        hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(128, 116, 50, 100);
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot.tunnel_pids.insert(1234);
+        snapshot
+            .connections
+            .insert(ConnectionKey::tcp(src, 40000, dst, 443), 1234);
+        let syn = build_ipv4_tcp_frame_with_flags(src, dst, 40000, 443, 0x02);
+        let ack = build_ipv4_tcp_frame_with_flags(src, dst, 40000, 443, 0x10);
+        let next_syn = build_ipv4_tcp_frame_with_flags(src, dst, 40001, 443, 0x02);
+        let mut outcomes = Vec::new();
+        for change in 0..4 {
+            hosts::clear_active_bootstrap_ips_for_test();
+            hosts::set_active_bootstrap_ips_for_test([dst]);
+            let mut cache = InlineCache::new();
+            assert!(
+                should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                    &syn,
+                    &snapshot,
+                    &mut cache,
+                    true,
+                    |_, _| Some(1234),
+                    |_| Some("RobloxPlayerBeta.exe".into())
+                )
+            );
+            let api = change != 3;
+            match change {
+                0 => {
+                    hosts::clear_active_bootstrap_ips_for_test();
+                }
+                1 => {
+                    hosts::clear_active_bootstrap_ips_for_test();
+                    assert!(hosts::learn_direct_only_bootstrap_ip(
+                        "clientsettingscdn.roblox.com",
+                        dst
+                    ));
+                }
+                2 => {
+                    hosts::clear_active_bootstrap_ips_for_test();
+                    hosts::set_country_ban_bypass_routing_for_test(true);
+                    hosts::set_dpi_evasion_confirmed(true);
+                }
+                _ => {}
+            }
+            prune_inline_cache_on_snapshot_refresh(
+                &mut cache,
+                &ProcessSnapshot::empty(Default::default()),
+            );
+            let kept = should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &ack,
+                &snapshot,
+                &mut cache,
+                api,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into()),
+            );
+            let fresh = should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &next_syn,
+                &snapshot,
+                &mut cache,
+                api,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into()),
+            );
+            outcomes.push((kept, fresh));
+        }
+        hosts::clear_active_bootstrap_ips_for_test();
+        assert_eq!(
+            outcomes,
+            vec![(true, false); 4],
+            "existing flows keep their relay; policy changes apply to new SYNs"
+        );
+    }
+
+    #[test]
+    fn test_tcp_capture_survives_fin_retransmissions_and_half_close_acks() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
 
@@ -12929,7 +14641,10 @@ mod tests {
         let second_fin_frame =
             build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+            InlineCacheEntry::tcp(1),
+        );
         crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -12939,8 +14654,8 @@ mod tests {
             true,
         ));
         assert_eq!(
-            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
-            Some(&InlineCacheEntry::FinSeen)
+            inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
+            Some(&InlineCacheEntry::tcp(1))
         );
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -12950,8 +14665,8 @@ mod tests {
             true,
         ));
         assert_eq!(
-            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
-            Some(&InlineCacheEntry::FinSeen)
+            inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
+            Some(&InlineCacheEntry::tcp(1))
         );
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -12961,8 +14676,8 @@ mod tests {
             true,
         ));
         assert_eq!(
-            inline_cache.get(&(src_ip, src_port, Protocol::Tcp)),
-            Some(&InlineCacheEntry::FinSeen)
+            inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
+            Some(&InlineCacheEntry::tcp(1))
         );
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -12971,7 +14686,17 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert_eq!(
+            inline_cache.get(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port)),
+            Some(&InlineCacheEntry::tcp(1)),
+            "a retransmitted FIN must not discard the captured path"
+        );
+        assert!(should_route_to_vpn_with_inline_cache(
+            &ack_frame,
+            &snapshot,
+            &mut inline_cache,
+            true
+        ));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -12988,7 +14713,10 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let rst_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x14);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+            InlineCacheEntry::tcp(1),
+        );
         crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst_ip]);
 
         assert!(should_route_to_vpn_with_inline_cache(
@@ -12997,13 +14725,15 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
     #[test]
-    fn test_tcp_inline_cache_fin_seen_reclassifies_recycled_syn() {
+    fn test_tcp_capture_after_fin_reclassifies_a_new_sequence() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(203, 0, 113, 20);
         let src_port = 40000;
@@ -13011,19 +14741,31 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::FinSeen);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+            InlineCacheEntry::tcp(1),
+        );
 
+        let fin = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x11);
+        assert!(should_route_to_vpn_with_inline_cache(
+            &fin,
+            &snapshot,
+            &mut inline_cache,
+            true
+        ));
         assert!(!should_route_to_vpn_with_inline_cache(
             &syn_frame,
             &snapshot,
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
     }
 
     #[test]
-    fn test_tcp_inline_cache_active_reclassifies_recycled_syn() {
+    fn test_tcp_capture_reclassifies_a_new_sequence() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let dst_ip = Ipv4Addr::new(203, 0, 113, 20);
         let src_port = 40000;
@@ -13031,7 +14773,10 @@ mod tests {
         let snapshot = ProcessSnapshot::empty(HashSet::new());
         let syn_frame = build_ipv4_tcp_frame_with_flags(src_ip, dst_ip, src_port, dst_port, 0x02);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Tcp), InlineCacheEntry::Active);
+        inline_cache.insert(
+            InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port),
+            InlineCacheEntry::tcp(1),
+        );
 
         assert!(!should_route_to_vpn_with_inline_cache(
             &syn_frame,
@@ -13039,7 +14784,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
     }
 
     #[test]
@@ -13059,12 +14806,13 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
         let frame = build_ipv4_frame(17, src_ip, dst_ip, src_port, dst_port);
         let mut inline_cache: InlineCache = HashMap::new();
-        inline_cache.insert((src_ip, src_port, Protocol::Udp), InlineCacheEntry::Active);
+        inline_cache.insert(InlineCacheKey::Udp(src_ip, src_port), InlineCacheEntry::Udp);
 
         assert!(!should_route_to_vpn_with_inline_cache(
             &frame,
@@ -13091,6 +14839,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13104,7 +14853,7 @@ mod tests {
             false,
         ));
         assert!(
-            inline_cache.contains_key(&(src_ip, src_port, Protocol::Udp)),
+            inline_cache.contains_key(&InlineCacheKey::Udp(src_ip, src_port)),
             "Speculative tunnel should seed the inline cache"
         );
     }
@@ -13126,6 +14875,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13389,8 +15139,134 @@ mod tests {
         assert!(
             script.contains("Add-BindingCandidate $candidates 'InterfaceDescription' $adapterHint")
         );
-        assert!(script.contains("Enable-NetAdapterBinding -InterfaceDescription $Candidate.Value"));
+        assert!(script.contains("Enable-NetAdapterBinding -InputObject $binding"));
         assert!(script.contains("winpkfilter_binding_validation_failed"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn binding_repair_uses_exact_instances_and_readonly_checks_do_not_start_services() {
+        for (mode, index, hint, repair, success, marker) in [
+            (
+                "normal",
+                None,
+                "Ethernet [1]*",
+                true,
+                true,
+                "binding enabled on adapter",
+            ),
+            (
+                "normal",
+                Some(9),
+                "unused hint",
+                true,
+                true,
+                "binding enabled on adapter",
+            ),
+            (
+                "legacy",
+                Some(9),
+                "unused hint",
+                true,
+                true,
+                "binding enabled on adapter",
+            ),
+            (
+                "ambiguous",
+                None,
+                "Fixture NIC",
+                true,
+                false,
+                "More than one adapter matches",
+            ),
+            (
+                "provider_failed",
+                None,
+                "Ethernet [1]*",
+                true,
+                false,
+                "fixture query failed",
+            ),
+            (
+                "readonly_enabled",
+                None,
+                "Ethernet [1]*",
+                false,
+                true,
+                "binding already enabled",
+            ),
+            (
+                "readonly_disabled",
+                None,
+                "Ethernet [1]*",
+                false,
+                false,
+                "winpkfilter_binding_disabled",
+            ),
+        ] {
+            let binding_script =
+                ParallelInterceptor::build_winpkfilter_binding_script(index, Some(hint), repair)
+                    .unwrap();
+            let fixture = format!(
+                r#"
+                $PSModuleAutoLoadingPreference='None'
+                Import-Module ($PSHOME + '\Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+                $script:mode='{mode}'
+                $script:legacyCalls=0
+                $script:owned=[pscustomobject]@{{Name='Ethernet [1]*';InterfaceDescription='Fixture NIC';ComponentID='nt_ndisrd';Enabled=($script:mode -eq 'readonly_enabled')}}
+                $script:other=[pscustomobject]@{{Name='Ethernet 1-other';InterfaceDescription='Fixture NIC';ComponentID='nt_ndisrd';Enabled=$false}}
+                function Get-NetAdapter {{
+                    [CmdletBinding()] param([int]$InterfaceIndex)
+                    if ($InterfaceIndex -ne 9) {{ throw 'fixture wrong interface index' }}
+                    [pscustomobject]@{{Name=$(if ($script:mode -eq 'legacy') {{ 'unresolved adapter alias' }} else {{ $script:owned.Name }})}}
+                }}
+                function Get-CimInstance {{
+                    [CmdletBinding()] param([string]$ClassName, [string]$Filter)
+                    $script:legacyCalls++
+                    [pscustomobject]@{{Name='Fixture NIC';NetConnectionID=$script:owned.Name;InterfaceIndex=9}}
+                }}
+                function Get-WmiObject {{ throw 'fixture must not query the real WMI provider' }}
+                function Get-NetAdapterBinding {{
+                    [CmdletBinding()] param([switch]$AllBindings)
+                    if (-not $AllBindings) {{ throw 'fixture expected unfiltered binding query' }}
+                    if ($script:mode -eq 'provider_failed') {{ Write-Error 'fixture query failed'; return }}
+                    if ($script:other.Enabled) {{ throw 'fixture changed an unrelated adapter' }}
+                    $script:owned; $script:other
+                }}
+                function Enable-NetAdapterBinding {{
+                    [CmdletBinding()] param([object[]]$InputObject, [bool]$Confirm)
+                    if ($script:mode.StartsWith('readonly')) {{ throw 'fixture read-only mutation' }}
+                    if ($InputObject.Count -ne 1 -or -not [object]::ReferenceEquals($InputObject[0], $script:owned)) {{ throw 'fixture wrong binding instance' }}
+                    $script:owned.Enabled=$true
+                }}
+                function Get-Service {{
+                    [CmdletBinding()] param([string]$Name)
+                    if ($script:mode.StartsWith('readonly')) {{ throw 'fixture read-only service access' }}
+                    [pscustomobject]@{{Status='Running'}}
+                }}
+                function Start-Service {{ throw 'fixture must not start any real service' }}
+                function Start-Sleep {{ param([int]$Milliseconds,[int]$Seconds) }}
+                {binding_script}
+                if ($script:mode -eq 'legacy') {{
+                    if ($script:legacyCalls -ne 1) {{ throw 'fixture legacy fallback was not used once' }}
+                }} elseif ($script:legacyCalls -ne 0) {{
+                    throw 'fixture unnecessary legacy WMI lookup'
+                }}
+            "#
+            );
+            let output = ParallelInterceptor::run_powershell_with_timeout_capture(&fixture, 8);
+            assert_eq!(
+                output.success, success,
+                "{mode} / {index:?}: {} / {}",
+                output.stdout, output.stderr
+            );
+            assert!(
+                format!("{}{}", output.stdout, output.stderr).contains(marker),
+                "{mode}: {} / {}",
+                output.stdout,
+                output.stderr
+            );
+        }
     }
 
     #[test]
@@ -13406,7 +15282,7 @@ mod tests {
         assert!(script.contains(
             "Add-BindingCandidate $candidates 'InterfaceIndex' ([string]$adapterIfIndex)"
         ));
-        assert!(script.contains("Get-NetAdapter -InterfaceIndex ([int]$Candidate.Value)"));
+        assert!(script.contains("Get-NetAdapter -InterfaceIndex ([int]$value)"));
         let interface_index_pos = script
             .find("Add-BindingCandidate $candidates 'InterfaceIndex'")
             .expect("interface-index candidate should be present");
@@ -13424,7 +15300,7 @@ mod tests {
 
         assert!(script.contains("$repairBinding = $false"));
         assert!(script.contains("winpkfilter_binding_disabled"));
-        assert!(script.contains("Enable-NetAdapterBinding -Name $adapter.Name"));
+        assert!(script.contains("Enable-NetAdapterBinding -InputObject $binding"));
         assert!(
             script.contains("if (-not $repairBinding)"),
             "read-only checks must branch before enabling nt_ndisrd"
@@ -13672,7 +15548,7 @@ mod tests {
         let pid = 1234;
 
         let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+        connections.insert(ConnectionKey::tcp(src_ip, src_port, dst_ip, dst_port), pid);
 
         let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
 
@@ -13686,6 +15562,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13727,7 +15604,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -13748,7 +15627,10 @@ mod tests {
         let pid = 1234;
 
         let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+        connections.insert(
+            ConnectionKey::tcp(src_ip, src_port, unpinned_cdn_ip, dst_port),
+            pid,
+        );
 
         let snapshot = ProcessSnapshot {
             connections,
@@ -13760,6 +15642,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13795,7 +15678,10 @@ mod tests {
         crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([asset_ip]);
 
         let mut connections = HashMap::new();
-        connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Tcp), pid);
+        connections.insert(
+            ConnectionKey::tcp(src_ip, src_port, asset_ip, dst_port),
+            pid,
+        );
 
         let snapshot = ProcessSnapshot {
             connections,
@@ -13807,6 +15693,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13833,7 +15720,7 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(ConnectionKey::new(src_ip, src_port, Protocol::Udp), pid);
-        connections.insert(ConnectionKey::new(src_ip, src_port + 1, Protocol::Tcp), pid);
+        connections.insert(ConnectionKey::tcp(src_ip, src_port + 1, dns_ip, 53), pid);
 
         let tunnel_pids: HashSet<u32> = [pid].into_iter().collect();
         let snapshot = ProcessSnapshot {
@@ -13846,6 +15733,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13888,6 +15776,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13910,7 +15799,9 @@ mod tests {
             &mut inline_cache,
             true,
         ));
-        assert!(!inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            !inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
     }
 
     #[test]
@@ -13939,6 +15830,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -13958,7 +15850,9 @@ mod tests {
                 }
             },
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -13978,7 +15872,7 @@ mod tests {
 
         let mut connections = HashMap::new();
         connections.insert(
-            ConnectionKey::new(src_ip, src_port, Protocol::Tcp),
+            ConnectionKey::tcp(src_ip, src_port, dst_ip, dst_port),
             tunnel_pid,
         );
         let snapshot = ProcessSnapshot {
@@ -13991,6 +15885,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14004,7 +15899,9 @@ mod tests {
             true,
             |_ip, _port| panic!("snapshot-owned SYN should not call tcp_owner_lookup"),
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, dst_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14028,6 +15925,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14051,6 +15949,45 @@ mod tests {
     }
 
     #[test]
+    fn test_route_assist_skips_owner_lookup_for_unrelated_https_syn() {
+        let src_ip = Ipv4Addr::new(10, 0, 0, 2);
+        let web_ip = Ipv4Addr::new(142, 250, 80, 46);
+        let src_port = 40003;
+        let snapshot = ProcessSnapshot {
+            connections: HashMap::new(),
+            pid_names: HashMap::new(),
+            tunnel_apps: ["robloxplayerbeta.exe".to_string()].into_iter().collect(),
+            tunnel_pids: [1234].into_iter().collect(),
+            explicit_tunnel_udp_ports: HashSet::new(),
+            explicit_tunnel_tcp_ports: HashSet::new(),
+            tunnel_udp_ports: HashSet::new(),
+            tunnel_tcp_ports: HashSet::new(),
+            version: 0,
+            owner_table_started_at: None,
+            created_at: std::time::Instant::now(),
+        };
+        let frame = build_ipv4_tcp_frame_with_flags(src_ip, web_ip, src_port, 443, 0x02);
+        let mut inline_cache: InlineCache = HashMap::new();
+        let lookups = std::cell::Cell::new(0u32);
+
+        assert!(!should_route_to_vpn_with_inline_cache_and_tcp_owner_lookup(
+            &frame,
+            &snapshot,
+            &mut inline_cache,
+            true,
+            |_, _| {
+                lookups.set(lookups.get() + 1);
+                Some(1234)
+            },
+        ));
+        assert_eq!(
+            lookups.get(),
+            0,
+            "an unrelated HTTPS SYN must not read the TCP owner table on the reader"
+        );
+    }
+
+    #[test]
     fn test_route_assist_keeps_unpinned_asset_syn_direct() {
         let src_ip = Ipv4Addr::new(10, 0, 0, 2);
         let cdn_ip = Ipv4Addr::new(184, 87, 193, 160);
@@ -14068,6 +16005,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14112,6 +16050,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14131,7 +16070,9 @@ mod tests {
                 }
             },
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14161,6 +16102,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14215,6 +16157,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14257,6 +16200,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14287,7 +16231,12 @@ mod tests {
             ),
             "Full Country Ban must relay Roblox website traffic even before hosts pins are published"
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_web_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14313,6 +16262,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14331,7 +16281,12 @@ mod tests {
             ),
             "Full Country Ban must handle first browser SYNs before Windows publishes the owner"
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_web_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14357,6 +16312,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14374,7 +16330,9 @@ mod tests {
             ),
             "Full Country Ban must relay first HTTPS SYNs when Windows has not published the owner yet"
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14401,6 +16359,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14457,6 +16416,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14515,6 +16475,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14528,7 +16489,9 @@ mod tests {
             true,
             |_ip, _port| None,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14553,6 +16516,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14591,6 +16555,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14604,7 +16569,9 @@ mod tests {
             true,
             |_ip, _port| None,
         ));
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14632,6 +16599,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14660,7 +16628,9 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(
+            inline_cache.contains_key(&InlineCacheKey::Tcp(src_ip, src_port, cdn_ip, dst_port))
+        );
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14686,6 +16656,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14754,6 +16725,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14786,7 +16758,12 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_api_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -14810,6 +16787,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14864,6 +16842,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14893,11 +16872,141 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_api_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
 
+    #[test]
+    fn completed_tcp_captures_are_retired_only_by_a_newer_complete_owner_table() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(128, 116, 50, 3);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst]);
+        let now = Instant::now();
+        let captured_at = now - Duration::from_secs(2);
+        let mut cache: InlineCache = (1..=MAX_INLINE_CACHE_ENTRIES)
+            .map(|port| {
+                (
+                    InlineCacheKey::Tcp(src, port as u16, dst, 443),
+                    InlineCacheEntry::Tcp {
+                        initial_sequence: 1,
+                        captured_at,
+                    },
+                )
+            })
+            .collect();
+        let mut snapshot =
+            ProcessSnapshot::empty(["robloxplayerbeta.exe".to_string()].into_iter().collect());
+        // An empty synthetic snapshot, metadata-only update or failed native
+        // refresh supplies no proof that the captured socket has ended.
+        prune_inline_cache_on_snapshot_refresh(&mut cache, &snapshot);
+        assert_eq!(cache.len(), MAX_INLINE_CACHE_ENTRIES);
+        snapshot.owner_table_started_at = Some(captured_at - Duration::from_millis(1));
+        prune_inline_cache_on_snapshot_refresh(&mut cache, &snapshot);
+        assert_eq!(
+            cache.len(),
+            MAX_INLINE_CACHE_ENTRIES,
+            "a late-published pre-SYN query cannot retire a new capture"
+        );
+        snapshot.owner_table_started_at = Some(now);
+        // Windows may report PID zero during TCP teardown. Presence of the
+        // socket, rather than its owner or tunnel policy, preserves its route.
+        snapshot
+            .connections
+            .insert(ConnectionKey::tcp(src, 5000, dst, 443), 0);
+        prune_inline_cache_on_snapshot_refresh(&mut cache, &snapshot);
+        assert_eq!(cache.len(), 1);
+        let ack = build_ipv4_tcp_frame_with_flags(src, dst, 5000, 443, 0x10);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &ack,
+                &snapshot,
+                &mut cache,
+                false,
+                |_, _| None,
+                |_| None
+            )
+        );
+        // Retiring closed sockets frees admission for the next real SYN,
+        // without evicting that still-present half-closed connection.
+        let syn = build_ipv4_tcp_frame_with_flags(src, dst, 40019, 443, 0x02);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &syn,
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into())
+            )
+        );
+        prune_inline_cache_on_snapshot_refresh(&mut cache, &snapshot);
+        assert_eq!(
+            cache.len(),
+            2,
+            "the query started before the new SYN and cannot expire it"
+        );
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn full_inline_cache_does_not_relay_only_a_new_tcp_syn() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(128, 116, 50, 3);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst]);
+        let snapshot =
+            ProcessSnapshot::empty(["robloxplayerbeta.exe".to_string()].into_iter().collect());
+        let mut cache: InlineCache = (1..=MAX_INLINE_CACHE_ENTRIES)
+            .map(|port| {
+                (
+                    InlineCacheKey::Tcp(src, port as u16, dst, 443),
+                    InlineCacheEntry::tcp(1),
+                )
+            })
+            .collect();
+        let syn = build_ipv4_tcp_frame_with_flags(src, dst, 40019, 443, 0x02);
+        let ack = build_ipv4_tcp_frame_with_flags(src, dst, 40019, 443, 0x10);
+        for frame in [&syn, &ack] {
+            assert!(
+                !should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                    frame,
+                    &snapshot,
+                    &mut cache,
+                    true,
+                    |_, _| Some(1234),
+                    |_| Some("RobloxPlayerBeta.exe".to_string()),
+                )
+            );
+        }
+        assert_eq!(cache.len(), MAX_INLINE_CACHE_ENTRIES);
+        // An existing half-closed flow retains ownership; a snapshot refresh
+        // cannot expire it just because its local FIN was sent a minute ago.
+        prune_inline_cache_on_snapshot_refresh(
+            &mut cache,
+            &ProcessSnapshot::empty(Default::default()),
+        );
+        let live_ack = build_ipv4_tcp_frame_with_flags(src, dst, 5000, 443, 0x10);
+        assert!(
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &live_ack,
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| None,
+                |_| None,
+            )
+        );
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
     #[test]
     fn test_tcp_api_tunneling_captured_roblox_syn_allows_follow_on_packet() {
         let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
@@ -14921,6 +17030,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -14952,7 +17062,12 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            roblox_api_ip,
+            dst_port
+        )));
         assert!(
             should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
                 &follow_on_frame,
@@ -14991,6 +17106,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15020,7 +17136,12 @@ mod tests {
                 },
             )
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            bootstrap_cdn_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
     }
@@ -15049,6 +17170,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15107,6 +17229,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
@@ -15170,6 +17293,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15200,9 +17324,91 @@ mod tests {
             ),
             "Full Country Ban must relay Roblox TCP even when the IP was direct-only in Route Assist"
         );
-        assert!(inline_cache.contains_key(&(src_ip, src_port, Protocol::Tcp)));
+        assert!(inline_cache.contains_key(&InlineCacheKey::Tcp(
+            src_ip,
+            src_port,
+            direct_only_ip,
+            dst_port
+        )));
 
         crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+    }
+
+    #[test]
+    fn tcp_relay_capture_does_not_move_another_connection_with_the_same_local_port() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(65, 9, 168, 101);
+        let other_dst = Ipv4Addr::new(65, 9, 168, 102);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst, other_dst]);
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot.tunnel_pids.insert(1234);
+        let mut cache = InlineCache::new();
+        let initial = build_ipv4_tcp_frame_with_flags(src, dst, 41000, 443, 0x02);
+        let ack = build_ipv4_tcp_frame_with_flags(src, dst, 41000, 443, 0x10);
+        // Windows may reuse a local endpoint for a different remote endpoint.
+        // This connection was already direct when capture started; its SYN
+        // was never relayed, so its ACK must not borrow another flow's capture.
+        let other_acks = [
+            build_ipv4_tcp_frame_with_flags(src, other_dst, 41000, 443, 0x10),
+            build_ipv4_tcp_frame_with_flags(src, dst, 41000, 80, 0x10),
+        ];
+        let mut route = |packet: &[u8]| {
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                packet,
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into()),
+            )
+        };
+        assert!(route(&initial));
+        let other_stayed_direct = other_acks.iter().all(|packet| !route(packet));
+        let stayed_on_relay = route(&ack);
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        assert!(
+            other_stayed_direct,
+            "an existing direct TCP connection borrowed another destination's relay capture"
+        );
+        assert!(
+            stayed_on_relay,
+            "the captured connection lost its relay route"
+        );
+    }
+
+    #[test]
+    fn closing_one_captured_tcp_peer_does_not_remove_another_peers_route() {
+        let _guard = BOOTSTRAP_ROUTE_IP_TEST_LOCK.lock().unwrap();
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        let src = Ipv4Addr::new(10, 0, 0, 2);
+        let dst = Ipv4Addr::new(65, 9, 168, 101);
+        let other_dst = Ipv4Addr::new(65, 9, 168, 102);
+        crate::roblox_proxy::hosts::set_active_bootstrap_ips_for_test([dst, other_dst]);
+        let mut snapshot = ProcessSnapshot::empty(HashSet::new());
+        snapshot.tunnel_pids.insert(1234);
+        let mut cache = InlineCache::new();
+        let mut route = |remote, flags| {
+            should_route_to_vpn_with_inline_cache_and_tcp_owner_process_lookup(
+                &build_ipv4_tcp_frame_with_flags(src, remote, 41000, 443, flags),
+                &snapshot,
+                &mut cache,
+                true,
+                |_, _| Some(1234),
+                |_| Some("RobloxPlayerBeta.exe".into()),
+            )
+        };
+        let first_started = route(dst, 0x02);
+        let second_started = route(other_dst, 0x02);
+        let first_closed = route(dst, 0x14);
+        let second_kept_route = route(other_dst, 0x10);
+        crate::roblox_proxy::hosts::clear_active_bootstrap_ips_for_test();
+        assert!(first_started && second_started && first_closed);
+        assert!(
+            second_kept_route,
+            "closing one TCP peer removed another peer's capture"
+        );
     }
 
     #[test]
@@ -15229,6 +17435,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
@@ -15325,6 +17532,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
@@ -15408,6 +17616,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
         let owner_lookup = |ip: Ipv4Addr, port: u16| {
@@ -15483,6 +17692,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15539,6 +17749,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15592,6 +17803,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15643,6 +17855,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15698,6 +17911,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15731,6 +17945,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15764,6 +17979,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15805,6 +18021,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: [src_port].into_iter().collect(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15927,6 +18144,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -15975,6 +18193,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16023,6 +18242,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16063,6 +18283,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16102,6 +18323,7 @@ mod tests {
             tunnel_udp_ports: HashSet::new(),
             tunnel_tcp_ports: HashSet::new(),
             version: 0,
+            owner_table_started_at: None,
             created_at: std::time::Instant::now(),
         };
 
@@ -16171,6 +18393,66 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    #[test]
+    fn a_wake_over_an_empty_queue_is_not_a_dead_handle_but_a_repeating_one_is() {
+        use windows::Win32::Foundation::{ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER};
+        let empty = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(
+            ERROR_INVALID_PARAMETER.0,
+        ));
+        // The 3.9.8 regression: the first empty wake after a good read went
+        // straight to a driver rebind.
+        assert!(reader_can_ignore_empty_wake(0, &empty));
+        assert!(reader_can_ignore_empty_wake(
+            READER_EMPTY_WAKE_LIMIT - 1,
+            &empty
+        ));
+        // A handle that keeps failing with no packet in between still recovers.
+        assert!(!reader_can_ignore_empty_wake(
+            READER_EMPTY_WAKE_LIMIT,
+            &empty
+        ));
+        let lost = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(
+            ERROR_INVALID_HANDLE.0,
+        ));
+        assert!(
+            !reader_can_ignore_empty_wake(0, &lost),
+            "a lost handle must spend the rebind budget at once"
+        );
+    }
+
+    #[test]
+    fn an_empty_drain_does_not_hide_a_lost_driver_or_adapter() {
+        use windows::Win32::Foundation::{
+            ERROR_DEV_NOT_EXIST, ERROR_DEVICE_NOT_CONNECTED, ERROR_INVALID_HANDLE,
+            ERROR_INVALID_PARAMETER, ERROR_NO_SUCH_DEVICE,
+        };
+        for code in [
+            ERROR_INVALID_HANDLE,
+            ERROR_DEV_NOT_EXIST,
+            ERROR_DEVICE_NOT_CONNECTED,
+            ERROR_NO_SUCH_DEVICE,
+        ] {
+            let error =
+                windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(code.0));
+            assert!(
+                !reader_can_ignore_drain_error(true, &error),
+                "lost device {code:?} must consume rebind budget even after a full batch"
+            );
+            assert!(!reader_can_ignore_drain_error(false, &error));
+        }
+        let empty = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(
+            ERROR_INVALID_PARAMETER.0,
+        ));
+        assert!(reader_can_ignore_drain_error(true, &empty));
+        assert!(!reader_can_ignore_drain_error(false, &empty));
+        let unspecified =
+            windows::core::Error::from_hresult(windows::core::HRESULT(0x80004005u32 as i32));
+        assert!(
+            reader_can_ignore_drain_error(true, &unspecified),
+            "legacy driver empty-queue behavior must remain supported"
+        );
+    }
+
     // RebindState — the pure state machine extracted from the reader loop.
     // These tests cover the four branches the reader relies on:
     //   1. increment on error
@@ -16399,5 +18681,34 @@ mod tests {
             !interruptible_sleep(Duration::from_millis(0), &stop_false),
             "total=0 with stop_flag=false should return false"
         );
+    }
+
+    #[test]
+    fn default_route_is_probed_at_most_every_two_seconds() {
+        let start = Instant::now();
+        assert!(route_change_check_due(None, start));
+        assert!(!route_change_check_due(Some(start), start));
+        assert!(!route_change_check_due(
+            Some(start),
+            start + Duration::from_millis(1500)
+        ));
+        assert!(route_change_check_due(
+            Some(start),
+            start + Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn powershell_route_fallback_runs_at_most_every_thirty_seconds() {
+        let start = Instant::now();
+        assert!(powershell_route_fallback_due(None, start));
+        assert!(!powershell_route_fallback_due(
+            Some(start),
+            start + Duration::from_secs(29)
+        ));
+        assert!(powershell_route_fallback_due(
+            Some(start),
+            start + Duration::from_secs(30)
+        ));
     }
 }

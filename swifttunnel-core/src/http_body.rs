@@ -6,8 +6,18 @@ pub async fn read_json_bounded<T: serde::de::DeserializeOwned>(
     what: &str,
 ) -> Result<T, String> {
     let bytes = read_bounded(response, max_bytes, what).await?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| format!("Could not read the {what}. Please try again."))
+    serde_json::from_slice(&bytes).map_err(|error| {
+        // Do not print the JSON or serde's message: an unexpected value can
+        // contain an account token. Category and position diagnose the failure.
+        log::warn!(
+            "Could not decode {what}: category={:?}, line={}, column={}, bytes={}",
+            error.classify(),
+            error.line(),
+            error.column(),
+            bytes.len(),
+        );
+        format!("Could not read the {what}. Please try again.")
+    })
 }
 
 pub async fn read_bounded(
@@ -23,11 +33,19 @@ pub async fn read_bounded(
         return Err(too_large());
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| format!("Could not finish downloading the {what}. Please try again."))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        // This reader also handles authentication. Keep endpoint URLs and
+        // response content out of the log while retaining the failure kind.
+        log::warn!(
+            "Could not finish {what}: received_bytes={}, timeout={}, body={}, decode={}: {}",
+            bytes.len(),
+            error.is_timeout(),
+            error.is_body(),
+            error.is_decode(),
+            error.without_url(),
+        );
+        format!("Could not finish downloading the {what}. Please try again.")
+    })? {
         if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
             return Err(too_large());
         }

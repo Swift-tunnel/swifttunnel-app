@@ -2,6 +2,7 @@
 
 #[cfg(windows)]
 mod imp {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
     use windows::Win32::System::Threading::CreateMutexW;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -9,6 +10,8 @@ mod imp {
         SW_SHOW, SetForegroundWindow, ShowWindow,
     };
     use windows::core::{PCWSTR, w};
+
+    static PROCESS_RESERVED: AtomicBool = AtomicBool::new(false);
 
     struct Reservation(HANDLE);
 
@@ -53,6 +56,7 @@ mod imp {
             Ok(Some(reservations)) => {
                 // Both handles live until process exit, including network cleanup.
                 std::mem::forget(reservations);
+                PROCESS_RESERVED.store(true, Ordering::Release);
                 true
             }
             Ok(None) => {
@@ -76,6 +80,39 @@ mod imp {
                 false
             }
         }
+    }
+
+    /// A helper must hold both client names for the entire cleanup, rather
+    /// than just checking whether they exist before changing shared state.
+    pub struct CleanupReservation {
+        _reservations: Vec<Reservation>,
+    }
+
+    fn cleanup_reservation_with(
+        process_reserved: bool,
+        global: PCWSTR,
+        legacy: PCWSTR,
+    ) -> Result<CleanupReservation, String> {
+        // The UI's lifetime reservation already protects its own cleanup.
+        // Helper processes enter before acquire(), so they need their own.
+        let reservations = if process_reserved {
+            Vec::new()
+        } else {
+            reserve_clients(global, legacy)
+                .map_err(|error| format!("Could not check whether SwiftTunnel is still running. Close its windows and tray icon, then retry cleanup. Windows reported: {error}"))?
+                .ok_or_else(|| "Close SwiftTunnel and SwiftTunnel Lite, including their tray icons, then retry cleanup.".to_string())?
+        };
+        Ok(CleanupReservation {
+            _reservations: reservations,
+        })
+    }
+
+    pub fn reserve_cleanup() -> Result<CleanupReservation, String> {
+        cleanup_reservation_with(
+            PROCESS_RESERVED.load(Ordering::Acquire),
+            w!("Global\\SwiftTunnelSingleClient"),
+            w!("SwiftTunnelSingleClient"),
+        )
     }
 
     fn focus_running_client() {
@@ -114,6 +151,45 @@ mod imp {
             .encode_utf16()
             .chain(Some(0))
             .collect()
+        }
+
+        #[test]
+        fn cleanup_refuses_a_live_client_and_holds_both_names_until_it_finishes() {
+            let machine = name(true);
+            let session = name(false);
+            let global = PCWSTR(machine.as_ptr());
+            let legacy = PCWSTR(session.as_ptr());
+            let client = reserve_clients(global, legacy).unwrap().unwrap();
+            assert!(cleanup_reservation_with(false, global, legacy).is_err());
+            // The client itself may clean up under its permanent reservation.
+            let own_cleanup = cleanup_reservation_with(true, global, legacy).unwrap();
+            drop(own_cleanup);
+            assert!(reserve_clients(global, legacy).unwrap().is_none());
+            drop(client);
+            let helper = cleanup_reservation_with(false, global, legacy).unwrap();
+            assert!(reserve(global).unwrap().is_none());
+            assert!(reserve(legacy).unwrap().is_none());
+            drop(helper);
+            assert!(reserve_clients(global, legacy).unwrap().is_some());
+        }
+
+        #[test]
+        fn legacy_client_or_unreadable_reservation_cannot_authorize_cleanup() {
+            let machine = name(true);
+            let session = name(false);
+            let global = PCWSTR(machine.as_ptr());
+            let legacy = PCWSTR(session.as_ptr());
+            let client = reserve(legacy).unwrap().unwrap();
+            assert!(cleanup_reservation_with(false, global, legacy).is_err());
+            assert!(
+                reserve(global).unwrap().is_some(),
+                "failed admission releases its new handle"
+            );
+            drop(client);
+            let event = Reservation(unsafe { CreateEventW(None, false, false, legacy).unwrap() });
+            assert!(cleanup_reservation_with(false, global, legacy).is_err());
+            assert!(reserve(global).unwrap().is_some());
+            drop(event);
         }
 
         #[test]
@@ -176,9 +252,14 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::acquire;
+pub use imp::{acquire, reserve_cleanup};
 
 #[cfg(not(windows))]
 pub fn acquire() -> bool {
     true
+}
+
+#[cfg(not(windows))]
+pub fn reserve_cleanup() -> Result<(), String> {
+    Ok(())
 }

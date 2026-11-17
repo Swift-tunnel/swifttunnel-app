@@ -65,6 +65,3 @@ export function overlayAnchor(
         : m.y + (m.h - size.h) / 2,
   );
 }
-export function overlayHeartbeatExpired(last: number | null, now: number) {
-  return last !== null && now - last > 4500;
-}

@@ -454,6 +454,34 @@ pub fn is_country_ban_bypass_routing_active() -> bool {
     COUNTRY_BAN_BYPASS_ROUTING.load(Ordering::Relaxed)
 }
 
+/// Roblox hosts that have no pin in the hosts file yet.
+///
+/// Both connect-time lookups come back incomplete at random under a country
+/// ban: one player's relay lookup returned 38 hosts on some connects and 23 on
+/// others. Whatever is left out stays on poisoned or blocked addresses for the
+/// whole session, which shows as an avatar page with no items, missing
+/// thumbnails or empty menus. The session retries just these.
+pub fn missing_bootstrap_domains() -> Vec<&'static str> {
+    let pinned = last_applied_overrides()
+        .read()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry.domain.to_ascii_lowercase())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    unpinned_domains(&pinned)
+}
+
+fn unpinned_domains(pinned: &HashSet<String>) -> Vec<&'static str> {
+    ROBLOX_BOOTSTRAP_DOMAINS
+        .iter()
+        .filter(|domain| !pinned.contains(&domain.to_ascii_lowercase()))
+        .copied()
+        .collect()
+}
+
 /// Record whether GoodbyeDPI confirmed a working evasion mode.
 ///
 /// Only meaningful while country-ban bypass is active. Cleared with the rest of
@@ -929,7 +957,7 @@ fn write_overrides(overrides: &[HostOverride]) -> Result<(), String> {
 
     let content = read_hosts_or_empty(&path)?;
 
-    let clean = remove_marker_block(&content);
+    let clean = remove_marker_block(&content)?;
     let block = build_hosts_block(overrides);
 
     let mut out = clean;
@@ -961,25 +989,25 @@ pub fn remove_overrides() -> Result<(), String> {
 
 fn remove_overrides_inner() -> Result<(), String> {
     let path = hosts_path()?;
-
-    // No file means nothing of ours is in it. Tearing down cleanly is the whole
-    // point of this function, so it must not fail on an absent file.
-    if !path.exists() {
-        return Ok(());
+    if remove_overrides_at(&path)? {
+        info!("Removed Roblox proxy overrides from hosts file");
+        flush_dns_cache();
     }
+    Ok(())
+}
 
+fn remove_overrides_at(path: &std::path::Path) -> Result<bool, String> {
+    // The reader treats only NotFound as empty. An exists() preflight also
+    // hides access errors and would incorrectly report successful cleanup.
     let content = read_hosts_or_empty(&path)?;
-
-    let clean = remove_marker_block(&content);
+    let clean = remove_marker_block(&content)?;
 
     if clean != content {
         fs::write(&path, &clean)
             .map_err(|e| format!("Failed to write hosts file '{}': {e}", path.display()))?;
-        info!("Removed Roblox proxy overrides from hosts file");
-        flush_dns_cache();
+        return Ok(true);
     }
-
-    Ok(())
+    Ok(false)
 }
 
 fn active_bootstrap_ips() -> &'static RwLock<HashSet<Ipv4Addr>> {
@@ -1215,6 +1243,13 @@ fn clear_bootstrap_ip_sets() {
         Ok(mut direct_only) => direct_only.clear(),
         Err(e) => warn!("Failed to clear direct-only Roblox bootstrap IPs: {e}"),
     }
+    // A future relay fallback merges this snapshot into its fresh answers.
+    // Keeping it after teardown can reintroduce an earlier session's pins
+    // when the new public lookup fails.
+    match last_applied_overrides().write() {
+        Ok(mut last) => last.clear(),
+        Err(e) => warn!("Failed to clear the previous Roblox hosts snapshot: {e}"),
+    }
 }
 
 #[cfg(test)]
@@ -1271,36 +1306,55 @@ pub fn has_overrides() -> bool {
 // ---------------------------------------------------------------------------
 
 /// Remove the marker-delimited block from the hosts file content.
-fn remove_marker_block(content: &str) -> String {
+fn remove_marker_block(content: &str) -> Result<String, String> {
     let mut result = String::with_capacity(content.len());
     let mut inside_block = false;
+    let mut tail_is_owned = true;
+    let incomplete = || {
+        "SwiftTunnel's entries in the Windows hosts file are incomplete. The file was left unchanged. Contact support for help.".to_string()
+    };
 
-    for line in content.lines() {
+    // Retain the exact text outside our blocks, including CRLF and an EOF
+    // without a newline. A no-op cleanup must not rewrite a user's file.
+    for line in content.split_inclusive('\n') {
         let trimmed = line.trim();
 
         if trimmed == MARKER_START {
+            if inside_block {
+                return Err(incomplete());
+            }
             inside_block = true;
+            tail_is_owned = true;
             continue;
         }
         if trimmed == MARKER_END {
+            if !inside_block {
+                return Err(incomplete());
+            }
             inside_block = false;
             continue;
         }
 
         if !inside_block {
             result.push_str(line);
-            result.push('\n');
+        } else if !trimmed.is_empty() {
+            // Only heal an unfinished block when every tail line could have
+            // been emitted by our writer. Unknown names, aliases and comments
+            // may belong to the user, even inside a damaged marker pair.
+            let mut fields = trimmed.split_ascii_whitespace();
+            let ip = fields.next().and_then(|ip| ip.parse::<Ipv4Addr>().ok());
+            let domain = fields.next();
+            tail_is_owned &= ip.is_some()
+                && domain.is_some_and(|domain| ROBLOX_BOOTSTRAP_DOMAINS.contains(&domain))
+                && fields.next().is_none();
         }
     }
 
-    // Collapse trailing blank lines to a single newline
-    let trimmed = result.trim_end_matches('\n');
-    if trimmed.is_empty() {
-        return String::new();
+    if inside_block && !tail_is_owned {
+        // Do not guess ownership of a user's remaining entries.
+        return Err(incomplete());
     }
-    let mut out = trimmed.to_string();
-    out.push('\n');
-    out
+    Ok(result)
 }
 
 fn build_hosts_block(overrides: &[HostOverride]) -> String {
@@ -1390,6 +1444,28 @@ fn flush_dns_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ended_dns_session_cannot_supply_stale_pins_to_the_next_relay_fallback() {
+        let _lock = BOOTSTRAP_IP_TEST_LOCK.lock().unwrap();
+        clear_bootstrap_ip_sets();
+        *last_applied_overrides().write().unwrap() = vec![HostOverride {
+            ip: Ipv4Addr::new(128, 116, 47, 3),
+            domain: "games.roblox.com".into(),
+        }];
+        enter_country_ban_routing();
+        set_dpi_evasion_confirmed(true);
+        clear_bootstrap_ip_sets();
+        let cached = last_applied_overrides().read().unwrap().len();
+        // Clear fixture data even on the old implementation's failing run.
+        last_applied_overrides().write().unwrap().clear();
+        assert!(!is_country_ban_bypass_routing_active());
+        assert!(!is_dpi_evasion_confirmed());
+        assert_eq!(
+            cached, 0,
+            "the next relay DNS merge can resurrect the previous session's pins"
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn cancelled_hosts_write_keeps_connection_ownership_through_state_publication() {
@@ -1516,14 +1592,114 @@ mod tests {
     }
 
     #[test]
+    fn hosts_without_our_entries_keep_original_line_endings_and_eof() {
+        for input in [
+            "127.0.0.1 localhost\r\n::1 localhost\r\n",
+            "127.0.0.1 localhost",
+            "# personal hosts\n\n\n",
+        ] {
+            assert_eq!(remove_marker_block(input).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn damaged_marker_blocks_leave_the_entire_file_untouched() {
+        let dir = HostsFixture::new();
+        let path = dir.0.join("hosts");
+        let cases = [
+            format!(
+                "127.0.0.1 localhost\r\n{MARKER_START}\r\n127.66.0.1 roblox.com\r\n192.168.1.5 personal-server"
+            ),
+            format!("{MARKER_START}\n{MARKER_START}\n{MARKER_END}\n192.168.1.5 personal-server\n"),
+            format!("127.0.0.1 localhost\n{MARKER_END}\n192.168.1.5 personal-server\n"),
+            format!("{MARKER_START}\n{MARKER_END}\n{MARKER_START}\n192.168.1.5 personal-server\n"),
+        ];
+        for original in cases {
+            fs::write(&path, &original).unwrap();
+            let error = remove_overrides_at(&path).unwrap_err();
+            assert!(error.contains("incomplete"));
+            assert_eq!(fs::read(&path).unwrap(), original.as_bytes());
+        }
+    }
+
+    #[test]
+    fn cleanup_heals_an_unterminated_block_only_with_known_generated_entries() {
+        let dir = HostsFixture::new();
+        let path = dir.0.join("hosts");
+        let prefix = "127.0.0.1 localhost\r\n192.168.1.5 personal-server\r\n";
+        for tail in [
+            "",
+            "\r\n",
+            "34.18.1.2 www.roblox.com\r\n1.2.3.4 auth.roblox.com",
+        ] {
+            fs::write(&path, format!("{prefix}{MARKER_START}\r\n{tail}")).unwrap();
+            assert!(remove_overrides_at(&path).unwrap());
+            assert_eq!(fs::read_to_string(&path).unwrap(), prefix);
+            assert!(!remove_overrides_at(&path).unwrap());
+        }
+        for tail in [
+            "1.2.3.4 www.roblox.com personal-server",
+            "1.2.3.4 www.roblox.com.example.org",
+            "# personal comment",
+            "::1 www.roblox.com",
+            "1.2.3.4 www.roblox.com\n192.168.1.5 personal-server",
+            "1.2.3.4 www.roblox.com\n1.2.3",
+        ] {
+            let original = format!("{prefix}{MARKER_START}\n{tail}");
+            fs::write(&path, &original).unwrap();
+            assert!(remove_overrides_at(&path).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        }
+    }
+
+    #[test]
+    fn cleanup_removes_only_complete_blocks_and_reports_unreadable_files() {
+        let dir = HostsFixture::new();
+        let path = dir.0.join("hosts");
+        assert!(!remove_overrides_at(&path).unwrap());
+        assert!(!path.exists());
+        fs::create_dir(&path).unwrap();
+        assert!(remove_overrides_at(&path).is_err());
+        fs::remove_dir(&path).unwrap();
+        let original = format!(
+            "127.0.0.1 localhost\r\n{MARKER_START}\r\n127.66.0.1 roblox.com\r\n{MARKER_END}\r\n\r\n192.168.1.5 personal-server\r\n{MARKER_START}\n127.66.0.1 setup.roblox.com\n{MARKER_END}\n::1 localhost"
+        );
+        fs::write(&path, original).unwrap();
+        assert!(remove_overrides_at(&path).unwrap());
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            b"127.0.0.1 localhost\r\n\r\n192.168.1.5 personal-server\r\n::1 localhost"
+        );
+        assert!(!remove_overrides_at(&path).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_does_not_open_an_unrelated_hosts_file_for_writing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = HostsFixture::new();
+        let path = dir.0.join("hosts");
+        let original = b"127.0.0.1 localhost\r\n192.168.1.5 personal-server";
+        fs::write(&path, original).unwrap();
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&path)
+            .unwrap();
+        assert!(!remove_overrides_at(&path).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        drop(locked);
+    }
+
+    #[test]
     fn remove_marker_block_empty_input() {
-        assert_eq!(remove_marker_block(""), "");
+        assert_eq!(remove_marker_block("").unwrap(), "");
     }
 
     #[test]
     fn remove_marker_block_no_markers() {
         let input = "127.0.0.1 localhost\n::1 localhost\n";
-        assert_eq!(remove_marker_block(input), input);
+        assert_eq!(remove_marker_block(input).unwrap(), input);
     }
 
     #[test]
@@ -1537,7 +1713,7 @@ mod tests {
 ::1 localhost
 ";
         let expected = "127.0.0.1 localhost\n::1 localhost\n";
-        assert_eq!(remove_marker_block(input), expected);
+        assert_eq!(remove_marker_block(input).unwrap(), expected);
     }
 
     #[test]
@@ -1549,7 +1725,7 @@ mod tests {
 # SwiftTunnel Roblox Proxy - END
 ";
         let expected = "127.0.0.1 localhost\n";
-        assert_eq!(remove_marker_block(input), expected);
+        assert_eq!(remove_marker_block(input).unwrap(), expected);
     }
 
     #[test]
@@ -1559,7 +1735,7 @@ mod tests {
 127.66.0.1 clientsettings.roblox.com
 # SwiftTunnel Roblox Proxy - END
 ";
-        assert_eq!(remove_marker_block(input), "");
+        assert_eq!(remove_marker_block(input).unwrap(), "");
     }
 
     #[test]
@@ -2019,6 +2195,24 @@ mod tests {
             })
             .collect();
         assert!(missing_direct_only_domains(&overrides).is_empty());
+    }
+
+    #[test]
+    fn unpinned_domains_lists_only_hosts_without_a_pin() {
+        assert_eq!(
+            unpinned_domains(&HashSet::new()).len(),
+            ROBLOX_BOOTSTRAP_DOMAINS.len()
+        );
+        // Pins are compared case-insensitively, as written to the hosts file.
+        let pinned: HashSet<String> = ["CATALOG.roblox.com", "www.roblox.com"]
+            .iter()
+            .map(|domain| domain.to_ascii_lowercase())
+            .collect();
+        let missing = unpinned_domains(&pinned);
+        assert!(!missing.contains(&"catalog.roblox.com"));
+        assert!(!missing.contains(&"www.roblox.com"));
+        assert!(missing.contains(&"economy.roblox.com"));
+        assert_eq!(missing.len(), ROBLOX_BOOTSTRAP_DOMAINS.len() - 2);
     }
 
     #[test]

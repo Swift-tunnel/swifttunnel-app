@@ -139,6 +139,12 @@ struct FpsRuntime {
 impl FpsRuntime {
     fn stop(&mut self) {
         self.shared.stop_flag.store(true, Ordering::SeqCst);
+        for worker in [&self.etw_thread, &self.sampler_thread]
+            .into_iter()
+            .flatten()
+        {
+            worker.thread().unpark();
+        }
         // Stopping the session unblocks the blocking `ProcessTrace` call. Skip
         // when there's no ETW thread (e.g. inert test runtimes) so we don't
         // fire a stray `ControlTraceW` at an unrelated session.
@@ -358,17 +364,23 @@ impl Drop for FpsMonitor {
 /// 2-sample average smooths the jitter from ETW's ~1s buffer flushing at low
 /// present rates (at real gaming framerates buffers fill sub-second anyway).
 fn run_sampler(shared: Arc<FpsShared>) {
-    loop {
-        // Interruptible ~1s sleep so shutdown is prompt.
-        for _ in 0..10 {
-            if shared.stop_flag.load(Ordering::Acquire) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-
+    while wait_for_fps_worker(&shared.stop_flag, Duration::from_secs(1)) {
         sample_window(&shared, Instant::now());
     }
+}
+
+/// Wait until the deadline, with an explicit wake on shutdown. Recheck the
+/// deadline after a spurious wake so the sampler cannot shorten its window.
+fn wait_for_fps_worker(stop: &AtomicBool, delay: Duration) -> bool {
+    let deadline = Instant::now() + delay;
+    while !stop.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::park_timeout(remaining);
+    }
+    false
 }
 
 fn sample_window(shared: &FpsShared, now: Instant) {
@@ -441,12 +453,8 @@ fn supervise_etw_session(shared: Arc<FpsShared>) {
                     e,
                     backoff_ms
                 );
-                let until = Instant::now() + Duration::from_millis(backoff_ms);
-                while Instant::now() < until {
-                    if shared.stop_flag.load(Ordering::Acquire) {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
+                if !wait_for_fps_worker(&shared.stop_flag, Duration::from_millis(backoff_ms)) {
+                    return;
                 }
                 backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
             }
@@ -671,6 +679,24 @@ impl FpsMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_shutdown_interrupts_a_long_retry_wait() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready, started) = std::sync::mpsc::channel();
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker_stop = stop.clone();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            let elapsed = wait_for_fps_worker(&worker_stop, Duration::from_secs(30));
+            let _ = done.send(elapsed);
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        stop.store(true, Ordering::Release);
+        worker.thread().unpark();
+        assert!(!finished.recv_timeout(Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+    }
 
     #[test]
     fn late_observations_cannot_clear_or_retarget_a_newer_players_trace() {

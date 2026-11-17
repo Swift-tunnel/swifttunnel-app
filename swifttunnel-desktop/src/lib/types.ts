@@ -504,7 +504,7 @@ export interface StartupRegistrationSnapshot {
 }
 
 export type StartupRegistrationRepairResponse =
-  | { outcome: "completed"; snapshot: StartupRegistrationSnapshot }
+  | { outcome: "completed"; snapshot: StartupRegistrationSnapshot; undo_available?: boolean }
   | { outcome: "preference_changed"; message: string };
 
 export interface DriverCheckResponse {

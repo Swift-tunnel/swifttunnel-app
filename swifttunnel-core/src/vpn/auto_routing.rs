@@ -519,10 +519,15 @@ impl AutoRouter {
         }
         let (_, address) = self.current_relay()?;
         let servers = self.available_servers_snapshot();
-        let candidates = match self.regional_only() {
+        let mut candidates = match self.regional_only() {
             Some(scope) => super::connection::relay_candidates_for_region(scope, &servers),
             None => servers,
         };
+        // Keep the current route as the baseline. A fast ICMP estimate for
+        // another relay cannot override a recent loss of UDP traffic.
+        candidates.retain(|(id, candidate, _)| {
+            *candidate == address || !super::servers::relay_is_avoided(id)
+        });
         super::route_measurements::choose_path_with_margin(
             &candidates,
             samples,
@@ -1021,7 +1026,8 @@ impl AutoRouter {
         let selection = self.relay_selection.read().clone();
         let current_st_region = selection.region;
         let current_relay_addr = selection.address;
-        let candidates = super::connection::relay_candidates_for_region(best_st_region, &servers);
+        let mut candidates =
+            super::connection::relay_candidates_for_region(best_st_region, &servers);
         if candidates.is_empty() {
             log::warn!(
                 "Auto-routing: No server found for region '{}' (game region: {})",
@@ -1030,14 +1036,16 @@ impl AutoRouter {
             );
             return None;
         }
+        candidates.retain(|(id, address, _)| {
+            Some(*address) == current_relay_addr || !super::servers::relay_is_avoided(id)
+        });
 
         // The same ranking a fresh connect uses: latency first, then load
         // among relays a player cannot tell apart, and a full relay passed
         // over for an open one close by. This is how crowded relays shed
         // players: at their next game join, never in the middle of one.
         let (resolved_region, resolved_addr) =
-            super::connection::best_cached_candidate(&candidates)
-                .expect("candidates checked as non-empty");
+            super::connection::best_cached_candidate(&candidates)?;
 
         if candidates.len() == 1
             && current_st_region == resolved_region
@@ -2538,6 +2546,40 @@ mod estimate_tests {
         ]);
         router.set_current_relay("127.0.0.1:4".parse().unwrap(), "mumbai-04");
         router
+    }
+
+    #[test]
+    fn auto_route_keeps_working_relay_during_failed_relays_cooldown() {
+        let working = "192.0.2.10:51821".parse().unwrap();
+        let failed = "192.0.2.11:51821".parse().unwrap();
+        let failed_id = "singapore-92";
+        let router = AutoRouter::new(true, "mumbai-91");
+        router.set_current_relay(working, "mumbai-91");
+        router.set_available_servers(vec![
+            ("mumbai-91".into(), working, Some(60)),
+            (failed_id.into(), failed, Some(10)),
+        ]);
+        let samples = serde_json::from_str::<Vec<_>>(
+            r#"[
+                {"relay":"mumbai-91","rtt_ms":20,"age_ms":0,"samples":2},
+                {"relay":"singapore-92","rtt_ms":5,"age_ms":0,"samples":2}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(router.measured_path(&samples).unwrap().address, failed);
+        assert_eq!(
+            router.get_best_server_for_region(&RobloxRegion::Singapore),
+            Some((failed_id.into(), failed))
+        );
+
+        super::super::servers::avoid_relay_for_a_while(failed_id);
+        let measured = router.measured_path(&samples);
+        let fallback = router.get_best_server_for_region(&RobloxRegion::Singapore);
+        super::super::servers::forget_avoided_relay_for_test(failed_id);
+
+        assert_eq!(measured.unwrap().address, working);
+        assert!(fallback.is_none());
+        assert_eq!(router.measured_path(&samples).unwrap().address, failed);
     }
 
     #[test]

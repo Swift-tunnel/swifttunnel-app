@@ -16,7 +16,6 @@ describe("app bootstrap", () => {
         fetchAuth: vi.fn(async () => {}),
         loadSettings: vi.fn(async () => {}),
         fetchServers: vi.fn(async () => {}),
-        fetchSystemInfo: vi.fn(async () => {}),
         fetchVpnState: vi.fn(async () => {}),
         refreshAuthProfile: vi.fn(async () => {}),
         getSettings: () => ({ ...DEFAULT_SETTINGS, auto_reconnect: true, resume_vpn_on_startup: true }),
@@ -48,7 +47,6 @@ describe("app bootstrap", () => {
     const fetchAuth = vi.fn().mockResolvedValue(undefined);
     const loadSettings = vi.fn().mockResolvedValue(undefined);
     const fetchServers = vi.fn().mockResolvedValue(undefined);
-    const fetchSystemInfo = vi.fn().mockResolvedValue(undefined);
     const fetchVpnState = vi.fn().mockResolvedValue(undefined);
     const refreshAuthProfile = vi.fn().mockResolvedValue(undefined);
     const connectVpn = vi.fn().mockResolvedValue(undefined);
@@ -59,7 +57,6 @@ describe("app bootstrap", () => {
       fetchAuth,
       loadSettings,
       fetchServers,
-      fetchSystemInfo,
       fetchVpnState,
       refreshAuthProfile,
       getSettings: () => ({
@@ -76,7 +73,6 @@ describe("app bootstrap", () => {
     expect(initEventListeners).toHaveBeenCalledTimes(1);
     expect(loadSettings).toHaveBeenCalledTimes(1);
     expect(fetchServers).toHaveBeenCalledTimes(1);
-    expect(fetchSystemInfo).toHaveBeenCalledTimes(1);
     expect(fetchAuth).toHaveBeenCalledTimes(2);
     expect(fetchVpnState).toHaveBeenCalledTimes(2);
     expect(refreshAuthProfile).toHaveBeenCalledTimes(1);
@@ -94,7 +90,6 @@ describe("app bootstrap", () => {
       fetchAuth: vi.fn().mockResolvedValue(undefined),
       loadSettings: vi.fn().mockResolvedValue(undefined),
       fetchServers: vi.fn().mockResolvedValue(undefined),
-      fetchSystemInfo: vi.fn().mockResolvedValue(undefined),
       fetchVpnState: vi.fn().mockResolvedValue(undefined),
       refreshAuthProfile,
       getSettings: () => ({
@@ -129,7 +124,6 @@ describe("app bootstrap", () => {
       }),
       loadSettings: vi.fn().mockResolvedValue(undefined),
       fetchServers: vi.fn().mockResolvedValue(undefined),
-      fetchSystemInfo: vi.fn().mockResolvedValue(undefined),
       fetchVpnState: vi.fn().mockImplementation(async () => {
         fetchVpnStateCalls += 1;
         if (fetchVpnStateCalls > 1) {
@@ -162,7 +156,6 @@ describe("app bootstrap", () => {
       fetchAuth,
       loadSettings: vi.fn().mockResolvedValue(undefined),
       fetchServers: vi.fn().mockResolvedValue(undefined),
-      fetchSystemInfo: vi.fn().mockResolvedValue(undefined),
       fetchVpnState,
       refreshAuthProfile,
       getSettings: () => ({

@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { shouldAutoReconnectOnLaunch, startupProgress } from "./startup";
+import { describe, expect, it, vi } from "vitest";
+import { pollUpdateRequirement, shouldAutoReconnectOnLaunch, startupProgress, watchStartupRecoveryCompletion } from "./startup";
 
 describe("startupProgress", () => {
   const steps = (done: boolean[]) =>
@@ -32,6 +32,30 @@ describe("startupProgress", () => {
   it("treats no steps as finished", () => {
     expect(startupProgress([])).toEqual({ done: 0, fraction: 1, current: null });
   });
+});
+
+it("clears the update gate on a successful null read and keeps just one pending poll", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("window", globalThis);
+  let finish!: (message: string | null) => void;
+  const read = vi.fn<() => Promise<string | null>>()
+    .mockResolvedValueOnce("Update required")
+    .mockRejectedValueOnce(new Error("IPC unavailable"))
+    .mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const publish = vi.fn();
+  const stop = pollUpdateRequirement(read, publish);
+  try {
+    await vi.advanceTimersByTimeAsync(81_500);
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(publish.mock.calls).toEqual([["Update required"]]);
+    finish(null);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(publish.mock.calls).toEqual([["Update required"], [null]]);
+  } finally {
+    stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
 });
 
 describe("shouldAutoReconnectOnLaunch", () => {
@@ -72,5 +96,45 @@ describe("shouldAutoReconnectOnLaunch", () => {
         resume_vpn_on_startup: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("watchStartupRecoveryCompletion", () => {
+  it("catches recovery that finishes before the completion listener is ready", async () => {
+    let register!: (stop: () => void) => void;
+    let emit!: () => void;
+    const unlisten = vi.fn();
+    const isDone = vi.fn(async () => done);
+    const complete = vi.fn();
+    let done = false;
+    const stop = watchStartupRecoveryCompletion((handler) => {
+      emit = handler;
+      return new Promise(resolve => { register = resolve; });
+    }, isDone, complete, vi.fn());
+
+    expect(isDone).not.toHaveBeenCalled();
+    done = true;
+    register(unlisten);
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    emit();
+    expect(complete).toHaveBeenCalledOnce();
+    stop();
+    expect(unlisten).toHaveBeenCalledOnce();
+  });
+
+  it("still checks recovery if listener registration fails", async () => {
+    const error = new Error("listen failed");
+    const complete = vi.fn();
+    const onSubscribeError = vi.fn();
+    const stop = watchStartupRecoveryCompletion(
+      async () => { throw error; },
+      async () => true,
+      complete,
+      onSubscribeError,
+    );
+
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledOnce());
+    expect(onSubscribeError).toHaveBeenCalledWith(error);
+    stop();
   });
 });

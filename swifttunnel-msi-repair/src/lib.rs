@@ -21,28 +21,52 @@
 //!
 //! # Why this is a library
 //!
-//! Setup and the app updaters call this library before launching msiexec.
-//! Their broader recovery runs elevated. The Desktop MSI now uses a separate,
-//! scoped DLL in `swifttunnel-msi-actions`: an early InstallExecute flush runs
-//! recovery as SYSTEM before RemoveExistingProducts and before new files land.
-//! It handles confirmed missing per-machine Desktop packages only. The launcher
-//! remains useful for other orphan cases. Neither approach is a full uninstall.
+//! The Desktop and Lite MSIs check related machine installations inside
+//! Windows Installer before removing the previous version. The in-app
+//! uninstall and standalone repair tool use the same source check.
 
 use std::path::Path;
 
-use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
+use windows_registry::LOCAL_MACHINE;
 
-/// Where Windows records per-machine installed products.
-/// Every account's installed-product list, not just the machine account's.
-///
-/// This used to point straight at `S-1-5-18`, the machine account, which is
-/// where a per-machine install registers. An install done per-user registers
-/// under that user's own SID instead and was invisible here, so the repair
-/// reported a healthy machine and the upgrade failed anyway.
+mod sources;
+pub use sources::{machine_install_location, machine_sources_are_missing};
+
+/// Includes both the machine registration and registrations scoped to users.
 const USERDATA: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData";
 const CLASSES_PRODUCTS: &str = r"SOFTWARE\Classes\Installer\Products";
 const CLASSES_FEATURES: &str = r"SOFTWARE\Classes\Installer\Features";
+const CLASSES_UPGRADE_CODES: &str = r"SOFTWARE\Classes\Installer\UpgradeCodes";
 const UNINSTALL: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall";
+const MACHINE_SID: &str = "S-1-5-18";
+
+fn is_machine_client(orphan: &Orphan) -> bool {
+    if orphan.sid != MACHINE_SID {
+        return false;
+    }
+    let family = if orphan
+        .display_name
+        .trim()
+        .eq_ignore_ascii_case("SwiftTunnel")
+    {
+        "{E8A8D9AE-1DDB-53D0-BCF4-8268BDDC947D}"
+    } else if orphan
+        .display_name
+        .trim()
+        .eq_ignore_ascii_case("SwiftTunnel Lite")
+    {
+        "{9C4E2B77-5A81-4F36-B0D9-1E6A83C7F520}"
+    } else {
+        return false;
+    };
+    let Some(family) = pack_guid(family) else {
+        return false;
+    };
+    LOCAL_MACHINE
+        .open(format!(r"{CLASSES_UPGRADE_CODES}\{family}"))
+        .and_then(|key| key.get_string(&orphan.packed))
+        .is_ok()
+}
 
 fn is_client_name(name: &str) -> bool {
     ["SwiftTunnel", "SwiftTunnel Lite"]
@@ -116,16 +140,67 @@ fn all_registrations() -> windows_registry::Result<Vec<(Orphan, bool)>> {
     Ok(out)
 }
 
-/// SwiftTunnel registrations whose cached installer package no longer exists.
-///
-/// A registration whose package is still on disk is healthy and is skipped, so
-/// running this on a working machine finds nothing and changes nothing.
+/// Find related machine products for which every recorded source is missing.
 pub fn find_orphans() -> windows_registry::Result<Vec<Orphan>> {
     Ok(all_registrations()?
         .into_iter()
         .filter(|(_, usable)| !usable)
         .map(|(orphan, _)| orphan)
+        .filter(|orphan| {
+            is_machine_client(orphan)
+                && machine_sources_are_missing(&orphan.product_code, &orphan.local_package)
+        })
         .collect())
+}
+
+/// Read the single per-machine record already identified by the uninstall
+/// caller. The caller separately proves that the installer sources are gone.
+pub fn machine_registration(product_code: &str) -> windows_registry::Result<Option<Orphan>> {
+    let Some(packed) = pack_guid(product_code) else {
+        return Ok(None);
+    };
+    let props = match LOCAL_MACHINE.open(format!(
+        r"{USERDATA}\{MACHINE_SID}\Products\{packed}\InstallProperties"
+    )) {
+        Ok(props) => props,
+        Err(error) if registry_not_found(error.code().0 as u32) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(Orphan {
+        sid: MACHINE_SID.into(),
+        packed,
+        product_code: product_code.into(),
+        display_name: props.get_string("DisplayName")?,
+        display_version: props.get_string("DisplayVersion").unwrap_or_default(),
+        local_package: props.get_string("LocalPackage")?,
+    }))
+}
+
+fn pack_guid(code: &str) -> Option<String> {
+    let fields: Vec<_> = code
+        .strip_prefix('{')?
+        .strip_suffix('}')?
+        .split('-')
+        .collect();
+    if fields.iter().map(|field| field.len()).ne([8, 4, 4, 4, 12])
+        || !fields
+            .iter()
+            .flat_map(|field| field.bytes())
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let mut packed = String::with_capacity(32);
+    for field in &fields[..3] {
+        packed.extend(field.chars().rev());
+    }
+    for field in &fields[3..] {
+        for pair in field.as_bytes().chunks_exact(2) {
+            packed.push(pair[1] as char);
+            packed.push(pair[0] as char);
+        }
+    }
+    Some(packed)
 }
 
 /// Whether two files hold identical bytes.
@@ -184,15 +259,8 @@ fn files_have_same_contents(left: &Path, right: &Path) -> bool {
 /// signature. Checking them costs one short read and rules out both an empty
 /// file and something that is not a package at all.
 ///
-/// Only a package we can prove is bad counts as bad. Saying "not usable" gets a
-/// registration deleted, and this now runs on every launch rather than only
-/// when someone is already installing, so the cost of being wrong changed. A
-/// file we cannot read is not evidence of anything: `C:\Windows\Installer` is
-/// readable only by SYSTEM and administrators, and antivirus holds a package
-/// open often enough to deny a share. Both look identical to a deleted file
-/// through `exists()`, which reports false when metadata is denied. Treating
-/// either as missing would unregister a perfectly healthy install, silently, on
-/// a machine where nothing was ever wrong.
+/// An unreadable file is unknown. Before clearing a record, check the
+/// registered package and fallback sources separately.
 ///
 /// Note what this does *not* establish: an OLE signature is common to every MSI
 /// ever made, so a valid package that is not ours passes it. Deciding that a
@@ -205,8 +273,7 @@ fn package_is_usable(path: &str) -> bool {
         return true;
     }
 
-    // Absent is the one thing worth acting on. Anything else that stops us
-    // looking is unknown, and unknown must leave the registration alone.
+    // Only NotFound establishes absence.
     match std::fs::metadata(Path::new(path)) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
@@ -236,6 +303,12 @@ fn package_header_is_usable(mut file: impl std::io::Read) -> bool {
 /// Remove every key that makes Windows believe the product is installed.
 pub fn clear_registration(orphan: &Orphan) -> Result<(), String> {
     validate_orphan(orphan)?;
+    if !is_machine_client(orphan) {
+        return Err(
+            "Could not verify this SwiftTunnel machine installation. Reopen Setup to continue."
+                .into(),
+        );
+    }
     // Discovery can precede a long source-preservation pass. Recheck the
     // registration before any deletion; a recovered package is no orphan.
     let props = LOCAL_MACHINE
@@ -259,44 +332,81 @@ pub fn clear_registration(orphan: &Orphan) -> Result<(), String> {
     {
         return Err("The installation changed while it was being checked. Reopen the repair tool before trying again.".into());
     }
-    if package_is_usable(&package) {
-        return Err("Windows no longer confirms that this installer source is missing. No registration was removed. Reopen Setup to continue.".into());
-    }
     drop(props);
-    // Classes/Installer keys are shared by product code. Do not remove them
-    // while another account still has a registration for that same product.
-    let users = LOCAL_MACHINE
-        .open(USERDATA)
-        .map_err(|error| format!("Could not check other Windows installations: {error}"))?;
-    for (index, sid) in users.keys().map_err(|error| error.to_string())?.enumerate() {
-        if index >= 256 {
-            return Err(
-                "Too many Windows account records to confirm a safe repair. Contact support."
-                    .into(),
-            );
-        }
-        if sid == orphan.sid {
-            continue;
-        }
-        match users.open(format!(r"{sid}\Products\{}", orphan.packed)) {
-            Ok(_) => return Err("Another Windows account still has this SwiftTunnel version registered. Its shared installer information was left intact. Use Windows Settings > Apps to repair the affected copy.".into()),
-            Err(error) if registry_not_found(error.code().0 as u32) => {}
-            Err(error) => return Err(format!("Could not check another Windows account's installer registration: {error}. Nothing was removed.")),
-        }
+    require_no_per_user_registration(&orphan.product_code)?;
+    if !machine_sources_are_missing(&orphan.product_code, &package) {
+        return Err("Windows could not confirm that all installer sources are missing. Use Windows Installer or reopen Setup.".into());
     }
     clear_registration_with(
         orphan,
-        |hive, path| {
-            hive.key()
+        |path| {
+            LOCAL_MACHINE
                 .remove_tree(path)
                 .map_err(|error| error.code().0 as u32)
         },
-        |hive, path| match hive.key().open(path) {
+        |path| match LOCAL_MACHINE.open(path) {
             Ok(_) => Ok(false),
             Err(error) if registry_not_found(error.code().0 as u32) => Ok(true),
             Err(error) => Err(error.code().0 as u32),
         },
     )
+}
+
+/// Classes/Installer keys are shared by product code. Confirm that no other
+/// account still needs those keys before removing a machine registration.
+pub fn require_no_per_user_registration(product_code: &str) -> Result<(), String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};
+    use windows::Win32::System::Registry::{RegEnumKeyExW, HKEY};
+
+    let packed = pack_guid(product_code).ok_or("Invalid Windows Installer product code.")?;
+    let users = LOCAL_MACHINE
+        .open(USERDATA)
+        .map_err(|error| format!("Could not check other Windows installations: {error}"))?;
+    for index in 0..=256 {
+        let mut name = [0u16; 256];
+        let mut length = name.len() as u32;
+        // KeyIterator hides enumeration errors as end-of-list. Destructive
+        // cleanup needs an explicit ERROR_NO_MORE_ITEMS from Windows.
+        let status = unsafe {
+            RegEnumKeyExW(
+                HKEY(users.as_raw()),
+                index,
+                Some(PWSTR(name.as_mut_ptr())),
+                &mut length,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        if status == ERROR_NO_MORE_ITEMS {
+            return Ok(());
+        }
+        if status != ERROR_SUCCESS {
+            return Err(format!(
+                "Could not read Windows account registrations (Windows error {}).",
+                status.0
+            ));
+        }
+        if index == 256 {
+            return Err(
+                "Too many Windows account records to confirm a safe repair. Contact support."
+                    .into(),
+            );
+        }
+        let sid = String::from_utf16(&name[..length as usize])
+            .map_err(|_| "Windows returned an invalid account registration.")?;
+        if sid == MACHINE_SID {
+            continue;
+        }
+        match users.open(format!(r"{sid}\Products\{packed}")) {
+            Ok(_) => return Err("Another Windows account still has this SwiftTunnel version registered. Use Windows Settings > Apps to repair the affected copy.".into()),
+            Err(error) if registry_not_found(error.code().0 as u32) => {}
+            Err(error) => return Err(format!("Could not check another Windows account's installer registration: {error}.")),
+        }
+    }
+    Err("Could not finish checking Windows account registrations.".into())
 }
 
 fn validate_orphan(orphan: &Orphan) -> Result<(), String> {
@@ -322,71 +432,41 @@ fn validate_orphan(orphan: &Orphan) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum RegistrationHive {
-    Machine,
-    User,
-}
-impl RegistrationHive {
-    fn key(self) -> &'static windows_registry::Key {
-        match self {
-            Self::Machine => LOCAL_MACHINE,
-            Self::User => CURRENT_USER,
-        }
-    }
-}
-
 fn registry_not_found(code: u32) -> bool {
     matches!(code, 0x80070002 | 0x80070003)
 }
 
 fn clear_registration_with(
     orphan: &Orphan,
-    mut remove: impl FnMut(RegistrationHive, &str) -> Result<(), u32>,
-    mut absent: impl FnMut(RegistrationHive, &str) -> Result<bool, u32>,
+    mut remove: impl FnMut(&str) -> Result<(), u32>,
+    mut absent: impl FnMut(&str) -> Result<bool, u32>,
 ) -> Result<(), String> {
     validate_orphan(orphan)?;
     // Keep the discovery record until the other deletions succeed. An access
     // failure must remain diagnosable and retryable, not look like success.
     let paths = [
-        (
-            RegistrationHive::Machine,
-            format!(r"{CLASSES_PRODUCTS}\{}", orphan.packed),
-        ),
-        (
-            RegistrationHive::Machine,
-            format!(r"{CLASSES_FEATURES}\{}", orphan.packed),
-        ),
-        (
-            RegistrationHive::Machine,
-            format!(r"{UNINSTALL}\{}", orphan.product_code),
-        ),
-        (
-            RegistrationHive::User,
-            format!(r"{UNINSTALL}\{}", orphan.product_code),
-        ),
-        (
-            RegistrationHive::Machine,
-            format!(r"{USERDATA}\{}\Products\{}", orphan.sid, orphan.packed),
-        ),
+        format!(r"{CLASSES_PRODUCTS}\{}", orphan.packed),
+        format!(r"{CLASSES_FEATURES}\{}", orphan.packed),
+        format!(r"{UNINSTALL}\{}", orphan.product_code),
+        format!(r"{USERDATA}\{}\Products\{}", orphan.sid, orphan.packed),
     ];
-    for (index, (hive, path)) in paths.iter().enumerate() {
+    for (index, path) in paths.iter().enumerate() {
         if index == paths.len() - 1 {
             // Confirm secondary records before discarding our retry anchor.
-            for (hive, path) in &paths[..index] {
-                if !matches!(absent(*hive, path), Ok(true)) {
+            for path in &paths[..index] {
+                if !matches!(absent(path), Ok(true)) {
                     return Err("Could not confirm the partial installer repair. The installation record was kept so you can retry as administrator.".into());
                 }
             }
         }
-        if let Err(error) = remove(*hive, path) {
+        if let Err(error) = remove(path) {
             if !registry_not_found(error) {
                 return Err(format!("Installer registration repair is incomplete (Windows error 0x{error:08X}). Reopen the repair tool as administrator to retry."));
             }
         }
     }
-    for (hive, path) in &paths {
-        match absent(*hive, path) {
+    for path in &paths {
+        match absent(path) {
             Ok(true) => {}
             _ => return Err("Could not confirm that the installer registration was removed. Reopen the repair tool as administrator to retry.".into()),
         }
@@ -452,11 +532,22 @@ mod tests {
     }
 
     #[test]
+    fn exact_registration_lookup_accepts_only_a_product_guid() {
+        let example = orphan();
+        assert_eq!(
+            super::pack_guid(&example.product_code),
+            Some(example.packed)
+        );
+        assert!(super::pack_guid(r"{F820821D-AF83-4972-B40A-4B4B4D53A92E}\Other").is_none());
+        assert!(super::pack_guid("{F820821D-AF83-4972-B40A-4B4B4D53A9ZZ}").is_none());
+    }
+
+    #[test]
     fn incomplete_cleanup_keeps_discovery_until_secondary_removals_succeed() {
         let mut removed = vec![];
         let result = super::clear_registration_with(
             &orphan(),
-            |_, path| {
+            |path| {
                 removed.push(path.to_string());
                 if removed.len() == 2 {
                     Err(0x80070005)
@@ -464,7 +555,7 @@ mod tests {
                     Ok(())
                 }
             },
-            |_, _| panic!("a failed deletion cannot be reported as verified"),
+            |_| panic!("a failed deletion cannot be reported as verified"),
         );
         assert!(result.unwrap_err().contains("incomplete"));
         assert_eq!(removed.len(), 2);
@@ -473,14 +564,14 @@ mod tests {
         removed.clear();
         super::clear_registration_with(
             &orphan(),
-            |_, path| {
+            |path| {
                 removed.push(path.to_string());
                 Err(0x80070002) // An already removed key is retryable.
             },
-            |_, _| Ok(true),
+            |_| Ok(true),
         )
         .unwrap();
-        assert_eq!(removed.len(), 5);
+        assert_eq!(removed.len(), 4);
         assert!(removed.last().unwrap().contains("UserData"));
     }
 
@@ -490,11 +581,11 @@ mod tests {
             let mut removed = vec![];
             let result = super::clear_registration_with(
                 &orphan(),
-                |_, path| {
+                |path| {
                     removed.push(path.to_string());
                     Ok(())
                 },
-                |_, _| verified,
+                |_| verified,
             );
             assert!(result.unwrap_err().contains("Could not confirm"));
             assert!(!removed.iter().any(|path| path.contains("UserData")));
@@ -526,8 +617,8 @@ mod tests {
             }
             assert!(super::clear_registration_with(
                 &record,
-                |_, _| panic!("invalid identifiers must not reach registry removal"),
-                |_, _| panic!("invalid identifiers must not reach registry reads"),
+                |_| panic!("invalid identifiers must not reach registry removal"),
+                |_| panic!("invalid identifiers must not reach registry reads"),
             )
             .is_err());
         }

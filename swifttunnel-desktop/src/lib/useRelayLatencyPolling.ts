@@ -3,6 +3,7 @@ import { useCallback, useEffect } from "react";
 import { useBoostStore } from "../stores/boostStore";
 import { useServerStore } from "../stores/serverStore";
 import { useFocusAwareInterval } from "./useFocusAwareInterval";
+import { isMainWindowHidden } from "./mainWindowVisibility";
 
 /** Refresh the picker automatically only while Roblox is closed. */
 export function useRelayLatencyPolling() {
@@ -13,6 +14,7 @@ export function useRelayLatencyPolling() {
   const enabled = fleetLoaded && hasLoadedMetrics && !robloxRunning;
 
   const scan = useCallback(() => {
+    if (isMainWindowHidden()) return;
     // A queued focus/timer callback can run before React handles a process
     // change. Read the current state so it cannot start a scan mid-game.
     const state = useBoostStore.getState();

@@ -127,18 +127,14 @@ describe("stores/vpnStore", () => {
     return { store, useServerStore, useSettingsStore, regions, connect };
   }
 
-  it("does not reconnect after Disconnect while a failover notification is pending", async () => {
+  it("starts relay recovery even when the notification is still pending", async () => {
     const { store, connect } = await failoverFixture();
     const notification = deferred<void>();
     notify.mockReturnValueOnce(notification.promise);
     store.getState().handleStateEvent(deadRelayEvent);
     expect(notify).toHaveBeenCalledTimes(1);
-    vpnGetState.mockResolvedValue(disconnectedState());
-    await store.getState().disconnect();
+    expect(connect).toHaveBeenCalledWith("singapore", ["roblox"]);
     notification.resolve();
-    await Promise.resolve();
-    expect(connect).not.toHaveBeenCalled();
-    expect(store.getState().state).toBe("disconnected");
   });
 
   it("owns failover before a slow fleet read and cancels it on Disconnect", async () => {
@@ -158,13 +154,13 @@ describe("stores/vpnStore", () => {
   });
 
   it("does not replace a newly chosen region with an old relay failover", async () => {
-    const { store, useSettingsStore, connect } = await failoverFixture();
-    const notification = deferred<void>();
-    notify.mockReturnValueOnce(notification.promise);
+    const { store, useSettingsStore, useServerStore, regions, connect } = await failoverFixture();
+    const fleet = deferred<void>();
+    useServerStore.setState({ regions: [], fetchList: () => fleet.promise });
     store.getState().handleStateEvent(deadRelayEvent);
-    expect(notify).toHaveBeenCalledTimes(1);
     useSettingsStore.getState().update({ selected_region: "tokyo" });
-    notification.resolve();
+    useServerStore.setState({ regions });
+    fleet.resolve();
     await Promise.resolve();
     expect(connect).not.toHaveBeenCalled();
     expect(useSettingsStore.getState().settings.selected_region).toBe("tokyo");
@@ -305,6 +301,28 @@ describe("stores/vpnStore", () => {
     await Promise.all([store.getState().fetchPing(), store.getState().fetchThroughput()]);
     expect(store.getState().ping).toBe(21);
     expect(store.getState().bytesDown).toBe(8);
+  });
+  it("keeps unchanged poll results so subscribers do not re-render", async () => {
+    const store = await loadStore();
+    const route = { game_location: "Singapore", relay: "mumbai", estimated_path_ms: 50, bypassed: false };
+    const poll = (processes: string[], ms: number) => ({
+      ...connectedState("mumbai"),
+      tunneled_processes: processes,
+      game_route: { ...route, estimated_path_ms: ms },
+    });
+    vpnGetState.mockResolvedValue(poll(["RobloxPlayerBeta.exe"], 50));
+    await store.getState().fetchState();
+    const first = store.getState();
+    // Same values, new objects from JSON.
+    vpnGetState.mockResolvedValue(poll(["RobloxPlayerBeta.exe"], 50));
+    await store.getState().fetchState();
+    expect(store.getState().tunneledProcesses).toBe(first.tunneledProcesses);
+    expect(store.getState().gameRoute).toBe(first.gameRoute);
+    // Real changes still land.
+    vpnGetState.mockResolvedValue(poll(["RobloxPlayerBeta.exe", "Other.exe"], 61));
+    await store.getState().fetchState();
+    expect(store.getState().tunneledProcesses).toEqual(["RobloxPlayerBeta.exe", "Other.exe"]);
+    expect(store.getState().gameRoute?.estimated_path_ms).toBe(61);
   });
   it("discards game route details when disconnected or moved to another relay", async () => {
     const store = await loadStore();
@@ -1017,6 +1035,26 @@ describe("stores/vpnStore", () => {
     expect(useVpnStore.getState().state).toBe("connected");
     expect(useVpnStore.getState().error).toBeNull();
     expect(useVpnStore.getState().connectAttemptInFlight).toBe(false);
+  });
+
+  it("finishes a verified connect while diagnostics and the notification are stalled", async () => {
+    systemCheckDriver.mockResolvedValue(driverStatus());
+    vpnGetState.mockResolvedValue(connectedState("singapore"));
+    const diagnostics = deferred<null>();
+    const notification = deferred<void>();
+    vpnGetDiagnostics.mockReturnValueOnce(diagnostics.promise);
+    notify.mockReturnValueOnce(notification.promise);
+    const store = await loadStore();
+    try {
+      await store.getState().connect("singapore", ["roblox"]);
+      expect(store.getState().state).toBe("connected");
+      expect(store.getState().connectAttemptInFlight).toBe(false);
+      expect(vpnGetDiagnostics).toHaveBeenCalledOnce();
+      expect(notify).toHaveBeenCalledOnce();
+    } finally {
+      diagnostics.resolve(null);
+      notification.resolve();
+    }
   });
 
   it("does not treat similar already-connected failures as idempotent success", async () => {

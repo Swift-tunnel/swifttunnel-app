@@ -239,6 +239,21 @@ function coalesceSessionRead<T>(read: () => Promise<T>): () => Promise<T> {
   };
 }
 
+/**
+ * Keep the previous value when a poll returns an equal one.
+ *
+ * `fetchState` runs every 2s while the window is focused and builds a fresh
+ * `tunneledProcesses` array and `gameRoute` object from JSON each time.
+ * Zustand compares by reference, so the whole Connect tab (which selects both)
+ * re-rendered on every poll even when nothing had changed. Both values are
+ * small plain JSON, so comparing their serialised form is cheap and exact.
+ */
+export function keepIfUnchanged<T>(previous: T, next: T): T {
+  if (previous === next) return previous;
+  if (previous === null || next === null || typeof next !== "object") return next;
+  return JSON.stringify(previous) === JSON.stringify(next) ? previous : next;
+}
+
 const clearedSessionTelemetry = {
   bytesUp: 0, bytesDown: 0, packetsTunneled: 0, packetsBypassed: 0,
   ping: null, pingReadings: 0, diagnostics: null,
@@ -339,8 +354,8 @@ async function failoverRelayAfterDeadSession(
   };
   if (!stillCurrent()) return;
 
-  // Own the guard before fetching the fleet. Duplicate failure events and a
-  // slow notification must not race a manual Disconnect or another connection.
+  // Own the guard before fetching the fleet. Duplicate failure events must
+  // not race a manual Disconnect or another connection.
   relayFailoverInFlight = true;
   try {
     if (useServerStore.getState().regions.length === 0) {
@@ -359,7 +374,7 @@ async function failoverRelayAfterDeadSession(
     }
     if (!stillCurrent()) return;
     lastRelayFailoverAt = performance.now();
-    await notify(
+    void notify(
       "SwiftTunnel",
       `Relay stopped responding. Reconnecting to another ${locationName} relay.`,
     );
@@ -555,16 +570,16 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
         return {
           ...(sessionChanged ? clearedSessionTelemetry : {}),
           state: resp.state,
-          gameRoute: nowConnected
+          gameRoute: keepIfUnchanged(current.gameRoute, nowConnected
             ? (resp.game_route
               ? (resp.game_route.relay === resp.region ? resp.game_route : null)
               : null)
-            : null,
+            : null),
           region: resp.region,
           serverEndpoint: resp.server_endpoint,
           assignedIp: resp.assigned_ip,
           splitTunnelActive: resp.split_tunnel_active,
-          tunneledProcesses: resp.tunneled_processes,
+          tunneledProcesses: keepIfUnchanged(current.tunneledProcesses, resp.tunneled_processes),
           error: resp.error,
           connectedAt,
         };
@@ -736,7 +751,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
               pendingConnectIntent: null,
               connectAttemptInFlight: false,
             });
-            await notify(
+            void notify(
               "SwiftTunnel",
               "Close Roblox first, then connect Full Country Ban.",
             );
@@ -957,11 +972,9 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       if (!isCurrentConnectAttempt(attempt)) return;
       await get().fetchState();
       if (!isCurrentConnectAttempt(attempt)) return;
-      await get().fetchDiagnostics();
-      if (!isCurrentConnectAttempt(attempt)) return;
       if (get().state === "connected") {
         set({ connectedAt: Date.now() });
-        await notify(
+        void notify(
           "SwiftTunnel",
           fullCountryBanEnabled
             ? "Connected. Open Roblox now so Full Country Ban uses the tunnel."
@@ -980,6 +993,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       });
       autoRepairedBindingSignatures.clear();
       autoRepairedFirewallSignatures.clear();
+      void get().fetchDiagnostics();
     } catch (e) {
       if (!isCurrentConnectAttempt(attempt)) return;
       const message = cleanDriverSetupMessage(getErrorMessage(e));
@@ -1065,7 +1079,7 @@ export const useVpnStore = create<VpnStore>((set, get) => ({
       });
       autoRepairedBindingSignatures.clear();
       autoRepairedFirewallSignatures.clear();
-      await notify("SwiftTunnel", "VPN disconnected.");
+      void notify("SwiftTunnel", "VPN disconnected.");
     } catch (e) {
       if (!isCurrentConnectAttempt(attempt)) return;
       set({ state: "error", error: getErrorMessage(e) });

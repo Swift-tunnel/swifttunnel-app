@@ -185,7 +185,9 @@ pub fn download(progress: impl FnMut(String)) -> Result<(ProtectedInstaller, Str
     let (bytes, version, file) = fetch_verified(progress)?;
     let source = InstallerCache::open()
         .and_then(|c| c.stage(&file, &bytes))
-        .map_err(|_| "Could not save Lite's installer. Check available disk space and retry.")?;
+        .map_err(|error| {
+            format!("Could not save the verified Lite installer: {error}. If retrying fails, use the signed Lite MSI from the official release.")
+        })?;
     Ok((source, version))
 }
 

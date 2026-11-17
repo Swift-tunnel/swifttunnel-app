@@ -1,9 +1,8 @@
 //! Command line front end for clearing an orphaned SwiftTunnel MSI
 //! registration. See the library for why this exists.
 //!
-//! This is the hand-out tool for someone already stuck. The launcher
-//! (`swifttunnel-setup`) does the same thing automatically before installing,
-//! so most people should never need to run this.
+//! This is the hand-out tool for someone already stuck. The Desktop and Lite
+//! MSIs check for orphaned registrations during upgrades.
 
 use swifttunnel_msi_repair::{clear_registration, find_orphans, preserve_installer_sources};
 

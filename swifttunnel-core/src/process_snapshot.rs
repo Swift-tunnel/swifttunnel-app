@@ -101,6 +101,17 @@ pub(crate) fn contains_pid(pid: u32) -> Result<bool, String> {
     Ok(found)
 }
 
+pub(crate) fn count_named(names: &[&str]) -> Result<usize, String> {
+    let mut count = 0;
+    if !names.is_empty() {
+        visit_entries(|entry| {
+            count += usize::from(name_matches(&entry.szExeFile, names));
+            true
+        })?;
+    }
+    Ok(count)
+}
+
 pub(crate) fn any_named(names: &[&str]) -> Result<bool, String> {
     if names.is_empty() {
         return Ok(false);
@@ -306,6 +317,8 @@ mod tests {
             !any_named(&[&format!("not-running-{:032x}.exe", rand::random::<u128>())]).unwrap()
         );
         assert!(!any_named(&[]).unwrap());
+        assert!(count_named(&[name]).unwrap() >= 1);
+        assert_eq!(count_named(&[]).unwrap(), 0);
     }
 
     #[test]

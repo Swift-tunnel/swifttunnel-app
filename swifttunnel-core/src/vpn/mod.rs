@@ -26,8 +26,12 @@ pub(crate) mod diskless_passthrough;
 pub mod error_messages;
 pub mod game_destination;
 pub mod ipv6_recovery;
+#[cfg(windows)]
+mod ipv6_route_recovery;
 pub mod local_connectivity;
+mod owner_table;
 pub mod parallel_interceptor;
+pub(crate) mod player_usage;
 pub mod process_cache;
 pub mod process_performance;
 pub mod process_tracker;
@@ -93,6 +97,18 @@ pub enum VpnError {
     #[error("Split tunnel driver not initialized - call initialize() first")]
     DriverNotInitialized,
 
+    #[error("Windows packet forwarding failed: {0}")]
+    PacketForwardingFailed(String),
+
+    #[error("SwiftTunnel could not protect this PC's network disk")]
+    NetworkDiskProtectionUnavailable,
+
+    #[error("Previous network workers have not finished stopping")]
+    NetworkWorkersStopping,
+
+    #[error("Could not save the network recovery record")]
+    RecoveryRecordUnavailable,
+
     #[error("Connection error: {0}")]
     Connection(String),
 
@@ -134,6 +150,30 @@ pub enum VpnError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+impl VpnError {
+    pub(crate) fn support_code(&self) -> &'static str {
+        match self {
+            Self::ConfigFetch(_) => "config_unavailable",
+            Self::SplitTunnel(_) | Self::SplitTunnelSetupFailed(_) => "split_tunnel_failed",
+            Self::SplitTunnelNotAvailable => "driver_unavailable",
+            Self::DriverNotOpen | Self::DriverNotInitialized => "driver_not_ready",
+            Self::NetworkWorkersStopping => "network_workers_stopping",
+            Self::RecoveryRecordUnavailable => "recovery_record_unavailable",
+            Self::PacketForwardingFailed(_) => "packet_forwarding_failed",
+            Self::NetworkDiskProtectionUnavailable => "network_disk_protection_failed",
+            Self::Connection(_) => "connection_failed",
+            Self::Network(_) => "network_failed",
+            Self::Route(_) => "route_failed",
+            Self::InvalidConfig(_) => "invalid_config",
+            Self::NotAuthenticated | Self::SessionExpired => "sign_in_required",
+            Self::UserBanned(_) => "account_blocked",
+            Self::FreeTierLimitReached(_) => "allowance_exhausted",
+            Self::UpdateRequired(_) => "update_required",
+            Self::Io(_) => "io_failed",
+        }
+    }
 }
 
 pub type VpnResult<T> = Result<T, VpnError>;

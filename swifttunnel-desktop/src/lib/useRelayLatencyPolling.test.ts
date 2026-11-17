@@ -37,6 +37,7 @@ import { useRelayLatencyPolling } from "./useRelayLatencyPolling";
 describe("automatic picker scans", () => {
   let events: EventTarget;
   let hasFocus: boolean;
+  let hidden: boolean;
   let cleanups: Array<() => void>;
 
   function stop() {
@@ -65,8 +66,14 @@ describe("automatic picker scans", () => {
     h.scan.mockResolvedValue(undefined);
     cleanups = [];
     hasFocus = true;
+    hidden = false;
     events = new EventTarget();
-    vi.stubGlobal("document", { hasFocus: () => hasFocus });
+    vi.stubGlobal("document", {
+      hasFocus: () => hasFocus,
+      get hidden() { return hidden; },
+      addEventListener: events.addEventListener.bind(events),
+      removeEventListener: events.removeEventListener.bind(events),
+    });
     vi.stubGlobal("window", {
       setTimeout: (callback: () => void, delay: number) => setTimeout(callback, delay),
       clearTimeout: (id: number) => clearTimeout(id),
@@ -143,6 +150,16 @@ describe("automatic picker scans", () => {
     expect(h.scan).toHaveBeenCalledOnce();
     vi.advanceTimersByTime(1);
     expect(h.scan).toHaveBeenCalledTimes(2);
+  });
+
+  it("waits to probe when the picker mounts behind a hidden window", () => {
+    hidden = true;
+    start();
+    vi.advanceTimersByTime(60_000);
+    expect(h.scan).not.toHaveBeenCalled();
+    hidden = false;
+    events.dispatchEvent(new Event("visibilitychange"));
+    expect(h.scan).toHaveBeenCalledOnce();
   });
 
   it("backs off out of focus and refreshes immediately when the window returns", () => {

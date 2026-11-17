@@ -4,7 +4,7 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useVpnStore } from "../../stores/vpnStore";
 import { useBoostStore } from "../../stores/boostStore";
 import { useFocusAwareInterval } from "../../lib/useFocusAwareInterval";
-import { useLiveUpdates } from "../../lib/useLiveUpdates";
+import { useLiveStoreValue, useLiveUpdates } from "../../lib/useLiveUpdates";
 import { useAuthStore } from "../../stores/authStore";
 import { StatusChip } from "./StatusChip";
 import { LanguageSelector } from "./LanguageSelector";
@@ -30,7 +30,7 @@ export function TopBar() {
   const activeTab = useSettingsStore((s) => s.activeTab);
   const setTab = useSettingsStore((s) => s.setTab);
   const vpnState = useVpnStore((s) => s.state);
-  const ping = useVpnStore((s) => s.ping);
+  const ping = useLiveStoreValue(useVpnStore, (s) => s.ping);
   const robloxRunning = useBoostStore((s) => s.robloxRunning);
   const fetchMetrics = useBoostStore((s) => s.fetchMetrics);
   const email = useAuthStore((s) => s.email);
@@ -45,7 +45,8 @@ export function TopBar() {
   useEffect(() => {
     void fetchMetrics();
   }, [fetchMetrics]);
-  useFocusAwareInterval(() => void fetchMetrics(), 4000);
+  // Game presence also gates the relay picker's network probes.
+  useFocusAwareInterval(() => void fetchMetrics(), 4000, { pauseWhenHidden: false });
 
   useEffect(() => {
     const appWindow = getCurrentWindow();
@@ -106,7 +107,11 @@ export function TopBar() {
           >
             {item.label}
           </h1>
-          <p className="mt-1.5 truncate text-[10.5px] leading-none text-text-muted">
+          {/* At the minimum window width the status chip leaves room for
+              about half of this line. A cut-off description reads as a
+              glitch, so it waits for the default width, where every page's
+              line fits whole. */}
+          <p className="mt-1.5 hidden truncate text-[10.5px] leading-none text-text-muted min-[1020px]:block">
             {item.description}
           </p>
         </div>
@@ -157,6 +162,8 @@ export function TopBar() {
 
         {isConnected && ping !== null && (
           <div
+            title="Ping to the SwiftTunnel relay"
+            aria-label={`Relay ping: ${ping} ms`}
             className="flex items-center gap-1.5 rounded-[5px] px-2.5 py-1.5"
             style={{
               backgroundColor: "var(--color-bg-base)",

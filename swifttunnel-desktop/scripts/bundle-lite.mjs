@@ -55,7 +55,7 @@ if (size < 1_000_000) {
   throw new Error(`${built} is only ${size} bytes; that is not a real build`);
 }
 
-execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-File",
+execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
   join(repo, "scripts", "check-vc-runtime.ps1"), "-Binary", built],
   { cwd: repo, stdio: "inherit", windowsHide: true });
 

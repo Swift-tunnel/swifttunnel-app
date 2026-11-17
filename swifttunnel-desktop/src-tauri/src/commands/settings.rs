@@ -142,12 +142,21 @@ pub async fn settings_save(
 
 fn persist_preferences(
     settings: &parking_lot::Mutex<AppSettings>,
-    next: AppSettings,
+    mut next: AppSettings,
     persist: impl FnOnce(&AppSettings) -> Result<(), String>,
 ) -> Result<bool, String> {
     // Native background writers use this lock through their saves too. Keep
     // disk publication and its matching in-memory state in the same ordering.
     let mut current = settings.lock();
+    // Full UI snapshots can predate a native connect/disconnect/sign-out.
+    // These fields describe confirmed session events, not user preferences.
+    next.resume_vpn_on_startup = current.resume_vpn_on_startup;
+    next.last_connected_region
+        .clone_from(&current.last_connected_region);
+    // Both clients can advance the lifetime counter, but an older snapshot
+    // must never roll it back. Window geometry and adapter choices remain
+    // editable by the UI and are deliberately not overwritten here.
+    next.total_tunneled_ms = next.total_tunneled_ms.max(current.total_tunneled_ms);
     let routing_changed = current.auto_routing_enabled != next.auto_routing_enabled
         || current.whitelisted_regions != next.whitelisted_regions;
     persist(&next)?;
@@ -794,6 +803,55 @@ mod tests {
         let result = persist_preferences(&settings, next, |_| Err("disk unavailable".into()));
         assert_eq!(result.unwrap_err(), "disk unavailable");
         assert_eq!(serde_json::to_value(&*settings.lock()).unwrap(), original);
+    }
+
+    #[test]
+    fn delayed_preferences_cannot_revive_a_session_or_roll_back_native_history() {
+        let settings = parking_lot::Mutex::new(AppSettings::default());
+        let mut stale = settings.lock().clone();
+        stale.resume_vpn_on_startup = true;
+        stale.last_connected_region = Some("singapore".into());
+        stale.total_tunneled_ms = 100;
+        stale.theme = "light".into();
+        stale.window_state.width = 1200.0;
+        {
+            let mut latest = settings.lock();
+            latest.resume_vpn_on_startup = false;
+            latest.last_connected_region = Some("mumbai".into());
+            latest.total_tunneled_ms = 500;
+        }
+        let mut saved = None;
+        persist_preferences(&settings, stale, |snapshot| {
+            saved = Some(snapshot.clone());
+            Ok(())
+        })
+        .unwrap();
+        let saved = saved.unwrap();
+        assert!(
+            !saved.resume_vpn_on_startup,
+            "stale UI revived the ended session"
+        );
+        assert_eq!(saved.last_connected_region.as_deref(), Some("mumbai"));
+        assert_eq!(saved.total_tunneled_ms, 500);
+        assert_eq!(saved.theme, "light");
+        assert_eq!(
+            saved.window_state.width, 1200.0,
+            "window state is owned by the UI"
+        );
+
+        // A preference save captured before connect must not clear its newly
+        // confirmed resume marker either. A larger UI usage total is valid.
+        let mut stale = saved;
+        stale.resume_vpn_on_startup = false;
+        stale.total_tunneled_ms = 700;
+        settings.lock().resume_vpn_on_startup = true;
+        persist_preferences(&settings, stale, |snapshot| {
+            assert!(snapshot.resume_vpn_on_startup);
+            assert_eq!(snapshot.total_tunneled_ms, 700);
+            Ok(())
+        })
+        .unwrap();
+        assert!(settings.lock().resume_vpn_on_startup);
     }
 
     struct ExportDirectory(PathBuf);

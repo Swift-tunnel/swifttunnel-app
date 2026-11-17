@@ -16,6 +16,9 @@ use std::time::{Duration, Instant};
 const SERVERS_API_PATH: &str = "/api/vpn/servers";
 const SERVER_RESPONSE_LIMIT: usize = 1024 * 1024;
 const SERVER_CACHE_LIMIT: usize = 4 * 1024 * 1024;
+const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_PROXY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Cache TTL in seconds (1 hour)
 const CACHE_TTL_SECONDS: i64 = 3600;
@@ -38,7 +41,7 @@ const STALE_CACHE_SERVED_EXPIRED_REASON: &str = "ST_STALE_CACHE_SERVED_EXPIRED";
 fn build_server_http_client(use_system_proxy: bool) -> Result<reqwest::Client, reqwest::Error> {
     let mut builder = reqwest::Client::builder()
         .user_agent("SwiftTunnel-Desktop/0.1.0")
-        .timeout(Duration::from_secs(10))
+        .timeout(SERVER_REQUEST_TIMEOUT)
         .use_native_tls();
 
     if !use_system_proxy {
@@ -200,7 +203,9 @@ impl CachedServerList {
     /// Check if the cache is still fresh
     pub fn is_fresh(&self) -> bool {
         let age = Utc::now().signed_duration_since(self.cached_at);
-        age.num_seconds() < CACHE_TTL_SECONDS
+        // A clock correction can leave the saved timestamp in the future.
+        // Try the API in that case, retaining the list as an offline fallback.
+        age >= chrono::Duration::zero() && age.num_seconds() < CACHE_TTL_SECONDS
     }
 
     pub fn age_seconds(&self) -> i64 {
@@ -298,6 +303,12 @@ fn save_servers_to_cache_at(
 
 /// Fetch server list from API
 pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
+    fetch_server_list_with_proxy_budget(SERVER_REQUEST_TIMEOUT).await
+}
+
+async fn fetch_server_list_with_proxy_budget(
+    proxy_timeout: Duration,
+) -> Result<ServerListResponse, String> {
     let client = build_server_http_client(true)
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
     let direct_client = build_server_http_client(false)
@@ -308,60 +319,31 @@ pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
     // auth client: a hostname a filter objects to must not be the only one we
     // know. See `API_HOSTS` in `auth::http_client`.
     let mut failures: Vec<String> = Vec::new();
-    let mut response = None;
+    let mut data = None;
 
     for base in crate::auth::http_client::api_hosts_in_order() {
         let url = format!("{base}{SERVERS_API_PATH}");
         log::info!("Fetching server list from API: {url}");
 
-        let attempt = match client.get(&url).send().await {
-            Ok(response) => Ok(response),
-            Err(primary_error) => {
-                // The whole chain. This is the single most reported failure in
-                // the product and its log line used to say only that a request
-                // to a URL failed, which is the part the user could already see
-                // on screen.
-                log::warn!(
-                    "Server list fetch failed through the system network path: {}. Retrying direct.",
-                    crate::utils::describe_error_chain(&primary_error)
-                );
-                direct_client
-                    .get(&url)
-                    .send()
-                    .await
-                    .map_err(|direct_error| {
-                        format!(
-                            "{}. Direct retry also failed: {}",
-                            crate::utils::describe_error_chain(&primary_error),
-                            crate::utils::describe_error_chain(&direct_error)
-                        )
-                    })
-            }
-        };
-
-        match attempt {
+        match fetch_server_list_from_host(&client, &direct_client, &url, proxy_timeout).await {
             Ok(ok) => {
                 crate::auth::http_client::note_api_host_worked(base);
-                response = Some(ok);
+                data = Some(ok);
                 break;
             }
-            Err(error) => failures.push(format!("{base}: {error}")),
+            Err(ServerListRequestError::Transport(error)) => {
+                failures.push(format!("{base}: {error}"))
+            }
+            Err(ServerListRequestError::Rejected(error)) => return Err(error),
         }
     }
 
-    let Some(response) = response else {
+    let Some(data) = data else {
         return Err(format!(
             "Failed to fetch server list: {}",
             failures.join(" | ")
         ));
     };
-
-    if !response.status().is_success() {
-        return Err(format!("API returned error status: {}", response.status()));
-    }
-
-    let data: ServerListResponse =
-        crate::http_body::read_json_bounded(response, SERVER_RESPONSE_LIMIT, "server list").await?;
 
     log::info!(
         "Fetched {} servers and {} regions from API (version: {})",
@@ -380,12 +362,74 @@ pub async fn fetch_server_list() -> Result<ServerListResponse, String> {
     Ok(data)
 }
 
+#[derive(Debug)]
+enum ServerListRequestError {
+    Transport(String),
+    Rejected(String),
+}
+
+async fn request_server_list(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+) -> Result<ServerListResponse, ServerListRequestError> {
+    tokio::time::timeout(timeout, async {
+        let response = client.get(url).send().await.map_err(|error| {
+            ServerListRequestError::Transport(crate::utils::describe_error_chain(&error))
+        })?;
+        if !response.status().is_success() {
+            return Err(ServerListRequestError::Rejected(format!(
+                "API returned error status: {}",
+                response.status()
+            )));
+        }
+        crate::http_body::read_json_bounded(response, SERVER_RESPONSE_LIMIT, "server list")
+            .await
+            .map_err(ServerListRequestError::Rejected)
+    })
+    .await
+    .map_err(|_| {
+        ServerListRequestError::Transport(format!(
+            "Server list request timed out after {}s",
+            timeout.as_secs_f64()
+        ))
+    })?
+}
+
+async fn fetch_server_list_from_host(
+    system_client: &reqwest::Client,
+    direct_client: &reqwest::Client,
+    url: &str,
+    proxy_timeout: Duration,
+) -> Result<ServerListResponse, ServerListRequestError> {
+    let error = match request_server_list(system_client, url, proxy_timeout).await {
+        Err(ServerListRequestError::Transport(error)) => error,
+        result => return result,
+    };
+    log::warn!(
+        "Server list fetch failed through the system network path: {error}. Retrying direct."
+    );
+    match request_server_list(direct_client, url, SERVER_REQUEST_TIMEOUT).await {
+        Err(ServerListRequestError::Transport(direct_error)) => {
+            Err(ServerListRequestError::Transport(format!(
+                "{error}. Direct retry also failed: {direct_error}"
+            )))
+        }
+        result => result,
+    }
+}
+
 /// Bound the entire refresh, including alternate hosts, before a connection.
 /// Callers keep their last usable list if the website cannot be reached.
 pub async fn fetch_server_list_for_connect() -> Result<ServerListResponse, String> {
-    tokio::time::timeout(Duration::from_secs(5), fetch_server_list())
-        .await
-        .map_err(|_| "Server list refresh timed out".to_string())?
+    // Leave part of the overall budget for the direct retry, even if the
+    // proxy has sent headers and then stopped forwarding the response body.
+    tokio::time::timeout(
+        CONNECT_REFRESH_TIMEOUT,
+        fetch_server_list_with_proxy_budget(CONNECT_PROXY_TIMEOUT),
+    )
+    .await
+    .map_err(|_| "Server list refresh timed out".to_string())?
 }
 
 /// Live occupancy per relay, refreshed whenever the server list is fetched.
@@ -579,9 +623,11 @@ pub fn relay_is_avoided(region: &str) -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn clear_avoided_relays_for_test() {
+pub(crate) fn forget_avoided_relay_for_test(region: &str) {
     if let Ok(mut guard) = AVOIDED_RELAYS.lock() {
-        *guard = None;
+        if let Some(avoided) = guard.as_mut() {
+            avoided.remove(region);
+        }
     }
 }
 
@@ -882,6 +928,92 @@ impl DynamicServerList {
 mod tests {
     use super::*;
 
+    async fn serve_one_list_request(
+        response: String,
+        keep_open: bool,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let worker = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert_ne!(connection.read(&mut request).await.unwrap(), 0);
+            connection.write_all(response.as_bytes()).await.unwrap();
+            if keep_open {
+                // Keep the socket open until the client gives up.
+                let _ = connection.read(&mut request).await;
+            }
+        });
+        (address, worker)
+    }
+
+    #[tokio::test]
+    async fn a_stalled_proxy_leaves_time_for_the_direct_server_list() {
+        const LIST: &str = r#"{"servers":[],"regions":[],"version":"direct"}"#;
+        for proxy_response in ["", "HTTP/1.1 200 OK\r\nContent-Length: 999\r\n\r\n{"] {
+            let (proxy, proxy_worker) = serve_one_list_request(proxy_response.into(), true).await;
+            let (origin, origin_worker) = serve_one_list_request(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{LIST}",
+                    LIST.len()
+                ),
+                false,
+            )
+            .await;
+            let system = reqwest::Client::builder()
+                .proxy(reqwest::Proxy::all(format!("http://{proxy}")).unwrap())
+                .build()
+                .unwrap();
+            let direct = reqwest::Client::builder().no_proxy().build().unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                fetch_server_list_from_host(
+                    &system,
+                    &direct,
+                    &format!("http://{origin}"),
+                    Duration::from_millis(200),
+                ),
+            )
+            .await;
+            proxy_worker.abort();
+            origin_worker.abort();
+            assert_eq!(result.unwrap().unwrap().version, "direct");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_explicit_rate_limit_is_not_retried_directly() {
+        let (proxy, proxy_worker) = serve_one_list_request(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                .into(),
+            false,
+        )
+        .await;
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let system = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{proxy}")).unwrap())
+            .build()
+            .unwrap();
+        let direct = reqwest::Client::builder().no_proxy().build().unwrap();
+        let result = fetch_server_list_from_host(
+            &system,
+            &direct,
+            &format!("http://{}", origin.local_addr().unwrap()),
+            Duration::from_secs(2),
+        )
+        .await;
+        proxy_worker.abort();
+        assert!(
+            matches!(result, Err(ServerListRequestError::Rejected(error)) if error.contains("429"))
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), origin.accept())
+                .await
+                .is_err()
+        );
+    }
+
     #[cfg(windows)]
     #[test]
     fn failed_cache_replacement_preserves_the_last_usable_list() {
@@ -956,7 +1088,7 @@ mod tests {
         moved_port.relay_port = Some(1234);
         list.update(vec![moved_port], vec![], ServerListSource::Api);
         assert_eq!(list.get_latency("reused-01"), None);
-        clear_avoided_relays_for_test();
+        forget_avoided_relay_for_test("reused-01");
     }
 
     fn make_server(region: &str, ip: &str) -> DynamicServerInfo {
@@ -1197,8 +1329,8 @@ mod tests {
     // --- CachedServerList ---
 
     #[test]
-    fn test_cached_server_list_is_fresh_when_recent() {
-        let cached = CachedServerList {
+    fn test_cached_server_list_is_fresh_when_recent_but_not_in_the_future() {
+        let mut cached = CachedServerList {
             data: ServerListResponse {
                 servers: vec![],
                 regions: vec![],
@@ -1207,6 +1339,8 @@ mod tests {
             cached_at: Utc::now(),
         };
         assert!(cached.is_fresh());
+        cached.cached_at += chrono::Duration::hours(1);
+        assert!(!cached.is_fresh());
     }
 
     #[test]

@@ -8,9 +8,7 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 #[cfg(all(test, windows))]
-use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
-#[cfg(windows)]
-use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, SetFileAttributesW};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_READONLY, SetFileAttributesW};
 
 /// Current Roblox settings read from the XML file
 #[derive(Debug, Clone)]
@@ -170,8 +168,17 @@ impl RobloxOptimizer {
             }
         }
 
+        // Polled, so only a changed location is worth a line.
+        static LAST_FOUND: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        let found = |path: &std::path::Path| {
+            let line = format!("Found Roblox settings at: {path:?}");
+            if crate::utils::changed_since_last(&LAST_FOUND, &line) {
+                info!("{line}");
+            }
+        };
+
         if let Some((_, path)) = latest_indexed {
-            info!("Found Roblox settings at: {:?}", path);
+            found(&path);
             return path;
         }
 
@@ -179,7 +186,7 @@ impl RobloxOptimizer {
         for i in (1..=20).rev() {
             let path = roblox_dir.join(format!("GlobalBasicSettings_{}.xml", i));
             if path.exists() {
-                info!("Found Roblox settings at: {:?}", path);
+                found(&path);
                 return path;
             }
         }
@@ -345,20 +352,12 @@ impl RobloxOptimizer {
 
     #[cfg(windows)]
     fn remove_readonly_path(path: &Path) -> Result<()> {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-
-        let path_wide: Vec<u16> = OsStr::new(path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        unsafe {
-            SetFileAttributesW(
-                windows::core::PCWSTR::from_raw(path_wide.as_ptr()),
-                FILE_ATTRIBUTE_NORMAL,
-            )?;
-        }
+        crate::roblox_native_launch::safe_path(path).map_err(anyhow::Error::msg)?;
+        // FILE_ATTRIBUTE_NORMAL discards unrelated flags such as Hidden and
+        // Archive. Derive permissions from the file and clear only ReadOnly.
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(path, permissions)?;
 
         info!("Removed read-only attribute from settings file");
         Ok(())
@@ -2738,6 +2737,78 @@ impl RobloxOptimizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn making_settings_writable_keeps_their_other_windows_attributes() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_ARCHIVE, FILE_ATTRIBUTE_HIDDEN};
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                if let Ok(metadata) = fs::metadata(&self.0) {
+                    let mut permissions = metadata.permissions();
+                    permissions.set_readonly(false);
+                    let _ = fs::set_permissions(&self.0, permissions);
+                }
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+        let path = Fixture(std::env::temp_dir().join(format!(
+            "swift-readonly-{:032x}.xml",
+            rand::random::<u128>()
+        )));
+        fs::write(&path.0, b"settings").unwrap();
+        let wide: Vec<_> = path.0.as_os_str().encode_wide().chain(Some(0)).collect();
+        let retained = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_ARCHIVE;
+        unsafe {
+            SetFileAttributesW(
+                windows::core::PCWSTR(wide.as_ptr()),
+                retained | FILE_ATTRIBUTE_READONLY,
+            )
+            .unwrap();
+        }
+        RobloxOptimizer::remove_readonly_path(&path.0).unwrap();
+        let after = fs::metadata(&path.0).unwrap().file_attributes();
+        assert_eq!(after & FILE_ATTRIBUTE_READONLY.0, 0);
+        assert_eq!(after & retained.0, retained.0);
+        assert_eq!(fs::read(&path.0).unwrap(), b"settings");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn making_settings_writable_rejects_redirected_files_without_changing_the_target() {
+        let root = std::env::temp_dir().join(format!(
+            "swift-readonly-link-{:032x}",
+            rand::random::<u128>()
+        ));
+        fs::create_dir(&root).unwrap();
+        let target = root.join("original.xml");
+        let link = root.join("redirected.xml");
+        fs::write(&target, b"original").unwrap();
+        // Windows symlink creation needs Developer Mode or elevated rights.
+        if std::os::windows::fs::symlink_file(&target, &link).is_err() {
+            fs::remove_file(target).unwrap();
+            fs::remove_dir(root).unwrap();
+            return;
+        }
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target, permissions).unwrap();
+        let result = RobloxOptimizer::remove_readonly_path(&link);
+        let preserved = fs::metadata(&target).unwrap().permissions().readonly();
+        let bytes = fs::read(&target).unwrap();
+        let mut permissions = fs::metadata(&target).unwrap().permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&target, permissions).unwrap();
+        fs::remove_file(link).unwrap();
+        fs::remove_file(target).unwrap();
+        fs::remove_dir(root).unwrap();
+        assert!(result.is_err());
+        assert!(preserved);
+        assert_eq!(bytes, b"original");
+    }
 
     #[test]
     fn recorded_launcher_directory_cannot_follow_the_apps_working_directory() {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import commandsTs from "./commands.ts?raw";
 import backendLibRs from "../../src-tauri/src/lib.rs?raw";
 import systemCommandsRs from "../../src-tauri/src/commands/system.rs?raw";
+import logClipboardRs from "../../src-tauri/src/log_clipboard.rs?raw";
 
 function extractInvokedCommands(source: string): string[] {
   const out = new Set<string>();
@@ -33,7 +34,11 @@ describe("Tauri command wiring", () => {
   });
 
   it("copies logs as a Windows file-drop clipboard payload", () => {
-    expect(systemCommandsRs).toContain("SetFileDropList");
+    // The copy is native now. It must still put the file itself on the
+    // clipboard (CF_HDROP), so a paste attaches the log instead of its text.
+    expect(logClipboardRs).toContain("CF_HDROP");
+    expect(systemCommandsRs).toContain("log_clipboard::");
     expect(systemCommandsRs).not.toContain("Set-Clipboard -LiteralPath");
+    expect(systemCommandsRs).not.toContain("SetFileDropList");
   });
 });

@@ -31,6 +31,7 @@ const GITHUB_RELEASES_API_URL: &str =
     "https://api.github.com/repos/Swift-tunnel/swifttunnel-app/releases";
 const GITHUB_RELEASES_DOWNLOAD_BASE_URL: &str =
     "https://github.com/Swift-tunnel/swifttunnel-app/releases/download";
+const LATEST_STABLE_MANIFEST_URL: &str = "https://github.com/Swift-tunnel/swifttunnel-app/releases/latest/download/swifttunnel-update-manifest.json";
 const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
 const GITHUB_API_USER_AGENT: &str = "SwiftTunnel-Updater";
 const UPDATE_MANIFEST_FILE_NAME: &str = "swifttunnel-update-manifest.json";
@@ -202,13 +203,6 @@ fn select_release_for_channel(
         .max_by(|left, right| left.version.cmp(&right.version))
 }
 
-fn verify_manifest_signature(manifest_bytes: &[u8], signature_b64: &str) -> Result<(), String> {
-    let public_key_bytes = base64::engine::general_purpose::STANDARD
-        .decode(update_manifest_public_key_b64()?)
-        .map_err(|e| format!("Invalid updater manifest public key encoding: {}", e))?;
-    verify_manifest_signature_with_public_key(manifest_bytes, signature_b64, &public_key_bytes)
-}
-
 /// Delegates to core so both clients check signatures with one
 /// implementation. Lite needs the same check, and a second copy of security
 /// code is how two copies drift until only one of them is right.
@@ -274,7 +268,7 @@ fn verify_manifest_payload(
     Ok(())
 }
 
-async fn github_client() -> Result<reqwest::Client, String> {
+fn github_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .https_only(true)
         .redirect(reqwest::redirect::Policy::limited(5))
@@ -284,7 +278,12 @@ async fn github_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to create updater HTTP client: {}", e))
 }
 
-async fn fetch_releases(client: &reqwest::Client) -> Result<Vec<GithubRelease>, String> {
+enum ReleaseList {
+    Available(Vec<GithubRelease>),
+    Refused(reqwest::StatusCode),
+}
+
+async fn fetch_releases(client: &reqwest::Client) -> Result<ReleaseList, String> {
     let response = client
         .get(GITHUB_RELEASES_API_URL)
         .header(USER_AGENT, GITHUB_API_USER_AGENT)
@@ -293,30 +292,33 @@ async fn fetch_releases(client: &reqwest::Client) -> Result<Vec<GithubRelease>, 
         .await
         .map_err(|e| format!("Failed to fetch GitHub releases: {}", e))?;
 
-    if !response.status().is_success() {
-        return Err(format!(
-            "GitHub releases API returned status {}",
-            response.status()
-        ));
+    let status = response.status();
+    if matches!(
+        status,
+        reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::TOO_MANY_REQUESTS
+    ) {
+        return Ok(ReleaseList::Refused(status));
+    }
+    if !status.is_success() {
+        return Err(format!("GitHub releases API returned status {}", status));
     }
 
     let bytes =
         swifttunnel_core::http_body::read_bounded(response, 4 * 1024 * 1024, "release list")
             .await?;
     serde_json::from_slice::<Vec<GithubRelease>>(&bytes)
+        .map(ReleaseList::Available)
         .map_err(|e| format!("Failed to parse GitHub releases: {}", e))
 }
 
 async fn fetch_manifest_with_verification(
     client: &reqwest::Client,
-    selected_release: &SelectedRelease,
+    manifest_url: &str,
+    signature_url: Option<String>,
+    public_key: &[u8],
 ) -> Result<SignedUpdateManifest, String> {
-    let latest_json_url = latest_json_url_for_tag(&selected_release.tag_name);
-    let manifest_url = manifest_url_for_tag(&selected_release.tag_name);
-    let signature_url = manifest_signature_url_for_tag(&selected_release.tag_name);
-
     let manifest_response = client
-        .get(&manifest_url)
+        .get(manifest_url)
         .header(USER_AGENT, GITHUB_API_USER_AGENT)
         .header(ACCEPT, "application/json")
         .send()
@@ -337,6 +339,12 @@ async fn fetch_manifest_with_verification(
     )
     .await?;
 
+    let signature_url = match signature_url {
+        Some(url) => url,
+        // Pin the signature even if GitHub switches the latest release
+        // between the manifest request and the signature request.
+        None => swifttunnel_core::update_verify::stable_manifest_signature_url(&manifest_bytes)?,
+    };
     let signature_response = client
         .get(&signature_url)
         .header(USER_AGENT, GITHUB_API_USER_AGENT)
@@ -358,14 +366,9 @@ async fn fetch_manifest_with_verification(
     )
     .map_err(|_| "The update manifest signature is not valid text.".to_string())?;
 
-    verify_manifest_signature(&manifest_bytes, &signature_b64)?;
-
-    let manifest: SignedUpdateManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| format!("Failed to parse updater manifest JSON: {}", e))?;
-
-    verify_manifest_payload(&manifest, selected_release, &latest_json_url)?;
-
-    Ok(manifest)
+    verify_manifest_signature_with_public_key(&manifest_bytes, &signature_b64, public_key)?;
+    serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("Failed to parse updater manifest JSON: {e}"))
 }
 
 async fn fetch_verified_latest_json(
@@ -399,15 +402,65 @@ async fn prepare_channel_update(
     channel: UpdateChannel,
     current_version: &Version,
 ) -> Result<Option<PreparedUpdate>, String> {
-    let client = github_client().await?;
-    let releases = fetch_releases(&client).await?;
-
-    let Some(selected_release) = select_release_for_channel(releases, channel, current_version)
-    else {
-        return Ok(None);
+    let public_key = base64::engine::general_purpose::STANDARD
+        .decode(update_manifest_public_key_b64()?)
+        .map_err(|e| format!("Invalid updater manifest public key encoding: {e}"))?;
+    if public_key.len() != 32 {
+        return Err("Invalid updater manifest public key length".into());
+    }
+    let client = github_client()?;
+    let (selected_release, manifest) = match fetch_releases(&client).await? {
+        ReleaseList::Available(releases) => {
+            let Some(release) = select_release_for_channel(releases, channel, current_version)
+            else {
+                return Ok(None);
+            };
+            let manifest = fetch_manifest_with_verification(
+                &client,
+                &manifest_url_for_tag(&release.tag_name),
+                Some(manifest_signature_url_for_tag(&release.tag_name)),
+                &public_key,
+            )
+            .await?;
+            (release, manifest)
+        }
+        ReleaseList::Refused(status) if channel == UpdateChannel::Stable => {
+            log::info!(
+                "Stable update check using signed release asset after GitHub API status {status}"
+            );
+            let manifest = fetch_manifest_with_verification(
+                &client,
+                LATEST_STABLE_MANIFEST_URL,
+                None,
+                &public_key,
+            )
+            .await?;
+            let version = Version::parse(&manifest.version).map_err(|error| {
+                format!("The latest Stable release has an invalid version: {error}")
+            })?;
+            let release = SelectedRelease {
+                tag_name: manifest.tag.clone(),
+                version,
+                prerelease: false,
+                release_notes: None,
+            };
+            (release, manifest)
+        }
+        ReleaseList::Refused(status) => {
+            return Err(format!(
+                "GitHub refused the Live release check (HTTP {status}). Try again later."
+            ));
+        }
     };
 
-    let manifest = fetch_manifest_with_verification(&client, &selected_release).await?;
+    verify_manifest_payload(
+        &manifest,
+        &selected_release,
+        &latest_json_url_for_tag(&selected_release.tag_name),
+    )?;
+    if selected_release.version <= *current_version {
+        return Ok(None);
+    }
     let latest_json = fetch_verified_latest_json(&client, &manifest).await?;
     let package = Package::from_metadata(
         &latest_json,
@@ -427,10 +480,16 @@ pub async fn updater_check_channel(
     app: AppHandle,
     channel: UpdateChannel,
 ) -> Result<UpdaterCheckResponse, String> {
-    let current_version = Version::parse(&app.package_info().version.to_string())
+    let mut support = swifttunnel_core::support_log::Operation::start("update_check", "version");
+    let current_version = support
+        .check(Version::parse(&app.package_info().version.to_string()))
         .map_err(|e| format!("Current app version is invalid semver: {}", e))?;
 
-    let Some(prepared) = prepare_channel_update(channel, &current_version).await? else {
+    support.stage(channel_name(channel));
+    let Some(prepared) =
+        support.check_explained(prepare_channel_update(channel, &current_version).await)?
+    else {
+        support.complete("up_to_date");
         return Ok(UpdaterCheckResponse {
             current_version: current_version.to_string(),
             available_version: None,
@@ -440,6 +499,7 @@ pub async fn updater_check_channel(
         });
     };
 
+    support.complete("update_available");
     Ok(UpdaterCheckResponse {
         current_version: current_version.to_string(),
         available_version: Some(prepared.selected_release.version.to_string()),
@@ -469,6 +529,10 @@ fn installer_exit_result(code: Option<i32>) -> Result<bool, String> {
         Some(0) => Ok(false),
         Some(3010 | 1641) => Ok(true),
         Some(1602) => Err("Update installation was cancelled.".to_string()),
+        Some(1618) => Err(
+            "Another installation is running. Wait for it to finish, then retry the update."
+                .to_string(),
+        ),
         Some(code) => Err(format!(
             "Windows Installer did not complete the update (code {code}). Please retry or use the downloaded installer."
         )),
@@ -495,6 +559,7 @@ fn launch_msi_installer(
         .status()
         .map_err(|e| format!("Failed to start the installer: {e}"))?;
 
+    log::info!("[support] event=update_msi_exit code={:?}", status.code());
     installer_exit_result(status.code())
 }
 
@@ -504,21 +569,32 @@ pub async fn updater_install_channel(
     channel: UpdateChannel,
     expected_version: String,
 ) -> Result<UpdaterInstallResponse, String> {
-    let install_permit = begin_install()?;
-    let current_version = Version::parse(&app.package_info().version.to_string())
+    let mut support =
+        swifttunnel_core::support_log::Operation::start("update_install", "admission");
+    let install_permit = support.check_explained(begin_install())?;
+    support.stage("validate_version");
+    let current_version = support
+        .check(Version::parse(&app.package_info().version.to_string()))
         .map_err(|e| format!("Current app version is invalid semver: {}", e))?;
-    let normalized_expected_version = Version::parse(expected_version.trim()).map_err(|e| {
-        format!(
-            "Expected version '{}' is invalid semver: {}",
-            expected_version, e
-        )
-    })?;
+    let normalized_expected_version = support
+        .check(Version::parse(expected_version.trim()))
+        .map_err(|e| {
+            format!(
+                "Expected version '{}' is invalid semver: {}",
+                expected_version, e
+            )
+        })?;
 
-    let Some(prepared) = prepare_channel_update(channel, &current_version).await? else {
+    support.stage("signed_metadata");
+    let Some(prepared) =
+        support.check_explained(prepare_channel_update(channel, &current_version).await)?
+    else {
+        support.fail("no_eligible_update");
         return Err("No eligible update found for the selected channel".to_string());
     };
 
     if prepared.selected_release.version != normalized_expected_version {
+        support.fail("version_mismatch");
         return Err(format!(
             "Expected version '{}' does not match selected release '{}'",
             normalized_expected_version, prepared.selected_release.version
@@ -533,20 +609,26 @@ pub async fn updater_install_channel(
         .and_then(|config| config.get("pubkey"))
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| {
+            support.fail("missing_update_key");
             "This app's update key is missing. Download the official installer.".to_string()
         })?
         .to_string();
     let legacy_key = legacy_tauri_updater_public_key();
     let app_for_progress = app.clone();
-    let package = prepared
-        .package
-        .download(move |downloaded, total| {
-            let _ = app_for_progress.emit(
-                UPDATER_PROGRESS_EVENT,
-                UpdaterProgressPayload { downloaded, total },
-            );
-        })
-        .await?;
+    support.stage("download");
+    let mut milestones = support.progress_milestones();
+    let package = support.check_explained(
+        prepared
+            .package
+            .download(move |downloaded, total| {
+                milestones(downloaded, total);
+                let _ = app_for_progress.emit(
+                    UPDATER_PROGRESS_EVENT,
+                    UpdaterProgressPayload { downloaded, total },
+                );
+            })
+            .await,
+    )?;
 
     // Install from a directory that survives, not the temp folder the plugin
     // would otherwise use. Windows records the path msiexec ran from as the
@@ -558,40 +640,29 @@ pub async fn updater_install_channel(
     let install_version = prepared.selected_release.version.to_string();
     let reboot_required = tauri::async_runtime::spawn_blocking(move || {
         let _install_permit = install_permit;
-        prepared
-            .package
-            .verify(&package, &primary_key, legacy_key.as_deref())?;
-        let installer_path = stage_installer(&install_version, &package)?;
+        support.stage("signature_verification");
+        support.check_explained(prepared.package.verify(
+            &package,
+            &primary_key,
+            legacy_key.as_deref(),
+        ))?;
+        support.stage("protected_cache");
+        let installer_path =
+            support.check_explained(stage_installer(&install_version, &package))?;
 
-        // Clear a registration whose cached package has gone before handing over to
-        // msiexec. A major upgrade uninstalls the old version first, which needs
-        // that package; without it the install dies on "the feature you are trying
-        // to use is on a network resource that is unavailable" and the machine can
-        // neither upgrade nor uninstall. Staging above stops new orphans being
-        // made, but does nothing for a machine already in that state, which is
-        // every install predating it and anyone whose installer cache a cleanup
-        // tool removed.
-        //
-        // Best effort on purpose. It is a no-op when nothing is orphaned, and a
-        // failure here should still let the install be attempted: the worst case is
-        // the same error the user would have had anyway. The app is already
-        // elevated, which is the privilege the equivalent MSI custom action could
-        // never get.
-        match swifttunnel_msi_repair::repair() {
-            Ok(cleared) if !cleared.is_empty() => {
-                log::warn!(
-                    "cleared {} orphaned SwiftTunnel registration(s) before upgrading",
-                    cleared.len()
-                );
-            }
-            Ok(_) => {}
-            Err(error) => log::warn!("could not check for an orphaned registration: {error}"),
-        }
-
+        // The MSI checks its own product family after Windows Installer
+        // admits the upgrade. Leave registration changes to that step.
         // Wait outside the async runtime workers. The MSI may close this process
         // to replace it, in which case the new app's version is the confirmation.
         // If this process survives, report success only from the installer's exit.
-        launch_msi_installer(&installer_path)
+        support.stage("windows_installer");
+        let reboot = support.check_explained(launch_msi_installer(&installer_path))?;
+        support.complete(if reboot {
+            "restart_required"
+        } else {
+            "installed"
+        });
+        Ok::<_, String>(reboot)
     })
     .await
     .map_err(|error| format!("Could not complete the update installer task: {error}"))??;

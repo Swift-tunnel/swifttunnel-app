@@ -14,6 +14,7 @@ import { useVpnStore } from "../../stores/vpnStore";
 import { findRegionForVpnRegion } from "../../lib/regionMatch";
 import { Flag } from "../ui/Flag";
 import { relayDisplayLabel } from "../../lib/connectedServer";
+import { useLiveStoreValue } from "../../lib/useLiveUpdates";
 
 function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -148,11 +149,14 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
           {paused ? "Start Roblox to collect ping statistics." : "Ping stats show up here after the first few readings."}
         </p>
       ) : (
-        <div className={`mt-auto grid grid-cols-4 gap-3 border-t pt-4 ${paused ? "opacity-50" : ""}`} aria-label={paused ? "Paused ping statistics" : "Session ping statistics"} style={{ borderColor: "var(--color-border-subtle)" }}>
-          <Stat label="Lowest ping" value={stats.lowest} unit="ms" />
-          <Stat label="Average ping" value={avg} unit="ms" />
-          <Stat label="Jitter" value={jit ?? "Measuring"} unit={jit !== null ? "ms" : undefined} />
-          <Stat label="Readings" value={stats.samples} />
+        <div className={`mt-auto border-t pt-4 ${paused ? "opacity-50" : ""}`} aria-label={paused ? "Paused relay ping statistics" : "Relay ping statistics"} style={{ borderColor: "var(--color-border-subtle)" }}>
+          <p className="mb-3 text-[12px] text-text-muted">Relay ping</p>
+          <div className="grid grid-cols-4 gap-3">
+            <Stat label="Lowest" value={stats.lowest} unit="ms" />
+            <Stat label="Average" value={avg} unit="ms" />
+            <Stat label="Jitter" value={jit ?? "Measuring"} unit={jit !== null ? "ms" : undefined} />
+            <Stat label="Readings" value={stats.samples} />
+          </div>
         </div>
       )}
     </div>
@@ -161,10 +165,12 @@ function SessionCard({ stats, live }: { stats: SessionStats | null; live: boolea
 
 function RobloxCard() {
   const running = useBoostStore((s) => s.robloxRunning);
-  const cpu = useBoostStore((s) => s.cpuUsage);
-  const ramMb = useBoostStore((s) => s.ramUsage);
-  const ramTotalMb = useBoostStore((s) => s.ramTotal);
-  const fps = useBoostStore((s) => s.fps);
+  // The overlay refreshes these every second while the game runs. Hold them
+  // while the window is behind the game instead of redrawing the card.
+  const cpu = useLiveStoreValue(useBoostStore, (s) => s.cpuUsage);
+  const ramMb = useLiveStoreValue(useBoostStore, (s) => s.ramUsage);
+  const ramTotalMb = useLiveStoreValue(useBoostStore, (s) => s.ramTotal);
+  const fps = useLiveStoreValue(useBoostStore, (s) => s.fps);
   const roblox = useSettingsStore((s) => s.settings.config.roblox_settings);
   const profile = useSettingsStore((s) => s.settings.config.profile);
 
@@ -244,7 +250,8 @@ function Chip({ label, value }: { label: string; value: string }) {
  */
 export function SessionCards() {
   const isConnected = useVpnStore((s) => s.state === "connected");
-  const current = useSessionStatsStore((s) => s.current);
+  // Updated on every ping reading during a game; held while in game.
+  const current = useLiveStoreValue(useSessionStatsStore, (s) => s.current);
   const last = useSessionStatsStore((s) => s.last);
   const setTab = useSettingsStore((s) => s.setTab);
   const stats = isConnected ? current : last;

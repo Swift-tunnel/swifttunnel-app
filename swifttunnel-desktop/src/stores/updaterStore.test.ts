@@ -115,7 +115,7 @@ describe("stores/updaterStore", () => {
       expect(() => store.getState().dismissWhatsNew()).not.toThrow();
       await store.getState().installUpdate();
       expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", available.available_version);
-      expect(store.getState().status).toBe("up_to_date");
+      expect(store.getState().status).toBe("installed");
     } finally {
       Object.defineProperty(globalThis, "localStorage", previous);
     }
@@ -248,7 +248,7 @@ describe("stores/updaterStore", () => {
     await useUpdaterStore.getState().installUpdate();
 
     expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
-    expect(useUpdaterStore.getState().status).toBe("up_to_date");
+    expect(useUpdaterStore.getState().status).toBe("installed");
     expect(useUpdaterStore.getState().availableVersion).toBeNull();
     expect(useUpdaterStore.getState().showWhatsNew).toBe(false);
     expect(useUpdaterStore.getState().progressPercent).toBe(100);
@@ -317,12 +317,31 @@ describe("stores/updaterStore", () => {
     await useUpdaterStore.getState().checkForUpdates(false, true);
 
     expect(updaterInstallChannel).toHaveBeenCalledWith("Stable", "1.5.1");
-    expect(useUpdaterStore.getState().status).toBe("up_to_date");
+    expect(useUpdaterStore.getState().status).toBe("installed");
     expect(useUpdaterStore.getState().progressPercent).toBe(100);
     expect(notify).toHaveBeenCalledWith(
       "SwiftTunnel Update",
       "Updating to v1.5.1, restarting...",
     );
+  });
+
+  it("finishes an install despite stalled notifications and preserves the reboot message", async () => {
+    updaterCheckChannel.mockResolvedValue(available);
+    updaterInstallChannel.mockResolvedValue({ reboot_required: true });
+    notify.mockReturnValue(deferred<void>().promise);
+    const store = await loadStore();
+    await store.getState().checkForUpdates(true, true);
+    expect(store.getState()).toMatchObject({
+      status: "installed",
+      installMessage: "Update installed. Restart Windows to finish applying it.",
+    });
+
+    // The still-running old binary would otherwise offer the same MSI again.
+    await store.getState().checkForUpdates(true, true);
+    await store.getState().installUpdate();
+    expect(updaterCheckChannel).toHaveBeenCalledOnce();
+    expect(updaterInstallChannel).toHaveBeenCalledOnce();
+    expect(store.getState().status).toBe("installed");
   });
 
   it("does not auto-install when autoInstall is false even on background check", async () => {

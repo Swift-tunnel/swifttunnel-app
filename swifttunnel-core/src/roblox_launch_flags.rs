@@ -172,20 +172,32 @@ fn restore_from(path: &Path, path_allowed: impl Fn(&Path) -> bool) -> Result<boo
         RESTORE_ERROR
     })?;
     validate_journal(&journal, path_allowed)?;
-    for e in journal.entries {
-        restore_entry(e)?;
+    let mut failed = false;
+    for entry in &journal.entries {
+        if let Err(error) = restore_entry(entry) {
+            log::warn!(
+                "Could not restore launch FastFlags at {}: {error}",
+                entry.path.display()
+            );
+            failed = true;
+        }
+    }
+    if failed {
+        // Preserve every original for retry, but do not leave recoverable
+        // files modified just because a different version is locked.
+        return Err(RESTORE_ERROR.into());
     }
     fs::remove_file(path).map_err(|e| e.to_string())?;
     Ok(true)
 }
-fn restore_entry(e: Entry) -> Result<(), String> {
+fn restore_entry(e: &Entry) -> Result<(), String> {
     if read(&e.path)?
         .as_deref()
         .is_some_and(|raw| hash(raw).eq_ignore_ascii_case(&e.applied))
     {
-        match e.before {
+        match &e.before {
             Some(before) => write(&e.path, before.as_bytes())?,
-            None => fs::remove_file(e.path).map_err(|e| e.to_string())?,
+            None => fs::remove_file(&e.path).map_err(|e| e.to_string())?,
         }
     }
     Ok(())
@@ -262,6 +274,59 @@ pub fn diagnostic() -> Result<Option<String>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn one_locked_flag_file_cannot_prevent_recovery_of_the_others() {
+        use std::os::windows::fs::OpenOptionsExt;
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = Fixture(std::env::temp_dir().join(format!(
+            "swift-flags-partial-{:032x}",
+            rand::random::<u128>()
+        )));
+        fs::create_dir(&dir.0).unwrap();
+        let locked_path = dir.0.join("locked.json");
+        let healthy_path = dir.0.join("healthy.json");
+        let backup = dir.0.join("native-launch-flags.json");
+        let applied = "{\"temporary\":true}";
+        let original = "{\"original\":true}\r\n";
+        for path in [&locked_path, &healthy_path] {
+            fs::write(path, applied).unwrap();
+        }
+        let journal = Journal {
+            entries: [&locked_path, &healthy_path]
+                .into_iter()
+                .map(|path| Entry {
+                    path: path.clone(),
+                    before: Some(original.into()),
+                    applied: hash(applied),
+                })
+                .collect(),
+            flags: HashMap::new(),
+        };
+        write_journal(&backup, &journal).unwrap();
+        let before = fs::read(&backup).unwrap();
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked_path)
+            .unwrap();
+        let result = restore_from(&backup, |path| path == locked_path || path == healthy_path);
+        // Release the fixture lock before any assertion can unwind cleanup.
+        drop(locked);
+        assert!(result.is_err());
+        assert_eq!(fs::read(&backup).unwrap(), before);
+        assert_eq!(fs::read_to_string(&healthy_path).unwrap(), original);
+        assert_eq!(fs::read_to_string(&locked_path).unwrap(), applied);
+        assert!(restore_from(&backup, |path| path == locked_path || path == healthy_path).unwrap());
+        assert_eq!(fs::read_to_string(&locked_path).unwrap(), original);
+        assert!(!backup.exists());
+    }
 
     #[test]
     fn valid_flag_backups_restore_original_bytes_and_allow_uppercase_hex_hashes() {
@@ -446,7 +511,7 @@ mod tests {
         let original = "{\"old\":true}";
         let applied = "{}";
         fs::write(&path, applied).unwrap();
-        restore_entry(Entry {
+        restore_entry(&Entry {
             path: path.clone(),
             before: Some(original.into()),
             applied: hash(applied),
@@ -454,7 +519,7 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
         fs::write(&path, "external edit").unwrap();
-        restore_entry(Entry {
+        restore_entry(&Entry {
             path: path.clone(),
             before: Some(original.into()),
             applied: hash(applied),
@@ -462,7 +527,7 @@ mod tests {
         .unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "external edit");
         fs::write(&path, applied).unwrap();
-        restore_entry(Entry {
+        restore_entry(&Entry {
             path: path.clone(),
             before: None,
             applied: hash(applied),

@@ -1,3 +1,5 @@
+import { isMainWindowHidden, subscribeMainWindowVisibility } from "./mainWindowVisibility";
+
 /**
  * Stop the interface animating while the window is not in front.
  *
@@ -41,9 +43,9 @@ export const IDLE_CLASS = "app-idle";
 export function shouldPauseAnimations(state: {
   idleWhenUnfocused: boolean;
   hasFocus: boolean;
+  hidden?: boolean;
 }): boolean {
-  if (!state.idleWhenUnfocused) return false;
-  return !state.hasFocus;
+  return state.hidden === true || (state.idleWhenUnfocused && !state.hasFocus);
 }
 
 /**
@@ -71,14 +73,13 @@ export function applyAnimationIdle(root: ClassTarget, paused: boolean): boolean 
  * Wire the pause to focus changes.
  *
  * `focus`/`blur` on the window cover alt-tab, and `visibilitychange` covers
- * the cases where the webview itself is told it is hidden. Both end up asking
- * the same question, so they share a handler.
+ * the cases where the webview itself is told it is hidden.
  */
 export function installAnimationIdle(options: {
   isIdleEnabled: () => boolean;
   root?: ClassTarget;
   target?: Pick<Window, "addEventListener" | "removeEventListener">;
-  doc?: Pick<Document, "hasFocus" | "addEventListener" | "removeEventListener">;
+  doc?: Pick<Document, "hasFocus" | "hidden" | "addEventListener" | "removeEventListener">;
 }): () => void {
   const root = options.root ?? document.documentElement;
   const target = options.target ?? window;
@@ -90,19 +91,20 @@ export function installAnimationIdle(options: {
       shouldPauseAnimations({
         idleWhenUnfocused: options.isIdleEnabled(),
         hasFocus: doc.hasFocus(),
+        hidden: isMainWindowHidden(doc),
       }),
     );
   };
 
   target.addEventListener("focus", sync);
   target.addEventListener("blur", sync);
-  doc.addEventListener("visibilitychange", sync);
+  const stopWatchingVisibility = subscribeMainWindowVisibility(sync, doc);
   sync();
 
   return () => {
     target.removeEventListener("focus", sync);
     target.removeEventListener("blur", sync);
-    doc.removeEventListener("visibilitychange", sync);
+    stopWatchingVisibility();
     root.classList.remove(IDLE_CLASS);
   };
 }

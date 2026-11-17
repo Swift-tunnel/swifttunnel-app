@@ -48,26 +48,27 @@ fn get_marker_path() -> Option<PathBuf> {
 /// Write the tunnel-mode marker. Called before the packet reader can put the
 /// adapter into tunnel mode, so a crash at any later point leaves the marker
 /// behind for startup recovery.
-pub fn write_tunnel_mode_marker(adapter_name: &str) {
-    let Some(marker_path) = get_marker_path() else {
-        return;
-    };
+pub fn write_tunnel_mode_marker(adapter_name: &str) -> std::io::Result<()> {
+    let marker_path = get_marker_path().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Windows local app-data folder is unavailable",
+        )
+    })?;
     if let Some(parent) = marker_path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
     }
 
     let marker = TunnelModeMarker {
         adapter_name: adapter_name.trim().to_string(),
     };
-    let payload = serde_json::to_vec(&marker).unwrap_or_else(|_| adapter_name.as_bytes().to_vec());
-    if let Err(e) = crate::atomic_file::replace(&marker_path, &payload) {
-        log::warn!("Failed to write tunnel-mode marker: {}", e);
-    } else {
-        log::debug!(
-            "Tunnel-mode marker written for adapter: {}",
-            marker.adapter_name
-        );
-    }
+    let payload = serde_json::to_vec(&marker).map_err(std::io::Error::other)?;
+    crate::atomic_file::replace(&marker_path, &payload)?;
+    log::debug!(
+        "Tunnel-mode marker written for adapter: {}",
+        marker.adapter_name
+    );
+    Ok(())
 }
 
 /// Delete the tunnel-mode marker. Only call after a verified adapter-mode
@@ -120,8 +121,8 @@ pub enum TunnelModeRecoveryPlan {
     /// not loaded, so tunnel mode cannot be active. The marker is stale —
     /// clear it without attempting any repair.
     ClearStaleMarker,
-    /// No marker: single best-effort sweep, matching the historical behavior
-    /// and covering sessions from builds that predate the marker.
+    /// No marker or unknown installation evidence: one native sweep without
+    /// unbinding escalation. Preserve any marker so a later launch can retry.
     BestEffortSweep,
 }
 
@@ -133,6 +134,26 @@ pub fn plan_tunnel_mode_recovery(
         (true, true) => TunnelModeRecoveryPlan::RepairWithRetries,
         (true, false) => TunnelModeRecoveryPlan::ClearStaleMarker,
         (false, _) => TunnelModeRecoveryPlan::BestEffortSweep,
+    }
+}
+
+fn plan_with_checked_install(
+    marker_present: bool,
+    inspect: impl FnOnce() -> Result<bool, String>,
+) -> TunnelModeRecoveryPlan {
+    if !marker_present {
+        // Installation metadata cannot change the no-marker plan. Avoid its
+        // service/driver-store discovery entirely on ordinary startup.
+        return TunnelModeRecoveryPlan::BestEffortSweep;
+    }
+    match inspect() {
+        Ok(installed) => plan_tunnel_mode_recovery(true, installed),
+        Err(error) => {
+            log::warn!(
+                "Driver installation could not be verified; keeping the tunnel recovery record: {error}"
+            );
+            TunnelModeRecoveryPlan::BestEffortSweep
+        }
     }
 }
 
@@ -178,7 +199,8 @@ where
             RecoveryOutcome {
                 attempts: 1,
                 cleaned,
-                // No marker exists in this plan; nothing to delete either way.
+                // Unknown installation evidence may have selected this plan
+                // with a marker present. It must stay available for retry.
                 delete_marker: false,
             }
         }
@@ -211,8 +233,10 @@ pub fn recover_tunnel_mode_on_startup() {
     use super::split_tunnel::SplitTunnelDriver;
 
     let marker = read_tunnel_mode_marker();
-    let driver_installed = SplitTunnelDriver::driver_install_evidence();
-    let plan = plan_tunnel_mode_recovery(marker.is_some(), driver_installed);
+    let plan = plan_with_checked_install(
+        marker.is_some(),
+        SplitTunnelDriver::driver_install_evidence_checked,
+    );
 
     if let Some(marker) = &marker {
         log::warn!(
@@ -286,9 +310,8 @@ pub fn recover_tunnel_mode_on_startup() {
             );
         }
         TunnelModeRecoveryPlan::BestEffortSweep => {
-            // No marker: keep the historical quiet behavior (fresh installs
-            // legitimately have no driver yet). Details were already logged by
-            // cleanup_stale_state_checked.
+            // No escalation without reliable install evidence. Native reset
+            // diagnostics were already logged by cleanup_stale_state_checked.
         }
     }
 
@@ -300,6 +323,54 @@ pub fn recover_tunnel_mode_on_startup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_startup_does_not_query_unused_installation_metadata() {
+        assert_eq!(
+            plan_with_checked_install(false, || panic!("no marker needs no installation query")),
+            TunnelModeRecoveryPlan::BestEffortSweep
+        );
+    }
+
+    #[test]
+    fn failed_installation_checks_preserve_recovery_without_unbinding_escalation() {
+        let plan = plan_with_checked_install(true, || Err("fixture driver-store timeout".into()));
+        assert_eq!(plan, TunnelModeRecoveryPlan::BestEffortSweep);
+        for clean in [false, true] {
+            let mut attempts = 0;
+            let result = execute_recovery_plan(
+                plan,
+                || {
+                    attempts += 1;
+                    clean
+                },
+                |_| panic!("unknown install evidence must not escalate"),
+            );
+            assert_eq!(attempts, 1);
+            assert!(!result.delete_marker);
+        }
+        assert_eq!(
+            plan_with_checked_install(true, || Ok(false)),
+            TunnelModeRecoveryPlan::ClearStaleMarker
+        );
+        assert_eq!(
+            plan_with_checked_install(true, || Ok(true)),
+            TunnelModeRecoveryPlan::RepairWithRetries
+        );
+    }
+
+    #[test]
+    fn marker_creation_failure_is_reported_and_can_be_retried() {
+        let path = get_marker_path().unwrap();
+        // A directory at the marker's filename prevents replacing it, without
+        // changing any user permissions or touching real recovery files.
+        fs::create_dir(&path).unwrap();
+        assert!(write_tunnel_mode_marker("Ethernet").is_err());
+        assert!(path.is_dir());
+        fs::remove_dir(&path).unwrap();
+        write_tunnel_mode_marker("Ethernet").unwrap();
+        assert_eq!(read_tunnel_mode_marker().unwrap().adapter_name, "Ethernet");
+    }
 
     #[test]
     fn oversized_record_still_triggers_recovery_without_loading_it() {
@@ -315,7 +386,7 @@ mod tests {
     #[test]
     fn failed_marker_replacement_preserves_previous_recovery_data() {
         use std::os::windows::fs::OpenOptionsExt;
-        write_tunnel_mode_marker("Original adapter");
+        write_tunnel_mode_marker("Original adapter").unwrap();
         let path = get_marker_path().unwrap();
         let before = fs::read(&path).unwrap();
         let locked = fs::OpenOptions::new()
@@ -323,10 +394,10 @@ mod tests {
             .share_mode(3)
             .open(&path)
             .unwrap();
-        write_tunnel_mode_marker("Replacement adapter");
+        assert!(write_tunnel_mode_marker("Replacement adapter").is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
         drop(locked);
-        write_tunnel_mode_marker("Replacement adapter");
+        write_tunnel_mode_marker("Replacement adapter").unwrap();
         assert_eq!(
             read_tunnel_mode_marker().unwrap().adapter_name,
             "Replacement adapter"
@@ -335,7 +406,7 @@ mod tests {
 
     #[test]
     fn test_marker_roundtrip() {
-        write_tunnel_mode_marker(r"\DEVICE\{TEST-GUID}");
+        write_tunnel_mode_marker(r"\DEVICE\{TEST-GUID}").unwrap();
         let read_back = read_tunnel_mode_marker();
         assert_eq!(
             read_back.map(|m| m.adapter_name),

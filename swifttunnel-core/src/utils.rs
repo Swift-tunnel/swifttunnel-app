@@ -5,6 +5,37 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+#[cfg(windows)]
+pub(crate) fn known_folder_path(id: &windows::core::GUID) -> std::io::Result<PathBuf> {
+    use std::ffi::OsString;
+    use std::io;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::{Component, Prefix};
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+
+    let raw =
+        unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None) }.map_err(io::Error::from)?;
+    if raw.0.is_null() {
+        return Err(io::Error::other("Windows did not return the folder"));
+    }
+    let path = PathBuf::from(OsString::from_wide(unsafe { raw.as_wide() }));
+    unsafe { CoTaskMemFree(Some(raw.0.cast())) };
+    if !path.is_absolute()
+        || !matches!(path.components().next(), Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_)))
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Expected a local Windows folder",
+        ));
+    }
+    Ok(path)
+}
+
 /// Compare lexical path components without resolving links or parent traversal.
 /// Windows uses ordinal UTF-16 case comparison; other platforms stay exact.
 pub(crate) fn paths_match(left: &Path, right: &Path) -> bool {
@@ -223,6 +254,27 @@ fn resolve_windows_command_path_with_root(
     }
 
     PathBuf::from(program)
+}
+
+#[cfg(windows)]
+fn elevated_command_path_with_root(
+    program: &str,
+    system_root: Option<&Path>,
+) -> std::io::Result<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    let path = resolve_windows_command_path_with_root(program, system_root);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        || path.as_os_str().encode_wide().any(|unit| unit == 0)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Could not resolve the elevated program to an absolute file location",
+        ));
+    }
+    Ok(path)
 }
 
 /// Normalize a GUID string to lowercase canonical form.
@@ -446,14 +498,25 @@ pub fn quote_windows_arg(arg: &str) -> String {
 pub fn run_elevated_and_wait(exe: &str, params: &str, hide_window: bool) -> std::io::Result<i32> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_FAILED, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
     use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNORMAL};
     use windows::core::PCWSTR;
 
+    let executable = elevated_command_path_with_root(exe, trusted_windows_root().as_deref())?;
+    if params.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "The elevated command contains an invalid character",
+        ));
+    }
     let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
-    let file: Vec<u16> = OsStr::new(exe).encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = executable
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
     let params_w: Vec<u16> = OsStr::new(params).encode_wide().chain(Some(0)).collect();
 
     let mut info = SHELLEXECUTEINFOW {
@@ -485,11 +548,32 @@ pub fn run_elevated_and_wait(exe: &str, params: &str, hide_window: bool) -> std:
     }
 
     let mut code: u32 = 1;
+    let wait = unsafe { WaitForSingleObject(process, INFINITE) };
+    if wait != WAIT_OBJECT_0 {
+        // Capture GetLastError before closing the handle changes it. A failed
+        // wait is not a completed installer and must not authorize a retry.
+        let error = if wait == WAIT_FAILED {
+            std::io::Error::last_os_error()
+        } else {
+            std::io::Error::other(format!(
+                "Unexpected elevated-process wait result: {}",
+                wait.0
+            ))
+        };
+        unsafe {
+            let _ = CloseHandle(process);
+        }
+        return Err(error);
+    }
+    let completed = unsafe { GetExitCodeProcess(process, &mut code) };
     unsafe {
-        WaitForSingleObject(process, INFINITE);
-        let _ = GetExitCodeProcess(process, &mut code);
         let _ = CloseHandle(process);
     }
+    completed.map_err(|error| {
+        std::io::Error::other(format!(
+            "Could not read the elevated program's completion result: {error}"
+        ))
+    })?;
     Ok(code as i32)
 }
 
@@ -1423,6 +1507,33 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn elevated_system_tools_resolve_without_searching_the_working_directory() {
+        let root = Path::new(r"E:\Windows");
+        for name in ["msiexec", "msiexec.exe", "MSIEXEC.EXE"] {
+            assert_eq!(
+                elevated_command_path_with_root(name, Some(root)).unwrap(),
+                root.join("System32").join("msiexec.exe")
+            );
+            assert!(elevated_command_path_with_root(name, None).is_err());
+        }
+        for ambiguous in [
+            "",
+            "unrecognised-helper.exe",
+            r".\msiexec.exe",
+            r"E:\Windows\..\msiexec.exe",
+            "E:\\Tools\\helper\0.exe",
+        ] {
+            assert!(elevated_command_path_with_root(ambiguous, Some(root)).is_err());
+        }
+        let explicit = r"E:\Program Files\SwiftTunnel\helper.exe";
+        assert_eq!(
+            elevated_command_path_with_root(explicit, None).unwrap(),
+            PathBuf::from(explicit)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn test_run_elevated_and_wait_is_linked() {
         // Verify the pure-Win32 elevation path exists without invoking it
         // (invoking would show a real UAC prompt).
@@ -1647,5 +1758,39 @@ mod tests {
         assert!(!out.success);
         assert!(!out.timed_out, "a missing program is not a timeout");
         assert!(!out.stderr.is_empty(), "the caller needs a reason to show");
+    }
+}
+
+/// Whether `message` differs from the last one recorded in `last`, recording
+/// it if so.
+///
+/// For results that are polled: the first answer and every changed answer are
+/// worth a log line, the identical repeats in between are not.
+pub fn changed_since_last(last: &std::sync::Mutex<String>, message: &str) -> bool {
+    // A poisoned slot only means an earlier logger panicked. Log rather than
+    // go quiet.
+    let Ok(mut last) = last.lock() else {
+        return true;
+    };
+    if *last == message {
+        return false;
+    }
+    *last = message.to_owned();
+    true
+}
+
+#[cfg(test)]
+mod changed_since_last_tests {
+    use super::changed_since_last;
+
+    #[test]
+    fn repeats_are_dropped_and_changes_are_kept() {
+        let last = std::sync::Mutex::new(String::new());
+        assert!(changed_since_last(&last, "adapters=5"));
+        assert!(!changed_since_last(&last, "adapters=5"));
+        assert!(!changed_since_last(&last, "adapters=5"));
+        assert!(changed_since_last(&last, "adapters=7"));
+        // Going back to an earlier answer is a change too.
+        assert!(changed_since_last(&last, "adapters=5"));
     }
 }

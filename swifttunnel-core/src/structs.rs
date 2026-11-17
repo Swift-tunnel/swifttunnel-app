@@ -279,7 +279,7 @@ pub struct NetworkConfig {
     pub disable_nagle: bool,
     #[serde(default)]
     pub disable_network_throttling: bool,
-    /// Firewall Fix - Adds Windows Firewall allow rules for Roblox, flushes DNS, resets Winsock
+    /// Firewall Fix - Adds Roblox allow rules, then refreshes DNS and ARP caches.
     #[serde(default)]
     pub firewall_fix: bool,
 }
@@ -486,9 +486,9 @@ pub mod boost_info {
     pub const FIREWALL_FIX: BoostInfo = BoostInfo {
         id: "firewall_fix",
         title: "Roblox Firewall Fix",
-        short_desc: "Fix Roblox launch crashes",
-        long_desc: "Adds Windows Firewall allow rules for all Roblox executables, flushes DNS cache, resets Winsock catalog, and clears ARP cache. Fixes 'HttpError: Timedout' crashes on launch caused by firewall or DNS blocking Roblox network access. Winsock reset requires a reboot to fully take effect.",
-        impact: "Fixes Roblox launch failures",
+        short_desc: "Allow Roblox through Windows Firewall",
+        long_desc: "Adds Windows Firewall allow rules for installed Roblox clients, then refreshes the DNS and ARP caches. Use it when Windows Firewall is blocking Roblox.",
+        impact: "Allows Roblox network access",
         risk_level: RiskLevel::LowRisk,
         requires_admin: true,
     };

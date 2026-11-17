@@ -60,6 +60,7 @@ pub async fn network_start_stability_test(
         .spawn(async move {
             NETWORK_TESTS
                 .run(
+                    "network_stability",
                     test_id,
                     swifttunnel_core::network_analyzer::run_stability_test(duration_secs, tx),
                 )
@@ -102,6 +103,7 @@ pub async fn network_start_speed_test(
         .spawn(async move {
             NETWORK_TESTS
                 .run(
+                    "network_speed",
                     test_id,
                     swifttunnel_core::network_analyzer::run_speed_test(tx),
                 )
@@ -132,6 +134,7 @@ pub async fn network_start_bufferbloat_test(
         .spawn(async move {
             NETWORK_TESTS
                 .run(
+                    "network_bufferbloat",
                     test_id,
                     swifttunnel_core::network_analyzer::run_bufferbloat_test(tx),
                 )
