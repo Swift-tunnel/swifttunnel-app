@@ -102,6 +102,51 @@ const RELAY_LEASE_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// buy extra time: the server charges only beyond what is already reserved.
 const RELAY_LEASE_NETWORK_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Seconds between retries for Roblox hosts the connect-time lookups missed:
+/// soon at first, then spread out, about 16 minutes in all.
+const BYPASS_PIN_RETRY_DELAYS_SECS: [u64; 6] = [15, 30, 60, 120, 240, 480];
+
+/// Ask the relay again for country-ban hosts that have no pin yet.
+///
+/// The connect-time relay lookup returned 38 hosts on some connects and 23 on
+/// others for the same player, and the missing ones (catalog, economy, image
+/// servers) left the avatar page without items for the whole session. Ends
+/// when every host is pinned, the bypass is no longer active, or the retries
+/// run out. Disconnect aborts it before the pins are removed.
+async fn retry_missing_bypass_pins(relay: Arc<super::udp_relay::UdpRelay>) {
+    for delay in BYPASS_PIN_RETRY_DELAYS_SECS {
+        tokio::time::sleep(Duration::from_secs(delay)).await;
+        if !crate::roblox_proxy::hosts::is_country_ban_bypass_routing_active() {
+            return;
+        }
+        let missing = crate::roblox_proxy::hosts::missing_bootstrap_domains();
+        if missing.is_empty() {
+            log::info!("Country ban bypass: every Roblox host is pinned");
+            return;
+        }
+        let resolved = relay
+            .resolve_roblox_hosts(&missing, Duration::from_secs(3))
+            .await;
+        if resolved.is_empty() {
+            log::info!(
+                "Country ban bypass: the relay could not resolve {} missing Roblox host(s) yet",
+                missing.len()
+            );
+            continue;
+        }
+        let count = resolved.len();
+        match crate::roblox_proxy::hosts::apply_relay_resolved_overrides(resolved).await {
+            Ok(()) => log::info!(
+                "Country ban bypass: pinned {count} of {} missing Roblox host(s) on retry",
+                missing.len()
+            ),
+            Err(error) => {
+                log::warn!("Country ban bypass: retried pins could not be applied: {error}")
+            }
+        }
+    }
+}
+
 fn relay_lease_retry_delay(error: &AuthError) -> Duration {
     match error {
         AuthError::RateLimited(seconds) => Duration::from_secs((*seconds).clamp(5, 300)),
@@ -1313,6 +1358,9 @@ pub struct VpnConnection {
     auto_router: Option<Arc<super::auto_routing::AutoRouter>>,
     /// Background task that performs async auto-routing IP lookups.
     auto_lookup_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Country-ban sessions: keeps asking the relay for Roblox hosts the
+    /// connect-time lookups missed. Must stop before the pins are removed.
+    bypass_pin_retry_handle: Option<tokio::task::JoinHandle<()>>,
     route_telemetry_handle: Option<tokio::task::JoinHandle<()>>,
     quota_monitor_handle: Option<tokio::task::JoinHandle<()>>,
     regional_auto_scope: Option<String>,
@@ -1350,6 +1398,7 @@ impl VpnConnection {
             etw_watcher: None,
             auto_router: None,
             auto_lookup_handle: None,
+            bypass_pin_retry_handle: None,
             route_telemetry_handle: None,
             quota_monitor_handle: None,
             regional_auto_scope: None,
@@ -1865,6 +1914,22 @@ impl VpnConnection {
                     }
                 }
             }
+        }
+
+        // Both lookups above can come back incomplete, and nothing else fills
+        // the gaps during the session. Only once pins exist: the cleanup flag
+        // must already cover any hosts-file entries a retry writes.
+        if enable_country_ban
+            && self.bootstrap_dns_cleanup_required
+            && let Some(relay) = self
+                .split_tunnel
+                .as_ref()
+                .and_then(|st| st.try_lock().ok().and_then(|d| d.get_relay_context()))
+        {
+            if let Some(previous) = self.bypass_pin_retry_handle.take() {
+                previous.abort();
+            }
+            self.bypass_pin_retry_handle = Some(tokio::spawn(retry_missing_bypass_pins(relay)));
         }
 
         // Step 3: Skip routes - V3 doesn't need them
@@ -3744,6 +3809,14 @@ impl VpnConnection {
             let _ = handle.await;
         }
 
+        // Before the pins are removed below: a retry finishing after removal
+        // would write Roblox entries back into the hosts file of a PC that is
+        // no longer connected.
+        if let Some(handle) = self.bypass_pin_retry_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+
         // Stop ETW watcher (cleans up ETW session)
         if let Some(mut watcher) = self.etw_watcher.take() {
             log::info!("Stopping ETW process watcher...");
@@ -3972,6 +4045,7 @@ impl Drop for VpnConnection {
             self.route_telemetry_handle.take(),
             self.quota_monitor_handle.take(),
             self.relay_lease_refresh_handle.take(),
+            self.bypass_pin_retry_handle.take(),
         ]
         .into_iter()
         .flatten()

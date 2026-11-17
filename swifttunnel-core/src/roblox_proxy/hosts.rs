@@ -454,6 +454,34 @@ pub fn is_country_ban_bypass_routing_active() -> bool {
     COUNTRY_BAN_BYPASS_ROUTING.load(Ordering::Relaxed)
 }
 
+/// Roblox hosts that have no pin in the hosts file yet.
+///
+/// Both connect-time lookups come back incomplete at random under a country
+/// ban: one player's relay lookup returned 38 hosts on some connects and 23 on
+/// others. Whatever is left out stays on poisoned or blocked addresses for the
+/// whole session, which shows as an avatar page with no items, missing
+/// thumbnails or empty menus. The session retries just these.
+pub fn missing_bootstrap_domains() -> Vec<&'static str> {
+    let pinned = last_applied_overrides()
+        .read()
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| entry.domain.to_ascii_lowercase())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    unpinned_domains(&pinned)
+}
+
+fn unpinned_domains(pinned: &HashSet<String>) -> Vec<&'static str> {
+    ROBLOX_BOOTSTRAP_DOMAINS
+        .iter()
+        .filter(|domain| !pinned.contains(&domain.to_ascii_lowercase()))
+        .copied()
+        .collect()
+}
+
 /// Record whether GoodbyeDPI confirmed a working evasion mode.
 ///
 /// Only meaningful while country-ban bypass is active. Cleared with the rest of
@@ -2167,6 +2195,24 @@ mod tests {
             })
             .collect();
         assert!(missing_direct_only_domains(&overrides).is_empty());
+    }
+
+    #[test]
+    fn unpinned_domains_lists_only_hosts_without_a_pin() {
+        assert_eq!(
+            unpinned_domains(&HashSet::new()).len(),
+            ROBLOX_BOOTSTRAP_DOMAINS.len()
+        );
+        // Pins are compared case-insensitively, as written to the hosts file.
+        let pinned: HashSet<String> = ["CATALOG.roblox.com", "www.roblox.com"]
+            .iter()
+            .map(|domain| domain.to_ascii_lowercase())
+            .collect();
+        let missing = unpinned_domains(&pinned);
+        assert!(!missing.contains(&"catalog.roblox.com"));
+        assert!(!missing.contains(&"www.roblox.com"));
+        assert!(missing.contains(&"economy.roblox.com"));
+        assert_eq!(missing.len(), ROBLOX_BOOTSTRAP_DOMAINS.len() - 2);
     }
 
     #[test]
